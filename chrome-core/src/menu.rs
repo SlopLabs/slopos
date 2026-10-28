@@ -1,8 +1,7 @@
-//! The system menu under the menu bar's mark, and the question each choice
-//! that ends something asks before it acts. A question has Cancel focused
-//! first, so Enter alone never ends anything.
+//! The system menu, and the question a choice that ends something asks
+//! first, Cancel focused, so Enter alone never ends anything.
 
-use crate::Key;
+use crate::key::Key;
 
 pub const RESTART_NOTICE: &str = "Restart the desktop to finish updating";
 pub const CLOSE: &str = "Close";
@@ -284,20 +283,20 @@ mod tests {
 
     #[test]
     fn every_word_on_the_menu_and_its_questions_speaks_plainly() {
-        use slopos_priv_core::words::{detail, label};
+        use slopos_theme_core::words::{label, sentence};
         for text in Menu::new(true)
             .entries()
             .map(Choice::label)
             .chain([RESTART_NOTICE, CLOSE])
         {
-            assert_eq!(label(text), Ok(()), "{text}");
+            assert_eq!(label(text, &[]), Ok(()), "{text}");
         }
-        assert_eq!(detail(TRY_AGAIN), Ok(()));
+        assert_eq!(sentence(TRY_AGAIN, &[]), Ok(()));
         for ending in Ending::ALL {
-            assert_eq!(label(ending.question()), Ok(()), "{ending:?}");
-            assert_eq!(label(ending.verb()), Ok(()), "{ending:?}");
-            assert_eq!(label(ending.failed()), Ok(()), "{ending:?}");
-            assert_eq!(detail(ending.detail()), Ok(()), "{ending:?}");
+            assert_eq!(sentence(ending.question(), &[]), Ok(()), "{ending:?}");
+            assert_eq!(label(ending.verb(), &[]), Ok(()), "{ending:?}");
+            assert_eq!(label(ending.failed(), &[]), Ok(()), "{ending:?}");
+            assert_eq!(sentence(ending.detail(), &[]), Ok(()), "{ending:?}");
         }
     }
 }

@@ -1,14 +1,14 @@
-//! Hover tracking registry for interactive compositor elements.
-//!
-//! Regions are registered per frame; the registry diffs against the previous
-//! frame and reports damage rects for regions whose hover state changed.
+//! The chrome's hover regions, registered each frame and compared with the
+//! last frame's, so a hover that moves repaints only what it left and reached.
 
 use crate::gfx::DamageRect;
 
 const MAX_HOVER_REGIONS: usize = 64;
 
-pub const HOVER_SIGNAL_GROUP_BASE: u32 = 0x0006_0000; // + task_id
-pub const HOVER_STATUS_ITEM_BASE: u32 = 0x0007_0000; // + StatusKind discriminant
+/// Plus a window's task id: the hover id of its buttons' group.
+pub const HOVER_BUTTONS_BASE: u32 = 0x0006_0000;
+/// Plus a status item's kind: its hover id.
+pub const HOVER_STATUS_ITEM_BASE: u32 = 0x0007_0000;
 
 #[derive(Copy, Clone)]
 struct HoverRegion {
@@ -58,56 +58,30 @@ impl HoverRegistry {
         self.current_count += 1;
     }
 
-    #[allow(dead_code)]
-    pub fn is_hovered(&self, id: u32) -> bool {
-        for i in 0..self.current_count {
-            if self.current[i].id == id {
-                return self.current[i].hovered;
+    /// Hands `damage` each region hovered or left since the last frame, or
+    /// that came or went while hovered.
+    pub fn changed_regions(&self, mut damage: impl FnMut(DamageRect)) {
+        let mut add = |rect: DamageRect| {
+            if rect.is_valid() {
+                damage(rect);
             }
-        }
-        false
-    }
-
-    /// Writes damage rects for regions whose hover state changed, or that
-    /// appeared or disappeared while hovered. Returns the number written.
-    pub fn changed_regions(&self, out: &mut [DamageRect]) -> usize {
-        let mut count = 0usize;
-
-        for i in 0..self.current_count {
-            let cur = &self.current[i];
+        };
+        for cur in &self.current[..self.current_count] {
             match self.find_previous(cur.id) {
-                Some(prev) => {
-                    if cur.hovered != prev.hovered {
-                        if count < out.len() && prev.rect.is_valid() {
-                            out[count] = prev.rect;
-                            count += 1;
-                        }
-                        if count < out.len() && cur.rect.is_valid() {
-                            out[count] = cur.rect;
-                            count += 1;
-                        }
-                    }
+                Some(prev) if cur.hovered != prev.hovered => {
+                    add(prev.rect);
+                    add(cur.rect);
                 }
-                None => {
-                    if cur.hovered && count < out.len() && cur.rect.is_valid() {
-                        out[count] = cur.rect;
-                        count += 1;
-                    }
-                }
+                Some(_) => {}
+                None if cur.hovered => add(cur.rect),
+                None => {}
             }
         }
-
-        for i in 0..self.previous_count {
-            let prev = &self.previous[i];
+        for prev in &self.previous[..self.previous_count] {
             if prev.hovered && self.find_current(prev.id).is_none() {
-                if count < out.len() && prev.rect.is_valid() {
-                    out[count] = prev.rect;
-                    count += 1;
-                }
+                add(prev.rect);
             }
         }
-
-        count
     }
 
     fn find_previous(&self, id: u32) -> Option<&HoverRegion> {

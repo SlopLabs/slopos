@@ -5,7 +5,6 @@ use slopos_ostd::KVec;
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 
-use crate::FontSource;
 use crate::ttf_parser::TtfFont;
 
 use crate::{ASCII_FIRST, ASCII_LAST, GLYPH_COUNT, boxdraw, glyph_slot, slot_codepoint};
@@ -14,19 +13,52 @@ use crate::{ASCII_FIRST, ASCII_LAST, GLYPH_COUNT, boxdraw, glyph_slot, slot_code
 /// kernel allocation may be once the cell reaches 32x32.
 pub const CHUNK_TARGET_BYTES: usize = 256 * 1024;
 
-/// Pre-rasterized fixed-width glyph atlas: every glyph-set codepoint (see
-/// [`crate::glyph_slot`]) gets a uniform cell, one coverage byte per pixel.
+const TAB_CELLS: i32 = 4;
+
+/// The cell after `c` at cell `col`: a tab goes on to the next stop, every
+/// [`TAB_CELLS`] cells.
+fn next_cell(col: i32, c: char) -> i32 {
+    match c {
+        '\t' => (col / TAB_CELLS + 1) * TAB_CELLS,
+        _ => col + 1,
+    }
+}
+
+/// How many cells a line of `text` covers, up to its first `\0` or `\n`.
+pub fn cells(text: &str) -> i32 {
+    line(text).fold(0, next_cell)
+}
+
+/// The longest prefix of `text`, in bytes, that covers at most `budget` cells.
+pub fn prefix_within(text: &str, budget: i32) -> usize {
+    let mut col = 0;
+    for (at, c) in text.char_indices() {
+        let next = next_cell(col, c);
+        if c == '\0' || c == '\n' || next > budget {
+            return at;
+        }
+        col = next;
+    }
+    text.len()
+}
+
+fn line(text: &str) -> impl Iterator<Item = char> + '_ {
+    text.chars().take_while(|&c| c != '\0' && c != '\n')
+}
+
+/// A uniform cell for every glyph-set codepoint (see [`crate::glyph_slot`]),
+/// one coverage byte per pixel.
 pub struct GlyphAtlas {
     cell_w: u16,
     cell_h: u16,
+    /// The cell row the baseline is on; the bottom row when the coverage came
+    /// without one.
+    ascent: u16,
     slots_per_chunk: usize,
-    /// [`GLYPH_COUNT`] cells of `cell_w × cell_h` bytes, in chunks of
-    /// `slots_per_chunk` cells.
+    /// [`GLYPH_COUNT`] cells in chunks of `slots_per_chunk`.
     chunks: KVec<KVec<u8>>,
-    /// Rendered for codepoints outside the glyph set, and for set codepoints
-    /// the font itself has no glyph for.
+    /// For codepoints outside the glyph set, and those the font has no glyph for.
     replacement: KVec<u8>,
-    source: FontSource,
 }
 
 /// Writes the synthesized notdef — a filled diamond — over the whole cell.
@@ -105,28 +137,27 @@ impl AtlasBuilder {
         chunk.as_mut_slice().get_mut(at..at + stride)
     }
 
-    pub fn finish(self, source: FontSource) -> GlyphAtlas {
+    pub fn finish(self) -> GlyphAtlas {
         GlyphAtlas {
             cell_w: self.cell_w,
             cell_h: self.cell_h,
+            ascent: self.cell_h,
             slots_per_chunk: self.slots_per_chunk,
             chunks: self.chunks,
             replacement: self.replacement,
-            source,
         }
     }
 }
 
 impl GlyphAtlas {
-    /// Create a new atlas by pre-rasterizing the whole glyph set at `size_px`.
+    /// The whole glyph set rasterized at `size_px`.
     pub fn new(font_data: &[u8], size_px: u16) -> Option<Self> {
         let font = TtfFont::parse(font_data)?;
         let scale = crate::scale(&font, size_px);
         let hhea = font.hhea();
-        let ascender = libm::ceilf(hhea.ascender as f32 * scale) as i32;
-        let descender = libm::floorf(hhea.descender as f32 * scale) as i32;
+        let ascender = crate::ascent(&font, size_px);
         let line_gap = libm::roundf(hhea.line_gap as f32 * scale) as i32;
-        let cell_h = (ascender - descender + line_gap / 2) as u16;
+        let cell_h = (ascender + crate::descent(&font, size_px) + line_gap / 2) as u16;
 
         // Deliberately ASCII-only: extending the glyph set must not move the
         // cell geometry the terminal grid is sized from; wider glyphs are clipped.
@@ -167,8 +198,6 @@ impl GlyphAtlas {
                 continue;
             }
 
-            // Rasterised at phase 0 on the cell's whole-pixel pen, so the
-            // baseline is row `ascender` of every cell.
             if let Some(rg) = crate::rasterize_glyph(&font, cp, scale, 0) {
                 let glyph_advance = rg.advance as i32;
                 let x_center = (cell_w as i32 - glyph_advance) / 2;
@@ -191,17 +220,9 @@ impl GlyphAtlas {
             }
         }
 
-        Some(builder.finish(FontSource::Embedded))
-    }
-
-    pub fn new_with_source(font_data: &[u8], size_px: u16, source: FontSource) -> Option<Self> {
-        let mut atlas = Self::new(font_data, size_px)?;
-        atlas.source = source;
+        let mut atlas = builder.finish();
+        atlas.ascent = ascender as u16;
         Some(atlas)
-    }
-
-    pub fn source(&self) -> FontSource {
-        self.source
     }
 
     #[inline]
@@ -212,6 +233,11 @@ impl GlyphAtlas {
     #[inline]
     pub fn cell_height(&self) -> i32 {
         self.cell_h as i32
+    }
+
+    #[inline]
+    pub fn ascent(&self) -> i32 {
+        self.ascent as i32
     }
 
     /// Coverage bytes for the whole glyph set: what the chunks concatenated
@@ -243,12 +269,8 @@ impl GlyphAtlas {
         &self.chunks.as_slice()[idx / self.slots_per_chunk].as_slice()[at..at + stride]
     }
 
-    /// Draw a single character at (x, y).
-    ///
-    /// An opaque `bg` never reads the target, so it is safe over MMIO. A
-    /// transparent one (`bg.0 == 0`) leaves uncovered pixels untouched and
-    /// composites edge pixels against what is already there — which *reads*
-    /// the target, so it needs one that can be read back.
+    /// An opaque `bg` never reads the target, so it is safe over MMIO; a
+    /// transparent one composites over what the target holds.
     pub fn draw_char<T: Canvas>(
         &self,
         target: &mut T,
@@ -287,10 +309,6 @@ impl GlyphAtlas {
                 } else if cov == 255 {
                     target.put_pixel(px, py, fg_px);
                 } else {
-                    // Transparent text composites against what is already
-                    // there, not against black: over a selection band or the
-                    // current-line highlight, blending to black would ring
-                    // every antialiased edge in the one place text is densest.
                     let under = if has_bg {
                         bg
                     } else {
@@ -341,66 +359,9 @@ impl GlyphAtlas {
                     cy += ch;
                 }
                 b'\r' => cx = x,
-                b'\t' => {
-                    let tab = 4 * cw;
-                    cx = ((cx - x + tab) / tab) * tab + x;
-                }
+                b'\t' => cx = x + next_cell((cx - x) / cw, '\t') * cw,
                 _ => {
                     if let Some(d) = self.draw_char(target, cx, cy, byte as u32, fg, bg) {
-                        damage = Some(match damage {
-                            Some(prev) => prev.union(&d),
-                            None => d,
-                        });
-                    }
-                    cx += cw;
-                    if cx + cw > w {
-                        cx = x;
-                        cy += ch;
-                    }
-                }
-            }
-            if cy >= h {
-                break;
-            }
-        }
-        if let Some(d) = damage {
-            target.report_damage(d);
-        }
-        damage
-    }
-
-    /// Draw a UTF-8 string; a multi-byte character occupies one glyph cell.
-    pub fn draw_str<T: Canvas>(
-        &self,
-        target: &mut T,
-        x: i32,
-        y: i32,
-        text: &str,
-        fg: Color32,
-        bg: Color32,
-    ) -> Option<DamageRect> {
-        let cw = self.cell_w as i32;
-        let ch = self.cell_h as i32;
-        let w = target.width() as i32;
-        let h = target.height() as i32;
-        let mut cx = x;
-        let mut cy = y;
-        let mut damage: Option<DamageRect> = None;
-
-        for c in text.chars() {
-            match c {
-                '\0' => break,
-                '\n' => {
-                    cx = x;
-                    cy += ch;
-                }
-                '\r' => cx = x,
-                '\t' => {
-                    let tab = 4 * cw;
-                    cx = ((cx - x + tab) / tab) * tab + x;
-                }
-                _ => {
-                    if let Some(d) = self.draw_char(target, cx, cy, c as u32, fg, bg) {
                         damage = Some(match damage {
                             Some(prev) => prev.union(&d),
                             None => d,
@@ -492,67 +453,29 @@ impl GlyphAtlas {
         if y + ch - 1 < clip.y0 || y > clip.y1 {
             return;
         }
-        let mut cx = x;
-        for c in text.chars() {
-            if c == '\0' {
-                break;
-            }
+        let mut col = 0;
+        for c in line(text) {
+            let cx = x + col * cw;
             if cx > clip.x1 {
                 break;
             }
-            if cx + cw - 1 >= clip.x0 {
+            if c != '\t' && cx + cw - 1 >= clip.x0 {
                 self.draw_char_clipped(target, cx, y, c as u32, fg, bg, clip);
             }
-            cx += cw;
+            col = next_cell(col, c);
         }
     }
 
-    /// Measure width of a null-terminated byte string.
+    /// The width of a line of bytes, each a cell, as [`Self::draw_bytes`]
+    /// lays them.
     pub fn bytes_width(&self, text: &[u8]) -> i32 {
-        let cw = self.cell_w as i32;
-        let mut width = 0i32;
-        for &ch in text {
-            match ch {
-                0 | b'\n' => break,
-                b'\t' => {
-                    let tab = 4 * cw;
-                    width = ((width + tab - 1) / tab) * tab;
-                }
-                _ => width += cw,
-            }
-        }
-        width
+        let line = text.iter().take_while(|&&b| b != 0 && b != b'\n');
+        line.fold(0, |col, &b| next_cell(col, b as char)) * self.cell_w as i32
     }
 
-    /// Measure width of a UTF-8 string (character-decoded).
+    /// The width of a line of `text`, as [`Self::draw_str_clipped`] lays it.
     pub fn str_width(&self, text: &str) -> i32 {
-        let cw = self.cell_w as i32;
-        let mut width = 0i32;
-        for c in text.chars() {
-            match c {
-                '\0' | '\n' => break,
-                '\t' => {
-                    let tab = 4 * cw;
-                    width = ((width + tab - 1) / tab) * tab;
-                }
-                _ => width += cw,
-            }
-        }
-        width
-    }
-
-    /// Count lines in a null-terminated byte string.
-    pub fn bytes_lines(&self, text: &[u8]) -> i32 {
-        let mut lines = 1i32;
-        for &ch in text {
-            if ch == 0 {
-                break;
-            }
-            if ch == b'\n' {
-                lines += 1;
-            }
-        }
-        lines
+        cells(text) * self.cell_w as i32
     }
 }
 
@@ -654,7 +577,7 @@ mod global_atlas {
             bitmap::BITMAP_FONT_HEIGHT,
             bitmap::BITMAP_FONT_GLYPH_COUNT,
         ) {
-            Some(builder) => replace_global(builder.finish(FontSource::BitmapFallback)),
+            Some(builder) => replace_global(builder.finish()),
             None => false,
         }
     }
@@ -684,7 +607,6 @@ pub use global_atlas::*;
 #[cfg(test)]
 mod tests {
     use super::GlyphAtlas;
-    use crate::FontSource;
 
     #[test]
     fn blend_div255_matches_the_divide_it_replaces() {
@@ -724,8 +646,7 @@ mod tests {
         assert!(builder.chunk_mut(count).is_none());
     }
 
-    /// The last chunk is the short one, so an off-by-one in either the chunk
-    /// index or the within-chunk offset shows up here and nowhere else.
+    /// The last chunk is the short one, where an off-by-one would show.
     #[test]
     fn a_slot_written_through_the_last_chunk_reads_back() {
         let cell_w = 32u16;
@@ -738,8 +659,7 @@ mod tests {
         chunk[(cells_in_last - 1) * stride] = 0xA5;
         builder.replacement_mut()[0] = 0x5A;
 
-        let atlas = builder.finish(FontSource::Syscall);
-        assert_eq!(atlas.source(), FontSource::Syscall);
+        let atlas = builder.finish();
         assert_eq!(atlas.cell_width(), 32);
         assert_eq!(atlas.cell_height(), 32);
 
@@ -748,8 +668,7 @@ mod tests {
         assert_eq!(atlas.get_coverage(0x1F)[0], 0x5A);
     }
 
-    /// A cell large enough that the set needs several chunks, so the two slots
-    /// either side of a chunk edge exercise the chunk arithmetic.
+    /// A 32 px cell needs several chunks, so these slots straddle a chunk edge.
     #[test]
     fn slots_across_a_chunk_boundary_read_back() {
         let cell_w = 32u16;
@@ -771,7 +690,7 @@ mod tests {
             .expect("first slot of the second chunk")
             .fill(0x22);
 
-        let atlas = builder.finish(FontSource::Syscall);
+        let atlas = builder.finish();
         let before = crate::slot_codepoint(slots_per_chunk - 1).expect("slot exists");
         let after = crate::slot_codepoint(slots_per_chunk).expect("slot exists");
         assert!(atlas.get_coverage(before).iter().all(|&b| b == 0x11));
@@ -783,7 +702,7 @@ mod tests {
         for (cell_w, cell_h) in [(8u16, 16u16), (32, 32), (11, 23)] {
             let atlas = super::AtlasBuilder::new(cell_w, cell_h)
                 .expect("builder must build")
-                .finish(FontSource::Syscall);
+                .finish();
             for chunk in atlas.coverage_chunks() {
                 assert!(
                     chunk.len() <= super::CHUNK_TARGET_BYTES,
@@ -798,7 +717,7 @@ mod tests {
     fn coverage_chunks_cover_exactly_the_coverage_length() {
         let atlas = super::AtlasBuilder::new(8, 16)
             .expect("builder must build")
-            .finish(FontSource::Syscall);
+            .finish();
         let total: usize = atlas.coverage_chunks().map(|chunk| chunk.len()).sum();
         assert_eq!(total, atlas.coverage_len());
         assert_eq!(atlas.coverage_len(), crate::GLYPH_COUNT * 8 * 16);
@@ -850,6 +769,21 @@ mod tests {
     ));
 
     #[test]
+    fn a_tab_goes_on_to_the_next_stop() {
+        assert_eq!(super::cells("\tx"), 5);
+        assert_eq!(super::cells("ab\tx"), 5);
+        assert_eq!(super::cells("abcd\tx"), 9);
+        assert_eq!(super::cells("ab\nlonger"), 2);
+        assert_eq!(super::prefix_within("ab\tcd", 3), 2);
+        assert_eq!(super::prefix_within("ab\tcd", 4), 3);
+        assert_eq!(super::prefix_within("ab\tcd", 9), 5);
+        let atlas = GlyphAtlas::new(INTER_TTF, 16).expect("atlas must build");
+        let five = 5 * atlas.cell_width();
+        assert_eq!(atlas.str_width("ab\tx"), five);
+        assert_eq!(atlas.bytes_width(b"ab\tx"), five);
+    }
+
+    #[test]
     fn atlas_rasterizes_latin1_glyphs() {
         let atlas = GlyphAtlas::new(INTER_TTF, 16).expect("atlas must build");
         for c in ['ä', 'é', 'à', '€'] {
@@ -866,8 +800,7 @@ mod tests {
         }
     }
 
-    /// Inter's cmap covers neither U+0149 nor U+0370, yet the set holds a slot
-    /// for both: they must read back as the notdef, not as a blank cell.
+    /// Inter lacks U+0149 and U+0370, both of which the set holds a slot for.
     #[test]
     fn a_set_codepoint_the_font_lacks_reads_back_as_the_notdef() {
         let atlas = GlyphAtlas::new(INTER_TTF, 16).expect("atlas must build");
@@ -886,8 +819,7 @@ mod tests {
         );
     }
 
-    /// Inter maps every box-drawing codepoint to `.notdef`, so coverage there
-    /// can only be procedural.
+    /// Inter maps all box drawing to `.notdef`, so its coverage can only be procedural.
     #[test]
     fn box_drawing_comes_from_the_procedural_path() {
         assert!(crate::glyph_slot(0x2500).is_some());

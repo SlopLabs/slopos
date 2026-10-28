@@ -21,10 +21,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/lib/gate_common.sh"
 gate_parse_args check_alloc_dep "$@"
 
-# Crate names allowed to own an `alloc` dep line. Userland runs on big
-# stacks; slopos-ostd is the sanctioned allocation surface. The `*-core`
-# crates are userland-only host-testable cores the kernel does not link, so
-# the framekernel allocation discipline does not reach them.
+# What both passes skip, the manifest's and the sources': slopos-ostd, the
+# sanctioned allocation surface, and the userland crates, the host-testable
+# `*-core` ones among them, which the kernel does not link.
 USERLAND_CRATES='userland|terminal-core|shell-core|editor-core|http-core|tls-core|fat-core|tree-core|extension-core|accounts-core|remote-core|installer-core|priv-core|chrome-core|slibc|slop-protocol|image|slopos-ostd'
 USERLAND_RE="^(${USERLAND_CRATES})\$"
 
@@ -94,8 +93,8 @@ scan_manifests() {
 # ::alloc::` patterns that a Cargo.toml scan would miss. The only kernel
 # file allowed to name `alloc` from source is `kernel/src/main.rs`,
 # which needs `extern crate alloc;` for its `#[global_allocator]` /
-# `#[alloc_error_handler]` declarations. Userland + slopos-ostd itself
-# are exempt per the Cargo-level whitelist above.
+# `#[alloc_error_handler]` declarations. The crates in USERLAND_CRATES are
+# skipped here too.
 # -----------------------------------------------------------------------
 
 SOURCE_WHITELIST="kernel/src/main.rs"

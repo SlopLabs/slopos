@@ -234,8 +234,6 @@ fn the_first_matching_principal_decides() {
     );
 }
 
-/// `uid requester` runs a mechanism as whoever asked, which only a person or
-/// root may be, holding no more than the ceiling.
 #[test]
 fn an_action_run_as_its_requester_stays_under_the_ceiling() {
     let text = |caps: &str, allows: &str| {
@@ -294,11 +292,6 @@ fn the_ceiling_reaches_no_disk_base_extension_seal_boot_variable_or_identity() {
     }
 }
 
-/// `priv` runs anything an administrator asks for once they click, keeping
-/// the answer for that command and directory but never for a shell, whose
-/// input says what it runs, as them and holding the ceiling; a standard
-/// user's is answered by an administrator's password, and no program or
-/// pairing reaches it.
 #[test]
 fn the_shipped_priv_is_an_administrator_s_and_keeps_only_a_command_s_answer() {
     let policy = Policy::parse(SHIPPED).unwrap();
@@ -763,32 +756,6 @@ fn values_outside_their_grammar_refuse() {
     assert_eq!(refusal(&long_name).line, 1);
 }
 
-/// A requester reads a policy of another base than its own: one from before
-/// the words were held, or one that names a setting it does not know.
-/// privd holds its own to both.
-#[test]
-fn a_requester_reads_what_privd_would_hold_to_more() {
-    let older = "action org.slopos.boot.install\n  program /bin/bootctl\n  args install *\n  \
-                 caps Power\n  uid 0\n  allow root\n  \
-                 describe \"Install a kernel into a boot slot\"\n";
-    let newer = "action org.slopos.boot.install\n  program /bin/bootctl\n  args install *\n  \
-                 caps Power\n  uid 0\n  allow root\n  describe \"install a kernel\"\n  \
-                 glow brightly\n";
-    for text in [older, newer] {
-        let read = Policy::read(text).expect(text);
-        assert_eq!(read.actions()[0].program, "/bin/bootctl");
-        assert!(Policy::parse(text).is_err(), "{text}");
-    }
-    let broken = "action org.slopos.x\n  program /bin/x\n  args *\n  caps Power\n  uid 0\n  \
-                  allow root\n  describe \"x\"\n  cwd please\n";
-    assert!(
-        Policy::read(broken).is_err(),
-        "a known setting is still read whole"
-    );
-}
-
-/// What each shipped action says passes the copy rules, and only the install
-/// that can erase a disk is marked as destroying something.
 #[test]
 fn the_shipped_policy_speaks_to_the_person() {
     let policy = Policy::parse(SHIPPED).unwrap();
@@ -865,8 +832,6 @@ fn every_capability_name_is_one_privd_holds() {
     assert_eq!(none.actions()[0].caps, 0);
 }
 
-/// Every prefix, every line dropped and every byte replaced: the parser
-/// answers each, a policy or the line it stopped at, and never panics.
 #[test]
 fn mutated_policies_parse_or_name_a_line() {
     let lines = EXAMPLE.lines().count();
@@ -906,7 +871,6 @@ fn mutated_policies_parse_or_name_a_line() {
     }
 }
 
-/// The policy the base carries, held to the rules the access model states.
 #[test]
 fn the_shipped_policy_says_what_the_access_model_does() {
     let policy = Policy::parse(SHIPPED).unwrap();
@@ -1093,9 +1057,6 @@ fn the_shipped_policy_says_what_the_access_model_does() {
     assert!(!rescue.accepts(&args_of(&["--rescue", "-c", "id"])));
 }
 
-/// What goes into `/usr/local` once it is the system's is installed by uid 0
-/// holding nothing, which reads only what uid 0 may by mode, one install at a
-/// time, from the requester's directory.
 #[test]
 fn the_software_action_installs_as_uid_0_holding_nothing() {
     let policy = Policy::parse(SHIPPED).unwrap();
@@ -1108,10 +1069,6 @@ fn the_software_action_installs_as_uid_0_holding_nothing() {
     assert!(action.accepts(&args_of(&["apps", "builddir/apps", "/usr/local"])));
 }
 
-/// With a second person, the system's actions are an administrator's: a
-/// standard user is answered by an administrator's password, may see what
-/// boots and power the machine off while nobody else is logged in, and
-/// changes their own password by confirming it.
 #[test]
 fn the_shipped_policy_reads_a_standard_user_s_requests_as_an_administrator_s_to_answer() {
     let policy = Policy::parse(SHIPPED).unwrap();
@@ -1156,10 +1113,6 @@ fn the_shipped_policy_reads_a_standard_user_s_requests_as_an_administrator_s_to_
     }
 }
 
-/// The extension actions hold what changes the store and the activations,
-/// or for a configuration the seal alone, and nothing that could rewrite or
-/// cover the root; only what a key signed goes in for an administrator
-/// unasked, and they run one at a time.
 #[test]
 fn the_extension_actions_hold_the_store_and_nothing_wider() {
     let policy = Policy::parse(SHIPPED).unwrap();

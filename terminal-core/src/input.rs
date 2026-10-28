@@ -1,11 +1,5 @@
-//! Pure input model for the terminal emulator: key encoding, pointer
-//! selection, paste sanitizing, and the compositor-event taxonomy.
-//!
-//! Keys become PTY-master byte sequences (printable / control passthrough plus
-//! the kernel's baked 0x80-0x88 navigation codes mapped to CSI). Touches no
-//! syscalls, no protocol wire types and no font globals — cell metrics arrive
-//! as plain `i32` arguments, and the userland app owns the actual IO and the
-//! `classify(ProtocolEvent)` bridge.
+//! The terminal's input as PTY bytes — keys, pointer reports and paste — and
+//! its selection, with no syscalls, wire types or font metrics of its own.
 
 use slopos_abi::input::keycode;
 use slopos_abi::input::{
@@ -14,18 +8,6 @@ use slopos_abi::input::{
 use slopos_vt::MouseTracking;
 
 use super::grid::TerminalGrid;
-
-// Kernel-baked navigation key codes: the compositor reports these as the
-// "ascii" byte for non-text keys.
-const KEY_PAGE_UP: u8 = 0x80;
-const KEY_PAGE_DOWN: u8 = 0x81;
-const KEY_UP: u8 = 0x82;
-const KEY_DOWN: u8 = 0x83;
-const KEY_LEFT: u8 = 0x84;
-const KEY_RIGHT: u8 = 0x85;
-const KEY_HOME: u8 = 0x86;
-const KEY_END: u8 = 0x87;
-const KEY_DELETE: u8 = 0x88;
 
 const MOUSE_LEFT: u8 = 0x01;
 const MOUSE_RIGHT: u8 = 0x02;
@@ -61,12 +43,6 @@ pub struct KeyBytes {
 }
 
 impl KeyBytes {
-    fn one(b: u8) -> Self {
-        let mut out = Self::empty();
-        out.push(b);
-        out
-    }
-
     fn seq(s: &[u8]) -> Self {
         let mut out = Self::empty();
         for &b in s {
@@ -260,13 +236,11 @@ fn pixel_to_anchor(px: i32, py: i32, cell_w: i32, cell_h: i32, grid: &TerminalGr
 /// One compositor key press, as the terminal receives it.
 #[derive(Clone, Copy)]
 pub struct KeyPress {
-    /// Legacy single-byte code: ASCII text, or one of the kernel's baked
-    /// navigation pseudo-codes (0x80..=0x88).
-    pub ascii: u8,
-    /// Canonical HID usage; 0 for an event that carries none (a dead-key
-    /// accent flush).
+    /// The HID usage; 0 for the accent a dead key leaves when nothing
+    /// composes with it.
     pub keycode: u16,
-    /// Layout-resolved text codepoint; 0 for a key that produces no text.
+    /// The text the layout makes, Enter's `\n`, Tab, Backspace's 0x08, Escape
+    /// and Ctrl+letter's control code included; 0 for none.
     pub codepoint: u32,
     /// `MODIFIER_*` snapshot at the time of the press.
     pub mods: u8,
@@ -351,25 +325,10 @@ fn encode_special(special: Special, mods: u8, app_cursor: bool) -> KeyBytes {
     out
 }
 
-/// The family a baked navigation pseudo-code belongs to. Also how keypad
-/// navigation arrives.
-fn special_for_ascii(ascii: u8) -> Option<Special> {
-    Some(match ascii {
-        KEY_UP => Special::Cursor(b'A'),
-        KEY_DOWN => Special::Cursor(b'B'),
-        KEY_RIGHT => Special::Cursor(b'C'),
-        KEY_LEFT => Special::Cursor(b'D'),
-        KEY_HOME => Special::Cursor(b'H'),
-        KEY_END => Special::Cursor(b'F'),
-        KEY_DELETE => Special::Tilde(3),
-        KEY_PAGE_UP => Special::Tilde(5),
-        KEY_PAGE_DOWN => Special::Tilde(6),
-        _ => return None,
-    })
-}
+const PAGE_UP: Special = Special::Tilde(5);
+const PAGE_DOWN: Special = Special::Tilde(6);
 
-/// The family a canonical HID usage belongs to. The driver bakes no legacy
-/// byte for F1–F12 or Insert, so this is their only source.
+/// The family a key that makes no text belongs to.
 fn special_for_keycode(code: u16, mods: u8) -> Option<Special> {
     // The keymap resolves a keypad key to text when `numlock ^ shift`; the
     // complement is its navigation meaning.
@@ -383,8 +342,8 @@ fn special_for_keycode(code: u16, mods: u8) -> Option<Special> {
         keycode::KEY_END => Special::Cursor(b'F'),
         keycode::KEY_INSERT => Special::Tilde(2),
         keycode::KEY_DELETE => Special::Tilde(3),
-        keycode::KEY_PAGEUP => Special::Tilde(5),
-        keycode::KEY_PAGEDOWN => Special::Tilde(6),
+        keycode::KEY_PAGEUP => PAGE_UP,
+        keycode::KEY_PAGEDOWN => PAGE_DOWN,
         keycode::KEY_F1 => Special::Pf(b'P'),
         keycode::KEY_F2 => Special::Pf(b'Q'),
         keycode::KEY_F3 => Special::Pf(b'R'),
@@ -399,12 +358,12 @@ fn special_for_keycode(code: u16, mods: u8) -> Option<Special> {
         keycode::KEY_F12 => Special::Tilde(24),
         keycode::KEY_KP_7 if keypad_nav => Special::Cursor(b'H'),
         keycode::KEY_KP_8 if keypad_nav => Special::Cursor(b'A'),
-        keycode::KEY_KP_9 if keypad_nav => Special::Tilde(5),
+        keycode::KEY_KP_9 if keypad_nav => PAGE_UP,
         keycode::KEY_KP_4 if keypad_nav => Special::Cursor(b'D'),
         keycode::KEY_KP_6 if keypad_nav => Special::Cursor(b'C'),
         keycode::KEY_KP_1 if keypad_nav => Special::Cursor(b'F'),
         keycode::KEY_KP_2 if keypad_nav => Special::Cursor(b'B'),
-        keycode::KEY_KP_3 if keypad_nav => Special::Tilde(6),
+        keycode::KEY_KP_3 if keypad_nav => PAGE_DOWN,
         keycode::KEY_KP_0 if keypad_nav => Special::Tilde(2),
         keycode::KEY_KP_DOT if keypad_nav => Special::Tilde(3),
         _ => return None,
@@ -416,63 +375,45 @@ fn special_for_keycode(code: u16, mods: u8) -> Option<Special> {
 /// `app_cursor` is DECCKM: an application that set it expects `SS3 A` rather
 /// than `CSI A`.
 ///
-/// Ctrl+Shift chords are terminal commands, never PTY input: the kernel bakes
-/// the same control byte for Ctrl+C and Ctrl+Shift+C, so `mods` is the only
-/// way to tell them apart. Ctrl+Shift+PgUp/PgDn pages the local scrollback for
-/// the same reason — plain PgUp/PgDn belongs to the application.
+/// Ctrl+Shift+C, V, PgUp and PgDn are terminal commands, never PTY input: the
+/// layout makes the same control code for Ctrl+C and Ctrl+Shift+C, so `mods`
+/// is the only way to tell them apart. Plain PgUp/PgDn belongs to the
+/// application.
 pub fn encode_key(key: KeyPress, app_cursor: bool) -> KeyAction {
     const CHORD: u8 = MODIFIER_CTRL | MODIFIER_SHIFT;
-    let chorded = key.mods & CHORD == CHORD;
-    if chorded {
-        match key.ascii {
-            0x03 => return KeyAction::CopySelection, // Ctrl+Shift+C
-            0x16 => return KeyAction::RequestPaste,  // Ctrl+Shift+V
+    let special = special_for_keycode(key.keycode, key.mods);
+    if key.mods & CHORD == CHORD {
+        match key.codepoint {
+            0x03 => return KeyAction::CopySelection,
+            0x16 => return KeyAction::RequestPaste,
             _ => {}
         }
-        if key.ascii == KEY_PAGE_UP || key.keycode == keycode::KEY_PAGEUP {
-            return KeyAction::ScrollUp(SCROLLBACK_PAGE_LINES);
-        }
-        if key.ascii == KEY_PAGE_DOWN || key.keycode == keycode::KEY_PAGEDOWN {
-            return KeyAction::ScrollDown(SCROLLBACK_PAGE_LINES);
+        match special {
+            Some(PAGE_UP) => return KeyAction::ScrollUp(SCROLLBACK_PAGE_LINES),
+            Some(PAGE_DOWN) => return KeyAction::ScrollDown(SCROLLBACK_PAGE_LINES),
+            _ => {}
         }
     }
 
-    if let Some(special) = special_for_ascii(key.ascii) {
+    if let Some(special) = special {
         return KeyAction::ToMaster(encode_special(special, key.mods, app_cursor));
     }
 
-    if key.ascii != 0 {
-        // Shift+Tab is CBT, not a tab: the keymap folds both to 0x09, so the
-        // modifier snapshot is the only thing that distinguishes them.
-        if key.ascii == b'\t' && modifier_param(key.mods) == 2 {
-            return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[Z"));
-        }
-        let bytes = KeyBytes::one(key.ascii);
-        return KeyAction::ToMaster(if alt_chord(key.mods) {
-            bytes.prefixed_esc()
-        } else {
-            bytes
-        });
+    let Some(c) = char::from_u32(key.codepoint).filter(|&c| c != '\0') else {
+        return KeyAction::None;
+    };
+    // The keymap makes Tab and Shift+Tab the same 0x09; Shift+Tab is CBT.
+    if c == '\t' && modifier_param(key.mods) == 2 {
+        return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[Z"));
     }
-
-    if key.codepoint > 0x7F {
-        if let Some(c) = char::from_u32(key.codepoint) {
-            let bytes = KeyBytes::utf8(c);
-            return KeyAction::ToMaster(if alt_chord(key.mods) {
-                bytes.prefixed_esc()
-            } else {
-                bytes
-            });
-        }
-    }
-
-    match special_for_keycode(key.keycode, key.mods) {
-        Some(special) => KeyAction::ToMaster(encode_special(special, key.mods, app_cursor)),
-        None => KeyAction::None,
-    }
+    let bytes = KeyBytes::utf8(c);
+    KeyAction::ToMaster(match alt_chord(key.mods) {
+        true => bytes.prefixed_esc(),
+        false => bytes,
+    })
 }
 
-/// What a (non-key) compositor event resolved to.
+/// What a compositor event resolved to.
 pub enum CompositorEvent {
     /// Key press, with everything the encoder needs to resolve it.
     Key(KeyPress),
@@ -824,31 +765,16 @@ mod tests {
         }
     }
 
-    fn text(ascii: u8, mods: u8) -> KeyPress {
+    fn press(code: u16, codepoint: u32, mods: u8) -> KeyPress {
         KeyPress {
-            ascii,
-            keycode: 0,
-            codepoint: ascii as u32,
-            mods,
-        }
-    }
-
-    fn baked(ascii: u8, mods: u8) -> KeyPress {
-        KeyPress {
-            ascii,
-            keycode: 0,
-            codepoint: 0,
+            keycode: code,
+            codepoint,
             mods,
         }
     }
 
     fn named(code: u16, mods: u8) -> KeyPress {
-        KeyPress {
-            ascii: 0,
-            keycode: code,
-            codepoint: 0,
-            mods,
-        }
+        press(code, 0, mods)
     }
 
     fn bytes_of(key: KeyPress) -> Vec<u8> {
@@ -858,50 +784,79 @@ mod tests {
     #[test]
     fn ctrl_shift_c_copies_instead_of_sigint() {
         assert!(matches!(
-            encode_key(text(0x03, CTRL_SHIFT), false),
+            encode_key(press(keycode::KEY_C, 0x03, CTRL_SHIFT), false),
             KeyAction::CopySelection
         ));
     }
 
-    /// Plain Ctrl+C (no Shift) must reach the PTY master so the ldisc can
-    /// raise SIGINT.
     #[test]
     fn ctrl_only_c_reaches_master_as_sigint_byte() {
-        assert_eq!(bytes_of(text(0x03, MODIFIER_CTRL)), alloc::vec![0x03]);
+        assert_eq!(bytes_of(press(keycode::KEY_C, 0x03, MODIFIER_CTRL)), [0x03]);
     }
 
     #[test]
     fn ctrl_shift_v_requests_paste() {
         assert!(matches!(
-            encode_key(text(0x16, CTRL_SHIFT), false),
+            encode_key(press(keycode::KEY_V, 0x16, CTRL_SHIFT), false),
             KeyAction::RequestPaste
         ));
     }
 
     #[test]
     fn shift_only_c_is_plain_text() {
-        assert_eq!(bytes_of(text(b'C', MODIFIER_SHIFT)), [b'C']);
+        assert_eq!(
+            bytes_of(press(keycode::KEY_C, 'C' as u32, MODIFIER_SHIFT)),
+            [b'C']
+        );
     }
 
     #[test]
     fn ctrl_shift_other_keys_still_reach_master() {
-        // Ctrl+Shift+A (0x01) is not a clipboard chord; the ldisc gets it.
-        assert_eq!(bytes_of(text(0x01, CTRL_SHIFT)), [0x01]);
+        assert_eq!(bytes_of(press(keycode::KEY_A, 0x01, CTRL_SHIFT)), [0x01]);
+    }
+
+    /// The control code is the layout's: AZERTY's A is the key QWERTY calls Q.
+    #[test]
+    fn ctrl_letters_send_the_control_code_the_layout_made() {
+        assert_eq!(bytes_of(press(keycode::KEY_A, 0x01, MODIFIER_CTRL)), [0x01]);
+        assert_eq!(bytes_of(press(keycode::KEY_X, 0x18, MODIFIER_CTRL)), [0x18]);
+        assert_eq!(bytes_of(press(keycode::KEY_Q, 0x01, MODIFIER_CTRL)), [0x01]);
     }
 
     #[test]
-    fn baked_navigation_codes_map_to_csi() {
-        assert_eq!(bytes_of(baked(KEY_UP, 0)), b"\x1b[A");
-        assert_eq!(bytes_of(baked(KEY_DOWN, 0)), b"\x1b[B");
-        assert_eq!(bytes_of(baked(KEY_LEFT, 0)), b"\x1b[D");
-        assert_eq!(bytes_of(baked(KEY_RIGHT, 0)), b"\x1b[C");
-        assert_eq!(bytes_of(baked(KEY_HOME, 0)), b"\x1b[H");
-        assert_eq!(bytes_of(baked(KEY_END, 0)), b"\x1b[F");
-        assert_eq!(bytes_of(baked(KEY_DELETE, 0)), b"\x1b[3~");
+    fn editing_keys_send_their_control_bytes() {
+        assert_eq!(bytes_of(press(keycode::KEY_ENTER, '\n' as u32, 0)), b"\n");
+        assert_eq!(
+            bytes_of(press(keycode::KEY_KP_ENTER, '\n' as u32, 0)),
+            b"\n"
+        );
+        assert_eq!(bytes_of(press(keycode::KEY_TAB, '\t' as u32, 0)), b"\t");
+        assert_eq!(bytes_of(press(keycode::KEY_BACKSPACE, 0x08, 0)), [0x08]);
+        assert_eq!(bytes_of(press(keycode::KEY_ESC, 0x1B, 0)), [0x1B]);
     }
 
-    /// The editing keys the driver bakes no legacy byte for, so the canonical
-    /// keycode is their only source.
+    #[test]
+    fn shift_tab_is_cbt() {
+        assert_eq!(
+            bytes_of(press(keycode::KEY_TAB, '\t' as u32, MODIFIER_SHIFT)),
+            b"\x1b[Z"
+        );
+    }
+
+    #[test]
+    fn navigation_keys_map_to_csi() {
+        assert_eq!(bytes_of(named(keycode::KEY_UP, 0)), b"\x1b[A");
+        assert_eq!(bytes_of(named(keycode::KEY_DOWN, 0)), b"\x1b[B");
+        assert_eq!(bytes_of(named(keycode::KEY_RIGHT, 0)), b"\x1b[C");
+        assert_eq!(bytes_of(named(keycode::KEY_LEFT, 0)), b"\x1b[D");
+        assert_eq!(bytes_of(named(keycode::KEY_HOME, 0)), b"\x1b[H");
+        assert_eq!(bytes_of(named(keycode::KEY_END, 0)), b"\x1b[F");
+        assert_eq!(bytes_of(named(keycode::KEY_INSERT, 0)), b"\x1b[2~");
+        assert_eq!(bytes_of(named(keycode::KEY_DELETE, 0)), b"\x1b[3~");
+        assert_eq!(bytes_of(named(keycode::KEY_PAGEUP, 0)), b"\x1b[5~");
+        assert_eq!(bytes_of(named(keycode::KEY_PAGEDOWN, 0)), b"\x1b[6~");
+    }
+
     #[test]
     fn function_keys_use_the_pc_style_encoding() {
         assert_eq!(bytes_of(named(keycode::KEY_F1, 0)), b"\x1bOP");
@@ -911,15 +866,26 @@ mod tests {
         assert_eq!(bytes_of(named(keycode::KEY_F10, 0)), b"\x1b[21~");
         assert_eq!(bytes_of(named(keycode::KEY_F11, 0)), b"\x1b[23~");
         assert_eq!(bytes_of(named(keycode::KEY_F12, 0)), b"\x1b[24~");
-        assert_eq!(bytes_of(named(keycode::KEY_INSERT, 0)), b"\x1b[2~");
     }
 
     #[test]
     fn modifiers_ride_the_second_csi_parameter() {
-        assert_eq!(bytes_of(baked(KEY_LEFT, MODIFIER_CTRL)), b"\x1b[1;5D");
-        assert_eq!(bytes_of(baked(KEY_RIGHT, MODIFIER_SHIFT)), b"\x1b[1;2C");
-        assert_eq!(bytes_of(baked(KEY_HOME, MODIFIER_ALT)), b"\x1b[1;3H");
-        assert_eq!(bytes_of(baked(KEY_DELETE, MODIFIER_CTRL)), b"\x1b[3;5~");
+        assert_eq!(
+            bytes_of(named(keycode::KEY_LEFT, MODIFIER_CTRL)),
+            b"\x1b[1;5D"
+        );
+        assert_eq!(
+            bytes_of(named(keycode::KEY_RIGHT, MODIFIER_SHIFT)),
+            b"\x1b[1;2C"
+        );
+        assert_eq!(
+            bytes_of(named(keycode::KEY_HOME, MODIFIER_ALT)),
+            b"\x1b[1;3H"
+        );
+        assert_eq!(
+            bytes_of(named(keycode::KEY_DELETE, MODIFIER_CTRL)),
+            b"\x1b[3;5~"
+        );
         assert_eq!(
             bytes_of(named(keycode::KEY_F5, MODIFIER_SHIFT)),
             b"\x1b[15;2~"
@@ -943,68 +909,77 @@ mod tests {
     /// produced must not come back as a modified key.
     #[test]
     fn altgr_is_not_an_alt_chord() {
-        let mut key = text(b'@', MODIFIER_ALT | MODIFIER_ALTGR);
-        key.codepoint = b'@' as u32;
-        assert_eq!(bytes_of(key), [b'@']);
-        assert_eq!(
-            bytes_of(baked(KEY_LEFT, MODIFIER_ALT | MODIFIER_ALTGR)),
-            b"\x1b[D"
-        );
+        let altgr = MODIFIER_ALT | MODIFIER_ALTGR;
+        assert_eq!(bytes_of(press(keycode::KEY_2, '@' as u32, altgr)), [b'@']);
+        assert_eq!(bytes_of(named(keycode::KEY_LEFT, altgr)), b"\x1b[D");
     }
 
     #[test]
     fn alt_prefixes_text_with_escape() {
-        assert_eq!(bytes_of(text(b'x', MODIFIER_ALT)), b"\x1bx");
-        let mut key = named(0, MODIFIER_ALT);
-        key.codepoint = 0x00E4;
-        assert_eq!(bytes_of(key), b"\x1b\xc3\xa4");
+        assert_eq!(
+            bytes_of(press(keycode::KEY_X, 'x' as u32, MODIFIER_ALT)),
+            b"\x1bx"
+        );
+        assert_eq!(
+            bytes_of(press(keycode::KEY_C, 0x03, MODIFIER_ALT | MODIFIER_CTRL)),
+            b"\x1b\x03"
+        );
+        assert_eq!(bytes_of(press(0, 0x00E4, MODIFIER_ALT)), b"\x1b\xc3\xa4");
     }
 
     #[test]
     fn application_cursor_keys_use_ss3() {
-        assert_eq!(master_bytes(encode_key(baked(KEY_UP, 0), true)), b"\x1bOA");
         assert_eq!(
-            master_bytes(encode_key(baked(KEY_HOME, 0), true)),
+            master_bytes(encode_key(named(keycode::KEY_UP, 0), true)),
+            b"\x1bOA"
+        );
+        assert_eq!(
+            master_bytes(encode_key(named(keycode::KEY_HOME, 0), true)),
             b"\x1bOH"
         );
         // A modified cursor key is CSI even under DECCKM, as xterm has it.
         assert_eq!(
-            master_bytes(encode_key(baked(KEY_UP, MODIFIER_CTRL), true)),
+            master_bytes(encode_key(named(keycode::KEY_UP, MODIFIER_CTRL), true)),
             b"\x1b[1;5A"
         );
-    }
-
-    #[test]
-    fn shift_tab_is_cbt() {
-        assert_eq!(bytes_of(text(b'\t', MODIFIER_SHIFT)), b"\x1b[Z");
-        assert_eq!(bytes_of(text(b'\t', 0)), b"\t");
     }
 
     /// An editor needs PgUp/PgDn, so the local scrollback moved to the chord
     /// that already means "terminal command" here.
     #[test]
     fn page_keys_reach_the_application_and_the_chord_scrolls() {
-        assert_eq!(bytes_of(baked(KEY_PAGE_UP, 0)), b"\x1b[5~");
-        assert_eq!(bytes_of(baked(KEY_PAGE_DOWN, 0)), b"\x1b[6~");
-        assert_eq!(bytes_of(baked(KEY_PAGE_UP, MODIFIER_SHIFT)), b"\x1b[5;2~");
+        assert_eq!(
+            bytes_of(named(keycode::KEY_PAGEUP, MODIFIER_SHIFT)),
+            b"\x1b[5;2~"
+        );
         assert!(matches!(
-            encode_key(baked(KEY_PAGE_UP, CTRL_SHIFT), false),
+            encode_key(named(keycode::KEY_PAGEUP, CTRL_SHIFT), false),
             KeyAction::ScrollUp(SCROLLBACK_PAGE_LINES)
         ));
         assert!(matches!(
-            encode_key(baked(KEY_PAGE_DOWN, CTRL_SHIFT), false),
+            encode_key(named(keycode::KEY_PAGEDOWN, CTRL_SHIFT), false),
             KeyAction::ScrollDown(SCROLLBACK_PAGE_LINES)
+        ));
+        assert!(matches!(
+            encode_key(
+                named(keycode::KEY_KP_9, CTRL_SHIFT | MODIFIER_NUM_LOCK),
+                false
+            ),
+            KeyAction::ScrollUp(SCROLLBACK_PAGE_LINES)
         ));
     }
 
-    /// Keypad navigation arrives as a baked byte for every key but KP-0, whose
-    /// Insert meaning has no legacy code.
     #[test]
-    fn keypad_navigation_resolves_without_a_baked_byte() {
+    fn keypad_navigation_resolves_from_the_keycode() {
+        assert_eq!(bytes_of(named(keycode::KEY_KP_8, 0)), b"\x1b[A");
+        assert_eq!(bytes_of(named(keycode::KEY_KP_3, 0)), b"\x1b[6~");
         assert_eq!(bytes_of(named(keycode::KEY_KP_0, 0)), b"\x1b[2~");
         assert_eq!(bytes_of(named(keycode::KEY_KP_DOT, 0)), b"\x1b[3~");
-        // NumLock on means the keypad is digits; the keymap resolved text, so
-        // the nav mapping must stand down.
+        // NumLock on makes the keypad digits, which the keymap made text.
+        assert_eq!(
+            bytes_of(press(keycode::KEY_KP_0, '0' as u32, MODIFIER_NUM_LOCK)),
+            b"0"
+        );
         assert!(matches!(
             encode_key(named(keycode::KEY_KP_0, MODIFIER_NUM_LOCK), false),
             KeyAction::None
@@ -1029,17 +1004,12 @@ mod tests {
     }
 
     #[test]
-    fn non_ascii_codepoint_encodes_as_utf8() {
-        let mut key = named(0, 0);
-        key.codepoint = 0x00E4;
-        assert_eq!(bytes_of(key), "ä".as_bytes());
-        key.codepoint = 0x20AC;
-        assert_eq!(bytes_of(key), "€".as_bytes());
-        // The dead-key accent flush carries no keycode at all.
-        key.codepoint = 0x00B4;
-        assert_eq!(bytes_of(key), "´".as_bytes());
-        // ASCII still rides the legacy byte, not double-encoded.
-        assert_eq!(bytes_of(text(b'a', 0)), [b'a']);
+    fn text_encodes_as_utf8() {
+        assert_eq!(bytes_of(press(keycode::KEY_A, 'a' as u32, 0)), [b'a']);
+        assert_eq!(bytes_of(press(keycode::KEY_Q, 0x00E4, 0)), "ä".as_bytes());
+        assert_eq!(bytes_of(press(keycode::KEY_Q, 0x20AC, 0)), "€".as_bytes());
+        // The accent a dead key leaves carries no keycode at all.
+        assert_eq!(bytes_of(press(0, 0x00B4, 0)), "´".as_bytes());
     }
 
     #[test]

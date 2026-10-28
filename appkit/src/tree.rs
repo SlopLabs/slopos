@@ -2,16 +2,16 @@ use std::any::Any;
 
 use slopos_theme_core::{TextRole, Tone};
 
-use super::components::{Button, ButtonRow, Text};
+use super::components::{Button, ButtonRow, RowButton, Text};
 use super::constraints::{BoxConstraints, Rect, Size};
-use super::event::{EventPhase, Key, MessageSink, Modifiers, WidgetEvent};
+use super::event::{Key, MessageSink, Modifiers, WidgetEvent};
 use super::node::{ButtonStyle, Node};
-use super::paint::PaintContext;
 use super::style::StyleSheet;
-use super::traits::{MeasureCtx, Scrolled, Widget, measure_widget, place_widget};
+use super::traits::{Kept, MeasureCtx, Widget, WidgetId, measure_widget, place_widget};
+use super::widgets::button_row::Escape;
 
-/// Build a retained widget tree from a declarative `Node<M>` tree, bridging the
-/// app's message type `M` into the widgets' type-erased callback storage.
+/// The widgets `node` stands for, its messages erased to the widgets'
+/// callbacks.
 pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> {
     use super::widgets;
 
@@ -29,21 +29,24 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             b.active,
         )),
         Node::ButtonRow(row) => build_button_row(row, row.ends),
-        Node::PropertyList(rows) => {
-            let mut cells: Vec<Box<dyn Widget>> = Vec::with_capacity(rows.len() * 2);
-            for (label, value) in rows {
+        Node::PropertyList(list) => {
+            let mut cells: Vec<Box<dyn Widget>> = Vec::with_capacity(list.rows.len() * 2);
+            for (label, value) in &list.rows {
                 let name = Text::new(label.clone()).tone(Tone::Secondary).wrap();
                 cells.push(Box::new(widgets::text::TextWidget::new(&name)));
                 cells.push(build_widget_tree(value));
             }
             Box::new(widgets::property_list::PropertyListWidget::new(cells))
         }
-        Node::List(list) => Box::new(widgets::list::ListWidget::new(
-            list.sections.clone(),
-            list.selected,
-            erase_with(list.on_select),
-            erase_with(list.on_activate),
-        )),
+        Node::List(list) => Box::new(
+            widgets::list::ListWidget::new(
+                list.sections.clone(),
+                list.selected,
+                erase_with(list.on_select),
+                erase_with(list.on_activate),
+            )
+            .active(list.active),
+        ),
         Node::Tag(tag) => Box::new(widgets::tag::TagWidget::new(tag.text.clone(), tag.tone)),
         Node::Disclosure(d) => Box::new(widgets::disclosure::DisclosureWidget::new(
             d.title.clone(),
@@ -51,29 +54,11 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             erase(&d.on_toggle),
             d.expanded.then(|| build_widget_tree(&d.content)),
         )),
-        Node::Button {
-            label,
-            on_press,
-            style,
-            enabled,
-        } => Box::new(widgets::button::ButtonWidget::new(
-            label.clone(),
-            erase(on_press),
-            *style,
-            *enabled,
-        )),
-        Node::TextField {
-            text,
-            placeholder,
-            on_change,
-            max_length,
-            read_only,
-        } => Box::new(widgets::text_field::TextFieldWidget::new(
-            text.clone(),
-            placeholder.clone(),
-            erase_with(*on_change),
-            *max_length,
-            *read_only,
+        Node::Button(b) => Box::new(widgets::button::ButtonWidget::new(
+            b.label.clone(),
+            erase(&b.on_press),
+            b.style,
+            b.enabled,
         )),
         Node::Checkbox {
             checked,
@@ -85,15 +70,6 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             label.clone(),
             erase(on_toggle),
             *enabled,
-        )),
-        Node::RadioGroup {
-            options,
-            selected,
-            on_select,
-        } => Box::new(widgets::radio_group::RadioGroupWidget::new(
-            options.clone(),
-            *selected,
-            erase_with(*on_select),
         )),
         Node::Slider {
             value,
@@ -124,39 +100,17 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
         )),
         Node::ScrollView {
             child,
-            direction,
-            show_scrollbar,
             scroll_y,
             on_scroll,
             follow_end,
-        } => {
-            let child_widget = build_widget_tree(child);
-            Box::new(
-                widgets::scroll_view::ScrollViewWidget::with_scroll(
-                    child_widget,
-                    *direction,
-                    *show_scrollbar,
-                    *scroll_y,
-                    erase_with(*on_scroll),
-                )
-                .following_end(*follow_end),
+        } => Box::new(
+            widgets::scroll_view::ScrollViewWidget::with_scroll(
+                build_widget_tree(child),
+                *scroll_y,
+                erase_with(*on_scroll),
             )
-        }
-        Node::ListView {
-            item_height,
-            selected,
-            on_select,
-            items,
-        } => {
-            let item_widgets: Vec<Box<dyn Widget>> =
-                items.iter().map(|n| build_widget_tree(n)).collect();
-            Box::new(widgets::list_view::ListViewWidget::new(
-                *item_height,
-                *selected,
-                erase_with(*on_select),
-                item_widgets,
-            ))
-        }
+            .following_end(*follow_end),
+        ),
         Node::TabBar {
             tabs,
             active,
@@ -179,7 +133,6 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
         Node::Table {
             columns,
             rows,
-            row_height,
             selected,
             on_select,
             on_activate,
@@ -192,17 +145,13 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
                 .map(|row| row.iter().map(|n| build_widget_tree(n)).collect())
                 .collect();
             Box::new(
-                widgets::table::TableWidget::new(
-                    columns.clone(),
-                    row_widgets,
-                    *row_height,
-                    *selected,
-                    erase_with(*on_select),
-                    erase_with(*on_header_click),
-                    erase_with(*on_context_menu),
-                )
-                .activating(erase_with(*on_activate))
-                .showing(*shows),
+                widgets::table::TableWidget::new(columns.clone(), row_widgets)
+                    .selected(*selected)
+                    .on_select(erase_with(*on_select))
+                    .on_activate(erase_with(*on_activate))
+                    .on_header_click(erase_with(*on_header_click))
+                    .on_context_menu(erase_with(*on_context_menu))
+                    .showing(*shows),
             )
         }
         Node::Dialog {
@@ -305,14 +254,12 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
         }
         Node::Card {
             surface,
-            border,
             shadow,
             child,
         } => {
             let child_widget = build_widget_tree(child);
             Box::new(widgets::card::CardWidget::new(
                 *surface,
-                *border,
                 *shadow,
                 child_widget,
             ))
@@ -423,7 +370,7 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             *active,
             erase_with(*on_drag),
         )),
-        Node::Canvas { .. } | Node::Empty => Box::new(super::layout::SpacerWidget::new(
+        Node::Empty => Box::new(super::layout::SpacerWidget::new(
             super::constraints::Length::Px(0),
         )),
     }
@@ -452,26 +399,17 @@ pub(crate) fn build_button_row<M: Clone + 'static>(
         .leading
         .iter()
         .chain(&row.trailing)
-        .map(|b| build_widget_tree(&Node::from(b.clone())))
+        .map(|b| build_widget_tree(&Node::Button(b.clone())))
         .collect();
     let pressable = |b: &Button<M>| b.enabled.then(|| erase(&b.on_press)).flatten();
-    let on_enter = row
-        .default
-        .filter(|_| ends)
-        .and_then(|i| row.trailing.get(i))
+    let key = |at: Option<RowButton>| at.filter(|_| ends).and_then(|at| row.button(at));
+    let on_enter = key(row.default)
         .filter(|b| b.style != ButtonStyle::Destructive)
         .and_then(pressable);
-    let on_escape = row
-        .escape
-        .filter(|_| ends)
-        .and_then(|(leading, i)| {
-            if leading {
-                row.leading.get(i)
-            } else {
-                row.trailing.get(i)
-            }
-        })
-        .map(pressable);
+    let on_escape = match key(row.escape) {
+        None => Escape::Unbound,
+        Some(b) => pressable(b).map_or(Escape::Disabled, Escape::Press),
+    };
     Box::new(super::widgets::button_row::ButtonRowWidget::new(
         buttons,
         row.leading.len(),
@@ -480,24 +418,27 @@ pub(crate) fn build_button_row<M: Clone + 'static>(
     ))
 }
 
-/// Where each scroll view the app does not steer has scrolled to, in tree
-/// order.
-pub(crate) fn kept_scrolls(widget: &dyn Widget, kept: &mut Vec<Scrolled>) {
-    kept.extend(widget.kept_scroll());
+/// Where each widget the app does not steer is, in tree order.
+pub(crate) fn kept(widget: &dyn Widget, kept: &mut Vec<Kept>) {
+    kept.extend(widget.kept());
     for child in widget.children() {
-        kept_scrolls(child.as_ref(), kept);
+        self::kept(child.as_ref(), kept);
     }
 }
 
-/// Hands each of a rebuilt tree's scroll views the offset of the next one in
-/// `kept` that showed the same, in tree order, so a dialog opened or closed
-/// between them moves none; its layout then clamps each to what it holds.
-pub(crate) fn restore_scrolls(root: &mut dyn Widget, kept: &[Scrolled]) {
-    fn walk(widget: &mut dyn Widget, kept: &[Scrolled], next: &mut usize) {
-        if let Some(now) = widget.kept_scroll()
-            && let Some(at) = kept[*next..].iter().position(|k| k.shows == now.shows)
+/// Hands each of a rebuilt tree's widgets where the next one in `kept` that
+/// showed the same was, in tree order, so a dialog opened or closed between
+/// them moves none; its layout then clamps each to what it holds.
+pub(crate) fn restore_kept(root: &mut dyn Widget, kept: &[Kept]) {
+    fn walk(widget: &mut dyn Widget, kept: &[Kept], next: &mut usize) {
+        let same = |was: &Kept, now: &Kept| {
+            was.shows == now.shows
+                && core::mem::discriminant(&was.at) == core::mem::discriminant(&now.at)
+        };
+        if let Some(now) = widget.kept()
+            && let Some(at) = kept[*next..].iter().position(|k| same(k, &now))
         {
-            widget.keep_scroll(kept[*next + at].offset);
+            widget.keep(kept[*next + at].at);
             *next += at + 1;
         }
         for child in widget.children_mut() {
@@ -533,12 +474,12 @@ pub fn offer_unhandled(
 /// Sends `event` to the widget `id` names; answers whether one did.
 pub(crate) fn send_to_id(
     widget: &mut dyn Widget,
-    id: super::traits::WidgetId,
+    id: WidgetId,
     event: &WidgetEvent,
     sink: &mut MessageSink,
 ) -> bool {
     if widget.id() == id {
-        widget.event(event, EventPhase::Target, sink);
+        widget.event(event, sink);
         return true;
     }
     widget
@@ -552,8 +493,4 @@ pub fn layout_tree(root: &mut dyn Widget, window_size: Size, style: &StyleSheet)
     let mut ctx = MeasureCtx { style };
     measure_widget(root, constraints, &mut ctx);
     place_widget(root, Rect::new(0, 0, window_size.width, window_size.height));
-}
-
-pub fn paint_tree(root: &dyn Widget, ctx: &mut PaintContext) {
-    root.paint(ctx);
 }

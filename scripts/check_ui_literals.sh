@@ -1,38 +1,10 @@
 #!/usr/bin/env bash
-# Fail the build when an app draws with a raw colour, a font size, or a
-# number for spacing or an inset, instead of the theme's roles and tokens
-# (theme-core, plans/ui-overhaul.md).
-#
-# Scope:
-#   - every app: each file under apps/, and each module of userland/src/apps/
-#     one of whose files implements appkit's `App` or calls `run_app`. All
-#     four checks.
-#   - appkit itself, its tests aside: constructors only, since its widgets
-#     are where the roles become pixels and their geometry is the toolkit's.
-#
-# Checks:
-#   1 colour     a `Color32` constructor (`::rgb`, `::new`, `::WHITE`,
-#                `::BLACK`, the tuple) or alias (`as`, `type`), an
-#                `EncodedPixel`; in an app also a colour derived by
-#                `with_alpha` or `mix`, or a theme table named (`DARK`,
-#                `StyleSheet::dark().theme`) rather than `theme::current()`.
-#                `Color32::TRANSPARENT` is no colour.
-#   2 font-size  text sized by hand: a `text::ui` sizing call, its import or
-#                the module's under another name, a `font_size` or
-#                `size_px`, a `TextStyle` literal.
-#   3 spacing    a stack's `spacing:`, over as many lines as its value takes,
-#                or a spacer's `Length::Px` holding an integer literal other
-#                than 0.
-#   4 inset      `EdgeInsets::{all,symmetric,new}` whose arguments, over as
-#                many lines as the call takes, hold an integer literal other
-#                than 0, or an `EdgeInsets { .. }` literal.
-#   5 allowlist  an entry in scripts/gates/ui-literals.txt that matches no
-#                finding: a dead exemption.
-#
-# It reads spellings, not values: a number reached through a constant, a
-# binding or a helper's parameter passes. A file whose colours are its content (a syntax
-# palette, a checkerboard) is exempt from one check by a line in the
-# allowlist, with its reason.
+# Fail when an app picks a colour, a spacing or an inset of its own rather
+# than the theme's roles and tokens. Apps are every file under apps/ and each
+# module of userland/src/apps/ that implements appkit's `App` or calls
+# `run_app`; appkit, outside its tests, is held to its colour constructors
+# alone. A file whose colours are its content takes a line in
+# scripts/gates/ui-literals.txt, and a line that matches nothing fails.
 
 set -euo pipefail
 
@@ -113,7 +85,7 @@ scan_sources() {
                 }
                 if (i <= length(s)) {
                     if (nonzero(svalue) && spacing_hit != spacing_at) {
-                        hit(3, "spacing", spacing_at, spacing_text)
+                        hit(2, "spacing", spacing_at, spacing_text)
                         spacing_hit = spacing_at
                     }
                     spacing_open = 0
@@ -130,7 +102,7 @@ scan_sources() {
                     if (depth > 0) args = args c
                 }
                 if (depth == 0) {
-                    if (nonzero(args)) hit(4, "inset", call_at, call_text)
+                    if (nonzero(args)) hit(3, "inset", call_at, call_text)
                     calling = 0
                 }
                 return substr(s, i)
@@ -189,10 +161,7 @@ scan_sources() {
                 while (k-- > 0) h = h "#"
                 return h
             }
-            BEGIN {
-                raw = -1
-                SIZING = "(width|width_weighted|line_height|ascent|centred_top|baseline_in|elide_end|elided_width|draw_elided|prefix_fitting|draw_clipped)"
-            }
+            BEGIN { raw = -1 }
             {
                 text = $0
                 line = code($0)
@@ -205,29 +174,7 @@ scan_sources() {
             }
             scope != "app" { next }
             line ~ /(^|[^A-Za-z0-9_])(with_alpha|mix)[[:space:]]*\(/ \
-                || line ~ /(^|[^A-Za-z0-9_])(DARK([^A-Za-z0-9_]|$)|contrast::)/ \
-                || line ~ /StyleSheet::dark[[:space:]]*\([[:space:]]*\)[[:space:]]*\.[[:space:]]*theme/ { hit(1, "colour", NR, text) }
-            line ~ "(^|[^A-Za-z0-9_])ui::" SIZING "[[:space:]]*[(]" \
-                || line ~ /(^|[^A-Za-z0-9_])(font_size|size_px)([^A-Za-z0-9_]|$)/ \
-                || line ~ /(^|[^A-Za-z0-9_])TextStyle[[:space:]]*\{/ { hit(2, "font-size", NR, text) }
-            !importing && line ~ /^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?use[[:space:]]/ {
-                importing = 1
-                import = ""
-                import_at = NR
-                import_text = text
-            }
-            importing {
-                import = import " " line
-                if (index(line, ";")) {
-                    importing = 0
-                    if (import ~ /(^|[^A-Za-z0-9_])ui[[:space:]]+as[[:space:]]/ \
-                        || import ~ /(^|[^A-Za-z0-9_])ui::/ \
-                        && (import ~ /ui::[[:space:]]*\*/ \
-                            || import ~ "(^|[^A-Za-z0-9_])" SIZING "([^A-Za-z0-9_]|$)")) {
-                        hit(2, "font-size", import_at, import_text)
-                    }
-                }
-            }
+                || line ~ /(^|[^A-Za-z0-9_])contrast::/ { hit(1, "colour", NR, text) }
             {
                 rest = line
                 if (spacing_open) rest = take(rest)
@@ -244,7 +191,7 @@ scan_sources() {
                 value = line
                 sub(/.*Length::Px[[:space:]]*\(/, "", value)
                 sub(/\).*$/, "", value)
-                if (nonzero(value)) hit(3, "spacing", NR, text)
+                if (nonzero(value)) hit(2, "spacing", NR, text)
             }
             {
                 rest = line
@@ -258,12 +205,12 @@ scan_sources() {
                     rest = feed(substr(rest, RSTART + RLENGTH))
                 }
             }
-            line ~ /(^|[^A-Za-z0-9_])EdgeInsets[[:space:]]*\{/ { hit(4, "inset", NR, text) }
+            line ~ /(^|[^A-Za-z0-9_])EdgeInsets[[:space:]]*\{/ { hit(3, "inset", NR, text) }
         ' "$file" || { echo "check_ui_literals: awk failed on $file" >&2; exit 2; }
     done
 }
 
-# The findings no allowlist entry covers, then a tag-5 finding for each
+# The findings no allowlist entry covers, then a tag-4 finding for each
 # entry that covered none.
 apply_allowlist() {
     local findings="$1" allowlist="$2"
@@ -294,7 +241,7 @@ apply_allowlist() {
         }
         END {
             for (i = 1; i <= n; i++) {
-                if (!used[i]) printf "5\tallowlist\t%s: matches nothing\n", text[i]
+                if (!used[i]) printf "4\tallowlist\t%s: matches nothing\n", text[i]
             }
         }
     ' <(printf '%s\n' "$findings")
@@ -331,13 +278,6 @@ fn e(c: &mut Color32) {
 use slopos_abi::draw::Color32 as Rgb;
 const F: EncodedPixel = EncodedPixel(0xff12_3456);
 const G: Color32 = with_alpha(Color32::TRANSPARENT, 0xff);
-fn h() -> Color32 { slopos_appkit::theme::DARK.danger }
-fn i(s: &str) -> i32 { ui::width(s, BODY.size) }
-use slopos_appkit::text::ui::{BULLET, width};
-use slopos_appkit::text::ui::*;
-fn j() { let font_size = 14; }
-fn k() { let size_px = 12; }
-const L: TextStyle = TextStyle { size: 14, weight: Weight::Regular, line_height: 20 };
 fn m() { Node::VStack { spacing: 8, children, align }; }
 fn n() { Node::VStack { spacing: space::SM + 2, children, align }; }
 fn o() { Node::VStack { spacing: 0x8, children, align }; }
@@ -367,17 +307,10 @@ fn z() { let q = '"'; let c = Color32::WHITE; }
 fn aa<'a>(s: &'a str) -> Color32 { Color32::BLACK }
 fn ab() { let p = (EdgeInsets::all(space::SM), EdgeInsets::all(4)); }
 fn ac(a: Color32, b: Color32) -> f64 { contrast::ratio(a, b) }
-use slopos_appkit::text::ui::{
-    BULLET,
-    width,
-};
-use slopos_appkit::text::{self, ui::line_height};
 const AD: &str = r#"a"b"#;
 const AE: Color32 = Color32::rgb(1, 2, 3);
 fn af() { let a = Node::VStack { spacing: 0, children }; let b = Node::HStack { spacing: 6, children }; }
 type Ag = Color32;
-fn ah() -> Color32 { StyleSheet::dark().theme.danger }
-use slopos_appkit::text::ui as t;
 fn ai(compact: bool) {
     Node::VStack {
         spacing: if compact {
@@ -404,7 +337,7 @@ const C: Color32 = Color32::TRANSPARENT;
 fn d() { Node::VStack { spacing: 0, children, align }; }
 fn e() { Node::HStack { spacing: space::SM, children, align }; }
 fn f() { let p = EdgeInsets::new(space::SM, 0, 0, space::SM); }
-fn g() { let p = EdgeInsets::ZERO; let q = inset::PAGE; }
+fn g() { let p = EdgeInsets::default(); let q = inset::PAGE; }
 fn h() { Node::Spacer { size: Length::Px(space::SM) }; }
 fn i() { Node::SizedBox { width: Some(Length::Px(140)), height: None, child }; }
 fn j() { TableColumnWidth::Fixed(80); let darkness = 2; }
@@ -418,10 +351,6 @@ fn k() {
         2,
     ];
 }
-fn l(ctx: &mut PaintContext) { ctx.draw_text_in(0, 0, "x", TextRole::Body, ctx.theme().text); }
-use slopos_appkit::text::ui;
-fn m() -> String { format!("{}{}", ui::ELLIPSIS, slopos_appkit::text::ui::BULLET) }
-fn n() -> ui::Weight { ui::Weight::Regular }
 fn o() -> &'static str { "Color32::rgb(1, 2, 3) spacing: 8 EdgeInsets::all(16)" }
 const P: &str = "a string that runs on: \
     spacing: 8, Color32::WHITE";
@@ -436,7 +365,7 @@ fn r(compact: bool) -> i32 {
         children,
     };
     let spacing: i32 = space::SM;
-    StyleSheet::dark().row_height
+    spacing
 }
 type Px = i32;
 FIXTURE
@@ -452,11 +381,11 @@ impl<T: Clone> slopos_appkit::App for Generic<T> {}
 const A: Color32 = Color32::rgb(1, 2, 3);
 FIXTURE
     cat > "$(gate_fixture userland/src/apps/gallery.rs)" <<'FIXTURE'
-pub fn main() -> ! { slopos_appkit::run_app(Gallery, 1, 1) }
+pub fn main() -> ! { slopos_appkit::run_app(Gallery) }
 fn a() { Node::VStack { spacing: 4, children, align }; }
 FIXTURE
     cat > "$(gate_fixture userland/src/apps/turbo/mod.rs)" <<'FIXTURE'
-pub fn main() -> ! { slopos_appkit::run_app::<Turbo>(Turbo, 1, 1) }
+pub fn main() -> ! { slopos_appkit::run_app::<Turbo>(Turbo) }
 FIXTURE
     cat > "$(gate_fixture userland/src/apps/turbo/view.rs)" <<'FIXTURE'
 const A: Color32 = Color32::rgb(1, 2, 3);
@@ -468,7 +397,7 @@ FIXTURE
 
     cat > "$(gate_fixture appkit/src/widgets/painter.rs)" <<'FIXTURE'
 const A: Color32 = Color32::new(0, 0, 0, 40);
-fn b(theme: &Theme) { let font_size = 14; let p = EdgeInsets::all(16); with_alpha(theme.text, 0x40); }
+fn b(theme: &Theme) { let p = EdgeInsets::all(16); with_alpha(theme.text, 0x40); }
 FIXTURE
     cat > "$(gate_fixture appkit/src/tests/fixture.rs)" <<'FIXTURE'
 const A: Color32 = Color32::rgb(1, 2, 3);
@@ -490,13 +419,12 @@ FIXTURE
     gate_expect_enumerator "$GATE_FIXTURE_ROOT" "$fixture_files"
     GATE_FINDINGS="$(run_gate "$GATE_FIXTURE_ROOT" "$fixture_files" "$fixture_allowlist")"
 
-    gate_expect 1 21 "constructors, a deref, two aliases, a raw pixel, a derived colour, two theme tables and contrast maths in apps, after a string holding /*, //, a quote, a lifetime or a raw string's quote, one in each appkit app's module, one in appkit"
-    gate_expect 2 9 "a ui:: sizing call, importing one or all of them on one line, over several or nested, the module renamed, font_size, size_px and a TextStyle literal"
-    gate_expect 3 8 "a number, token arithmetic, hex, the second stack on a line, a value over several lines and a spacer's size in an app, a single-file appkit app, and the allowlisted file's other check"
-    gate_expect 4 7 "all, new, hex, a split symmetric, a split new with a nested call, the second call on a line, and a struct literal"
-    gate_expect 5 1 "the entry for a file that no longer exists"
+    gate_expect 1 19 "colours apps build or derive, and appkit's"
+    gate_expect 2 8 "numbers for spacing"
+    gate_expect 3 7 "numbers for insets"
+    gate_expect 4 1 "a dead allowlist entry"
     gate_expect_silent 'themed\.rs|compositor/|appkit/src/tests/|painter\.rs:2|palette\.rs:1:' \
-        "comments, nested ones, strings, raw ones, roles, tokens over several lines, a type alias that is no colour, the dark sheet's geometry, the current theme, TRANSPARENT, zero, tokens, sizes, a list of numbers, the ellipsis and bullet, non-app modules, appkit's own geometry and tests, and the allowlisted check"
+        "accepted forms"
 
     gate_selftest_end
 fi
@@ -510,12 +438,12 @@ gate_require_nonempty check_ui_literals "$REPO_ROOT" "$file_list"
 offenders="$(run_gate "$REPO_ROOT" "$file_list" "$ALLOWLIST" | cut -f2-)"
 
 if [ -n "$offenders" ]; then
-    echo "check_ui_literals: an app picks its own colour, size or spacing:" >&2
+    echo "check_ui_literals: an app picks its own colour, spacing or inset:" >&2
     echo "$offenders" | sed 's/^/    /' >&2
-    echo "  Name a role instead: a Tone or a Surface, a TextRole, a theme::space or" >&2
-    echo "  theme::inset token. A file whose colours are its content takes a line in" >&2
-    echo "  scripts/gates/ui-literals.txt saying why; an entry that matches nothing" >&2
-    echo "  is taken away." >&2
+    echo "  Name a Tone, a Surface, a theme::space or a theme::inset token instead." >&2
+    echo "  A file whose colours are its content takes a line in" >&2
+    echo "  scripts/gates/ui-literals.txt saying why; take away a line that matches" >&2
+    echo "  nothing." >&2
     exit 1
 fi
 

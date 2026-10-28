@@ -1,10 +1,8 @@
-use slopos_theme_core::Surface;
+use slopos_theme_core::{EdgeInsets, Surface};
 
 use crate::audit::Arrangement;
-use crate::constraints::{
-    BoxConstraints, CrossAxisAlignment, EdgeInsets, Length, MAX_EXTENT, Rect, Size,
-};
-use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use crate::constraints::{BoxConstraints, CrossAxisAlignment, Length, MAX_EXTENT, Rect, Size};
+use crate::event::{EventResponse, MessageSink, WidgetEvent, route};
 use crate::paint::PaintContext;
 use crate::traits::{MeasureCtx, Widget, WidgetCore, measure_widget, place_widget};
 
@@ -246,58 +244,6 @@ impl StackWidget {
             child.paint(ctx);
         }
     }
-
-    fn event_impl(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        let pointer_pos = match event {
-            WidgetEvent::PointerDown { x, y, .. }
-            | WidgetEvent::PointerUp { x, y, .. }
-            | WidgetEvent::PointerMove { x, y }
-            | WidgetEvent::Scroll { x, y, .. } => Some((*x, *y)),
-            _ => None,
-        };
-
-        let mut response = EventResponse::Ignored;
-        for child in self.children.iter_mut().rev() {
-            if let Some((px, py)) = pointer_pos {
-                let r = child.layout_rect();
-                if !r.contains(px, py) {
-                    continue;
-                }
-            }
-            let resp = child.event(event, phase, sink);
-            if resp.is_consumed() {
-                response = resp;
-                break;
-            }
-        }
-
-        // A drag leaving its widget's rect is the ordinary way to drag, so
-        // moves and releases also reach the children they missed. Each guards
-        // on containment or on its own latch, so only the waiting one acts.
-        let is_drag_event = matches!(
-            event,
-            WidgetEvent::PointerUp { .. } | WidgetEvent::PointerMove { .. }
-        );
-        if let (true, Some((px, py))) = (is_drag_event, pointer_pos) {
-            for child in self.children.iter_mut().rev() {
-                if child.layout_rect().contains(px, py) {
-                    continue;
-                }
-                // A child clearing its own hover is a repaint; dropping the
-                // response leaves the highlight lit.
-                if child.event(event, phase, sink).is_consumed() {
-                    response = EventResponse::Consumed;
-                }
-            }
-        }
-
-        response
-    }
 }
 
 pub struct VStackWidget {
@@ -322,8 +268,8 @@ impl Widget for VStackWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         self.inner.paint_impl(ctx);
     }
-    fn event(&mut self, e: &WidgetEvent, p: EventPhase, sink: &mut MessageSink) -> EventResponse {
-        self.inner.event_impl(e, p, sink)
+    fn event(&mut self, e: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
+        route(&mut self.inner.children, e, sink)
     }
     fn core(&self) -> &WidgetCore {
         &self.inner.core
@@ -331,7 +277,6 @@ impl Widget for VStackWidget {
     fn core_mut(&mut self) -> &mut WidgetCore {
         &mut self.inner.core
     }
-    /// The first child's, which sits at the column's top.
     fn baseline(&self) -> Option<i32> {
         self.inner
             .children
@@ -368,8 +313,8 @@ impl Widget for HStackWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         self.inner.paint_impl(ctx);
     }
-    fn event(&mut self, e: &WidgetEvent, p: EventPhase, sink: &mut MessageSink) -> EventResponse {
-        self.inner.event_impl(e, p, sink)
+    fn event(&mut self, e: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
+        route(&mut self.inner.children, e, sink)
     }
     fn core(&self) -> &WidgetCore {
         &self.inner.core
@@ -433,33 +378,20 @@ impl Widget for ZStackWidget {
             place_widget(child.as_mut(), rect);
         }
     }
-    /// What a modal layer covers shows no hover: the pointer is on the layer.
     fn paint(&self, ctx: &mut PaintContext) {
-        let modal = self.children.iter().rposition(|c| c.is_modal());
-        let pointer = ctx.pointer;
         for (i, child) in self.children.iter().enumerate() {
-            if modal.is_some_and(|m| i < m) {
-                ctx.pointer = (-1, -1);
-            }
             match i {
                 0 => child.paint(ctx),
                 _ => ctx.with_layer(child.id(), |ctx| child.paint(ctx)),
             }
-            ctx.pointer = pointer;
         }
     }
     fn arrangement(&self) -> Arrangement {
         Arrangement::Layers
     }
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        // Topmost first, and it may swallow: that is a modal surface.
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
         for child in self.children.iter_mut().rev() {
-            let resp = child.event(event, phase, sink);
+            let resp = child.event(event, sink);
             if resp.is_consumed() {
                 return resp;
             }
@@ -519,8 +451,8 @@ impl Widget for PaddingWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         self.child.paint(ctx);
     }
-    fn event(&mut self, e: &WidgetEvent, p: EventPhase, sink: &mut MessageSink) -> EventResponse {
-        self.child.event(e, p, sink)
+    fn event(&mut self, e: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
+        self.child.event(e, sink)
     }
     fn baseline(&self) -> Option<i32> {
         self.child.baseline().map(|b| b + self.insets.top)
@@ -562,18 +494,10 @@ impl Widget for SpacerWidget {
         constraints.constrain(Size::new(px, px))
     }
     fn flex_weight(&self) -> u16 {
-        match self.length {
-            Length::Fill(weight) => weight,
-            Length::Px(_) => 0,
-        }
+        self.length.flex_weight()
     }
     fn paint(&self, _ctx: &mut PaintContext) {}
-    fn event(
-        &mut self,
-        _e: &WidgetEvent,
-        _p: EventPhase,
-        _sink: &mut MessageSink,
-    ) -> EventResponse {
+    fn event(&mut self, _e: &WidgetEvent, _sink: &mut MessageSink) -> EventResponse {
         EventResponse::Ignored
     }
 }
@@ -614,8 +538,8 @@ impl Widget for ExpandWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         self.child.paint(ctx);
     }
-    fn event(&mut self, e: &WidgetEvent, p: EventPhase, sink: &mut MessageSink) -> EventResponse {
-        self.child.event(e, p, sink)
+    fn event(&mut self, e: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
+        self.child.event(e, sink)
     }
     fn baseline(&self) -> Option<i32> {
         self.child.baseline()
@@ -666,8 +590,8 @@ impl Widget for BackgroundWidget {
         ctx.fill_rect(rect.x, rect.y, rect.width, rect.height, fill);
         self.child.paint(ctx);
     }
-    fn event(&mut self, e: &WidgetEvent, p: EventPhase, sink: &mut MessageSink) -> EventResponse {
-        self.child.event(e, p, sink)
+    fn event(&mut self, e: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
+        self.child.event(e, sink)
     }
     fn baseline(&self) -> Option<i32> {
         self.child.baseline()
@@ -736,8 +660,8 @@ impl Widget for SizedBoxWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         self.child.paint(ctx);
     }
-    fn event(&mut self, e: &WidgetEvent, p: EventPhase, sink: &mut MessageSink) -> EventResponse {
-        self.child.event(e, p, sink)
+    fn event(&mut self, e: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
+        self.child.event(e, sink)
     }
     fn baseline(&self) -> Option<i32> {
         self.child.baseline()

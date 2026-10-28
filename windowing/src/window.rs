@@ -1,4 +1,4 @@
-//! High-level window abstraction combining surface, rendering, input, and redraw state.
+//! A window: its compositor objects, what it draws into, and the pointer.
 
 use slopos_abi::handle::{DisplayHandle, HasDisplayHandle, HasWindowHandle, WindowHandle};
 use slopos_gfx::{RenderError, RenderSurface};
@@ -11,9 +11,6 @@ use crate::surface::{Surface, SurfaceError};
 
 pub const EVENT_BUF_LEN: usize = 16;
 
-/// A compositor-managed window with input handling and redraw tracking.
-///
-/// Owns a [`Surface`] (windowing lifecycle) and a [`SoftSurface`] (rendering).
 pub struct Window {
     handle: ProtocolHandle,
     surface: Surface,
@@ -64,7 +61,6 @@ impl Window {
         let _ = client.toplevel_set_size_limits(toplevel_id, min, max);
     }
 
-    /// Resize the window's backing surface; called automatically on `Event::Configure`.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
         self.renderer.resize(width, height)?;
         self.surface.set_size(width, height);
@@ -89,7 +85,7 @@ impl Window {
         self.redraw_needed
     }
 
-    /// Last known pointer position in window-local coordinates.
+    /// In window coordinates.
     #[inline]
     pub fn pointer(&self) -> (i32, i32) {
         (self.pointer_x, self.pointer_y)
@@ -98,11 +94,6 @@ impl Window {
     #[inline]
     pub fn surface(&self) -> &Surface {
         &self.surface
-    }
-
-    #[inline]
-    pub fn surface_mut(&mut self) -> &mut Surface {
-        &mut self.surface
     }
 
     #[inline]
@@ -130,10 +121,7 @@ impl Window {
         self.renderer.height()
     }
 
-    /// Poll protocol events from the compositor socket.
-    ///
-    /// `BufferRelease` events are consumed internally to drive [`SoftSurface`]
-    /// buffer reuse and are never surfaced to the application.
+    /// Every event but `BufferRelease`, which the window takes itself.
     pub fn poll_protocol_events(&mut self, buf: &mut [ProtocolEvent]) -> usize {
         // Releases are applied after the client borrow drops, so `renderer` can
         // be borrowed mutably.
@@ -164,29 +152,13 @@ impl Window {
         count
     }
 
-    /// Call per-event *before* dispatch, so `pointer()` reflects the position at
-    /// the time of each event rather than the end of the batch.
+    /// Called for each event before it is dispatched, so `pointer()` is where
+    /// the pointer was then rather than at the end of the batch.
     #[inline]
     pub fn track_pointer(&mut self, event: &Event) {
         if let Event::PointerMotion { x, y } = *event {
             self.pointer_x = x;
             self.pointer_y = y;
-        }
-    }
-
-    /// Poll input events, convert them, and call `handler` for each.
-    pub fn poll_events<F: FnMut(Event)>(&mut self, mut handler: F) {
-        let mut proto_events: [ProtocolEvent; EVENT_BUF_LEN] =
-            core::array::from_fn(|_| ProtocolEvent::FrameDone {
-                surface: slopos_protocol::types::SurfaceId::NONE,
-                timestamp_ms: 0,
-            });
-        let count = self.poll_protocol_events(&mut proto_events);
-        for pe in &proto_events[..count] {
-            if let Some(event) = Event::from_protocol(pe) {
-                self.track_pointer(&event);
-                handler(event);
-            }
         }
     }
 }

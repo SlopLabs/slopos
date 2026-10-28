@@ -16,6 +16,7 @@ use slopos_abi::signal::{SIGHUP, SIGINT, SIGKILL, SIGQUIT, SIGTERM, UserSigactio
 use slopos_abi::syscall::{O_CLOEXEC, POLLHUP, POLLIN, UserPollFd};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_accounts_core::{Accounts, Entry};
+use slopos_slibc_core::passwd::{BASE_PASSWD, Passwd, lines};
 use slopos_tls_core::ct::wipe;
 
 use crate::apps::extctl::store::Store as Extensions;
@@ -272,6 +273,35 @@ pub fn name_of(uid: u32) -> Option<String> {
 
 pub fn home_of(uid: u32) -> Option<String> {
     by_uid(uid).map(|(.., home)| home)
+}
+
+pub struct Listed {
+    pub name: String,
+    pub uid: u32,
+    pub home: String,
+}
+
+/// The people `/etc/passwd` lists, read once and believed as the C library
+/// believes it.
+pub fn people() -> Vec<Listed> {
+    let passwd = database("/etc/passwd", BASE_PASSWD);
+    lines(&passwd)
+        .filter_map(Passwd::parse)
+        .filter(|p| PERSON_UIDS.contains(&p.uid))
+        .map(|p| Listed {
+            name: String::from_utf8_lossy(p.name).into_owned(),
+            uid: p.uid,
+            home: String::from_utf8_lossy(p.dir).into_owned(),
+        })
+        .collect()
+}
+
+/// A database's bytes while it is sealed, and its stand-in otherwise.
+pub fn database(path: &str, base: &str) -> Vec<u8> {
+    crate::sealed::read_sealed(Path::new(path), SMALL_MAX)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| base.as_bytes().to_vec())
 }
 
 /// The installed extensions' users, none on a root without the store.

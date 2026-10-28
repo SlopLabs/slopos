@@ -1,37 +1,51 @@
 use std::any::Any;
+use std::cell::Cell;
 
 use slopos_abi::draw::Color32;
-use slopos_theme_core::{ColorRole, State, TextRole, Theme, inset, radius};
+use slopos_theme_core::{ColorRole, State, TextRole, Theme, inset, radius, stroke};
 
 use crate::constraints::{BoxConstraints, Rect, Size};
-use crate::event::{
-    EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
-};
+use crate::event::{EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent};
 use crate::node::ButtonStyle;
 use crate::paint::PaintContext;
-use crate::text::BODY;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
+use crate::text::ui;
+use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, WidgetId};
 
 /// What every pressable control shares: pressed by a click that starts and
-/// ends on it, or by Enter or Space while it holds focus.
+/// ends on it, or by Space or Enter while it holds focus.
 #[derive(Default)]
 pub(crate) struct Press {
     pressed: bool,
     pub(crate) focused: bool,
+    /// Leaves Enter to the page's default button.
+    toggles: bool,
 }
 
 impl Press {
-    /// Answers how the event was taken and whether it pressed the control.
+    /// A control that turns something on and off, which Space alone presses.
+    pub(crate) fn toggle() -> Self {
+        Self {
+            toggles: true,
+            ..Self::default()
+        }
+    }
+
+    /// A tab stop while enabled; a click leaves focus where it was, so
+    /// pressing a tool does not take the keyboard from a field.
+    pub(crate) fn focus_policy(enabled: bool) -> FocusPolicy {
+        match enabled {
+            true => FocusPolicy::TabFocus,
+            false => FocusPolicy::None,
+        }
+    }
+
+    /// How the event was taken, and whether it pressed the control.
     pub(crate) fn event(
         &mut self,
         rect: Rect,
         enabled: bool,
         event: &WidgetEvent,
-        phase: EventPhase,
     ) -> (EventResponse, bool) {
-        if phase != EventPhase::Target {
-            return (EventResponse::Ignored, false);
-        }
         match event {
             WidgetEvent::FocusGained => {
                 self.focused = true;
@@ -65,18 +79,25 @@ impl Press {
                 }
             }
             WidgetEvent::KeyDown {
-                key: Key::Named(NamedKey::Enter | NamedKey::Space),
+                key: Key::Named(key @ (NamedKey::Enter | NamedKey::Space)),
                 ..
-            } if self.focused => (EventResponse::Consumed, true),
+            } if self.focused && !(self.toggles && *key == NamedKey::Enter) => {
+                (EventResponse::Consumed, true)
+            }
             _ => (EventResponse::Ignored, false),
         }
     }
 
-    /// Normal, hovered under the pointer, or pressed.
-    pub(crate) fn state(&self, rect: Rect, ctx: &PaintContext) -> State {
+    /// Lit whole while `enabled`, wherever its `rect` is.
+    pub(crate) fn hover_part(enabled: bool, rect: Rect, x: i32, y: i32) -> Option<usize> {
+        (enabled && rect.contains(x, y)).then_some(0)
+    }
+
+    /// What the control `id` shows: pressed, lit or neither.
+    pub(crate) fn state(&self, id: WidgetId, ctx: &PaintContext) -> State {
         if self.pressed {
             State::Pressed
-        } else if rect.contains(ctx.pointer.0, ctx.pointer.1) {
+        } else if ctx.lit(id).is_some() {
             State::Hover
         } else {
             State::Normal
@@ -92,7 +113,7 @@ pub struct ButtonWidget {
     enabled: bool,
     press: Press,
     baseline: i32,
-    cut: bool,
+    cut: Cell<bool>,
 }
 
 impl ButtonWidget {
@@ -110,7 +131,7 @@ impl ButtonWidget {
             enabled,
             press: Press::default(),
             baseline: 0,
-            cut: false,
+            cut: Cell::new(false),
         }
     }
 
@@ -125,12 +146,12 @@ impl ButtonWidget {
     }
 
     pub(crate) fn natural_width(&self, ctx: &MeasureCtx) -> i32 {
-        let text_w = ctx.text_width(&self.label);
+        let text_w = ui::width(&self.label, TextRole::Body);
         (text_w + inset::CONTROL.horizontal()).max(ctx.style.button_min_width)
     }
 }
 
-/// Fill, ink and edge for the given style and state.
+/// Fill, ink and edge.
 fn button_colors(
     theme: &Theme,
     style: ButtonStyle,
@@ -175,53 +196,35 @@ impl Widget for ButtonWidget {
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         let w = self.natural_width(ctx);
-        let h = BODY.line_height + inset::CONTROL.vertical();
+        let h = ctx.style.control_height;
         let size = constraints.constrain(Size::new(w, h));
-        self.baseline = ctx.baseline_in(size.height);
+        self.baseline = ui::baseline_in(size.height, TextRole::Body);
         size
-    }
-
-    fn layout(&mut self, rect: Rect) {
-        let room = rect.width - inset::CONTROL.horizontal();
-        self.cut = crate::text::ui::role_width(&self.label, TextRole::Body) > room;
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
-        let state = self.press.state(rect, ctx);
+        let state = self.press.state(self.id(), ctx);
         let (bg, fg, edge) = button_colors(ctx.theme(), self.style, self.enabled, state);
-        ctx.fill_rounded_rect(rect.x, rect.y, rect.width, rect.height, radius::CONTROL, bg);
+        ctx.fill_rounded_rect(rect, radius::CONTROL, bg);
         if let Some(edge) = edge {
-            ctx.draw_rounded_rect(
-                rect.x,
-                rect.y,
-                rect.width,
-                rect.height,
-                radius::CONTROL,
-                edge,
-            );
+            ctx.draw_rounded_rect(rect, radius::CONTROL, stroke::EDGE, edge);
         }
 
         let room = rect.width - inset::CONTROL.horizontal();
-        let text_w = ctx.text_width(&self.label).min(room);
+        let text_w = ui::width(&self.label, TextRole::Body).min(room);
         let tx = rect.x + (rect.width - text_w) / 2;
-        let ty = rect.y + (rect.height - ctx.text_height()) / 2;
-        ctx.draw_text_fitted(tx, ty, &self.label, TextRole::Body, room, fg);
+        let ty = ui::centred_top(rect.y, rect.height, TextRole::Body);
+        let cut = ctx.draw_text_fitted(tx, ty, &self.label, TextRole::Body, room, fg);
+        self.cut.set(cut);
 
         if self.press.focused {
             ctx.draw_focus_ring(rect);
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        let (response, pressed) = self
-            .press
-            .event(self.layout_rect(), self.enabled, event, phase);
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
+        let (response, pressed) = self.press.event(self.layout_rect(), self.enabled, event);
         if pressed {
             self.activate(sink);
         }
@@ -241,16 +244,14 @@ impl Widget for ButtonWidget {
     }
 
     fn tooltip(&self, _x: i32, _y: i32) -> Option<&str> {
-        self.cut.then_some(self.label.as_str())
+        self.cut.get().then_some(self.label.as_str())
     }
 
-    /// A disabled control is not a tab stop: it answers nothing, draws no ring,
-    /// and leaving it in the chain makes Tab appear to skip two.
     fn focus_policy(&self) -> FocusPolicy {
-        if self.enabled {
-            FocusPolicy::StrongFocus
-        } else {
-            FocusPolicy::None
-        }
+        Press::focus_policy(self.enabled)
+    }
+
+    fn hover_part(&self, x: i32, y: i32) -> Option<usize> {
+        Press::hover_part(self.enabled, self.layout_rect(), x, y)
     }
 }

@@ -669,7 +669,8 @@ to a signed install until a newer one goes in, and `remove` keeps the record.
 Every activation (`enable`, `rollback`, `activate-all`, and a key's change,
 which holds what it signed to the keys anew) holds the stored image to its
 record, its key and both ceilings again, and stops one that no longer fits,
-saying why in its record; an update or rollback that will not activate
+or whose declaration's words the base's no longer take, saying why in its
+record; an update or rollback that will not activate
 leaves the record as it was. The store is `slopos_abi::fs::EXTENSION_STORE`:
 `keys.<n>`, and per extension `record.<n>` and its images named by root,
 each copied with its holes kept, sealed and then held whole to its root —
@@ -813,8 +814,7 @@ only a requester running that file of the activation whose label
 (`SO_PEEREXTENSION`) names the extension and the digest its record installed,
 and never `root`. privd reads a requester's label before its program, so one
 that lapses between the two reads is no program; uid 0 running an extension's
-program is no `root`. The question names the extension in its details, and to
-a dialog of an earlier consent version after the action's `describe`. Init
+program is no `root`. The question names the extension in its details. Init
 remembers what the actions privd read were read from — each
 extension's name, image digest and activation — and on `extensions`, and
 whenever it reads the store again, sends privd `SIGHUP` when that changes,
@@ -886,21 +886,21 @@ newer activations as nothing shown and wait for them. A program outside the base
 which only grows: `scripts/check_libc_exports.sh` holds its dynamic symbols
 to `scripts/gates/libc/exports.txt` and the layout of every struct and union
 `slibc/include` defines to `scripts/gates/libc/layouts.txt`. The compositor
-serves `PROTOCOL_VERSION_MIN` through `PROTOCOL_VERSION`: its `Hello` names
-the newest, a client's first request is a `Hello` naming the version it
-speaks, which the compositor answers in or refuses with `VersionMismatch`
-before closing, and a client accepts any compositor at its version or newer.
-The two `Hello`s never change encoding, and raising the minimum is a
-decision with a stated reason. Version 4 added a toplevel's size limits
-(`ToplevelSetSizeLimits`, xdg-shell's minimum and maximum size, a maximum
-equal to the minimum being a window that does not resize), which the
-compositor holds an interactive resize and a zoom to.
+and its clients speak one `PROTOCOL_VERSION`: each side's `Hello` names it,
+and either refuses another with `VersionMismatch` before closing, so a
+change to the wire is a new version and an app built against another
+reconnects only once rebuilt. The two `Hello`s never change encoding. A
+toplevel states its size limits (`ToplevelSetSizeLimits`, xdg-shell's
+minimum and maximum size, a maximum equal to the minimum being a window that
+does not resize), which the compositor holds an interactive resize and a
+zoom to.
 
 **The apps live outside the base.** The editor, the file manager, the image
-viewer and the widget gallery are `slopos-apps` (`apps/`), built as `cargo build` builds a
-program for this target — the target's std and panic strategy, linked
-dynamically against `libc.so` by the line the clang driver writes — and staged
-by `build_userland.sh` with their app entries and icons as `builddir/apps`:
+viewer and the widget gallery are `slopos-apps` (`apps/`), built as `cargo
+build` builds a program for this target — the target's std and panic
+strategy, linked dynamically against `libc.so` by the line the clang driver
+writes — and staged by `build_userland.sh`, the first three with their app
+entries and icons, as `builddir/apps`:
 the tree `apps`, which every root holds at `/usr/local` beside the toolchain's
 `usr_local`. `scripts/check_loose_programs.sh`, after every host userland
 build, fails one that is static, names another interpreter, lacks `libc.so`
@@ -936,8 +936,8 @@ it is installed (`slopos_userland::tree::scan`), its identity a digest of every
 entry; the toolchain's comes with the payload, written by the host. The
 dock pins the app entries — `share/slopos/apps/<id>.app`, `key=value` lines
 naming the `id`, a `name`, the program it `exec`s, an `icon` PNG in that
-share's `slopos/icons/`, drawn from the `<icon>@2x.png` beside it when there
-is one, and `boot=medium` for one shown only on a boot from
+share's `slopos/icons/`, with an `<icon>@2x.png` beside it for a scale
+factor to come, and `boot=medium` for one shown only on a boot from
 the install medium (`slopos_userland::app_entry`) — read at session start
 from `/usr/share`, `/usr/local/share` and `~/.local/share`, a later one
 replacing an earlier with its id as the XDG data directories rank, in name
@@ -956,13 +956,12 @@ surface they sit on, hovered and selected rows included, status tones on
 plain surfaces, and edges, focus and disabled text to 3:1. appkit hands its
 widgets the theme through `ctx` (`StyleSheet::theme`), and an app names a
 `Tone`, a `Surface` or a `SegmentFill::Series`, never a colour, a code
-view's syntax spans aside, or reads `theme::current()` when it draws itself;
-`userland/src/theme.rs` is the compositor's chrome geometry over the same
-tokens. `scripts/check_ui_literals.sh`, from `check-framekernel-gates`,
+view's syntax spans aside, or reads `theme::current()` when it draws itself,
+as the compositor's chrome does. Text is reached only by a `TextRole`.
+`scripts/check_ui_literals.sh`, from `check-framekernel-gates`,
 fails an app — a file under `apps/`, or a module of `userland/src/apps/` that
 implements `App` or calls `run_app` — that constructs or derives a colour or
-names a theme table, sizes its own text or gives a spacing or an inset a
-number, and appkit for constructing a colour; a
+gives a spacing or an inset a number, and appkit for constructing a colour; a
 file whose colours are its content, as the editor's syntax palette, is
 exempt from that one check by a line of `scripts/gates/ui-literals.txt`,
 which fails once the line matches nothing. `theme-core::words` is the voice
@@ -970,26 +969,39 @@ where words are data: the glossary — computer, disk, installer, partition,
 restart, power off, administrator, log out, switch user, app and startup
 order, each beside what a screen never says in its place — and the shapes
 a label (`label`) and a sentence (`sentence`) take, neither naming a flag,
-three dots or a glossary word (`plain`). Each surface holds its words to
+three dots or a glossary word (`plain`), and a size as a person reads one
+(`Bytes`: `512 bytes`, `1.5 KiB`, `8 MiB`). Each surface holds its words to
 them in a host test, beside the trade words it keeps to its details:
 `priv-core::words` for the policy, installer-core's copy tests for every
 page of every fixture.
 
 **Apps are built from components.** appkit's components
 (`appkit/src/components.rs`) — `Text` in a role and a tone, `Page`, `Section`,
-`PropertyList`, `Notice`, `ButtonRow`, a `List` of `ListRow`s, `Sidebar`, a
-`Toolbar` of `IconButton`s, `SearchField`, `Tag`, `EmptyState`, `Disclosure`,
-and `Node::Dialog`, which a `ButtonRow` ends — own their spacing, roles and
-states: a line too long ends in `…` and shows whole as a tooltip, focus is
-one ring around the control, every control is at least 28 px across, Enter
+`PropertyList`, `Notice`, `Button`, `ButtonRow`, a `List` of `ListRow`s,
+`Sidebar`, a `Toolbar` of `IconButton`s, `SearchField`, `StatusBar`, `Tag`,
+`EmptyState`, `Disclosure`, and `Dialog`, which a `ButtonRow` ends, laid out
+with `column` and `row` — own their spacing, roles and states: a line too
+long is cut with `…` — at its end, or at its start where the end tells it
+apart, as a path or a file name is in a tree's rows, an editor's tabs and a
+`ListRow::detail_tail` — and shows whole as a tooltip, every control lights
+under the pointer, focus is one ring around the control (a disclosure's
+header; just inside a tab bar's tabs; a field thickens its own edge in the
+focus colour) or, in a list, table, tree or menu, around the row the
+keyboard is on while all of it shows and around the whole view otherwise,
+the rows of a table or a tree that scrolls lie beside its scrollbar, a click
+focuses a field, list or
+table but leaves focus where it was on a button, every control, and every
+row of a list, table, tree or menu, is at least 28 px across
+(`style::MIN_TARGET`), a pane's divider aside, Enter
 and Escape no control took go to the `ButtonRow` that ends the modal layer's
 `Page` or dialog (its confirming button, never a destructive one, and its
 back or cancel one; Escape dismisses a dialog without one) before the app's
 `on_key`, Left and Right move along a `ButtonRow`, a list or a table
 leaves an Alt chord to the app, a table's chosen row opens on Enter or a
 second click (`on_activate`), a scroll view is a tab stop only while it
-scrolls and keeps its offset through a rebuild that shows the same
-(`Widget::kept_scroll`), the wheel goes to the innermost view that can
+scrolls, and a scroll view and a table keep their offset, and a menu its
+keyboard row, through a rebuild that shows the same (`Widget::kept`), the
+wheel goes to the innermost view that can
 move, and a dialog is modal for Tab, the pointer and tooltips
 (`Widget::is_modal`, `Widget::covers`, `EventResponse::Blocked`), giving
 focus back when it closes and scrolling its content when the window is too
@@ -1000,8 +1012,8 @@ renderer at a role's size. `App::window` is a `WindowSpec` — the size a
 window opens at, the least it lays out at and whether it resizes — which
 `run_app` sends the compositor; `App::title` is read again after every
 rebuild and sent when it changes, a window showing a document titled
-`document_title`'s `<document> — <App>`, and an app's name is its dock
-entry's, its About box's and its windows' alike, which `apps_test` holds.
+`document_title`'s `<document> — <App>`, and an app with a dock entry is
+named by it and by its windows alike, which `apps_test` holds.
 `appkit::audit` lays a tree out, paints it off screen and reports text cut
 by an edge on any side rather than an
 ellipsis (a viewport, `PaintContext::with_viewport`, cuts nothing short),
@@ -1029,13 +1041,20 @@ distance, and square once maximized; its shadow follows the rounded rect,
 reaches as far whatever has focus and is half as dark without it; overlapping
 shadows darken each other; and the close, minimise and zoom buttons are discs
 that are grey on a window without focus and show their colours and glyphs
-while the pointer is over the group. A toplevel is placed at its first commit
+while the pointer is over the group; a window that does not resize has a
+grey zoom button with no glyph that does nothing. Zoom fills the area
+between the menu bar and the dock, or, for a window whose limits keep it
+from filling it exactly, gives it the nearest size they allow, centred and
+kept a normal window; zoom again restores it while it is maximized,
+wherever a drag has moved it since, or while it is a normal window still
+where zoom put it. A toplevel is placed at its first commit
 as one (`chrome-core::placement`, host-tested): the first window of an app,
 known by its app id or else by its client, is centred in the area between the
 menu bar and the dock, a later one cascades from the app's latest by the title
 bar's height and wraps to the area's top before its frame would cross the
 dock, and one larger than the area is shrunk to its minimum size or the area,
-whichever is larger, which the client hears as a configure. The menu bar names
+whichever is larger, never under the floor a resize keeps, which the client
+hears as a configure. The menu bar names
 the focused window's app in `heading`, by the dock's entry for its app id or
 else by its title, and shows the time as `HH:MM` from `CLOCK_REALTIME`, in UTC
 (`chrome-core::clock`), repainting when the minute changes in a width kept for
@@ -1043,10 +1062,12 @@ the widest time; a click on it shows the date, and the network item is a glyph
 of the icon font. The compositor's own surfaces — the lock and login screens,
 the system menu, the network and clock panels, and the question a choice that
 ends something asks (`compositor::views`) — are appkit trees painted through
-`appkit::embed`, which takes the pointer, while every key goes to the
-host-tested model behind the surface (`chrome-core::gate`, `::menu`, `::key`),
-which says what has focus; on the lock and login screens, in the system menu
-and in a question, Tab, the arrows, Space and Enter work as in any form. A
+`appkit::embed`, which takes the pointer; on the lock and login screens, in
+the system menu and in a question every key goes to the host-tested model
+behind the surface (`chrome-core::gate`, `::menu`, `::key`), which says what
+has focus, and Tab, the arrows, Space and Enter work as in any form, while
+the network and clock panels answer the pointer alone and take a key only to
+close on Escape. A
 question, and a panel the person opened or has since reached with the pointer,
 takes every key, and no window hears the pointer, or shapes it, while the lock
 or login screen or a question is up; a button's release goes only to the
@@ -1066,12 +1087,14 @@ desktop are init's to carry out, and Restart and Power off privd's
 the person answered privd's question so, says so in the question's place, and
 why goes to the log. An app's icon is appkit's template (`appkit::app_icon`):
 a rounded square in the theme's series colour with a glyph of the icon font on
-it, which `just icons` (`tools/icons`) renders into the icons the system and
-the apps ship, at 64 px and as `<id>@2x.png` at 128 px, and whose host test
+it, which `just icons` (`tools/icons`) renders, failing without the icon
+font, into the icons the system and the apps ship, at 64 px and as `<id>@2x.png` at 128 px, and whose host test
 holds them to it. The dock draws the 64 px icon, never drawing past it, since
 its filter samples two pixels a side; the 128 px one waits for a scale factor.
-It draws an app that ships none on the template, tinted by its app id, and a
-dot under each app that runs.
+It draws an app that ships none on the template, tinted by its app id, a
+window with no app id as an entry of its own tinted by the title it first
+had, a hover
+label as appkit draws a tooltip, and a dot under each app that runs.
 
 **The guest installs what it builds.** `/bin/bootctl` (privd's
 `org.slopos.boot.*` and `org.slopos.base.*` actions, run as uid 0 with
@@ -1178,7 +1201,7 @@ in one process; its questions are asked through the requester's terminal) asks
 for a whole disk —
 never one that answers `BLKROGET` with 1, nor the one carrying the medium's
 GPT disk GUID, which `installer_test` excludes by the same rule
-(`boot_disk::not_installable`) — and a mode — erase it, install
+(`apps::installer::not_offered`) — and a mode — erase it, install
 into free space beside what it holds, or reuse a partition as the root — or
 takes every answer as a flag. Its engine (`installer::engine`) probes the
 medium and every disk, proposes what a set of choices installs and installs
@@ -1199,15 +1222,24 @@ under `just test-host`, is what the engine and a driver agree on: the
 machine and each opened disk as views, every choice on an opened disk
 proposed with the engine's defaults, the proposal — the disk before and
 after, an action per partition tagged erase, new, format, share, keep or
-reuse, the root's size range — its issues, each a fact and what to do
-instead, in the glossary's words for a window (`Issue::words`, with the
-sizes and nodes as its `detail`) and naming the flag that changes it for
-the CLI (`Display`), the events, the protocol's codec, and the `Wizard`
-whose pages, lists and words a window renders. A disk is named by the model
-its `/dev/disk/by-id` names give (`model_of`) and sized in decimal units, as
-its label is (`disk_size`), with its node in the caption, and a typed size
-is read in the units the box shows. Its copy tests hold every word each
-page of every fixture shows, and the CLI's issues, to `theme-core::words`.
+reuse, the root's size range — its issues, each a fact and, where a window
+can act on it, what to do instead, in the glossary's words (`Issue::words`,
+with the sizes and nodes as its `detail`; an issue only the CLI's own
+choices raise — a name, a size for a reused root, a root to keep — is its
+fact alone) and, for the CLI (`Display`), a sentence
+naming the flag that changes it where one does, an install refused before
+it writes anything, carried as its issue for each driver to word, the
+events, the protocol's codec, and the `Wizard` whose pages, lists and words
+a window renders. A disk is named by the model its `/dev/disk/by-id` names
+give, read beside the writer of those names (`boot_core::disk_id::describe`,
+which also gives the bus), and sized in decimal units, as its label is
+(`disk_size`), with its node in the caption; every size the installer
+shows, the copy's progress and its log included, is decimal, and every size
+it reads, the window's box and `--root-size` alike, is read in those units
+(`parse_size`: `20 GB`, `512MB`, `4096 bytes`, a bare number GB, no
+binary unit, no one-letter unit but `B`, and nothing short of a whole byte). Its copy tests hold every word each page of
+every fixture shows, and the CLI's issues, to `theme-core::words` and to
+decimal units.
 `/bin/installer-ui`, in every base and refusing to start off the medium, is
 that window, built of `Page`s, `ListRow`s, `PropertyList`s and `Notice`s
 with the engine's log under *Show details*: an appkit app holding nothing,
@@ -1370,10 +1402,11 @@ five seconds. `/dev/disk/by-id` names a disk as systemd's
 `60-persistent-storage` rules and `usb_id` do, through `boot_core::disk_id`
 (host-tested under `just test-host`), each part cut at its first NUL and
 every byte that is no ASCII letter, digit, one of `#+-.:=@_` or part of a
-character systemd's `unichar_is_valid` takes written `_`, a `/` or `\x`
-udev keeps included: an NVMe namespace `nvme-<model>_<serial>_<nsid>` from
+character systemd's `unichar_is_valid` takes written `_`, a `/` and the `\` of a
+`\x` udev keeps included: an NVMe namespace `nvme-<model>_<serial>_<nsid>` from
 Identify Controller, namespace 1 also `nvme-<model>_<serial>`, each part
-losing its trailing whitespace and keeping every other whitespace byte as
+losing its trailing spaces, tabs, carriage returns and line feeds and keeping
+every other whitespace byte as
 an `_` of its own; a virtio disk `virtio-<serial>` from
 `VIRTIO_BLK_T_GET_ID`, which the engine carries as `Op::Identify`, a read no
 abandoned write fences; a USB LUN `usb-<vendor>_<product>_<serial>-0:<lun>`,
@@ -1386,7 +1419,7 @@ when there is none — the parts of both trimmed and each run of whitespace
 one `_`; and a partition its disk's names with `-part<N>`. A driver hands
 the id over on its `EngineDisk` (`identified`), whose partitions share it,
 and an NVMe or virtio disk with an empty part, or a name past 192 bytes,
-gets no link. A name two nodes share is the first's, every link reads
+gets no link. A name two nodes share, whichever of their names it is, is the first node's, every link reads
 `../../<node>`, and a `/dev/disk/by-id/` path is a mount source like the
 others. QEMU's test disks carry `serial=` values, so
 `test_block_by_id_names` and `test_block_by_id_partition_names` hold the
@@ -2477,9 +2510,8 @@ none) and `destructive` fills it with the danger tone, all held by
 words (requester, mechanism, slot, base, uid…) or those
 `theme-core::words`' glossary replaces, no flag and no `...`, and a verb
 one of `words::VERBS`, none of which says what another control of the
-dialog says or reads as refusing; the base's policy is held to them as it
-parses and an extension's when it goes in, so one installed before the
-words tighten still activates. What privd answers is a sentence to the
+dialog says or reads as refusing; the base's policy and an extension's
+declaration are held to them as they parse. What privd answers is a sentence to the
 person who asked (`consent::Refusal`,
 `policy::Refused`, `consent::WRONG_PASSWORD`, `words::privd`), which a
 requester prints after its own name; the detail a developer needs goes to
@@ -2490,22 +2522,17 @@ else that program's file name; for an extension's program, its extension,
 *The <name> extension* (`consent::named_extension`), whose name only the
 activation gives, and no icon, so nothing it ships passes it off as another
 app; for anything else, none, which the dialog calls *An unidentified
-program* (`consent::UNIDENTIFIED`). An entry under
+app* (`consent::UNIDENTIFIED`). An entry under
 `/usr/local` or `~/.local` is never read for it. The name, and the entry's
 icon when it is a PNG of that share, ride in the question,
-and `ASKING` names it to the requester, as a dialog of the channel's third
-version shows it.
+and `ASKING` names it to the requester.
 An action marked `medium` exists only on a boot the kernel says served the
 install medium (`BOOT_FLAG_MEDIUM` in `sys_info`): off it privd answers it as
 no action, and so does a requester's own reading of the policy
-(`slopos_userland::privd::policy`, `Policy::read`), which may be of another
-base than its own and so passes over a setting it does not know and holds no
-words; a requester likewise passes over a reply's field it does not know.
-A requester of a base from before the words refuses the policy that carries
-them and the replies that name the app, so across a live switch to one it
-asks nothing until it starts again, and a rollback to such a base stops each
-extension whose declaration says more than `describe`, which `extctl enable`
-under a newer base brings back.
+(`slopos_userland::privd::policy`). A requester reads the policy and privd's
+replies as strictly as privd writes them, so across a live base switch that
+changes either, a requester started before it asks nothing until it starts
+again.
 argv outside the action's shapes, a request carrying other than its
 descriptors, a requester whose process has exited — before the question and
 after it — and every lookup that fails are refusals. A connection serves its
@@ -2556,20 +2583,21 @@ had pending — privd interrupts every question — and init sends one on behalf
 of a side that exited, and discards what is written to a side not running.
 privd puts a question to the compositor only after a `READY` sent since the
 last, so one question at most is in flight and no frame is ever left torn in
-the pair's buffer. `READY` names the version the compositor speaks, the one
-the running base's interface says its privd reads, since either side of a
-live base switch may be the older: one of
-the first, which names none, is asked only for a click, in that version's
-words, so a desktop older than a live base switch still confirms and refuses
-what needs a password until its session restarts; from the second on a
-question says what answers it and whose request it is, the compositor says
-`SHOWN` once it is on screen, which is when the requester hears it is being
-asked, and an answer carries the password typed and whose; from the third on
-a question names the app that asks and its icon, the action's `detail`,
-`verb` and `destructive`, and the extension whose action it is, which a
-question to the second tells by appending it to `describe`. The compositor
+the pair's buffer. `READY` names the channel's `consent::VERSION`, and privd
+asks a compositor naming any other, or none, nothing, refusing what needs
+consent, and what waited for it, with *Restart the desktop, then try again.*
+(`Refusal::Outdated`), so a desktop older than a live base switch asks nothing
+until its session restarts, and a compositor refuses a question it cannot
+read by closing its end, so a base rolled back past the desktop's version
+asks nothing either until the desktop restarts; a change to what a question
+may carry — its words' limits, `words::VERBS` — is a new version, which a
+priv-core test holds the two to. A question says what answers it and whose request it is, names the app that
+asks and its icon, the action's `detail`, `verb` and `destructive`, and the
+extension whose action it is; the compositor says `SHOWN` once it is on
+screen, which is when the requester hears it is being asked, and an answer
+carries the password typed and whose. The compositor
 draws one question at a time over every surface, a dialog of appkit's
-components (`Node::Dialog`, its card centred over the asking app's window
+components (`Dialog`, its card centred over the asking app's window
 when the requester's pid has one shown) that `slopos_appkit::embed` lays
 out and paints into its buffer and hands the pointer, the keys staying with
 `consent::Dialog`, priv-core's model of the question: the headline
@@ -2581,10 +2609,11 @@ about neither past 320 escaped bytes), and the extension — which *Show less*
 hides; Cancel has focus first, or the password field, and focus is a ring,
 never a fill, while the allowing button, named by `verb`, is filled with the
 accent or for a destructive action the danger tone whatever has focus. Tab
-moves through the field, the details' toggle, Cancel and the allowing button,
-Left and Right between the buttons and Up and Down among the administrators;
-the allowing button answers a click, or Enter once Tab, or Left or Right
-between the buttons, has moved to it, and a question that takes a password
+and Shift+Tab move through the field, the details' toggle, Cancel and the allowing button,
+from either button Left to Cancel and Right to the allowing button, neither
+wrapping, and Up and
+Down among the administrators; the allowing button answers a click, or Enter
+once Tab or Right has moved to it, and a question that takes a password
 only once one is typed, which Enter in the field also allows but for a
 destructive action, where it moves focus to the allowing button; input is
 ignored for 750 ms after the frame that first shows the question and after

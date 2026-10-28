@@ -1,6 +1,6 @@
 use slopos_abi::damage::DamageRect;
+use slopos_theme_core::EdgeInsets;
 
-/// Pixel dimensions in the DrawBuffer coordinate space.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Size {
     pub width: i32,
@@ -69,10 +69,8 @@ impl Rect {
         }
     }
 
-    /// `DamageRect`'s bounds are **inclusive** — the compositor builds its own
-    /// the same way, and every `*_clipped` primitive reads them that way — so a
-    /// rect of zero extent correctly yields an invalid (empty) region rather
-    /// than a one-pixel one.
+    /// A `DamageRect`'s bounds are inclusive, so a rect of no extent is an
+    /// invalid one rather than a pixel.
     pub fn to_damage_rect(&self) -> DamageRect {
         DamageRect {
             x0: self.x,
@@ -83,21 +81,16 @@ impl Rect {
     }
 }
 
-pub use slopos_theme_core::EdgeInsets;
-
-/// The extent that stands in for "unbounded" in a constraint or a rect.
-///
-/// Finite on purpose: with `i32::MAX`, any container that adds padding to a
-/// child's reported extent wraps negative. 16M px is past any surface this will
-/// draw to, and small enough that summing a few extents stays inside `i32`.
+/// What stands for unbounded: finite, so a container adding padding to a
+/// child's extent does not wrap, and past any surface drawn to.
 pub const MAX_EXTENT: i32 = 1 << 24;
 
 pub const fn is_unbounded(extent: i32) -> bool {
     extent >= MAX_EXTENT
 }
 
-/// Constraint box passed top-down during the measure phase. A `max_width` or
-/// `max_height` of [`MAX_EXTENT`] means unbounded; see [`is_unbounded`].
+/// What a parent allows a child as it measures it; a maximum of
+/// [`MAX_EXTENT`] is unbounded.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct BoxConstraints {
     pub min_width: i32,
@@ -120,15 +113,6 @@ impl BoxConstraints {
             max_width: size.width,
             min_height: size.height,
             max_height: size.height,
-        }
-    }
-
-    pub fn tight_width(width: i32) -> Self {
-        Self {
-            min_width: width,
-            max_width: width,
-            min_height: 0,
-            max_height: MAX_EXTENT,
         }
     }
 
@@ -204,29 +188,10 @@ impl BoxConstraints {
     }
 }
 
-/// How a widget participates in space distribution.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum SizePolicy {
-    /// Use exactly the intrinsic content size. Do not grow or shrink.
-    Fixed,
-    /// Use intrinsic content size as preferred, but may shrink to min.
-    Shrink,
-    /// Expand to fill available space. Weight controls proportional share.
-    Expand { weight: u16 },
-}
-
-impl Default for SizePolicy {
-    fn default() -> Self {
-        Self::Fixed
-    }
-}
-
-/// Declarative sizing intent, so "fill the parent" is stated rather than
-/// encoded as a sentinel extent the caller has to recognise.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Length {
     Px(i32),
-    /// Fill remaining space proportionally. Weight 0 = shrink to content.
+    /// A share of the room left; a weight of 0 shrinks to the content.
     Fill(u16),
 }
 
@@ -238,12 +203,8 @@ impl Length {
         match self {
             Length::Px(px) => (*px).clamp(min, max),
             Length::Fill(0) => min,
-            Length::Fill(_) => max, // the parent distributes the remainder
+            Length::Fill(_) => max,
         }
-    }
-
-    pub fn is_fill(&self) -> bool {
-        matches!(self, Length::Fill(w) if *w > 0)
     }
 
     pub fn flex_weight(&self) -> u16 {
@@ -287,30 +248,13 @@ pub enum Orientation {
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum ScrollDirection {
-    #[default]
-    Vertical,
-    Horizontal,
-    Both,
-}
-
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum ScrollbarVisibility {
-    Always,
-    #[default]
-    WhenNeeded,
-    Never,
-}
-
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum ImageScale {
-    /// Scale to fit within constraints preserving aspect ratio.
     #[default]
     Fit,
-    /// Scale preserving aspect ratio and crop overflow to fill constraints.
+    /// Fills the box, cropping what overflows.
     Cover,
-    /// Stretch to fill constraints.
+    /// Stretched to the box.
     Fill,
-    /// Display at source dimensions.
+    /// At the image's own size.
     None,
 }

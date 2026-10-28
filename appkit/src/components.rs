@@ -1,15 +1,9 @@
-//! What an app builds its pages from. Each owns its spacing, its text roles
-//! and its states, so a page made of them reads like every other.
-//!
-//! A component converts into a [`Node`] with `.into()`; one that only
-//! arranges others becomes the stacks and padding it stands for.
+//! What an app builds its pages from, each owning its spacing, text roles and
+//! states; `.into()` makes one a [`Node`].
 
-use slopos_theme_core::{Icon, Surface, TextRole, Tone, inset, space};
+use slopos_theme_core::{EdgeInsets, Icon, Surface, TextRole, Tone, inset, space, stroke};
 
-use crate::constraints::{
-    CrossAxisAlignment, EdgeInsets, Length, ScrollDirection, ScrollbarVisibility, Size,
-    TextAlignment,
-};
+use crate::constraints::{CrossAxisAlignment, Length, Rect, Size, TextAlignment};
 use crate::node::{ButtonStyle, Node};
 use crate::widgets::line_edit::LineEditInput;
 
@@ -25,7 +19,6 @@ pub enum Wrap {
     Chars,
 }
 
-/// Text in a role and a tone.
 #[derive(Clone, Debug)]
 pub struct Text {
     pub text: String,
@@ -132,29 +125,30 @@ impl<M> Button<M> {
 }
 
 impl<M> From<Button<M>> for Node<M> {
-    fn from(b: Button<M>) -> Self {
-        Node::Button {
-            label: b.label,
-            on_press: b.on_press,
-            style: b.style,
-            enabled: b.enabled,
-        }
+    fn from(button: Button<M>) -> Self {
+        Node::Button(button)
     }
 }
 
-/// The buttons that end a page or a dialog: going back or aside on the left,
-/// finishing on the right with the default last. In a footer, Enter presses
-/// the default unless it destroys, and Escape the way back.
+/// The buttons that end a page or a dialog: back and aside on the left, the
+/// default last on the right; in a footer, Enter and Escape press them.
 #[derive(Clone, Debug)]
 pub struct ButtonRow<M> {
     pub leading: Vec<Button<M>>,
     pub trailing: Vec<Button<M>>,
-    /// Index into `trailing` of the button Enter presses.
-    pub default: Option<usize>,
-    /// The button Escape presses: in `leading` when `true`, else `trailing`.
-    pub escape: Option<(bool, usize)>,
+    /// What Enter presses.
+    pub default: Option<RowButton>,
+    /// What Escape presses.
+    pub escape: Option<RowButton>,
     /// Ends a page or a dialog, so Enter and Escape reach it.
     pub(crate) ends: bool,
+}
+
+/// One of a [`ButtonRow`]'s buttons, by its side and its place there.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RowButton {
+    Leading(usize),
+    Trailing(usize),
 }
 
 impl<M> Default for ButtonRow<M> {
@@ -174,9 +168,16 @@ impl<M> ButtonRow<M> {
         }
     }
 
+    pub fn button(&self, at: RowButton) -> Option<&Button<M>> {
+        match at {
+            RowButton::Leading(i) => self.leading.get(i),
+            RowButton::Trailing(i) => self.trailing.get(i),
+        }
+    }
+
     /// On the left, pressed by Escape.
     pub fn back(mut self, button: Button<M>) -> Self {
-        self.escape = Some((true, self.leading.len()));
+        self.escape = Some(RowButton::Leading(self.leading.len()));
         self.leading.push(button.secondary_style());
         self
     }
@@ -193,20 +194,20 @@ impl<M> ButtonRow<M> {
 
     /// On the right, before the default, pressed by Escape.
     pub fn cancel(mut self, button: Button<M>) -> Self {
-        self.escape = Some((false, self.trailing.len()));
+        self.escape = Some(RowButton::Trailing(self.trailing.len()));
         self.trailing.push(button.secondary_style());
         self
     }
 
     /// Last on the right and filled, pressed by Enter.
     pub fn confirm(mut self, button: Button<M>) -> Self {
-        self.default = Some(self.trailing.len());
+        self.default = Some(RowButton::Trailing(self.trailing.len()));
         self.trailing.push(button.primary());
         self
     }
 
-    /// Last on the right, filled with the danger tone even while disabled;
-    /// Enter never presses it.
+    /// Last on the right, filled with the danger tone, and edged with it while
+    /// disabled; Enter never presses it.
     pub fn destructive(mut self, button: Button<M>) -> Self {
         self.trailing.push(button.destructive());
         self
@@ -245,6 +246,11 @@ impl<M> Page<M> {
         }
     }
 
+    /// A tab's body, which the tab names.
+    pub fn untitled() -> Self {
+        Self::new("")
+    }
+
     pub fn subtitle(mut self, subtitle: impl Into<String>) -> Self {
         self.subtitle = subtitle.into();
         self
@@ -269,12 +275,26 @@ fn header<M>(title: String, subtitle: String) -> Node<M> {
     column(space::XS, lines)
 }
 
-fn column<M>(spacing: i32, children: Vec<Node<M>>) -> Node<M> {
+/// `children` one under another, `spacing` apart, each as wide as the column.
+pub fn column<M>(spacing: i32, children: Vec<Node<M>>) -> Node<M> {
     Node::VStack {
         children,
         spacing,
         align: CrossAxisAlignment::Stretch,
     }
+}
+
+/// `children` side by side, `spacing` apart, centred across the row.
+pub fn row<M>(spacing: i32, children: Vec<Node<M>>) -> Node<M> {
+    Node::HStack {
+        children,
+        spacing,
+        align: CrossAxisAlignment::Center,
+    }
+}
+
+fn fill<M>() -> Node<M> {
+    Node::Spacer { size: Length::FILL }
 }
 
 fn padded<M>(padding: EdgeInsets, child: Node<M>) -> Node<M> {
@@ -296,13 +316,15 @@ impl<M> From<Page<M>> for Node<M> {
         let top = EdgeInsets::new(inset::PAGE.top, inset::PAGE.right, 0, inset::PAGE.left);
         let body = Node::ScrollView {
             child: Box::new(padded(inset::PAGE, page.content)),
-            direction: ScrollDirection::Vertical,
-            show_scrollbar: ScrollbarVisibility::WhenNeeded,
             scroll_y: 0,
             on_scroll: None,
             follow_end: false,
         };
-        let mut parts = vec![padded(top, header(page.title, page.subtitle)), expand(body)];
+        let mut parts = Vec::new();
+        if !page.title.is_empty() {
+            parts.push(padded(top, header(page.title, page.subtitle)));
+        }
+        parts.push(expand(body));
         if let Some(mut footer) = page.footer {
             footer.ends = true;
             parts.push(Node::Divider);
@@ -311,6 +333,72 @@ impl<M> From<Page<M>> for Node<M> {
         Node::Background {
             surface: Surface::Base,
             child: Box::new(column(0, parts)),
+        }
+    }
+}
+
+/// A question over the page, which it covers for the pointer and the keyboard
+/// until the [`ButtonRow`] at its foot answers it.
+pub struct Dialog<M> {
+    pub title: String,
+    pub icon: Option<Node<M>>,
+    pub content: Node<M>,
+    pub footer: ButtonRow<M>,
+    pub on_dismiss: Option<M>,
+    pub anchor: Option<Rect>,
+}
+
+impl<M> Dialog<M> {
+    pub fn new(title: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            icon: None,
+            content: Node::Empty,
+            footer: ButtonRow::new(),
+            on_dismiss: None,
+            anchor: None,
+        }
+    }
+
+    /// Drawn beside the title.
+    pub fn icon(mut self, icon: impl Into<Node<M>>) -> Self {
+        self.icon = Some(icon.into());
+        self
+    }
+
+    pub fn content(mut self, content: impl Into<Node<M>>) -> Self {
+        self.content = content.into();
+        self
+    }
+
+    pub fn footer(mut self, footer: ButtonRow<M>) -> Self {
+        self.footer = footer;
+        self
+    }
+
+    /// Sent by a click outside it, and by Escape when the footer has no way
+    /// back.
+    pub fn on_dismiss(mut self, msg: M) -> Self {
+        self.on_dismiss = Some(msg);
+        self
+    }
+
+    /// What the card centres over where it fits; the page when none.
+    pub fn anchor(mut self, anchor: Option<Rect>) -> Self {
+        self.anchor = anchor;
+        self
+    }
+}
+
+impl<M> From<Dialog<M>> for Node<M> {
+    fn from(dialog: Dialog<M>) -> Self {
+        Node::Dialog {
+            title: dialog.title,
+            icon: dialog.icon.map(Box::new),
+            content: Box::new(dialog.content),
+            footer: dialog.footer,
+            on_dismiss: dialog.on_dismiss,
+            anchor: dialog.anchor,
         }
     }
 }
@@ -377,7 +465,7 @@ impl<M> Default for PropertyList<M> {
 
 impl<M> From<PropertyList<M>> for Node<M> {
     fn from(list: PropertyList<M>) -> Self {
-        Node::PropertyList(list.rows)
+        Node::PropertyList(list)
     }
 }
 
@@ -424,12 +512,7 @@ impl<M> From<Notice<M>> for Node<M> {
         }
         let mut text = column(space::XS, words);
         if let Some(action) = notice.action {
-            let button = Node::HStack {
-                children: vec![action.into()],
-                spacing: 0,
-                align: CrossAxisAlignment::Start,
-            };
-            text = column(space::SM, vec![text, button]);
+            text = column(space::SM, vec![text, row(0, vec![action.into()])]);
         }
         let icon = Node::Icon {
             icon: Icon::for_tone(notice.tone),
@@ -438,7 +521,6 @@ impl<M> From<Notice<M>> for Node<M> {
         };
         Node::Card {
             surface: Surface::Raised,
-            border: true,
             shadow: false,
             child: Box::new(padded(
                 inset::CARD,
@@ -460,11 +542,18 @@ pub struct ListRow {
     pub avatar: bool,
     pub title: String,
     pub detail: String,
+    /// The detail is one line cut short from its start.
+    pub detail_tail: bool,
     pub trailing: String,
     pub disabled_reason: Option<String>,
 }
 
 impl ListRow {
+    /// How tall a row is with `detail_lines` lines under its title.
+    pub const fn height(detail_lines: usize) -> i32 {
+        crate::widgets::list::ListWidget::row_height(detail_lines)
+    }
+
     pub fn new(title: impl Into<String>) -> Self {
         Self {
             title: title.into(),
@@ -485,6 +574,14 @@ impl ListRow {
 
     pub fn detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = detail.into();
+        self
+    }
+
+    /// A detail kept to one line and cut short from its start, as a path is
+    /// whose end tells it apart; it shows whole as a tooltip.
+    pub fn detail_tail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = detail.into();
+        self.detail_tail = true;
         self
     }
 
@@ -512,16 +609,12 @@ pub struct List<M> {
     pub selected: Option<usize>,
     pub on_select: Option<fn(usize) -> M>,
     pub on_activate: Option<fn(usize) -> M>,
+    pub active: bool,
 }
 
 impl<M> List<M> {
     pub fn new(rows: Vec<ListRow>) -> Self {
-        Self {
-            sections: vec![(String::new(), rows)],
-            selected: None,
-            on_select: None,
-            on_activate: None,
-        }
+        Self::sectioned(vec![(String::new(), rows)])
     }
 
     pub fn sectioned(sections: Vec<(String, Vec<ListRow>)>) -> Self {
@@ -530,7 +623,15 @@ impl<M> List<M> {
             selected: None,
             on_select: None,
             on_activate: None,
+            active: false,
         }
+    }
+
+    /// Shows the chosen row as a focused list does, for a list whose keys a
+    /// field beside it takes, as a palette's does.
+    pub fn active(mut self, active: bool) -> Self {
+        self.active = active;
+        self
     }
 
     pub fn selected(mut self, selected: Option<usize>) -> Self {
@@ -590,8 +691,6 @@ impl<M> From<Sidebar<M>> for Node<M> {
                     EdgeInsets::all(space::SM),
                     Node::ScrollView {
                         child: Box::new(sidebar.content),
-                        direction: ScrollDirection::Vertical,
-                        show_scrollbar: ScrollbarVisibility::WhenNeeded,
                         scroll_y: 0,
                         on_scroll: None,
                         follow_end: false,
@@ -602,7 +701,7 @@ impl<M> From<Sidebar<M>> for Node<M> {
     }
 }
 
-const SIDEBAR_WIDTH: i32 = 200;
+pub const SIDEBAR_WIDTH: i32 = 200;
 
 /// A control that shows only an icon; its label is its tooltip and what a
 /// screen reader would say.
@@ -683,31 +782,77 @@ impl<M> Default for Toolbar<M> {
 
 impl<M> From<Toolbar<M>> for Node<M> {
     fn from(bar: Toolbar<M>) -> Self {
-        let group = |items: Vec<Node<M>>| Node::HStack {
-            children: items,
-            spacing: space::XS,
-            align: CrossAxisAlignment::Center,
-        };
-        let row = Node::HStack {
-            children: vec![
-                group(bar.start),
-                expand(Node::Spacer {
-                    size: Length::Px(0),
-                }),
-                group(bar.end),
-            ],
-            spacing: space::SM,
-            align: CrossAxisAlignment::Center,
-        };
+        let tools = row(
+            space::SM,
+            vec![row(space::XS, bar.start), fill(), row(space::XS, bar.end)],
+        );
         Node::Background {
             surface: Surface::Chrome,
             child: Box::new(column(
                 0,
                 vec![
-                    padded(EdgeInsets::symmetric(space::SM, space::XS), row),
+                    padded(EdgeInsets::symmetric(space::SM, space::XS), tools),
                     Node::Divider,
                 ],
             )),
+        }
+    }
+}
+
+/// The line along a view's foot that says how things stand, in a tone, and
+/// at its end what it always shows.
+#[derive(Clone, Debug)]
+pub struct StatusBar {
+    pub text: String,
+    pub tone: Tone,
+    pub end: String,
+}
+
+impl StatusBar {
+    /// Its edge included, whatever it says.
+    pub const HEIGHT: i32 = stroke::EDGE + TextRole::Caption.style().line_height + 2 * space::XS;
+
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            tone: Tone::Secondary,
+            end: String::new(),
+        }
+    }
+
+    pub fn tone(mut self, tone: Tone) -> Self {
+        self.tone = tone;
+        self
+    }
+
+    pub fn end(mut self, end: impl Into<String>) -> Self {
+        self.end = end.into();
+        self
+    }
+}
+
+impl<M> From<StatusBar> for Node<M> {
+    fn from(bar: StatusBar) -> Self {
+        let caption = |text, tone| Text::new(text).role(TextRole::Caption).tone(tone);
+        let mut words = vec![expand(caption(bar.text, bar.tone).into())];
+        if !bar.end.is_empty() {
+            words.push(
+                caption(bar.end, Tone::Secondary)
+                    .align(TextAlignment::End)
+                    .into(),
+            );
+        }
+        let line = Node::Background {
+            surface: Surface::Chrome,
+            child: Box::new(padded(
+                EdgeInsets::symmetric(space::SM, space::XS),
+                row(space::SM, words),
+            )),
+        };
+        Node::SizedBox {
+            width: None,
+            height: Some(Length::Px(StatusBar::HEIGHT)),
+            child: Box::new(column(0, vec![Node::Divider, expand(line)])),
         }
     }
 }
@@ -717,8 +862,13 @@ pub struct SearchField<M> {
     pub text: String,
     pub caret: usize,
     pub focused: bool,
+    /// What the empty field says it finds: *Search* unless told.
+    pub placeholder: String,
     /// Right-aligned inside the field: how many matched.
     pub count: String,
+    /// Edged in the danger tone: nothing matched.
+    pub invalid: bool,
+    pub tab_stop: bool,
     pub on_input: Option<fn(LineEditInput) -> M>,
 }
 
@@ -728,9 +878,17 @@ impl<M> SearchField<M> {
             text: text.into(),
             caret,
             focused: false,
+            placeholder: String::from("Search"),
             count: String::new(),
+            invalid: false,
+            tab_stop: true,
             on_input: None,
         }
+    }
+
+    pub fn invalid(mut self, invalid: bool) -> Self {
+        self.invalid = invalid;
+        self
     }
 
     pub fn focused(mut self, focused: bool) -> Self {
@@ -738,8 +896,20 @@ impl<M> SearchField<M> {
         self
     }
 
+    pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = placeholder.into();
+        self
+    }
+
     pub fn count(mut self, count: impl Into<String>) -> Self {
         self.count = count.into();
+        self
+    }
+
+    /// `false` keeps it out of the tab order, its focus the app's alone, as
+    /// a palette's field is: Tab then reaches the app as a key.
+    pub fn tab_stop(mut self, tab_stop: bool) -> Self {
+        self.tab_stop = tab_stop;
         self
     }
 
@@ -753,13 +923,13 @@ impl<M> From<SearchField<M>> for Node<M> {
     fn from(field: SearchField<M>) -> Self {
         Node::LineEdit {
             text: field.text,
-            placeholder: String::from("Search"),
+            placeholder: field.placeholder,
             caret: field.caret,
             focused: field.focused,
             icon: Some(Icon::Search),
             suffix: field.count,
-            invalid: false,
-            tab_stop: true,
+            invalid: field.invalid,
+            tab_stop: field.tab_stop,
             on_input: field.on_input,
         }
     }
@@ -833,27 +1003,12 @@ impl<M> From<EmptyState<M>> for Node<M> {
         if let Some(action) = state.action {
             parts.push(action.primary().into());
         }
-        let fill = || {
-            expand(Node::Spacer {
-                size: Length::Px(0),
-            })
+        let middle = Node::VStack {
+            children: parts,
+            spacing: space::MD,
+            align: CrossAxisAlignment::Center,
         };
-        padded(
-            inset::PAGE,
-            Node::VStack {
-                children: vec![
-                    fill(),
-                    Node::VStack {
-                        children: parts,
-                        spacing: space::MD,
-                        align: CrossAxisAlignment::Center,
-                    },
-                    fill(),
-                ],
-                spacing: 0,
-                align: CrossAxisAlignment::Stretch,
-            },
-        )
+        padded(inset::PAGE, column(0, vec![fill(), middle, fill()]))
     }
 }
 
@@ -928,11 +1083,5 @@ impl WindowSpec {
             true => (self.min_size, None),
             false => (self.size, Some(self.size)),
         }
-    }
-}
-
-impl Default for WindowSpec {
-    fn default() -> Self {
-        Self::new(640, 480)
     }
 }

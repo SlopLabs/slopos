@@ -1,18 +1,14 @@
-//! The editor's view: state in, `Node` tree out.
-//!
-//! Layout is computed in two places that must agree — here, where the panes are
-//! placed, and in [`code_viewport`], which tells the document how many rows will
-//! be drawn. They agree because the second is derived from the same constants
-//! the first lays out with, and because the code surface renders exactly the
-//! rows it is handed rather than as many as fit.
+//! The editor's view. [`code_viewport`] counts the rows the code surface
+//! draws from the same pane sizes the layout places, so the two agree.
 
 use slopos_appkit::theme::space;
 use slopos_appkit::widgets::code_view::{CodeLine, StyledSpan};
 use slopos_appkit::widgets::editor_tabs::EditorTab;
 use slopos_appkit::widgets::tree_view::TreeRow;
 use slopos_appkit::{
-    Button, ButtonRow, CrossAxisAlignment, EdgeInsets, Icon, IconButton, Length, MenuItem,
-    MenuItemKind, Node, Orientation, Surface, Text, TextAlignment, Tone,
+    Button, ButtonRow, CrossAxisAlignment, EdgeInsets, ICON_BUTTON_SIDE, Icon, IconButton, Length,
+    List, ListRow, MenuItem, MenuItemKind, Node, Orientation, SearchField, StatusBar, StyleSheet,
+    Surface, Text, Tone, column, row,
 };
 
 use slopos_editor_core::document::{Document, file_name};
@@ -21,24 +17,35 @@ use slopos_editor_core::search::{self, SearchOptions};
 use super::commands::{Command, MENUS, MenuEntry};
 use super::prompt::Prompt;
 use super::syntax;
-use super::{Dialog, EditorApp, EditorMsg, Focus, Overwrite, said};
+use super::{Answer, Dialog, EditorApp, EditorMsg, Focus, Overwrite, said};
 
 pub const DEFAULT_WIDTH: i32 = 1180;
 pub const DEFAULT_HEIGHT: i32 = 760;
 
-/// Chrome heights. The style sheet owns the look; these are the pane sizes the
-/// application composes with, and the viewport maths reads them back.
-pub const MENU_BAR_HEIGHT: i32 = 30;
-pub const TAB_BAR_HEIGHT: i32 = 34;
-pub const STATUS_BAR_HEIGHT: i32 = 24;
-pub const PROMPT_BAR_HEIGHT: i32 = 36;
-pub const SPLITTER_WIDTH: i32 = 6;
-/// Narrowest the code surface may become when the sidebar is dragged wide.
 pub const MIN_CODE_WIDTH: i32 = 320;
 
 const PALETTE_WIDTH: i32 = 620;
-const PALETTE_ROW_HEIGHT: i32 = 26;
-pub const PALETTE_MAX_ROWS: usize = 12;
+const PALETTE_MAX_ROWS: usize = 8;
+const PROMPT_PADDING: EdgeInsets = EdgeInsets::symmetric(space::SM, space::XS);
+
+fn prompt_bar_height(style: &StyleSheet) -> i32 {
+    style.control_height.max(ICON_BUTTON_SIDE) + PROMPT_PADDING.vertical()
+}
+
+fn palette_top(style: &StyleSheet) -> i32 {
+    style.menu_bar_height + space::XL + space::LG
+}
+
+/// Rows the finder and the palette show in a window `window_height` tall,
+/// so the card ends above its foot.
+pub fn overlay_rows(window_height: i32) -> usize {
+    let style = StyleSheet::current();
+    let above = palette_top(&style) + 2 * space::SM + style.control_height + space::SM;
+    let room = window_height - above - space::XL;
+    // Every finder row carries one line of detail.
+    let row = ListRow::height(1);
+    (room.max(0) / row).clamp(1, PALETTE_MAX_ROWS as i32) as usize
+}
 
 /// Rows the code surface will draw, and columns it can show.
 pub fn code_viewport(
@@ -53,15 +60,16 @@ pub fn code_viewport(
     let cell_h = slopos_appkit::text::cell_height().max(1);
     let cell_w = slopos_appkit::text::cell_width().max(1);
 
-    let mut height = window_height - MENU_BAR_HEIGHT - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT;
+    let style = StyleSheet::current();
+    let mut height = window_height - style.menu_bar_height - style.tab_height - StatusBar::HEIGHT;
     if prompt_bar {
-        height -= PROMPT_BAR_HEIGHT;
+        height -= prompt_bar_height(&style);
     }
     let lines = slopos_appkit::visible_line_count(height.max(0), cell_h);
 
     let mut width = window_width;
     if sidebar_visible {
-        width -= sidebar_width + SPLITTER_WIDTH;
+        width -= sidebar_width + style.divider_width;
     }
     let gutter = slopos_appkit::gutter_width(line_count.unwrap_or(1), cell_w, show_line_numbers);
     let cols = ((width - gutter - slopos_appkit::text_area_reserved()).max(0) / cell_w) as usize;
@@ -69,11 +77,9 @@ pub fn code_viewport(
 }
 
 pub fn tree_rows_visible(window_height: i32) -> usize {
-    // Read from the style sheet rather than restated here: the tree widget
-    // measures its rows with the same value, and a copy would drift.
-    let row_h = slopos_appkit::StyleSheet::dark().row_height.max(1);
-    let height = window_height - MENU_BAR_HEIGHT - STATUS_BAR_HEIGHT;
-    (height.max(0) / row_h) as usize
+    let style = StyleSheet::current();
+    let height = window_height - style.menu_bar_height - StatusBar::HEIGHT;
+    (height.max(0) / style.row_height.max(1)) as usize
 }
 
 pub fn build(app: &EditorApp) -> Node<EditorMsg> {
@@ -93,39 +99,28 @@ pub fn build(app: &EditorApp) -> Node<EditorMsg> {
 }
 
 fn main_column(app: &EditorApp) -> Node<EditorMsg> {
-    let mut children = vec![menu_bar(app), body(app)];
-    children.push(status_bar(app));
-    Node::VStack {
-        children,
-        spacing: 0,
-        align: CrossAxisAlignment::Stretch,
-    }
+    column(0, vec![menu_bar(app), body(app), status_bar(app)])
 }
 
 fn menu_bar(app: &EditorApp) -> Node<EditorMsg> {
     let titles: Vec<String> = MENUS.iter().map(|m| m.title.to_string()).collect();
 
-    Node::SizedBox {
-        width: None,
-        height: Some(Length::Px(MENU_BAR_HEIGHT)),
-        child: Box::new(Node::Background {
-            surface: Surface::Chrome,
-            child: Box::new(Node::HStack {
-                spacing: 0,
-                align: CrossAxisAlignment::Center,
-                children: vec![
-                    Node::MenuBar {
-                        titles,
-                        open: app.menu_open.map(|(index, _, _)| index),
-                        on_input: Some(EditorMsg::MenuBar),
-                    },
-                    Node::Expand {
-                        weight: 1,
-                        child: Box::new(Node::Empty),
-                    },
-                ],
-            }),
-        }),
+    Node::Background {
+        surface: Surface::Chrome,
+        child: Box::new(row(
+            0,
+            vec![
+                Node::MenuBar {
+                    titles,
+                    open: app.menu_open.map(|(index, _, _)| index),
+                    on_input: Some(EditorMsg::MenuBar),
+                },
+                Node::Expand {
+                    weight: 1,
+                    child: Box::new(Node::Empty),
+                },
+            ],
+        )),
     }
 }
 
@@ -158,8 +153,6 @@ fn body(app: &EditorApp) -> Node<EditorMsg> {
     }
 }
 
-/// The tree, and nothing above it: its first row *is* the open folder, and
-/// Open Folder is on the File menu and in the palette.
 fn sidebar(app: &EditorApp) -> Node<EditorMsg> {
     let visible = tree_rows_visible(app.window_height);
     let rows = visible_tree_rows(app, visible);
@@ -213,14 +206,10 @@ fn editor_column(app: &EditorApp) -> Node<EditorMsg> {
         .collect();
 
     let mut children = vec![
-        Node::SizedBox {
-            width: None,
-            height: Some(Length::Px(TAB_BAR_HEIGHT)),
-            child: Box::new(Node::EditorTabs {
-                tabs,
-                active: app.active_index(),
-                on_input: Some(EditorMsg::Tab),
-            }),
+        Node::EditorTabs {
+            tabs,
+            active: app.active_index(),
+            on_input: Some(EditorMsg::Tab),
         },
         Node::Expand {
             weight: 1,
@@ -231,16 +220,12 @@ fn editor_column(app: &EditorApp) -> Node<EditorMsg> {
     if app.prompt.is_open() && !app.prompt.is_overlay() {
         children.push(Node::SizedBox {
             width: None,
-            height: Some(Length::Px(PROMPT_BAR_HEIGHT)),
+            height: Some(Length::Px(prompt_bar_height(&StyleSheet::current()))),
             child: Box::new(prompt_bar(app)),
         });
     }
 
-    Node::VStack {
-        children,
-        spacing: 0,
-        align: CrossAxisAlignment::Stretch,
-    }
+    column(0, children)
 }
 
 fn code_view(app: &EditorApp) -> Node<EditorMsg> {
@@ -327,17 +312,16 @@ fn prompt_bar(app: &EditorApp) -> Node<EditorMsg> {
             };
             fields.push(Node::Expand {
                 weight: 1,
-                child: Box::new(Node::LineEdit {
-                    text: query.text.clone(),
-                    placeholder: String::from("Find"),
-                    caret: query.caret,
-                    focused: app.focus == Focus::Prompt && !*on_replace,
-                    icon: Some(Icon::Search),
-                    suffix,
-                    invalid: !query.text.is_empty() && *total == 0,
-                    tab_stop: false,
-                    on_input: Some(EditorMsg::Prompt),
-                }),
+                child: Box::new(
+                    SearchField::new(query.text.clone(), query.caret)
+                        .focused(app.focus == Focus::Prompt && !*on_replace)
+                        .placeholder("Find")
+                        .count(suffix)
+                        .invalid(!query.text.is_empty() && *total == 0)
+                        .tab_stop(false)
+                        .on_input(EditorMsg::Prompt)
+                        .into(),
+                ),
             });
             if let Some(replace) = replace {
                 fields.push(Node::Expand {
@@ -372,10 +356,7 @@ fn prompt_bar(app: &EditorApp) -> Node<EditorMsg> {
             );
         }
         other => {
-            let (text, caret) = match other.input_text() {
-                Some(pair) => pair,
-                None => (String::new(), 0),
-            };
+            let (text, caret) = other.input_text().unwrap_or_default();
             fields.push(
                 Text::new(format!("{}:", other.title()))
                     .tone(Tone::Secondary)
@@ -401,12 +382,8 @@ fn prompt_bar(app: &EditorApp) -> Node<EditorMsg> {
     Node::Background {
         surface: Surface::Raised,
         child: Box::new(Node::Padding {
-            padding: EdgeInsets::symmetric(space::SM, space::XS),
-            child: Box::new(Node::HStack {
-                children: fields,
-                spacing: space::SM,
-                align: CrossAxisAlignment::Center,
-            }),
+            padding: PROMPT_PADDING,
+            child: Box::new(row(space::SM, fields)),
         }),
     }
 }
@@ -420,10 +397,13 @@ fn status_bar(app: &EditorApp) -> Node<EditorMsg> {
         .map(|r| format!("  ({} selected)", doc.buffer.count_chars(r)))
         .unwrap_or_default();
 
-    let left = if app.status.is_empty() {
-        doc.path().unwrap_or(doc.title()).to_string()
+    let (left, tone) = if app.status.is_empty() {
+        (
+            doc.path().unwrap_or(doc.title()).to_string(),
+            Tone::Secondary,
+        )
     } else {
-        app.status.clone()
+        (app.status.clone(), app.status_tone)
     };
 
     let right = format!(
@@ -436,43 +416,7 @@ fn status_bar(app: &EditorApp) -> Node<EditorMsg> {
         doc.language().label(),
     );
 
-    // The divider is inside the bar's height, which the viewport maths reads.
-    Node::SizedBox {
-        width: None,
-        height: Some(Length::Px(STATUS_BAR_HEIGHT)),
-        child: Box::new(Node::VStack {
-            spacing: 0,
-            align: CrossAxisAlignment::Stretch,
-            children: vec![
-                Node::Divider,
-                Node::Expand {
-                    weight: 1,
-                    child: Box::new(Node::Background {
-                        surface: Surface::Chrome,
-                        child: Box::new(Node::Padding {
-                            padding: EdgeInsets::symmetric(space::MD, 0),
-                            child: Box::new(Node::HStack {
-                                spacing: space::SM,
-                                align: CrossAxisAlignment::Center,
-                                children: vec![
-                                    Node::Expand {
-                                        weight: 1,
-                                        child: Box::new(
-                                            Text::new(left).tone(Tone::Secondary).into(),
-                                        ),
-                                    },
-                                    Text::new(right)
-                                        .tone(Tone::Secondary)
-                                        .align(TextAlignment::End)
-                                        .into(),
-                                ],
-                            }),
-                        }),
-                    }),
-                },
-            ],
-        }),
-    }
+    StatusBar::new(left).tone(tone).end(right).into()
 }
 
 fn menu_popup(menu: usize, x: i32, y: i32) -> Node<EditorMsg> {
@@ -510,84 +454,65 @@ fn menu_popup(menu: usize, x: i32, y: i32) -> Node<EditorMsg> {
 }
 
 fn overlay_prompt(app: &EditorApp) -> Node<EditorMsg> {
-    let (text, caret) = app.prompt.input_text().unwrap_or((String::new(), 0));
+    let (text, caret) = app.prompt.input_text().unwrap_or_default();
     let width = PALETTE_WIDTH.min(app.window_width - 80).max(240);
     let x = (app.window_width - width) / 2;
-    let y = MENU_BAR_HEIGHT + 40;
 
-    // The list shows a window of the results, scrolled to keep the selection
-    // in it: without that, arrowing past the twelfth match moves a selection
-    // the list cannot show and Enter opens something invisible.
-    let first = app.overlay_first_row();
-    let rows: Vec<Node<EditorMsg>> = match &app.prompt {
+    // The rows around the selection, so Enter never runs one not shown.
+    let (first, shown) = (app.overlay_first_row(), app.overlay_rows());
+    let (rows, selected): (Vec<ListRow>, usize) = match &app.prompt {
         Prompt::Palette {
             results, selected, ..
-        } => results
-            .iter()
-            .enumerate()
-            .skip(first)
-            .take(PALETTE_MAX_ROWS)
-            .map(|(index, command)| palette_row(command, index == *selected))
-            .collect(),
+        } => (
+            results
+                .iter()
+                .skip(first)
+                .take(shown)
+                .map(palette_row)
+                .collect(),
+            *selected,
+        ),
         Prompt::FileFinder {
             results, selected, ..
-        } => results
-            .iter()
-            .enumerate()
-            .skip(first)
-            .take(PALETTE_MAX_ROWS)
-            .map(|(index, path)| finder_row(app, path, index == *selected))
-            .collect(),
-        _ => Vec::new(),
+        } => (
+            results
+                .iter()
+                .skip(first)
+                .take(shown)
+                .map(|path| finder_row(app, path))
+                .collect(),
+            *selected,
+        ),
+        _ => (Vec::new(), 0),
     };
-
-    let selected = match &app.prompt {
-        Prompt::Palette { selected, .. } | Prompt::FileFinder { selected, .. } => {
-            Some(selected.saturating_sub(first))
-        }
-        _ => None,
-    };
-    let row_count = rows.len() as i32;
 
     let content = Node::Card {
         surface: Surface::Raised,
-        border: true,
         shadow: true,
         child: Box::new(Node::Padding {
             padding: EdgeInsets::all(space::SM),
-            child: Box::new(Node::VStack {
-                spacing: space::SM,
-                align: CrossAxisAlignment::Stretch,
-                children: vec![
-                    Node::LineEdit {
-                        text,
-                        placeholder: app.prompt.placeholder().to_string(),
-                        caret,
-                        focused: true,
-                        icon: Some(Icon::Search),
-                        suffix: String::new(),
-                        invalid: false,
-                        tab_stop: false,
-                        on_input: Some(EditorMsg::Prompt),
-                    },
-                    Node::SizedBox {
-                        width: None,
-                        height: Some(Length::Px(row_count * PALETTE_ROW_HEIGHT)),
-                        child: Box::new(Node::ListView {
-                            item_height: PALETTE_ROW_HEIGHT,
-                            selected,
-                            on_select: Some(EditorMsg::Pick),
-                            items: rows,
-                        }),
-                    },
+            child: Box::new(column(
+                space::SM,
+                vec![
+                    SearchField::new(text, caret)
+                        .focused(true)
+                        .placeholder(app.prompt.placeholder())
+                        .tab_stop(false)
+                        .on_input(EditorMsg::Prompt)
+                        .into(),
+                    List::new(rows)
+                        .selected(Some(selected.saturating_sub(first)))
+                        .active(true)
+                        .on_activate(EditorMsg::Pick)
+                        .into(),
                 ],
-            }),
+            )),
         }),
     };
 
     Node::Popup {
         x,
-        y,
+        y: palette_top(&StyleSheet::current()),
         child: Box::new(Node::SizedBox {
             width: Some(Length::Px(width)),
             height: None,
@@ -597,67 +522,27 @@ fn overlay_prompt(app: &EditorApp) -> Node<EditorMsg> {
     }
 }
 
-fn palette_row(command: &Command, selected: bool) -> Node<EditorMsg> {
-    let tone = if selected {
-        Tone::Normal
-    } else {
-        Tone::Secondary
-    };
-    Node::Padding {
-        padding: EdgeInsets::symmetric(space::SM, 0),
-        child: Box::new(Node::HStack {
-            spacing: space::SM,
-            align: CrossAxisAlignment::Center,
-            children: vec![
-                Node::Expand {
-                    weight: 1,
-                    child: Box::new(Text::new(command.label().to_string()).tone(tone).into()),
-                },
-                Text::new(command.shortcut().unwrap_or("").to_string())
-                    .tone(Tone::Secondary)
-                    .align(TextAlignment::End)
-                    .into(),
-            ],
-        }),
-    }
+fn palette_row(command: &Command) -> ListRow {
+    ListRow::new(command.label()).trailing(command.shortcut().unwrap_or_default())
 }
 
-fn finder_row(app: &EditorApp, path: &str, selected: bool) -> Node<EditorMsg> {
-    let tone = if selected {
-        Tone::Normal
-    } else {
-        Tone::Secondary
-    };
-    let root = app.tree.root_path();
+/// The file's name over its folder, the root's own name at the root, on one
+/// line so every row is as tall as [`overlay_rows`] counts.
+fn finder_row(app: &EditorApp, path: &str) -> ListRow {
     let name = file_name(path);
+    let root = app.tree.root_path();
     let relative = slopos_editor_core::filetree::relative_to(root, path).unwrap_or(path);
-    // The directory the name sits in, not the whole relative path: a file at
-    // the root of the tree would otherwise have its name printed twice, once
-    // in each column.
-    let context = relative.strip_suffix(name).unwrap_or(relative);
-    let context = context.trim_end_matches('/');
-    Node::Padding {
-        padding: EdgeInsets::symmetric(space::SM, 0),
-        child: Box::new(Node::HStack {
-            spacing: space::SM,
-            align: CrossAxisAlignment::Center,
-            children: vec![
-                Text::new(name.to_string()).tone(tone).into(),
-                Node::Expand {
-                    weight: 1,
-                    child: Box::new(Text::new(context.to_string()).tone(Tone::Secondary).into()),
-                },
-            ],
-        }),
-    }
+    let folder = match relative.strip_suffix(name).map(|f| f.trim_end_matches('/')) {
+        Some("") | None => file_name(root),
+        Some(folder) => folder,
+    };
+    ListRow::new(name).detail_tail(folder)
 }
 
 fn dialog_node(app: &EditorApp, dialog: &Dialog) -> Node<EditorMsg> {
-    match dialog {
-        Dialog::About => Node::Dialog {
-            title: String::from(said::NAME),
-            icon: None,
-            content: Box::new(
+    let question = match dialog {
+        Dialog::About => slopos_appkit::Dialog::new(said::NAME)
+            .content(
                 Text::new(format!(
                     "The SlopOS text editor: tabs, a file tree, syntax highlighting, \
                      find and replace, a command palette, and every edit undoable.\n\n\
@@ -665,73 +550,59 @@ fn dialog_node(app: &EditorApp, dialog: &Dialog) -> Node<EditorMsg> {
                     said::choose(Command::CommandPalette),
                     Command::CommandPalette.shortcut().unwrap_or_default()
                 ))
-                .wrap()
-                .into(),
+                .wrap(),
+            )
+            .footer(
+                ButtonRow::new()
+                    .confirm(Button::new("Close").on_press(EditorMsg::Dialog(Answer::Cancel))),
             ),
-            footer: ButtonRow::new().confirm(Button::new("Close").on_press(EditorMsg::Dialog(0))),
-            on_dismiss: Some(EditorMsg::Dialog(2)),
-            anchor: None,
-        },
         Dialog::ConfirmClose { index } => {
             let name = app
                 .documents()
                 .get(*index)
                 .map(|d| d.title().to_string())
                 .unwrap_or_default();
-            Node::Dialog {
-                title: format!("Save the changes to {name}?"),
-                icon: None,
-                content: Box::new(
-                    Text::new("If you close it without saving, the changes are lost.")
-                        .wrap()
-                        .into(),
-                ),
-                footer: ButtonRow::new()
-                    .aside(
-                        Button::new("Don't save")
-                            .on_press(EditorMsg::Dialog(1))
-                            .destructive(),
-                    )
-                    .cancel(Button::new("Cancel").on_press(EditorMsg::Dialog(2)))
-                    .confirm(Button::new("Save").on_press(EditorMsg::Dialog(0))),
-                on_dismiss: Some(EditorMsg::Dialog(2)),
-                anchor: None,
-            }
+            slopos_appkit::Dialog::new(format!("Save the changes to {name}?"))
+                .content(Text::new("If you close it without saving, the changes are lost.").wrap())
+                .footer(
+                    ButtonRow::new()
+                        .aside(
+                            Button::new("Don't save")
+                                .on_press(EditorMsg::Dialog(Answer::Discard))
+                                .destructive(),
+                        )
+                        .cancel(Button::new("Cancel").on_press(EditorMsg::Dialog(Answer::Cancel)))
+                        .confirm(Button::new("Save").on_press(EditorMsg::Dialog(Answer::Save))),
+                )
         }
         Dialog::ConfirmOverwrite { path, found, .. } => {
             let (title, body) = said::overwrite(path, *found);
-            let cancel = Button::new("Cancel").on_press(EditorMsg::Dialog(1));
-            let save = |label| Button::new(label).on_press(EditorMsg::Dialog(0));
-            Node::Dialog {
-                title,
-                icon: None,
-                content: Box::new(Text::new(body).wrap().into()),
-                footer: match found {
+            let cancel = Button::new("Cancel").on_press(EditorMsg::Dialog(Answer::Cancel));
+            let save = |label| Button::new(label).on_press(EditorMsg::Dialog(Answer::Save));
+            slopos_appkit::Dialog::new(title)
+                .content(Text::new(body).wrap())
+                .footer(match found {
                     Overwrite::Gone => ButtonRow::new().cancel(cancel).confirm(save("Save")),
                     _ => ButtonRow::new().cancel(cancel).destructive(save("Replace")),
-                },
-                on_dismiss: Some(EditorMsg::Dialog(1)),
-                anchor: None,
-            }
+                })
         }
-        Dialog::ConfirmQuit => Node::Dialog {
-            title: String::from("Save your changes before quitting?"),
-            icon: None,
-            content: Box::new(
+        Dialog::ConfirmQuit => slopos_appkit::Dialog::new("Save your changes before quitting?")
+            .content(
                 Text::new("Some files have changes that aren't saved. If you quit without saving, they're lost.")
-                    .wrap()
-                    .into(),
+                    .wrap(),
+            )
+            .footer(
+                ButtonRow::new()
+                    .aside(
+                        Button::new("Quit without saving")
+                            .on_press(EditorMsg::Dialog(Answer::Discard))
+                            .destructive(),
+                    )
+                    .cancel(Button::new("Cancel").on_press(EditorMsg::Dialog(Answer::Cancel)))
+                    .confirm(Button::new("Save all").on_press(EditorMsg::Dialog(Answer::Save))),
             ),
-            footer: ButtonRow::new()
-                .aside(
-                    Button::new("Quit without saving")
-                        .on_press(EditorMsg::Dialog(1))
-                        .destructive(),
-                )
-                .cancel(Button::new("Cancel").on_press(EditorMsg::Dialog(2)))
-                .confirm(Button::new("Save all").on_press(EditorMsg::Dialog(0))),
-            on_dismiss: Some(EditorMsg::Dialog(2)),
-            anchor: None,
-        },
-    }
+    };
+    question
+        .on_dismiss(EditorMsg::Dialog(Answer::Cancel))
+        .into()
 }

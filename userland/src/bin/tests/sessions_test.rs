@@ -24,6 +24,7 @@ use slopos_abi::input::keycode::{KEY_DELETE, KEY_ENTER, KEY_LEFTALT, KEY_LEFTCTR
 use slopos_abi::syscall::{O_CLOEXEC, POLLIN, UserPollFd};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_priv_core::ENV_FD;
+use slopos_priv_core::consent;
 use slopos_userland::init_control::{self, Command as Init};
 use slopos_userland::sessions::{self as listed, Class};
 use slopos_userland::syscall::core::test_key;
@@ -183,7 +184,6 @@ fn typed_in_front(keys: impl FnOnce()) {
     keys();
 }
 
-/// The boot's own session is its one person's desktop: no login screen.
 fn one_person_boot_goes_straight_to_the_desktop() -> bool {
     if !ask_init(Init::RestartSession) {
         return false;
@@ -260,7 +260,6 @@ fn a_second_person_logs_in_at_the_login_screen() -> bool {
     true
 }
 
-/// Each desktop's processes reach its own clipboard alone.
 fn each_session_has_its_own_clipboard() -> bool {
     let (Some(carol), Some(theirs), Some(first)) = (
         carol(),
@@ -523,7 +522,10 @@ fn a_console_login_starts_a_shell_of_its_own() -> bool {
             return false;
         }
         console.type_line("priv /bin/true; echo status=$?");
-        if !console.wait_for(&format!("Password for {CAROL}: "), SESSION_DEADLINE) {
+        if !console.wait_for(
+            &format!("{}: ", consent::password_for(CAROL)),
+            SESSION_DEADLINE,
+        ) {
             return false;
         }
         console.type_line(CAROL_PASSWORD);

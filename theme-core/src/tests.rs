@@ -1,6 +1,7 @@
 use std::vec::Vec;
 
 use super::contrast::{NON_TEXT, TEXT, over, ratio};
+use super::dark::DARK;
 use super::*;
 
 const PLAIN: [ColorRole; 4] = [
@@ -38,8 +39,7 @@ fn text_reads_on_every_surface_it_sits_on() {
     }
 }
 
-/// Body text also reads where a pressed control holds it, as a menu's open
-/// title does, and secondary text on the stripes of free space.
+/// A menu's open title sits on a pressed fill, free space on its edge stripes.
 #[test]
 fn body_text_reads_pressed_and_secondary_text_on_an_edge() {
     let t = &DARK;
@@ -134,15 +134,12 @@ fn edges_focus_and_disabled_text_reach_three_to_one() {
     }
 }
 
-/// The inner pixels of a focused field's edge go from its fill to `focus`.
 #[test]
 fn a_focused_edge_changes_more_than_its_hue() {
     assert!(stroke::FOCUS > stroke::EDGE);
     assert_floor(DARK.focus, DARK.surface_sunken, NON_TEXT, "a focused edge");
 }
 
-/// A disabled control's edge is told from an enabled one's, and its tick
-/// shows on its disabled fill.
 #[test]
 fn a_disabled_control_reads_as_one() {
     let t = &DARK;
@@ -230,15 +227,8 @@ fn text_roles_descend_and_fit_their_line() {
 
 #[test]
 fn spacing_is_a_four_pixel_scale() {
-    let scale = [
-        space::XS,
-        space::SM,
-        space::MD,
-        space::LG,
-        space::XL,
-        space::XXL,
-    ];
-    assert_eq!(scale, [4, 8, 12, 16, 24, 32]);
+    let scale = [space::XS, space::SM, space::MD, space::LG, space::XL];
+    assert_eq!(scale, [4, 8, 12, 16, 24]);
     for insets in [inset::PAGE, inset::SECTION, inset::CARD, inset::CONTROL] {
         for side in [insets.top, insets.right, insets.bottom, insets.left] {
             assert!(scale.contains(&side), "{insets:?}");

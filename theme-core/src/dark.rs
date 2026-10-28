@@ -1,4 +1,6 @@
-use super::{Color32, Shadow, Theme};
+use slopos_abi::draw::Color32;
+
+use super::{Shadow, Theme};
 
 const SURFACE: Color32 = Color32::rgb(0x28, 0x2c, 0x33);
 const TEXT: Color32 = Color32::rgb(0xdc, 0xe0, 0xe5);
@@ -11,7 +13,7 @@ const CYAN: Color32 = Color32::rgb(0x56, 0xb6, 0xc2);
 const ORANGE: Color32 = Color32::rgb(0xd1, 0x9a, 0x66);
 
 /// One Dark's hues, its red lifted to read on a raised surface.
-pub static DARK: Theme = Theme {
+pub(crate) static DARK: Theme = Theme {
     surface: SURFACE,
     surface_raised: Color32::rgb(0x32, 0x37, 0x3f),
     surface_sunken: Color32::rgb(0x21, 0x25, 0x2b),

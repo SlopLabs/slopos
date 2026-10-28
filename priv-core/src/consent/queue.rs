@@ -2,7 +2,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::{Answer, Ask, EXPIRY_MS, Kind, Refusal, asks_more};
+use super::{Answer, Ask, EXPIRY_MS, Kind, Refusal, VERSION};
 
 /// How many questions may wait behind the one on screen.
 pub const WAITING_MAX: usize = 8;
@@ -20,11 +20,10 @@ pub const DECLINED_MS: u64 = 5_000;
 /// one, so privd never has more than one question in flight to it: whatever
 /// privd writes fits the channel whole, and a frame is never left torn.
 pub struct Questions<T> {
-    agent: u32,
+    agent_version: Option<u32>,
     ready: bool,
     waiting: VecDeque<(Ask, T)>,
     showing: Option<Showing<T>>,
-    /// Each uid refused lately, and until when.
     declined: Vec<(u32, u64)>,
     next_id: u64,
 }
@@ -42,7 +41,7 @@ struct Showing<T> {
 impl<T> Default for Questions<T> {
     fn default() -> Self {
         Self {
-            agent: 0,
+            agent_version: None,
             ready: false,
             waiting: VecDeque::new(),
             showing: None,
@@ -53,23 +52,22 @@ impl<T> Default for Questions<T> {
 }
 
 impl<T> Questions<T> {
-    /// The agent can draw a question now, in `version`: it says so once it
-    /// can draw, and again each time the question it was shown goes.
-    pub fn ready(&mut self, version: u32) {
-        self.agent = version;
+    /// The agent can draw a question now: it says so once it can draw, and
+    /// again each time the question it was shown goes. An agent of another
+    /// version is asked nothing: what was waiting comes back, to be refused.
+    pub fn ready(&mut self, version: u32) -> Vec<T> {
+        self.agent_version = Some(version);
         self.ready = true;
+        match version == VERSION {
+            true => Vec::new(),
+            false => self.waiting.drain(..).map(|(_, asker)| asker).collect(),
+        }
     }
 
-    /// The version the agent speaks, 0 while there is none.
-    pub fn version(&self) -> u32 {
-        self.agent
-    }
-
-    /// Queue `ask`, or hand its asker back with why it is refused at once.
     pub fn offer(&mut self, ask: Ask, asker: T, now: u64) -> Result<(), (T, Refusal)> {
-        let refusal = if self.agent == 0 {
+        let refusal = if self.agent_version.is_none() {
             Refusal::NoAgent
-        } else if !asks_more(self.agent) && ask.kind != Kind::Confirm {
+        } else if self.agent_version != Some(VERSION) {
             Refusal::Outdated
         } else if self
             .declined
@@ -95,7 +93,7 @@ impl<T> Questions<T> {
 
     /// The question to put on screen now, numbered, and its asker.
     pub fn next(&mut self, now: u64) -> Option<(Ask, &T)> {
-        if !self.ready || self.showing.is_some() {
+        if !self.ready || self.agent_version != Some(VERSION) || self.showing.is_some() {
             return None;
         }
         let (mut ask, asker) = self.waiting.pop_front()?;
@@ -132,7 +130,6 @@ impl<T> Questions<T> {
         None
     }
 
-    /// The question on screen, once it has gone unanswered too long.
     pub fn expired(&mut self, now: u64) -> Option<(u64, T)> {
         if self.showing.as_ref().is_some_and(|s| now >= s.expires) {
             return self.showing.take().map(|s| (s.id, s.asker));
@@ -191,7 +188,7 @@ impl<T> Questions<T> {
     /// The agent has gone, or another took its place, and nothing it was
     /// asked can be answered: every asker, to be refused.
     pub fn lost(&mut self) -> Vec<T> {
-        self.agent = 0;
+        self.agent_version = None;
         self.ready = false;
         let mut askers: Vec<T> = self.showing.take().map(|s| s.asker).into_iter().collect();
         askers.extend(self.waiting.drain(..).map(|(_, asker)| asker));

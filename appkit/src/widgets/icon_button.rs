@@ -4,9 +4,12 @@ use slopos_theme_core::{Icon, State, TextRole, radius, space};
 
 use super::button::Press;
 use crate::constraints::{BoxConstraints, Size};
-use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use crate::event::{EventResponse, MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
+
+/// An [`IconButton`](crate::IconButton) is square, this wide and tall.
+pub const ICON_BUTTON_SIDE: i32 = TextRole::Body.style().icon + 2 * space::SM;
 
 /// A square control showing an icon, named by its tooltip.
 pub struct IconButtonWidget {
@@ -37,10 +40,6 @@ impl IconButtonWidget {
             press: Press::default(),
         }
     }
-
-    fn side() -> i32 {
-        TextRole::Body.style().icon + space::SM * 2
-    }
 }
 
 impl Widget for IconButtonWidget {
@@ -52,19 +51,19 @@ impl Widget for IconButtonWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, _ctx: &mut MeasureCtx) -> Size {
-        constraints.constrain(Size::new(Self::side(), Self::side()))
+        constraints.constrain(Size::new(ICON_BUTTON_SIDE, ICON_BUTTON_SIDE))
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
         let theme = ctx.theme();
-        let state = match self.press.state(rect, ctx) {
+        let state = match self.press.state(self.id(), ctx) {
             _ if !self.enabled => State::Normal,
             _ if self.active => State::Pressed,
             state => state,
         };
         if state != State::Normal {
-            ctx.fill_rounded_wash(rect, radius::CONTROL, theme.overlay(state));
+            ctx.fill_rounded_rect(rect, radius::CONTROL, theme.overlay(state));
         }
         let ink = if self.enabled {
             theme.text
@@ -84,15 +83,8 @@ impl Widget for IconButtonWidget {
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        let (response, pressed) = self
-            .press
-            .event(self.layout_rect(), self.enabled, event, phase);
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
+        let (response, pressed) = self.press.event(self.layout_rect(), self.enabled, event);
         if let (true, Some(f)) = (pressed, &self.on_press) {
             sink.emit_raw(f());
         }
@@ -112,10 +104,10 @@ impl Widget for IconButtonWidget {
     }
 
     fn focus_policy(&self) -> FocusPolicy {
-        if self.enabled {
-            FocusPolicy::StrongFocus
-        } else {
-            FocusPolicy::None
-        }
+        Press::focus_policy(self.enabled)
+    }
+
+    fn hover_part(&self, x: i32, y: i32) -> Option<usize> {
+        Press::hover_part(self.enabled, self.layout_rect(), x, y)
     }
 }

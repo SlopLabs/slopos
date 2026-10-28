@@ -1,19 +1,5 @@
-//! The apps, run as the session runs them: each program at `/usr/local/bin`
-//! is dynamically linked against `libc.so`, and every app, the base's among
-//! them, loads, finds its session's compositor and names its window with the
-//! id and the name its dock entry has.
-//!
-//! The compositor here is this test, serving the session's socket through
-//! the protocol's own server: under `tests=on` init starts none, and a
-//! client's requests are what show the app came up.
-//!
-//! With `--trees`, as uid 0, the trees software is installed in: a second
-//! person makes `/usr/local` the system's, whole, which the first person then
-//! installs into for everyone through privd, allowing it by a click, but only
-//! what everyone may read and what leads nowhere outside the tree, and into
-//! their own `~/.local` holding nothing; the second person runs what
-//! everyone has, its library found in `/usr/local/lib`, and finds nothing of
-//! the first person's own.
+//! Each app names its window as its dock entry does, and each in `/usr/local`
+//! links `libc.so`; `--trees` grades installing there and in `~/.local`.
 
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -51,8 +37,6 @@ const APPS: &[(&str, &str)] = &[
     ("/bin/terminal", "org.slopos.terminal"),
 ];
 
-/// Where the apps' entries are: the base's for its own programs, else the
-/// share they were installed with.
 fn entry_name(program: &str, id: &str) -> Option<String> {
     let dir = match program.starts_with("/usr/local/") {
         true => "/usr/local/share",
@@ -68,7 +52,6 @@ fn entry_name(program: &str, id: &str) -> Option<String> {
         .map(|entry| entry.name)
 }
 
-/// The program's `PT_INTERP`, read from its ELF header and program headers.
 fn interpreter(program: &str) -> Result<Vec<u8>, String> {
     let elf = std::fs::read(program).map_err(|e| format!("{program}: {e}"))?;
     let word = |at: usize, len: usize| -> Option<u64> {
@@ -104,8 +87,7 @@ fn exited(child: &mut Child) -> Option<String> {
     }
 }
 
-/// Serve `program` as its compositor until it names its window's app id:
-/// that id, and the title it gave the window before it.
+/// The app id `program` names its window with, and the title before it.
 fn app_id_of(program: &str) -> Result<(String, String), String> {
     let path = slopos_protocol::socket_path(slopos_userland::syscall::process::geteuid());
     let shown = String::from_utf8_lossy(&path).into_owned();
@@ -269,7 +251,6 @@ fn fail(why: impl std::fmt::Display) -> bool {
     false
 }
 
-/// `/bin/users` asked of privd as root: its status.
 fn users(args: &[&str]) -> Option<i32> {
     Command::new("/bin/users")
         .args(args)
@@ -471,9 +452,8 @@ fn entries(top: &Path) -> Vec<(PathBuf, fs::Metadata)> {
     out
 }
 
-/// A second person makes `/usr/local` the system's to its last entry, so the
-/// first person writes there no more. The apps' manifest stays theirs, which
-/// uid 0 then installs over without believing.
+/// Every entry becomes uid 0's, but the apps' manifest stays the first
+/// person's, which uid 0 installs over without believing.
 fn a_second_person_makes_usr_local_the_system_s() -> bool {
     if users(&["add", BOB, "--keep-autologin"]) != Some(0) || bob().is_none() {
         return fail(format!("{BOB} was not added"));
@@ -518,9 +498,7 @@ fn a_second_person_makes_usr_local_the_system_s() -> bool {
         ))
 }
 
-/// The first person installs a tree for everyone: `tree-install` asks privd,
-/// they allow it by a click at their desktop, and it is installed as uid
-/// 0's, writable by uid 0 alone whatever the tree's modes say.
+/// What goes in is writable by uid 0 alone, whatever the tree's modes say.
 fn the_first_person_installs_for_everyone_through_privd() -> bool {
     let (Ok(loader), Ok(library)) = (
         fs::read("/bin/dl_search_rpath"),
@@ -567,9 +545,8 @@ fn the_first_person_installs_for_everyone_through_privd() -> bool {
     }
 }
 
-/// `tree-install` of `tree` as `name` at `/usr/local`, asked by the first
-/// person and allowed by their click, asked again while their desktop cannot
-/// yet show the question: its status and what it said.
+/// `tree-install` as the first person, allowed by their click and asked again
+/// while their desktop cannot yet show the question: its status and output.
 fn install_for_everyone(name: &str, tree: &Path) -> (Option<i32>, String) {
     let Some(desktop) = sessions::front_desktop() else {
         return (None, "no desktop came in front to ask".into());
@@ -598,8 +575,8 @@ fn install_for_everyone(name: &str, tree: &Path) -> (Option<i32>, String) {
     }
 }
 
-/// What not everyone may read goes into `/usr/local` for nobody, whatever
-/// privd's mechanism, uid 0, may read: the install is refused.
+/// The install is refused although privd's mechanism, as uid 0, could read
+/// the file.
 fn a_tree_holding_what_not_everyone_may_read_is_refused() -> bool {
     let Some(tree) = stage(
         SECRET,
@@ -625,8 +602,8 @@ fn a_tree_holding_what_not_everyone_may_read_is_refused() -> bool {
         || fail(format!("{code:?} {said:?}, and {landed:?} installed"))
 }
 
-/// A link leading out of a tree, which would have everyone's command run
-/// what its requester may change, refuses the install.
+/// Such a link would have everyone's command run what its requester may
+/// change.
 fn a_tree_whose_link_leads_out_of_it_is_refused() -> bool {
     let Some(tree) = stage(OUTWARD, &[("bin/apps-outward", &script("outward"), 0o755)]) else {
         return false;
@@ -651,9 +628,7 @@ fn a_tree_whose_link_leads_out_of_it_is_refused() -> bool {
         || fail(format!("{code:?} {said:?}, and {landed:?} installed"))
 }
 
-/// The first person installs a tree of their own into `~/.local` holding
-/// nothing and asking nobody, its manifest kept in their home, and runs it
-/// by its name.
+/// The tree goes into `~/.local` unasked, its manifest kept in their home.
 fn the_first_person_installs_their_own_holding_nothing() -> bool {
     let Some(tree) = stage(
         OWN,
@@ -683,10 +658,9 @@ fn the_first_person_installs_their_own_holding_nothing() -> bool {
         || fail(format!("{OWN_COMMAND} for its person: {code:?} {said:?}"))
 }
 
-/// The second person runs what everyone has, by its name and its link, a
-/// program of it loading its library from `/usr/local/lib`, and finds
-/// nothing of the first person's own: not by its name, and not by its path
-/// through a home the root made for its person alone.
+/// Everyone's runs by its name and its link, loading its library from
+/// `/usr/local/lib`; the first person's own runs neither by name nor by a path
+/// through their home.
 fn the_second_person_runs_everyone_s_and_not_the_first_s_own() -> bool {
     let Some(bob) = bob() else {
         return fail(format!("{BOB} has no uid"));

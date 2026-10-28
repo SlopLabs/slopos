@@ -1,12 +1,11 @@
-//! The installer as a person at a terminal runs it: each choice a question
-//! or a flag, the proposal summarised and confirmed by typing, and the
-//! install's events printed as lines.
+//! The installer at a terminal: each choice a question or a flag, the
+//! proposal confirmed by typing, and the install's events printed as lines.
 
 use std::io::{Write, stdin, stdout};
 
 use slopos_installer_core::{
-    Choices, DEFAULT_REMOTE, Event, FIRST_PERSON, Issue, Mode, Person, capitalised, human,
-    parse_size,
+    Choices, DEFAULT_REMOTE, Event, FIRST_PERSON, Issue, Mode, NOTHING_WRITTEN, Person, disk_size,
+    parse_size, short,
 };
 
 use super::disk::Disk;
@@ -50,9 +49,10 @@ const USAGE: &str = "usage: installer [--disk /dev/<disk>] [--mode erase|free|re
                  the disk has them
   --region       the free space new partitions go into, by its number in the
                  disk's listing (default: the largest)
-  --root-size    how large SlopOS's partition is, as 20GB or 512MB (default:
-                 all the free space gives); the crash record partition
-                 follows it and the rest stays free
+  --root-size    how large SlopOS's partition is, in decimal units as 20GB,
+                 512MB or 1.5TB, a bare number being GB (default: all the
+                 free space gives); the crash record partition follows it
+                 and the rest stays free
   --root         the partition reuse installs SlopOS on
   --keep-root    keep the SlopOS that partition holds, its accounts and their
                  files, updating /usr/local
@@ -96,7 +96,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--root-size" => {
                 let text = value()?;
                 opts.root_size = Some(parse_size(&text).ok_or_else(|| {
-                    format!("--root-size {text}: a size such as 20GB, 512MB or 20GiB")
+                    format!("--root-size {text}: a size such as 20GB, 512MB or 1.5TB")
                 })?);
             }
             "--root" => opts.root = Some(value()?),
@@ -153,13 +153,18 @@ fn choose_disk(system: &System) -> Result<String, String> {
     println!("Disks:");
     for found in &system.disks {
         let node = &found.node;
-        if let State::Refused(why) = found.state {
-            println!("{node}: {} It isn't offered.", why.words());
-            continue;
-        }
-        match found.disk() {
-            Ok(disk) => print!("{}", disk.describe(found.model.as_deref())),
-            Err(why) => println!("{node}: {why}"),
+        let model = found.model.as_deref();
+        match &found.state {
+            State::Refused(why) => {
+                println!("{node}: {} It isn't offered.", why.words());
+                continue;
+            }
+            State::Unreadable(why) => {
+                println!("{why}");
+                continue;
+            }
+            State::Listed(disk) => print!("{}", disk.describe(model)),
+            State::Opened(open) => print!("{}", open.disk.describe(model)),
         }
         offered.push(node.as_str());
     }
@@ -181,11 +186,11 @@ fn disk_node(named: String) -> String {
 }
 
 fn choose_kind(disk: &Disk) -> Result<Kind, String> {
-    if disk.table.is_none() {
+    if let Err(held) = &disk.table {
         println!(
             "{}: {} SlopOS is installed by erasing it.",
             disk.node,
-            disk.contents.only_erase()
+            held.only_erase()
         );
         return Ok(Kind::Erase);
     }
@@ -257,7 +262,7 @@ fn choose_person(named: Option<String>, no_password: bool) -> Result<Person, Str
     }
     let again = crate::secret::read("Again: ")?.ok_or("The password wasn't typed again.")?;
     if again != typed {
-        return Err("The two passwords differ. Nothing was written.".into());
+        return Err(format!("The two passwords differ. {NOTHING_WRITTEN}"));
     }
     Ok(Person {
         name,
@@ -292,10 +297,12 @@ fn settle(opts: Options, system: &mut System) -> Result<(Choices, Settled), Stri
     if kind == Kind::Reuse && opts.root_size.is_some() {
         return Err(issue(Issue::RootSize));
     }
-    if kind != Kind::Erase && disk.table.is_none() {
+    if kind != Kind::Erase
+        && let Err(held) = &disk.table
+    {
         return Err(issue(Issue::OnlyErase {
             node,
-            contents: disk.contents.clone(),
+            contents: held.clone(),
         }));
     }
     let asked = opts.mode.is_none();
@@ -393,7 +400,7 @@ fn settle(opts: Options, system: &mut System) -> Result<(Choices, Settled), Stri
 
 fn confirm(p: &Settled) -> Result<(), String> {
     let (want, question) = if p.view.erase {
-        let name = p.disk().rsplit('/').next().unwrap_or(p.disk()).to_owned();
+        let name = short(p.disk()).to_owned();
         let question = format!("Type {name} to erase it");
         (name, question)
     } else {
@@ -403,7 +410,7 @@ fn confirm(p: &Settled) -> Result<(), String> {
     if answer == want {
         Ok(())
     } else {
-        Err("Nothing was written.".to_owned())
+        Err(NOTHING_WRITTEN.to_owned())
     }
 }
 
@@ -416,11 +423,7 @@ struct Lines {
 impl Events for Lines {
     fn event(&mut self, event: Event) {
         match event {
-            Event::Step {
-                index,
-                total,
-                title,
-            } => println!("installer: [{index}/{total}] {}", capitalised(&title)),
+            Event::Step(step) => println!("installer: {step}"),
             Event::Log { line } => println!("installer:   {line}"),
             Event::Progress { done, total } => {
                 if done < self.reported {
@@ -428,7 +431,11 @@ impl Events for Lines {
                 }
                 if done - self.reported >= PROGRESS_EVERY {
                     self.reported = done;
-                    println!("installer:   {} of {} copied", human(done), human(total));
+                    println!(
+                        "installer:   {} of {} copied",
+                        disk_size(done),
+                        disk_size(total)
+                    );
                 }
             }
         }
@@ -452,7 +459,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let (choices, proposal) = settle(opts, &mut system)?;
     let summary = system
         .install(&choices, &proposal, &mut Lines::default())
-        .map_err(|failure| failure.message)?;
+        .map_err(|failure| failure.to_string())?;
     println!("installer: {summary} Remove the USB stick or DVD, then restart.");
     Ok(())
 }

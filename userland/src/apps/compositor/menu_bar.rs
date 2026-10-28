@@ -1,54 +1,47 @@
-//! System bar rendering and state for the SlopOS compositor.
-//!
-//! The system bar is the 24 px strip at the top of the screen: a system icon
-//! and the active application's name on the left, status items packed against
-//! the right edge.
-//!
-//! Hover repaints nothing here — [`super::hover::HoverRegistry`] already emits
-//! both the old and the new rect when a hover flips.
+//! The menu bar: the system menu's mark and the focused app's name on the
+//! left, the status items on the right; the hover registry damages a hover.
 
 use slopos_appkit::text::ui;
 use slopos_chrome_core::clock::WallTime;
-use slopos_chrome_core::status::{StatusLayout, hit_status_item, layout_status_items};
+use slopos_chrome_core::status::{
+    BAR_HEIGHT, BAR_PADDING_X, StatusLayout, hit_status_item, layout_status_items,
+};
 use slopos_gfx::rounded::Rounded;
-use slopos_theme_core::{TextRole, TextStyle};
+use slopos_theme_core::{TextRole, space, with_alpha};
 
 use super::hover::HOVER_STATUS_ITEM_BASE;
 use super::popover::Panel;
 use super::status_item::{STATUS_ITEM_COUNT, StatusItems, hover_rect};
 use crate::gfx::{self, DamageRect, DrawBuffer};
-use crate::theme::*;
 
-/// The focused app's name.
-const NAME: TextStyle = TextRole::Heading.style();
+const NAME: TextRole = TextRole::Heading;
+const NAME_MAX_WIDTH: i32 = 200;
+const MARK_SIZE: i32 = 8;
+const MARK_GAP: i32 = space::SM;
+/// Over the wallpaper, so a little of it shows through.
+const OPACITY: u8 = 0xcc;
 
-/// Damage rects [`SystemBar::take_damage`] can emit in one frame: one per
-/// item, or the single spanning rect a layout change produces.
+/// One per item, or the one spanning rect a change of layout gives.
 pub const MAX_BAR_DAMAGE: usize = STATUS_ITEM_COUNT;
 
 /// A cursor position no bar pixel can hold, for geometry-only layouts.
 const NO_CURSOR: i32 = i32::MIN;
 
-/// The system icon is 8 px; its press target runs from the screen's edge to
-/// halfway to the app name.
-const SYSTEM_ICON_HIT_W: i32 =
-    SYSTEM_BAR_PADDING_X + SYSTEM_BAR_ICON_SIZE + SYSTEM_BAR_ICON_GAP / 2;
+/// The mark's press target runs from the screen's edge to halfway to the
+/// app's name.
+const MARK_HIT_W: i32 = BAR_PADDING_X + MARK_SIZE + MARK_GAP / 2;
+const NAME_X: i32 = BAR_PADDING_X + MARK_SIZE + MARK_GAP;
 
-pub struct SystemBar {
+pub struct MenuBar {
     items: StatusItems,
-    /// Layout digest as of the last damage pass. A change means items moved.
     last_signature: u64,
-    /// Per-item content revisions as of the last damage pass.
     last_revision: [u32; STATUS_ITEM_COUNT],
-    /// Left edge of the leftmost item as of the last damage pass, so a layout
-    /// change also repaints the strip the items *used* to occupy.
+    /// So a change of layout also repaints where the items were.
     last_leftmost: i32,
-    /// Screen width the last damage pass laid out against. Every slot moves
-    /// with it, so a change is a layout change even at an equal signature.
     last_screen_width: i32,
 }
 
-impl SystemBar {
+impl MenuBar {
     pub fn new() -> Self {
         Self {
             items: StatusItems::new(),
@@ -59,129 +52,91 @@ impl SystemBar {
         }
     }
 
-    /// Publish the network indicator's state; an unchanged rendered state bumps
-    /// no revision and therefore produces no damage.
-    pub fn set_network(&mut self, present: bool, state: slopos_chrome_core::NetIndicatorState) {
+    pub fn set_network(
+        &mut self,
+        present: bool,
+        state: slopos_chrome_core::netstate::NetIndicatorState,
+    ) {
         self.items.set_network(present, state);
     }
 
-    /// Where the status items sit — the single geometry source, for draw,
-    /// hit-test, hover and damage alike.
     fn layout(&self, screen_width: u32, cursor_x: i32, cursor_y: i32) -> StatusLayout {
         layout_status_items(self.items.specs(), screen_width as i32, cursor_x, cursor_y)
     }
 
-    /// Render the system bar onto the buffer.
-    ///
-    /// `active_app_name`: the focused window's app, or "SlopOS" if none, in
-    /// the heading role.
-    /// `cursor_x` / `cursor_y`: the pointer, for the hovered item's backdrop.
+    fn name_budget(layout: &StatusLayout) -> i32 {
+        (layout.app_name_limit - NAME_X).min(NAME_MAX_WIDTH)
+    }
+
     pub fn draw(
         &self,
         buf: &mut DrawBuffer,
         screen_width: u32,
-        active_app_name: &str,
+        app_name: &str,
         cursor_x: i32,
         cursor_y: i32,
-        clip: Option<DamageRect>,
+        clip: &DamageRect,
     ) {
+        let theme = slopos_theme_core::current();
         let sw = screen_width as i32;
-        let bar_h = SYSTEM_BAR_HEIGHT;
+        let fill = with_alpha(theme.chrome, OPACITY);
+        gfx::fill_rect_blended_clipped(buf, 0, 0, sw, BAR_HEIGHT, fill, clip);
+        gfx::fill_rect_clipped(buf, 0, BAR_HEIGHT, sw, 1, theme.border, clip);
 
-        let full_clip = DamageRect {
-            x0: 0,
-            y0: 0,
-            x1: sw - 1,
-            y1: bar_h, // includes the 1 px border row
-        };
-        let clip = clip.unwrap_or(full_clip);
-
-        gfx::fill_rect_blended_clipped(buf, 0, 0, sw, bar_h, BAR_BG, &clip);
-        gfx::fill_rect_clipped(buf, 0, bar_h, sw, 1, DIVIDER, &clip);
+        let mark = Rounded::circle(BAR_PADDING_X, (BAR_HEIGHT - MARK_SIZE) / 2, MARK_SIZE);
+        mark.draw(buf, clip, theme.accent);
 
         let layout = self.layout(screen_width, cursor_x, cursor_y);
-
-        let mut cursor = SYSTEM_BAR_PADDING_X;
-
-        let mark = Rounded::circle(
-            cursor,
-            (bar_h - SYSTEM_BAR_ICON_SIZE) / 2,
-            SYSTEM_BAR_ICON_SIZE,
-        );
-        mark.fill(buf, &mark.bounds(), &clip, |_, _| ACCENT);
-        cursor += SYSTEM_BAR_ICON_SIZE + SYSTEM_BAR_ICON_GAP;
-
-        let name = if active_app_name.is_empty() {
-            "SlopOS"
-        } else {
-            active_app_name
-        };
-        let text_y = ui::centred_top(0, bar_h, NAME.size);
-        let name_budget = (layout.app_name_limit - cursor).min(SYSTEM_BAR_MAX_APP_NAME_WIDTH);
-
-        if name_budget > 0 {
+        let budget = Self::name_budget(&layout);
+        if budget > 0 && !app_name.is_empty() {
+            // Its edges are anti-aliased towards the bar's own colour rather
+            // than whatever the wallpaper put behind it.
             ui::draw_elided(
                 buf,
-                cursor,
-                text_y,
-                name,
-                NAME.size,
-                NAME.weight,
-                name_budget,
-                TEXT_PRIMARY,
-                BAR_INK_BG,
-                &clip,
+                NAME_X,
+                ui::centred_top(0, BAR_HEIGHT, NAME),
+                app_name,
+                NAME,
+                budget,
+                theme.text,
+                theme.chrome,
+                clip,
             );
         }
 
         for (index, slot) in layout.slots().iter().enumerate() {
             self.items
-                .draw(buf, slot, layout.hovered == Some(index), &clip);
+                .draw(buf, slot, layout.hovered == Some(index), clip);
         }
     }
 
-    /// Whether `py` falls inside the bar strip.  The bar spans the full width,
-    /// so x says nothing; which *item* it is over is [`Self::hit_test`].
     pub fn covers(py: i32) -> bool {
-        py >= 0 && py < SYSTEM_BAR_HEIGHT
+        (0..BAR_HEIGHT).contains(&py)
     }
 
-    /// Which panel the item at `(px, py)` opens: the system icon's or a
-    /// status item's.  Laid out at the passed position, so a click batched
-    /// with the motion that brought the cursor here is tested against where
-    /// the cursor now is.
+    /// Which panel the item at `(px, py)` opens, laid out at that position.
     pub fn hit_test(&self, screen_width: u32, px: i32, py: i32) -> Option<Panel> {
-        if Self::covers(py) && (0..SYSTEM_ICON_HIT_W).contains(&px) {
+        if Self::covers(py) && (0..MARK_HIT_W).contains(&px) {
             return Some(Panel::System);
         }
         let layout = self.layout(screen_width, px, py);
         hit_status_item(&layout, px, py).map(Panel::Status)
     }
 
-    /// The screen rect an item occupies, for anchoring its popover.
+    /// What `panel`'s popover hangs from.
     pub fn item_rect(&self, screen_width: u32, panel: Panel) -> Option<DamageRect> {
-        let kind = match panel {
-            Panel::System => {
-                return Some(DamageRect {
-                    x0: SYSTEM_BAR_PADDING_X,
-                    y0: 0,
-                    x1: SYSTEM_BAR_PADDING_X + SYSTEM_BAR_ICON_SIZE - 1,
-                    y1: SYSTEM_BAR_HEIGHT,
-                });
+        let (x, w) = match panel {
+            Panel::System => (BAR_PADDING_X, MARK_SIZE),
+            Panel::Status(kind) => {
+                let layout = self.layout(screen_width, NO_CURSOR, NO_CURSOR);
+                let slot = layout.slot_for(kind)?;
+                (slot.x, slot.w)
             }
-            Panel::Status(kind) => kind,
         };
-        let layout = self.layout(screen_width, NO_CURSOR, NO_CURSOR);
-        layout.slot_for(kind).map(|slot| DamageRect {
-            x0: slot.x,
-            y0: 0,
-            x1: slot.x + slot.w - 1,
-            y1: SYSTEM_BAR_HEIGHT,
-        })
+        Some(strip(x, x + w - 1))
     }
 
-    /// The hover regions to register for this frame: one `(id, rect, hovered)`
-    /// per placed item.
+    /// One `(id, rect, hovered)` per placed item.
     pub fn hover_regions(
         &self,
         screen_width: u32,
@@ -205,34 +160,18 @@ impl SystemBar {
         count
     }
 
-    /// The strip the system icon and the app-name text occupy.
-    ///
-    /// Nothing else in the frame damages `y < 24` when focus moves, so without
-    /// this the name stays stale.  Bounded by the leftmost status item and by
-    /// [`SYSTEM_BAR_MAX_APP_NAME_WIDTH`], which the text is truncated at
-    /// anyway.
+    /// Where the mark and the app's name are drawn, which nothing else in a
+    /// frame repaints when focus moves.
     pub fn app_name_damage(&self, screen_width: u32) -> DamageRect {
         let layout = self.layout(screen_width, NO_CURSOR, NO_CURSOR);
-        let text_x = SYSTEM_BAR_PADDING_X + SYSTEM_BAR_ICON_SIZE + SYSTEM_BAR_ICON_GAP;
-        let budget = (layout.app_name_limit - text_x)
-            .min(SYSTEM_BAR_MAX_APP_NAME_WIDTH)
-            .max(0);
-        DamageRect {
-            x0: SYSTEM_BAR_PADDING_X,
-            y0: 0,
-            x1: text_x + budget,
-            y1: SYSTEM_BAR_HEIGHT,
-        }
+        strip(BAR_PADDING_X, NAME_X + Self::name_budget(&layout).max(0))
     }
 
-    /// Show `now` on the clock and report what changed since the previous
-    /// call. Returns how many rects were written to `out`, which must hold at
-    /// least [`MAX_BAR_DAMAGE`].
-    ///
-    /// A layout change — an item appeared, vanished, changed width, or the
-    /// screen resized — moves everything left of it, so it emits one rect from
-    /// the leftmost of (previous, current) to the right edge.  A content change
-    /// emits that item's slot alone.
+    /// Show `now` on the clock and say what changed since the last call, in
+    /// `out`, which holds at least [`MAX_BAR_DAMAGE`]. A change of layout
+    /// moves everything left of it, so it repaints from the leftmost item,
+    /// before or after, to the right edge; a change of content repaints the
+    /// item alone.
     pub fn take_damage(
         &mut self,
         screen_width: u32,
@@ -248,38 +187,22 @@ impl SystemBar {
             .iter()
             .map(|slot| slot.x)
             .min()
-            .unwrap_or(sw - SYSTEM_BAR_PADDING_X);
+            .unwrap_or(sw - BAR_PADDING_X);
 
         let mut count = 0usize;
-        let layout_changed =
-            layout.signature != self.last_signature || sw != self.last_screen_width;
-
-        if layout_changed {
-            let x0 = leftmost.min(self.last_leftmost).max(0);
-            push(
-                out,
-                &mut count,
-                DamageRect {
-                    x0,
-                    y0: 0,
-                    x1: sw - 1,
-                    y1: SYSTEM_BAR_HEIGHT,
-                },
-            );
+        let mut push = |rect: DamageRect| {
+            if count < out.len() {
+                out[count] = rect;
+                count += 1;
+            }
+        };
+        if layout.signature != self.last_signature || sw != self.last_screen_width {
+            push(strip(leftmost.min(self.last_leftmost).max(0), sw - 1));
         } else {
             let revisions = self.items.revisions();
             for slot in layout.slots() {
                 if revisions[slot.idx] != self.last_revision[slot.idx] {
-                    push(
-                        out,
-                        &mut count,
-                        DamageRect {
-                            x0: slot.x,
-                            y0: 0,
-                            x1: slot.x + slot.w - 1,
-                            y1: SYSTEM_BAR_HEIGHT,
-                        },
-                    );
+                    push(strip(slot.x, slot.x + slot.w - 1));
                 }
             }
         }
@@ -292,9 +215,12 @@ impl SystemBar {
     }
 }
 
-fn push(out: &mut [DamageRect], count: &mut usize, rect: DamageRect) {
-    if *count < out.len() {
-        out[*count] = rect;
-        *count += 1;
+/// The bar from `x0` to `x1`, its border row included.
+fn strip(x0: i32, x1: i32) -> DamageRect {
+    DamageRect {
+        x0,
+        y0: 0,
+        x1,
+        y1: BAR_HEIGHT,
     }
 }

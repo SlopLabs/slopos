@@ -2,14 +2,12 @@ use slopos_abi::draw::Color32;
 use slopos_gfx::image::ImageSampling;
 use std::sync::Arc;
 
-use slopos_theme_core::{Icon, Surface, TextRole, Tone};
+use slopos_theme_core::{EdgeInsets, Icon, Surface, TextRole, Tone};
 
-use super::components::{ButtonRow, Disclosure, IconButton, List, Tag, Text, WindowSpec};
-
-use super::constraints::Orientation;
-use super::constraints::{
-    CrossAxisAlignment, EdgeInsets, ImageScale, Length, Rect, ScrollDirection, ScrollbarVisibility,
+use super::components::{
+    Button, ButtonRow, Disclosure, IconButton, List, PropertyList, Tag, Text, WindowSpec,
 };
+use super::constraints::{CrossAxisAlignment, ImageScale, Length, Orientation, Rect};
 use super::event::{Key, Modifiers};
 use super::sender::AppSender;
 use super::widgets::code_view::{CodeInput, CodeLine};
@@ -20,9 +18,8 @@ use super::widgets::menu_bar::MenuBarInput;
 use super::widgets::slider::{SliderGrab, SliderInput};
 use super::widgets::tree_view::{TreeInput, TreeRow};
 
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ButtonStyle {
-    #[default]
     Primary,
     Secondary,
     Destructive,
@@ -40,7 +37,6 @@ pub struct MenuItem {
 pub enum MenuItemKind {
     Action,
     Separator,
-    Submenu(Vec<MenuItem>),
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -85,14 +81,6 @@ impl ImageData {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct RadioOption {
-    pub label: String,
-    /// A second line under the label, as why the option is disabled.
-    pub detail: String,
-    pub enabled: bool,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SegmentFill {
     /// The theme's `n`th categorical colour.
@@ -116,8 +104,8 @@ pub struct TableColumn {
     pub sort_indicator: Option<SortIndicator>,
 }
 
-/// Declarative tree an app builds in `view()`; the framework diffs it against
-/// the previous one to update retained widgets.
+/// What an app's `view` builds, which the framework turns into a widget tree
+/// anew after every rebuild.
 pub enum Node<M> {
     Text(Text),
     /// A glyph of the icon font, at the size of text in `role`.
@@ -132,31 +120,12 @@ pub enum Node<M> {
     Avatar {
         name: String,
     },
-    Button {
-        label: String,
-        /// `None` leaves the button non-interactive; `Some` emits on click.
-        on_press: Option<M>,
-        style: ButtonStyle,
-        enabled: bool,
-    },
-    TextField {
-        text: String,
-        placeholder: String,
-        on_change: Option<fn(String) -> M>,
-        max_length: Option<usize>,
-        read_only: bool,
-    },
+    Button(Button<M>),
     Checkbox {
         checked: bool,
         label: String,
         on_toggle: Option<M>,
         enabled: bool,
-    },
-    /// One option of several, chosen by a click, the arrows or Space.
-    RadioGroup {
-        options: Vec<RadioOption>,
-        selected: Option<usize>,
-        on_select: Option<fn(usize) -> M>,
     },
     /// A horizontal slider over `min + k * step` up to `max`, and `max`.
     Slider {
@@ -190,17 +159,14 @@ pub enum Node<M> {
         highlight: Option<usize>,
     },
     ButtonRow(ButtonRow<M>),
-    /// Rows of a name and its value; see [`crate::PropertyList`].
-    PropertyList(Vec<(String, Node<M>)>),
+    PropertyList(PropertyList<M>),
     List(List<M>),
     Tag(Tag),
     Disclosure(Box<Disclosure<M>>),
 
+    /// A view down a child taller than it.
     ScrollView {
         child: Box<Node<M>>,
-        direction: ScrollDirection,
-        show_scrollbar: ScrollbarVisibility,
-        /// Initial scroll offset (preserved across rebuilds).
         scroll_y: i32,
         /// Emitted with the new `offset_y` whenever it changes, for the app to
         /// give back as `scroll_y`; a rebuild in answer would end a thumb drag.
@@ -208,12 +174,6 @@ pub enum Node<M> {
         /// Reports its end as `i32::MAX`, which given back keeps it there as
         /// it grows.
         follow_end: bool,
-    },
-    ListView {
-        item_height: i32,
-        selected: Option<usize>,
-        on_select: Option<fn(usize) -> M>,
-        items: Vec<Node<M>>,
     },
     TabBar {
         tabs: Vec<String>,
@@ -228,12 +188,10 @@ pub enum Node<M> {
     Table {
         columns: Vec<TableColumn>,
         rows: Vec<Vec<Node<M>>>,
-        row_height: i32,
         selected: Option<usize>,
         on_select: Option<fn(usize) -> M>,
         /// Emitted by Enter and by a click on the row already chosen.
         on_activate: Option<fn(usize) -> M>,
-        /// `None` leaves headers unclickable; `Some` emits with the column index.
         on_header_click: Option<fn(usize) -> M>,
         /// Emitted on secondary click and on Menu / Shift+F10, after selection
         /// has moved to the row.
@@ -253,9 +211,8 @@ pub enum Node<M> {
         /// What the card centres over, where it fits; the page when none.
         anchor: Option<Rect>,
     },
-    /// Child floated at an absolute window position, clamped on-screen. A click
-    /// outside it or an Escape press emits `on_dismiss`, leaving the app's own
-    /// state the single source of truth for whether the popup is open.
+    /// A child floated at a window position, kept on screen; a click outside it
+    /// or Escape emits `on_dismiss`, and the app closes it.
     Popup {
         x: i32,
         y: i32,
@@ -292,10 +249,10 @@ pub enum Node<M> {
         surface: Surface,
         child: Box<Node<M>>,
     },
-    /// A floating surface: filled, rounded, optionally bordered, with a shadow.
+    /// A rounded surface inside an edge, with a shadow when it floats above
+    /// the page.
     Card {
         surface: Surface,
-        border: bool,
         shadow: bool,
         child: Box<Node<M>>,
     },
@@ -303,11 +260,6 @@ pub enum Node<M> {
         width: Option<Length>,
         height: Option<Length>,
         child: Box<Node<M>>,
-    },
-
-    Canvas {
-        width: i32,
-        height: i32,
     },
 
     /// A viewport of code: the lines given are the lines drawn, and every
@@ -325,10 +277,10 @@ pub enum Node<M> {
         selection: Option<((usize, usize), (usize, usize))>,
         show_line_numbers: bool,
         focused: bool,
-        /// A selection drag is live; the application sets this between the press
-        /// and the release.
+        /// A selection drag is live, from the press to the release, since the
+        /// tree is rebuilt between them.
         selecting: bool,
-        /// A scrollbar drag is live, for the same reason.
+        /// A scrollbar drag is live, likewise.
         scroll_dragging: bool,
         on_input: Option<fn(CodeInput) -> M>,
     },
@@ -340,8 +292,7 @@ pub enum Node<M> {
         total_rows: usize,
         selected: Option<usize>,
         focused: bool,
-        /// A scrollbar drag is live; the application sets this between the
-        /// press and the release, because the tree is rebuilt in between.
+        /// A scrollbar drag is live, from the press to the release.
         scroll_dragging: bool,
         on_input: Option<fn(TreeInput) -> M>,
     },
@@ -361,7 +312,7 @@ pub enum Node<M> {
     LineEdit {
         text: String,
         placeholder: String,
-        /// Caret position, in characters.
+        /// In characters.
         caret: usize,
         focused: bool,
         icon: Option<Icon>,
@@ -390,7 +341,7 @@ pub trait App {
 
     fn update(&mut self, msg: Self::Message) -> Action;
 
-    /// Called once, before the first [`App::view`], with the handle a thread
+    /// Called once before the first [`App::view`], with the handle a thread
     /// sends this app messages through.
     fn on_start(&mut self, _sender: AppSender<Self::Message>) -> Action {
         Action::None
@@ -401,7 +352,7 @@ pub trait App {
         0
     }
 
-    /// Return `Some(ms)` to receive [`App::tick`] calls at that interval.
+    /// How often [`App::tick`] is called, if at all.
     fn tick_interval_ms(&self) -> Option<u64> {
         None
     }
@@ -410,51 +361,37 @@ pub trait App {
         Action::None
     }
 
-    /// Called when a key event is not consumed by any widget.
+    /// A key no widget took.
     fn on_key(&mut self, _key: Key, _modifiers: Modifiers) -> Action {
         Action::None
     }
 
-    /// Called with the selection some time after
-    /// [`crate::clipboard::request_paste`].
+    /// The selection, some time after [`crate::clipboard::request_paste`].
     fn on_paste(&mut self, _text: String) -> Action {
         Action::None
     }
 
-    /// Called when the window's close button is pressed.
-    ///
-    /// Returning `false` refuses the close, which is what lets an application
-    /// ask before discarding unsaved work; the default accepts it. An
-    /// application that refuses is responsible for offering the user a way out
-    /// — a confirmation dialog — and for exiting itself once they choose.
+    /// The close button was pressed: `false` refuses, to ask first, and the
+    /// app then exits itself once the person has answered.
     fn on_close_request(&mut self) -> (bool, Action) {
         (true, Action::None)
     }
 
-    /// Called when the compositor resizes the window, before the tree rebuilds.
-    ///
-    /// An app that sizes its own content in rows — an editor's viewport, a
-    /// list's page — needs the window's size, and the size it was launched with
-    /// is only the first one it has.
+    /// The compositor resized the window; the tree rebuilds after.
     fn on_resize(&mut self, _width: u32, _height: u32) -> Action {
         Action::None
     }
 
-    /// The window's title, read again after every rebuild; a window showing
-    /// a document is titled by [`document_title`].
-    fn title(&self) -> String {
-        String::from("SlopOS App")
-    }
+    /// Read again after every rebuild; a window showing a document is titled
+    /// by [`document_title`].
+    fn title(&self) -> String;
 
-    /// Read once at startup.
-    fn window(&self) -> WindowSpec {
-        WindowSpec::default()
-    }
+    /// Read once, at start.
+    fn window(&self) -> WindowSpec;
 
-    /// App ID for the compositor (e.g. "org.slopos.sysmon").
-    fn app_id(&self) -> &str {
-        ""
-    }
+    /// The id the dock and the compositor know the app by, as
+    /// `org.slopos.sysmon`.
+    fn app_id(&self) -> &str;
 }
 
 /// A window's title that names its document: `notes.txt — Editor`.

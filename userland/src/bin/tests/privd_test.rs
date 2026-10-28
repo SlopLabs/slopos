@@ -204,7 +204,6 @@ fn root_runs_an_action_holding_its_capabilities() -> bool {
     true
 }
 
-/// What the mechanism exits with is what the requester is told.
 fn the_mechanism_s_exit_status_comes_back() -> bool {
     let Some(mut privd) = connect() else {
         return false;
@@ -570,7 +569,6 @@ fn holds_privd() -> i32 {
     i32::from((3..256).any(to_privd))
 }
 
-/// A uid no principal names is refused every action.
 fn a_uid_the_policy_names_nowhere_is_refused() -> bool {
     match run_self(&[STRANGER_ARG], STRANGER, None) {
         Some(out) if out.status.success() => true,
@@ -1126,8 +1124,7 @@ fn alone_beside_another(bob: u32) -> bool {
 }
 
 /// With a desktop up, the first person, an administrator without a password,
-/// is asked for a click as they always were: Tab and Enter allow, Escape
-/// refuses.
+/// is asked for a click: Tab and Enter allow, Escape refuses.
 fn the_first_person_s_click_allows_and_escape_denies() -> bool {
     if users(
         &["passwd", ALICE],
@@ -1154,10 +1151,6 @@ fn the_first_person_s_click_allows_and_escape_denies() -> bool {
     true
 }
 
-/// The dialog the compositor draws, for each shape of question, passes the
-/// layout audit at a phone's, a laptop's and a monitor's width: nothing cut,
-/// nothing over anything else, focus shown all the way round, and every
-/// line of text against what is behind it.
 fn every_question_reads_whole_at_every_width() -> bool {
     use slopos_priv_core::consent::{ARMING_MS, Ask, Dialog, Focus, Kind, MAX_ADMINS, MAX_SHOWN};
     let ask = Ask {
@@ -1175,7 +1168,7 @@ fn every_question_reads_whole_at_every_width() -> bool {
         app: Some("Install SlopOS".into()),
         icon: None,
         detail: Some("It can delete everything on the disk you choose.".into()),
-        verb: Some("Install".into()),
+        verb: "Install".into(),
         destructive: true,
         extension: None,
     };
@@ -1186,7 +1179,7 @@ fn every_question_reads_whole_at_every_width() -> bool {
             kind: Kind::Password,
             app: None,
             detail: None,
-            verb: None,
+            verb: words::VERB.into(),
             destructive: false,
             ..ask.clone()
         },
@@ -1230,7 +1223,11 @@ fn every_question_reads_whole_at_every_width() -> bool {
             let mut found = slopos_appkit::audit::audit_node(&node, &[360, 640, 960], 720);
             found.extend(slopos_appkit::audit::audit_node(&node, &[640], 480));
             if !found.is_empty() {
-                note(&format!("{}:\n  {}", dialog.headline(), found.join("\n  ")));
+                note(&format!(
+                    "{}:\n  {}",
+                    dialog.ask().headline(),
+                    found.join("\n  ")
+                ));
                 clean = false;
             }
         }
@@ -1243,11 +1240,9 @@ fn every_question_reads_whole_at_every_width() -> bool {
 const LOCAL_COPY: &str = "/usr/local/bin/privd-test-probe";
 const LOCAL_APPS: &str = "/usr/local/share/slopos/apps";
 
-/// The dialog names a base program with no app entry by its file name, and a
-/// program outside the base as an unidentified one, whatever an entry in
-/// `/usr/local`, which the session can write, claims for either. It first
-/// waits out the refusal the case before it ended on.
 fn the_dialog_names_the_app_only_from_what_no_process_can_write() -> bool {
+    // The case before ended on a refusal, which declines this uid's next
+    // questions for a while.
     std::thread::sleep(Duration::from_millis(DECLINED_MS + 500));
     let outcome = named_from_what_no_process_can_write();
     for entry in ["privd-test-base", "privd-test-copy"] {

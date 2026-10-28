@@ -11,9 +11,8 @@ An app implements `App`. `view` turns its state into a `Node` tree, `update`
 applies a message, and `run_app(app)` opens the window that `window` asks for:
 
 ```rust
-use slopos_appkit::{
-    Action, App, Button, ButtonRow, Node, Page, PropertyList, Section, Text, WindowSpec,
-};
+use slopos_appkit::theme::words::Bytes;
+use slopos_appkit::{Action, App, Button, ButtonRow, Node, Page, PropertyList, Section, WindowSpec};
 
 struct About;
 
@@ -32,7 +31,7 @@ impl App for About {
                 "Hardware",
                 PropertyList::new()
                     .row("Processor", "Intel Core i7-1260P")
-                    .row("Memory", "16 GB"),
+                    .row("Memory", Bytes(16 << 30).to_string()),
             ))
             .footer(ButtonRow::new().confirm(Button::new("Close").on_press(Msg::Close)))
             .into()
@@ -64,11 +63,13 @@ fn main() {
 
 The tree is rebuilt after every message that returns `Action::Rebuild`. The
 app keeps all of its state. A widget keeps nothing between rebuilds except
-what the app gives it back, such as a caret or a slider grab. A scroll view
-whose offset the app does not keep holds its place while it shows the same
-thing, and starts at the top when it shows something else. A table cannot
-tell that by itself, so give `Node::Table` a `shows` that changes when its
-rows are of something else, such as the directory a file manager lists.
+what the app gives it back, such as a caret or a slider grab, and three
+things it hands the widget built in its place while that shows the same: a
+scroll view whose offset the app does not keep, its offset; a table, how far
+it is scrolled; and a menu, the row the arrows reached. Shown something else,
+each starts afresh. A table cannot tell by itself that its rows are of
+something else, so give `Node::Table` a `shows` that changes when they are,
+such as the directory a file manager lists.
 
 `title` is read again after every rebuild. A window that shows a document
 is titled `document_title(document, app)`, as `notes.txt — Editor`; any other
@@ -95,20 +96,49 @@ last resort.
 | `List`, `ListRow` | Rows the person chooses from, such as disks, places or results. The whole list is one tab stop and the arrows move the choice. Enter opens the chosen row when the list has something to open, and otherwise reaches the page's `ButtonRow`. A row that cannot be chosen is built with `.disabled(reason)`, and the reason is shown in place of its detail. A row for a person leads with `.avatar()`. |
 | `Sidebar` | The places an app moves between, down its left side: a `List`, optionally in sections. `Sidebar::empty(reason)` says why there are none, as when a filter matches nothing. |
 | `Toolbar`, `IconButton` | Tools across the top of a view. An icon button's label is its tooltip, so always give it a label. |
-| `SearchField` | A field that filters what the view shows. |
+| `SearchField` | A field that filters what the view shows. `.placeholder()` says what it finds, *Search* unless told, `.count()` how many matched, and `.invalid(true)` edges it in the danger tone when nothing did. `.tab_stop(false)` keeps a palette's field out of the tab order, so Tab reaches the app as a key. |
+| `StatusBar` | The line along a view's foot that says how things stand. `.tone()` colours what it says, as `Danger` for a failure, and `.end()` adds what it always shows at its right, such as a caret's line and column. It is `StatusBar::HEIGHT` tall whatever it says. |
 | `Tag` | One word that marks what happens to a thing: *Erased*, *New*, *Kept*. |
 | `EmptyState` | What a view shows when it has nothing to show: why it is empty, and what to do about it. |
 | `Disclosure` | More detail the person may open, such as a log or a command line. |
-| `Node::Dialog` | A question over the page. It covers the page for both the pointer and the keyboard until it is answered, and its footer is a `ButtonRow`. |
-| `Text` | Any text. `.role()` sets its size: `Title`, `Heading`, `Body`, `Label`, `Caption`, or `Mono` for code and command lines; `Hero` is the lock screen's clock and nothing else. `.tone()` sets its colour. `.wrap()` breaks prose at spaces, and `.wrap_anywhere()` breaks a path or command line anywhere so that none of it is lost. |
+| `Dialog` | A question over the page: a title, its content and a `ButtonRow` footer. It covers the page for both the pointer and the keyboard until it is answered. |
+| `Text` | Any text. `.role()` sets its size: `Display` for a page that is one number, `Title`, `Heading`, `Body`, `Label`, `Caption`, or `Mono` for code and command lines, set in the cells a code view's columns are; `Hero` is the lock screen's clock and nothing else. `.tone()` sets its colour. `.wrap()` breaks prose at spaces, and `.wrap_anywhere()` breaks a path or command line anywhere so that none of it is lost. |
 | `Node::Icon` | A glyph of the icon font, at the size of a text role and in a tone. |
 | `Node::Avatar` | A person: the initial of their name in a circle of the colour their name picks. |
 
-The controls (`Node::TextField`, `Node::LineEdit`, `Node::Checkbox`,
-`Node::RadioGroup`, `Node::Slider`, `Node::ProgressBar`,
-`Node::PartitionBar`) and the containers (`Node::VStack`, `Node::HStack`,
-`Node::ScrollView`, `Node::Expand`) are still available. Use them inside the
-components.
+The controls (`Node::LineEdit`, `Node::Checkbox`, `Node::Slider`,
+`Node::ProgressBar`, `Node::PartitionBar`) and the containers (`Node::VStack`,
+`Node::HStack`, `Node::ZStack`, `Node::ScrollView`, `Node::Expand`) go inside
+the components. `column(spacing, children)` and `row(spacing, children)` set
+components one under another or side by side. One of several choices is a
+`List`.
+
+A view of many things, or a document, takes a widget the app steers:
+
+| Node | Use it for |
+|---|---|
+| `Node::Table` | Rows of cells under column headings, as files or processes. One tab stop; the arrows move the choice, Enter or a second click opens it (`on_activate`), a heading click sorts (`on_header_click`), and a secondary click or the Menu key asks for a context menu (`on_context_menu`, at a `ContextMenuAt`). Give it a `shows` that changes when its rows are of something else. |
+| `Node::TreeView` | A tree whose rows, expansion and scroll the app keeps, handing over the rows in view, as a file sidebar does. Every gesture comes back as a `TreeInput`. |
+| `Node::CodeView` | Lines of code with a caret and a selection, every gesture back in document coordinates. Its text is `Mono`. |
+| `Node::TabBar` | Tabs that switch which of its panels shows. |
+| `Node::EditorTabs` | The documents an app has open, each with a dot for unsaved changes and a close button. |
+| `Node::MenuBar` | Menu titles across a window's top; the app opens the menu it reports as a `Node::Popup` holding a `Node::Menu`. |
+| `Node::DragHandle` | A divider between panes, which reports where the pointer drags it; the app sizes the panes. |
+
+A menu over the view is a `Node::ZStack` whose last child is a `Node::Popup`
+at the point the menu opens from, holding a `Node::Menu`; that is how a menu
+bar's menu and a table's context menu both open. The popup takes the keyboard
+while it is open, the arrows move along the menu and Enter chooses, a click
+outside it or Escape sends its `on_dismiss`, and the app closes it by building
+the view without it. A table's and a tree's rows are `StyleSheet::row_height`
+tall. An app that counts what fits, as the editor counts rows, reads the sizes
+from appkit: `ListRow::height`, `StatusBar::HEIGHT`, `ICON_BUTTON_SIDE`, and
+`StyleSheet`'s `control_height`, `menu_bar_height`, `tab_height`,
+`row_height` and `divider_width`. A window whose content is a table takes its
+least width from `TableColumn::least_width`, adding `SIDEBAR_WIDTH` for a
+`Sidebar` beside it, and a fixed column's width from `TableColumnWidth::fitting`
+over what it shows, which counts every digit as the widest: a number's longest
+shape, such as `1023.9 MiB`, stands for every number of that shape.
 
 The widget gallery (`widget_gallery`, or `widget_gallery --page <name>`)
 shows every component in each of its states. Its pages are
@@ -116,16 +146,35 @@ shows every component in each of its states. Its pages are
 
 ## What comes with every component
 
-- **Text that does not fit.** One line ends in `…`, and the whole text shows
-  in a tooltip when the pointer rests on it. Wrapped text never loses a word.
-- **States.** Every control has hover, pressed, focused and disabled states.
-  You never draw one yourself.
-- **Focus.** The focused control gets one 2 px ring around the whole control.
-  For a list, the ring goes around the focused row. Tab and Shift+Tab move
-  focus. While a dialog is open, Tab moves only among the dialog's controls.
+- **Text that does not fit.** A line too long is cut with `…`: at its end,
+  or at its start where the end tells it apart, as a path or a file name does
+  in a tree's rows, an editor's tabs and a `ListRow::detail_tail`. The whole
+  text shows in a tooltip when the pointer rests on it. Wrapped text never
+  loses a word, and a field's own text is never cut: it scrolls to the caret.
+- **States.** Every control lights under the pointer and shows when it has
+  focus. A button, an icon button, a checkbox, a disclosure's header and a
+  slider's knob also show while pressed; a field shows focus instead, since a
+  press focuses it. A button, an icon button, a checkbox, a slider and a row
+  of a list or a menu can be disabled and show it; a field cannot be. You
+  never draw a state yourself.
+- **Focus.** The focused control gets one 2 px ring around it, a disclosure
+  around its header and a tab bar just inside its tabs; a field's own edge
+  thickens in the focus colour instead. For a list, a table, a tree or a
+  menu, the ring goes around the row the keyboard is on while all of that row
+  shows, and around the whole view otherwise. Tab and Shift+Tab move focus. A
+  click gives focus to a field, a list or a table, and leaves it where it was
+  for a button, so a toolbar button never takes the keyboard from a search
+  field. While a dialog is open, Tab moves only among the dialog's controls.
 - **Keys.** Enter and Escape reach the page's `ButtonRow` when no control took
-  them. A focused button takes Enter for itself.
-- **Hit targets.** Every control is at least 28 px tall.
+  them. A focused button takes Enter for itself; a checkbox takes only Space.
+- **Hit targets.** Every control, and every row of a list, a table, a tree or
+  a menu, is at least `style::MIN_TARGET` across. A `DragHandle` is a divider
+  rather than a control: it is as long as the panes it parts and as wide as
+  `StyleSheet::divider_width`.
+- **Scrolling.** Every view that scrolls draws the same bar down its right
+  edge, and lays what it shows beside it rather than under it. Its thumb
+  lights under the pointer, and a press anywhere on the bar moves the thumb
+  there and drags it, in a window and in a tree the compositor embeds alike.
 
 ## Rules
 
@@ -152,20 +201,12 @@ paths go in captions and in details. Use sentence case everywhere except for
 proper nouns. Buttons and menu items are verbs, with no full stop. An ellipsis
 (`…`, never `...`) marks an item that asks something further. An error says
 what happened and what to do next. Give disk sizes in decimal units (GB, TB),
-as the drive's label does. Give memory and file sizes in binary units.
+as the drive's label does. Give memory and file sizes in binary units, as
+`theme_core::words::Bytes` writes them: `512 bytes`, `1.5 KiB`, `16 GiB`.
 
-| Use | Not |
-|---|---|
-| computer | machine |
-| disk | drive, medium (for the target) |
-| installer, USB stick, DVD | medium |
-| partition | volume, region |
-| restart | reboot |
-| power off | halt, shut down |
-| log out, switch user | end session, switch person |
-| administrator | admin |
-| app | program, client |
-| startup order | boot order, firmware entry, `BootOrder` |
+The words a screen never says, and what it says in their place, are
+`theme_core::words::GLOSSARY`; `words::label` and `words::sentence` hold a
+label and a sentence to their shapes. Hold your app's words to them in a test.
 
 ## Checking your work
 
@@ -177,7 +218,7 @@ as the drive's label does. Give memory and file sizes in binary units.
     other text;
   - a centred or baseline row whose texts do not share a baseline;
   - a focusable control whose focus does not show all the way round it;
-  - a control under 28 px across;
+  - a control under `style::MIN_TARGET` across;
   - text under the contrast floor against what is behind it.
 
   `appkit::audit::audit_node(&node, &widths, height)` returns every finding.

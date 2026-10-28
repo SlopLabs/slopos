@@ -1,14 +1,12 @@
-//! The template every app's icon is drawn on: a rounded square in one of the
-//! theme's series colours with a glyph of the icon font on it, in the ink
-//! drawn on an accent. `tools/icons` renders the icons the system and the
-//! apps ship with it, and the dock draws an app that ships none on it.
+//! Every app's icon: a glyph of the icon font on a rounded square in a series
+//! colour, which `tools/icons` renders and the dock draws for an app with none.
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_abi::pixel::PixelFormat;
 use slopos_gfx::DrawBuffer;
 use slopos_gfx::rounded::Rounded;
-use slopos_theme_core::Icon;
+use slopos_theme_core::{Icon, with_alpha};
 
 /// The sizes an app icon ships at: 64 px, and twice that as `<id>@2x.png`.
 pub const SIZES: [u32; 2] = [64, 128];
@@ -49,7 +47,7 @@ pub fn render(size: u32, tint: usize, icon: Icon) -> Vec<Color32> {
         .map(|(i, px)| {
             let (x, y) = ((i % size as usize) as i32, (i / size as usize) as i32);
             let ink = format.decode(u32::from_le_bytes([px[0], px[1], px[2], px[3]]));
-            Color32::new(ink.red(), ink.green(), ink.blue(), outline.coverage(x, y))
+            with_alpha(ink, outline.coverage(x, y))
         })
         .collect()
 }

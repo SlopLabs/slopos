@@ -12,10 +12,10 @@ use slopos_userland as _;
 
 use slopos_abi::syscall::O_CLOEXEC;
 use slopos_appkit::{
-    Action, App, AppSender, EventPhase, Key, LineEditInput, MessageSink, Modifiers, NamedKey, Node,
-    PointerButton, Role, Size, SliderInput, StyleSheet, UiQueue, Widget, WidgetEvent,
+    Action, App, AppSender, Icon, Key, LineEditInput, MessageSink, Modifiers, NamedKey, Node,
+    PointerButton, Role, SliderInput, StyleSheet, Widget, WidgetEvent,
 };
-use slopos_boot_core::install::Mode as PlanMode;
+use slopos_boot_core::install::{Mode as PlanMode, PlanError};
 use slopos_boot_core::layout::ESP_TYPE;
 use slopos_installer_core::fixtures::{
     Case, GIB, LINUX, MIB, NODE, foreign, gapped, installed, machine, opened, table,
@@ -23,15 +23,14 @@ use slopos_installer_core::fixtures::{
 use slopos_installer_core::protocol::{Reply, Request, VERSION};
 use slopos_installer_core::wizard::{Kind, Page, StepState, say};
 use slopos_installer_core::{
-    Choices, Contents, DiskState, Event, Failure, Layout, Mode, Opened, Proposal,
-    Refusal as NotOffered, Reinstall, STEPS, Summary, System, capitalised, disk_size,
+    Choices, DiskState, Event, Failure, Issue, Layout, Mode, Opened, Proposal,
+    Refusal as NotOffered, Reinstall, Step, Summary, System, capitalised, disk_size,
 };
 use slopos_priv_core::consent::Refusal;
 use slopos_slibc::test_harness::note;
-use slopos_userland::apps::installer_ui::{
-    EngineSays, HEIGHT, InstallerApp, Link, Msg, WIDTH, relay,
-};
+use slopos_userland::apps::installer_ui::{EngineSays, InstallerApp, Link, Msg, relay};
 use slopos_userland::syscall::{OwnedFd, fs};
+use slopos_windowing::UiQueue;
 
 #[derive(Clone, Debug, PartialEq)]
 enum Asked {
@@ -179,12 +178,7 @@ impl Window {
         let mut found = None;
         walk(&self.view(), &mut |node| {
             let buttons: Vec<(&str, bool, Option<&Msg>)> = match node {
-                Node::Button {
-                    label,
-                    enabled,
-                    on_press,
-                    ..
-                } => vec![(label.as_str(), *enabled, on_press.as_ref())],
+                Node::Button(b) => vec![(b.label.as_str(), b.enabled, b.on_press.as_ref())],
                 Node::ButtonRow(row) => row
                     .leading
                     .iter()
@@ -219,8 +213,8 @@ impl Window {
     /// footer's buttons first, then the app.
     fn key(&mut self, key: NamedKey) -> Action {
         let mut tree = slopos_appkit::tree::build_widget_tree(&self.view());
-        let window = Size::new(WIDTH, HEIGHT);
-        slopos_appkit::tree::layout_tree(tree.as_mut(), window, &StyleSheet::dark());
+        let window = self.app.window().size;
+        slopos_appkit::tree::layout_tree(tree.as_mut(), window, &StyleSheet::current());
         let mut sink = MessageSink::new();
         let key = Key::Named(key);
         if slopos_appkit::tree::offer_unhandled(tree.as_mut(), key, Modifiers::default(), &mut sink)
@@ -280,13 +274,26 @@ impl Window {
         lists.into_iter().nth(n)
     }
 
+    fn icons(&self, n: usize) -> Vec<Option<Icon>> {
+        let mut lists = Vec::new();
+        walk(&self.view(), &mut |node| {
+            if let Node::List(list) = node {
+                let rows = list.sections.iter().flat_map(|(_, rows)| rows);
+                lists.push(rows.map(|r| r.icon).collect());
+            }
+        });
+        lists.into_iter().nth(n).unwrap_or_default()
+    }
+
     fn texts(&self) -> Vec<String> {
         let mut texts = Vec::new();
         walk(&self.view(), &mut |node| match node {
             Node::Text(text) => texts.push(text.text.clone()),
             Node::Checkbox { label, .. } => texts.push(label.clone()),
             Node::Tag(tag) => texts.push(tag.text.clone()),
-            Node::PropertyList(rows) => texts.extend(rows.iter().map(|(name, _)| name.clone())),
+            Node::PropertyList(list) => {
+                texts.extend(list.rows.iter().map(|(name, _)| name.clone()))
+            }
             Node::Disclosure(d) => texts.push(d.title.clone()),
             Node::List(list) => {
                 for row in list.sections.iter().flat_map(|(_, rows)| rows) {
@@ -327,8 +334,8 @@ impl Window {
         }
         // Laid out in the window: a page is a tab stop only while it scrolls.
         let mut tree = slopos_appkit::tree::build_widget_tree(&self.view());
-        let window = Size::new(WIDTH, HEIGHT);
-        slopos_appkit::tree::layout_tree(tree.as_mut(), window, &StyleSheet::dark());
+        let window = self.app.window().size;
+        slopos_appkit::tree::layout_tree(tree.as_mut(), window, &StyleSheet::current());
         let mut roles = Vec::new();
         stops(tree.as_ref(), &mut roles);
         roles
@@ -346,7 +353,7 @@ impl Window {
                     button: PointerButton::Left,
                     modifiers: Modifiers::default(),
                 };
-                widget.event(&event, EventPhase::Target, sink);
+                widget.event(&event, sink);
                 return true;
             }
             widget
@@ -355,8 +362,8 @@ impl Window {
                 .any(|child| press(child.as_mut(), role, sink))
         }
         let mut tree = slopos_appkit::tree::build_widget_tree(&self.view());
-        let window = Size::new(WIDTH, HEIGHT);
-        slopos_appkit::tree::layout_tree(tree.as_mut(), window, &StyleSheet::dark());
+        let window = self.app.window().size;
+        slopos_appkit::tree::layout_tree(tree.as_mut(), window, &StyleSheet::current());
         let mut sink = MessageSink::new();
         if !press(tree.as_mut(), role, &mut sink) {
             return false;
@@ -402,8 +409,8 @@ fn walk(node: &Node<Msg>, visit: &mut dyn FnMut(&Node<Msg>)) {
         | Node::Background { child, .. }
         | Node::Card { child, .. }
         | Node::Popup { child, .. } => walk(child, visit),
-        Node::PropertyList(rows) => {
-            for (_, value) in rows {
+        Node::PropertyList(list) => {
+            for (_, value) in &list.rows {
                 walk(value, visit);
             }
         }
@@ -428,7 +435,7 @@ fn machine_holding(layout: (slopos_boot_core::gpt::Header, Vec<u8>), open: Opene
 /// A window on the Disk page, the engine started and the machine probed.
 fn at_disk() -> Option<Window> {
     let mut w = Window::new();
-    w.press("Install SlopOS")?;
+    w.press(say::INSTALL)?;
     if w.asked() != [Asked::Start] {
         return None;
     }
@@ -447,7 +454,7 @@ fn at_disk() -> Option<Window> {
 /// answered with `proposal`; and the choices it proposed.
 fn at_how(system: System, proposal: Proposal) -> Option<(Window, Choices)> {
     let mut w = at_disk()?;
-    w.press("Next")?;
+    w.press(say::NEXT)?;
     if w.frames() != [Request::Open { disk: NODE.into() }] {
         return None;
     }
@@ -473,14 +480,14 @@ fn at_free() -> Option<(Window, Choices)> {
 /// on the Disk page once the engine has probed.
 fn welcome_asks_privd_once_and_probes() -> bool {
     let mut w = Window::new();
-    if !(w.enabled("Install SlopOS") && w.button("Try SlopOS").is_some()) {
+    if !(w.enabled(say::INSTALL) && w.button(say::TRY).is_some()) {
         return fail("Welcome offers to try or install");
     }
     if !w.asked().is_empty() {
         return fail("the welcome asked privd before the person chose");
     }
-    w.press("Install SlopOS");
-    if w.asked() != [Asked::Start] || w.enabled("Install SlopOS") {
+    w.press(say::INSTALL);
+    if w.asked() != [Asked::Start] || w.enabled(say::INSTALL) {
         return fail("one start, the button waiting on it");
     }
     w.app.update(Msg::Next);
@@ -509,14 +516,14 @@ fn welcome_asks_privd_once_and_probes() -> bool {
 /// ask again; Try SlopOS closes the window.
 fn a_refusal_leaves_the_person_at_welcome() -> bool {
     let mut w = Window::new();
-    w.press("Install SlopOS");
+    w.press(say::INSTALL);
     w.asked();
     let why = &Refusal::Refused.to_string();
     w.app.update(Msg::Engine(EngineSays::Refused(why.into())));
     if w.page() != Page::Welcome || !w.shows(why) {
         return fail("the refusal is not shown at Welcome");
     }
-    w.press("Install SlopOS");
+    w.press(say::INSTALL);
     if w.asked() != [Asked::Start] {
         return fail("Install SlopOS does not ask again");
     }
@@ -528,7 +535,7 @@ fn a_refusal_leaves_the_person_at_welcome() -> bool {
 /// done; a refusal leaves the person at Welcome, free to ask again.
 fn the_dock_s_entry_asks_privd_at_once() -> bool {
     let mut w = Window::from_the_dock();
-    if w.asked() != [Asked::Start] || w.page() != Page::Welcome || w.enabled("Install SlopOS") {
+    if w.asked() != [Asked::Start] || w.page() != Page::Welcome || w.enabled(say::INSTALL) {
         return fail("the window did not ask privd as it started");
     }
     let live = w.app.wizard().heading(true);
@@ -538,7 +545,7 @@ fn the_dock_s_entry_asks_privd_at_once() -> bool {
     }
     let why = &Refusal::Refused.to_string();
     w.app.update(Msg::Engine(EngineSays::Refused(why.into())));
-    if !w.shows(why) || !w.enabled("Install SlopOS") || !w.asked().is_empty() {
+    if !w.shows(why) || !w.enabled(say::INSTALL) || !w.asked().is_empty() {
         return fail("the refusal is not left to the person at Welcome");
     }
     w.press(say::CLOSE) == Some(Action::Exit)
@@ -558,7 +565,7 @@ fn the_disk_page_opens_the_disk_chosen() -> bool {
         .wizard()
         .disks()
         .into_iter()
-        .map(|row| (row.title.clone(), row.enabled()))
+        .map(|row| (row.title.clone(), row.reason.is_none()))
         .collect();
     let named = expected
         .first()
@@ -570,6 +577,10 @@ fn the_disk_page_opens_the_disk_chosen() -> bool {
         || !w.texts().iter().any(|t| t.starts_with("nvme0n1 · "))
     {
         return fail("a disk does not say what it holds, or why not");
+    }
+    let drives = Some(Icon::HardDrive);
+    if w.icons(0) != [drives, drives, Some(Icon::Usb)] {
+        return fail(format!("the disks are drawn as {:?}", w.icons(0)));
     }
     w.app.update(Msg::Disk(2));
     if w.list(0).map(|(_, chosen)| chosen) != Some(Some(0)) {
@@ -586,7 +597,7 @@ fn the_disk_page_opens_the_disk_chosen() -> bool {
     if !w.says(&[Reply::System(machine(None))]) {
         return false;
     }
-    w.press("Next");
+    w.press(say::NEXT);
     w.frames()
         == [Request::Open {
             disk: "/dev/vda".into(),
@@ -599,7 +610,7 @@ fn how_proposes_each_change_and_review_waits() -> bool {
     let Some((mut w, first)) = at_free() else {
         return fail("no How page");
     };
-    if first.mode != (Mode::Free { region: None }) || !w.enabled("Review") {
+    if first.mode != (Mode::Free { region: None }) || !w.enabled(say::REVIEW) {
         return fail(format!("opened as {first:?}"));
     }
     let span = free_proposal().root;
@@ -611,7 +622,7 @@ fn how_proposes_each_change_and_review_waits() -> bool {
     if !matches!(&sized[..], [Request::Propose(c)] if c.root_size == Some(4 * GIB)) {
         return fail(format!("a slide proposed {sized:?}"));
     }
-    if w.enabled("Review") || w.slider().map(|s| s.0) != Some(4 * GIB) {
+    if w.enabled(say::REVIEW) || w.slider().map(|s| s.0) != Some(4 * GIB) {
         return fail("Review before the answer, or the knob went back");
     }
     w.type_in(Msg::SizeText, "");
@@ -622,7 +633,7 @@ fn how_proposes_each_change_and_review_waits() -> bool {
             ..Modifiers::default()
         },
     }));
-    w.type_in(Msg::SizeText, "5G");
+    w.type_in(Msg::SizeText, "5 GB");
     if !w.frames().is_empty() {
         return fail("a second proposal went out with one in flight");
     }
@@ -658,7 +669,7 @@ fn how_proposes_each_change_and_review_waits() -> bool {
         id: 11,
         proposal: free_proposal(),
     }]);
-    w.enabled("Review") && w.frames().is_empty()
+    w.enabled(say::REVIEW) && w.frames().is_empty()
 }
 
 /// A number typed into the size box without a unit is GB, as the box shows
@@ -843,7 +854,6 @@ fn a_drag_ends_with_its_page() -> bool {
         || fail("the grab outlived the page")
 }
 
-/// Every control on How is a tab stop, the fields among them.
 fn how_reaches_every_control_by_tab() -> bool {
     let Some((w, _)) = at_free() else {
         return fail("no How page");
@@ -880,7 +890,7 @@ fn back_keeps_every_answer() -> bool {
         id: 9,
         proposal: free_proposal(),
     }]);
-    w.press("Review");
+    w.press(say::REVIEW);
     if w.page() != Page::Review {
         return fail("Review");
     }
@@ -934,7 +944,7 @@ fn the_review_is_worded_by_the_damage() -> bool {
         (
             (
                 machine(Some(opened(Ok(()), None))),
-                Case::erasing(Some(foreign()), Contents::Gpt).proposal(),
+                Case::erasing(Some(foreign())).proposal(),
                 Some(0),
             ),
             Kind::Erase.title(),
@@ -967,7 +977,7 @@ fn the_review_is_worded_by_the_damage() -> bool {
                 proposal: proposal.clone(),
             }]);
         }
-        w.press("Review");
+        w.press(say::REVIEW);
         if w.page() != Page::Review {
             return fail(format!("{button}: no Review page"));
         }
@@ -1005,7 +1015,7 @@ fn the_review_is_worded_by_the_damage() -> bool {
 
 fn at_install() -> Option<Window> {
     let (mut w, _) = at_free()?;
-    w.press("Review");
+    w.press(say::REVIEW);
     w.app.update(Msg::Confirm);
     w.press("Install beside Other OS");
     w.frames();
@@ -1023,8 +1033,8 @@ fn an_install_shows_its_steps_and_will_not_close() -> bool {
     }
     w.key(NamedKey::Escape);
     w.says(&[
-        Reply::Event(Event::step(1)),
-        Reply::Event(Event::step(4)),
+        Reply::Event(Event::Step(Step::Partition)),
+        Reply::Event(Event::Step(Step::CopySystem)),
         Reply::Event(Event::Log {
             line: "copying the toolchain".into(),
         }),
@@ -1035,7 +1045,7 @@ fn an_install_shows_its_steps_and_will_not_close() -> bool {
     ]);
     let running = w.app.wizard().steps().get(3).map(|(_, state)| *state);
     if w.page() != Page::Install
-        || !w.shows(&capitalised(STEPS[3]))
+        || !w.shows(&capitalised(Step::CopySystem.doing()))
         || running != Some(StepState::Running)
     {
         return fail(format!("the install page shows {:?}", w.texts()));
@@ -1051,7 +1061,8 @@ fn an_install_shows_its_steps_and_will_not_close() -> bool {
             copied = Some((*v, label.clone()));
         }
     });
-    if copied != Some((25, "1.0 GiB of 4.0 GiB copied".into())) {
+    let label = format!("{} of {} copied", disk_size(GIB), disk_size(4 * GIB));
+    if copied != Some((25, label)) {
         return fail(format!("the copy shows {copied:?}"));
     }
     let logged = |w: &Window| {
@@ -1084,14 +1095,14 @@ fn an_install_shows_its_steps_and_will_not_close() -> bool {
     if w.asked() != [Asked::Restart] {
         return fail("Restart does not ask privd");
     }
-    w.app.update(Msg::RestartRefused { by_person: true });
+    w.app.update(Msg::NotRestarted { failed: false });
     if w.shows(say::NOT_RESTARTED) {
         return fail("a restart the person refused is said not to have happened");
     }
     w.press(say::RESTART);
-    w.app.update(Msg::RestartRefused { by_person: false });
+    w.app.update(Msg::NotRestarted { failed: true });
     if !w.shows(say::NOT_RESTARTED) {
-        return fail("a refused restart is not shown");
+        return fail("a restart that failed is not shown");
     }
     w.press(say::KEEP_TRYING) == Some(Action::Exit)
 }
@@ -1103,14 +1114,14 @@ fn a_failed_install_goes_back_to_review() -> bool {
         return fail("no Install page");
     };
     w.says(&[
-        Reply::Event(Event::step(3)),
-        Reply::Failed(Failure {
-            step: 3,
-            message: "mke2fs exited 1".into(),
+        Reply::Event(Event::Step(Step::Format)),
+        Reply::Failed(Failure::Stopped {
+            step: Some(Step::Format),
+            why: "mke2fs exited 1".into(),
         }),
     ]);
     let said = w.app.wizard().heading(false).subtitle;
-    if w.page() != Page::Error || !said.contains(STEPS[2]) || !w.shows(&said) {
+    if w.page() != Page::Error || !said.contains(Step::Format.doing()) || !w.shows(&said) {
         return fail(format!("the error page shows {:?}", w.texts()));
     }
     if w.shows("mke2fs exited 1") || w.disclose() != Some(true) || !w.shows("mke2fs exited 1") {
@@ -1121,11 +1132,11 @@ fn a_failed_install_goes_back_to_review() -> bool {
     }
     w.press(say::RESTART);
     w.key(NamedKey::Escape);
-    if w.asked() != [Asked::Restart] || w.page() != Page::Error || w.enabled("Try again") {
+    if w.asked() != [Asked::Restart] || w.page() != Page::Error || w.enabled(say::TRY_AGAIN) {
         return fail("the page can be left while a restart is asked for");
     }
-    w.app.update(Msg::RestartRefused { by_person: false });
-    w.press("Try again");
+    w.app.update(Msg::NotRestarted { failed: true });
+    w.press(say::TRY_AGAIN);
     if w.frames() != [Request::Probe] {
         return fail("Try again probes the engine still running");
     }
@@ -1147,29 +1158,45 @@ fn a_failed_install_goes_back_to_review() -> bool {
             .is_some_and(|(_, ticked)| !ticked)
 }
 
+fn a_refused_install_says_why_in_the_window_s_words() -> bool {
+    let Some(mut w) = at_install() else {
+        return fail("no Install page");
+    };
+    let issue = Issue::Plan {
+        error: PlanError::NoSlot,
+        node: NODE.into(),
+        root: None,
+    };
+    w.says(&[Reply::Failed(Failure::Refused(issue.clone()))]);
+    w.disclose();
+    let texts = w.texts();
+    if w.page() != Page::Error || !w.shows(&issue.words()) || texts.iter().any(|t| t.contains("--"))
+    {
+        return fail(format!("a refused install shows {texts:?}"));
+    }
+    true
+}
+
 /// An engine whose output ends mid-install is a failure, and one that ends
 /// before it leaves the person at Welcome to start it again.
 fn an_engine_that_ends_is_said() -> bool {
     let Some(mut w) = at_install() else {
         return fail("no Install page");
     };
-    w.says(&[Reply::Event(Event::step(6))]);
+    w.says(&[Reply::Event(Event::Step(Step::Menu))]);
     if !w.ends() || w.page() != Page::Error {
         return fail("an install whose engine ended");
     }
     let Some((mut w, _)) = at_free() else {
         return fail("no How page");
     };
-    if !w.ends() || w.page() != Page::Welcome || !w.enabled("Install SlopOS") {
+    if !w.ends() || w.page() != Page::Welcome || !w.enabled(say::INSTALL) {
         return fail("an engine that ended before the install");
     }
-    w.press("Install SlopOS");
+    w.press(say::INSTALL);
     w.asked() == [Asked::Start]
 }
 
-/// Every page lays out within the audit's rules at the window's size and
-/// the least it is allowed: no text cut, nothing overlapping, every
-/// control's focus shown and large enough.
 fn every_page_passes_the_layout_audit() -> bool {
     let mut findings = Vec::new();
     let mut audit = |w: &Window, page: Page| {
@@ -1177,9 +1204,11 @@ fn every_page_passes_the_layout_audit() -> bool {
             findings.push(format!("{page:?} is not in front but {:?}", w.page()));
             return;
         }
-        for height in [HEIGHT / 2, HEIGHT] {
+        let spec = w.app.window();
+        let widths = [spec.min_size.width, spec.size.width];
+        for height in [spec.min_size.height, spec.size.height] {
             let view = w.view();
-            for finding in slopos_appkit::audit::audit_node(&view, &[WIDTH / 2, WIDTH], height) {
+            for finding in slopos_appkit::audit::audit_node(&view, &widths, height) {
                 findings.push(format!("{page:?} at {height} px: {finding}"));
             }
         }
@@ -1193,13 +1222,13 @@ fn every_page_passes_the_layout_audit() -> bool {
         return fail("no How page");
     };
     audit(&w, Page::How);
-    w.press("Review");
+    w.press(say::REVIEW);
     audit(&w, Page::Review);
     let Some(mut w) = at_install() else {
         return fail("no Install page");
     };
     w.says(&[
-        Reply::Event(Event::step(4)),
+        Reply::Event(Event::Step(Step::CopySystem)),
         Reply::Event(Event::Log {
             line: "copying the toolchain".into(),
         }),
@@ -1207,9 +1236,9 @@ fn every_page_passes_the_layout_audit() -> bool {
     audit(&w, Page::Install);
     w.disclose();
     audit(&w, Page::Install);
-    w.says(&[Reply::Failed(Failure {
-        step: 4,
-        message: "mke2fs exited 1".into(),
+    w.says(&[Reply::Failed(Failure::Stopped {
+        step: Some(Step::CopySystem),
+        why: "mke2fs exited 1".into(),
     })]);
     audit(&w, Page::Error);
     let Some(mut w) = at_install() else {
@@ -1267,6 +1296,10 @@ fn main() {
         (
             "a_failed_install_goes_back_to_review",
             a_failed_install_goes_back_to_review,
+        ),
+        (
+            "a_refused_install_says_why_in_the_window_s_words",
+            a_refused_install_says_why_in_the_window_s_words,
         ),
         ("an_engine_that_ends_is_said", an_engine_that_ends_is_said),
         (

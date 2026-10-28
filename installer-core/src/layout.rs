@@ -2,11 +2,10 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use slopos_boot_core::Guid;
 use slopos_boot_core::gpt::Header;
-use slopos_boot_core::install::{self, ROLES, Role};
+use slopos_boot_core::install::{self, Role};
 
-use crate::{capitalised, disk_size, name_of, partition_node, role_words, type_name};
+use crate::{disk_size, name_of, partition_node, role_of, type_name};
 
 /// What a disk's table lays out, lowest first: its partitions and the free
 /// regions a new partition may go into. Bytes between them hold the table
@@ -38,15 +37,9 @@ pub enum Piece {
     Free { region: usize },
 }
 
-fn role_of(type_guid: &Guid) -> Option<Role> {
-    ROLES
-        .into_iter()
-        .find(|role| role.type_guid() == *type_guid)
-}
-
 impl Segment {
     /// Its name on a partition bar: what SlopOS takes it for, else its own
-    /// name or type, and its size.
+    /// name or type, with its size but for SlopOS's small partitions.
     pub fn label(&self) -> String {
         let size = disk_size(self.bytes);
         match &self.piece {
@@ -54,8 +47,8 @@ impl Segment {
             Piece::Partition {
                 role, kind, name, ..
             } => match role {
-                Some(Role::Root) => format!("SlopOS {size}"),
-                Some(role) => capitalised(role_words(*role)),
+                Some(Role::Root) => format!("{kind} {size}"),
+                Some(_) => kind.clone(),
                 None if name.is_empty() => format!("{kind} {size}"),
                 None => format!("{name} {size}"),
             },

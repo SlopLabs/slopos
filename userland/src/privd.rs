@@ -27,7 +27,7 @@ use slopos_abi::syscall::{
     POLLIN, POLLOUT, TIOCSPTLCK, UserPollFd, UserTermios,
 };
 use slopos_priv_core::wire::{self, CONNECTION, Exit, Reply, Request};
-use slopos_priv_core::{ENV_ACTION, ENV_FD, POLICY, PROGRAM, Policy, PolicyError, RunsAs, SOCKET};
+use slopos_priv_core::{ENV_ACTION, ENV_FD, POLICY, PROGRAM, Policy, RunsAs, SOCKET};
 use slopos_remote_core::Deframer;
 use slopos_slibc::pal::{Pal, Sys};
 
@@ -55,7 +55,6 @@ pub const RESTART_WAIT: Duration = Duration::from_secs(2);
 /// new base's privd, which starts once its predecessor has drained.
 pub const SWITCH_WAIT: Duration = Duration::from_secs(60);
 
-/// What a requester says while the dialog asks its person.
 pub const WAITING: &str = "waiting for you to allow this on the screen";
 
 /// Exit statuses for a request that ran nothing, as pkexec gives them.
@@ -74,8 +73,8 @@ impl Connection {
         Self::open_within(Duration::ZERO)
     }
 
-    /// [`open`](Self::open), waiting `wait` for a privd that is not listening
-    /// yet, as one init has just started again is not.
+    /// Waits `wait` for a privd that is not listening yet, as one init has
+    /// just started again is not.
     pub fn open_within(wait: Duration) -> Result<Connection, String> {
         let started = Instant::now();
         let fd = loop {
@@ -97,8 +96,7 @@ impl Connection {
             .ok_or_else(|| format!("{SOCKET} is not privd"))
     }
 
-    /// The connection [`ENV_FD`] named when this process started, if it is
-    /// one to privd.
+    /// The connection [`ENV_FD`] names, if it is one to privd.
     pub fn inherited() -> Option<Connection> {
         let dup = Sys::fcntl(inherited_fd()?, F_DUPFD_CLOEXEC as i32, 3).ok()?;
         // SAFETY: fcntl just opened this descriptor for us.
@@ -135,8 +133,6 @@ impl Connection {
         }
     }
 
-    /// Send `request` with its descriptors: stdin, stdout, stderr and, when
-    /// it names one, the working directory.
     pub fn send(&self, request: &Request, fds: &[RawFd]) -> Result<(), String> {
         self.send_frame(&request.frame(), fds)
     }
@@ -151,8 +147,7 @@ impl Connection {
         Ok(())
     }
 
-    /// The next reply to request `id`, blocking; `None` once privd has closed
-    /// the connection.
+    /// `None` once privd has closed the connection.
     pub fn reply(&mut self, id: u64) -> Result<Option<Reply>, String> {
         loop {
             if let Some(reply) = self.buffered(id)? {
@@ -164,8 +159,7 @@ impl Connection {
         }
     }
 
-    /// A reply to request `id` that has already arrived. What an earlier
-    /// request on the connection left is passed over.
+    /// What an earlier request on the connection left is passed over.
     fn buffered(&mut self, id: u64) -> Result<Option<Reply>, String> {
         loop {
             let (kind, payload) = match self.frames.next_frame() {
@@ -181,7 +175,6 @@ impl Connection {
         }
     }
 
-    /// Read what has arrived; `false` at end of stream.
     fn fill(&mut self) -> Result<bool, String> {
         let mut buf = [0u8; 4096];
         match fs::read_slice(self.raw(), &mut buf) {
@@ -239,21 +232,15 @@ pub fn takes_connection(program: &str) -> bool {
     program == SHELL || is_mechanism(program)
 }
 
-/// The base's policy, every action of it, held as privd holds its own.
 pub fn whole_policy() -> Result<Policy, String> {
-    policy_as(Policy::parse)
-}
-
-fn policy_as(parse: fn(&str) -> Result<Policy, PolicyError>) -> Result<Policy, String> {
     let text = std::fs::read_to_string(POLICY).map_err(|e| format!("{POLICY}: {e}"))?;
-    parse(&text).map_err(|e| format!("{POLICY}: {e}"))
+    Policy::parse(&text).map_err(|e| format!("{POLICY}: {e}"))
 }
 
-/// The base's policy as it stands on this boot, as a requester reads it
-/// ([`Policy::read`]): an action marked `medium` exists only when the kernel
-/// serves the install medium it booted from.
+/// The base's policy on this boot: an action marked `medium` exists only when
+/// the kernel serves the install medium it booted from.
 pub fn policy() -> Result<Policy, String> {
-    Ok(policy_as(Policy::read)?.for_boot(on_the_medium()))
+    Ok(whole_policy()?.for_boot(on_the_medium()))
 }
 
 pub fn on_the_medium() -> bool {
@@ -276,7 +263,6 @@ pub fn is_mechanism(program: &str) -> bool {
 
 const SHELL: &str = "/bin/shell";
 
-/// This process's argv past its first word, as privd is sent it.
 pub fn own_args() -> Vec<Vec<u8>> {
     std::env::args_os()
         .skip(1)
@@ -361,7 +347,6 @@ fn ask(action: &str, args: &[Vec<u8>], input: Input) -> Result<Asked, String> {
     run(&mut connection, request, input).map(Asked::Ran)
 }
 
-/// Why privd ran nothing.
 #[derive(Debug)]
 pub struct NotRun {
     pub reason: String,
@@ -384,8 +369,6 @@ impl core::fmt::Display for NotRun {
     }
 }
 
-/// Have privd run `action` with `args`, the mechanism reading `input` and
-/// writing to `out`, its errors to `err`: its status, or why nothing ran.
 pub fn run_feeding(
     action: &str,
     args: &[&str],
@@ -436,13 +419,10 @@ pub fn request_id() -> u64 {
     u64::from_le_bytes(bytes).max(1)
 }
 
-/// The descriptors a request carries and the pumps that stand in for a
-/// terminal among them.
 struct Stdio {
     passed: Vec<OwnedFd>,
     to_stdin: Option<Forward>,
     from_out: [Option<OwnedFd>; 2],
-    /// The master of the mechanism's own terminal, under [`Input::Terminal`].
     terminal: Option<OwnedFd>,
     /// What that terminal shows, relayed to `shown_at` only once the
     /// mechanism has started and this terminal is raw, so a reply typed at a
@@ -508,9 +488,8 @@ fn dup(fd: &OwnedFd) -> Result<OwnedFd, String> {
     above_stdio(fs::dup(fd.raw()).map_err(|e| format!("dup: {e}"))?)
 }
 
-/// A pseudo-terminal's master and slave, with this terminal's size. The slave
-/// is locked again once this process holds it, so no other process opens it
-/// by its path before the mechanism makes it its own.
+/// The slave is locked again once this process holds it, so no other process
+/// opens it by its path before the mechanism makes it its own.
 fn terminal_pair() -> Result<(OwnedFd, OwnedFd), String> {
     let fail = |why: String| format!("no terminal for the mechanism: {why}");
     let (master, _) =
@@ -529,9 +508,8 @@ fn terminal_pair() -> Result<(OwnedFd, OwnedFd), String> {
     Ok((master, slave))
 }
 
-/// This process's terminal, raw while the mechanism's own terminal stands in
-/// for it, so every byte typed reaches that one unchanged; as it was again
-/// once dropped.
+/// Raw while the mechanism's own terminal stands in for this one, so every
+/// byte typed reaches that one unchanged.
 struct RawTerminal(UserTermios);
 
 impl RawTerminal {
@@ -634,9 +612,8 @@ extern "C" fn note_signal(signal: i32) {
 const DRAIN: Duration = Duration::from_millis(500);
 const TICK_MS: i64 = 250;
 
-/// Send `request` with this process's stdio, relay until the mechanism
-/// exits, and give its status. A signal before it starts withdraws the
-/// request, and a second one stops waiting for it.
+/// A signal before the mechanism starts withdraws the request, and a second
+/// one stops waiting for it.
 pub fn run(connection: &mut Connection, request: Request, input: Input) -> Result<i32, String> {
     let mut stdio = Stdio::build(input)?;
     let cwd = match request.cwd {
@@ -703,9 +680,7 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
                     eprintln!("{program}: {WAITING}");
                 }
                 Some(Reply::Prompt { about, prompt }) => {
-                    if let Some(about) = about {
-                        eprintln!("{about}");
-                    }
+                    eprintln!("{about}");
                     let typed = crate::secret::read(&prompt)?;
                     let secret = typed.as_ref().map_or(&[][..], |typed| typed.bytes());
                     let mut frame = wire::secret_frame(request.id, secret);

@@ -333,7 +333,7 @@ fn install_tree(
     events.log(match installed {
         Some(bytes) => format!(
             "installed {what} at {LOCAL} ({})",
-            slopos_installer_core::human(bytes)
+            slopos_installer_core::disk_size(bytes)
         ),
         None => format!("{LOCAL} already holds this medium's {what}"),
     });
@@ -523,7 +523,7 @@ pub fn fill(
     let bytes = seed(root, medium, remote, events)?;
     events.log(format!(
         "seeded /src with the medium's clone ({})",
-        slopos_installer_core::human(bytes)
+        slopos_installer_core::disk_size(bytes)
     ));
     if let Some(url) = remote {
         events.log(format!("/src/slopos fetches from and pushes to {url}"));

@@ -1,9 +1,5 @@
-//! The desktop's design tokens, which appkit and the compositor both read:
-//! colours by role, text roles, a spacing scale and named insets, radii and
-//! shadows.
-//!
-//! An app names a role and the toolkit resolves it through the [`Theme`] it
-//! draws with, so a second theme is a second table and no app changes.
+//! The desktop's design tokens, which appkit and the compositor both read
+//! through [`current`], so a second theme is a second table and no app changes.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -18,16 +14,15 @@ mod insets;
 mod text;
 pub mod words;
 
-pub use dark::DARK;
+use slopos_abi::draw::Color32;
 
-/// The theme the desktop draws with.
-pub fn current() -> &'static Theme {
-    &DARK
-}
 pub use icon::Icon;
 pub use insets::EdgeInsets;
-pub use slopos_abi::draw::Color32;
 pub use text::{TextRole, TextStyle, Weight};
+
+pub fn current() -> &'static Theme {
+    &dark::DARK
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ColorRole {
@@ -161,7 +156,7 @@ pub struct Theme {
     /// What hover and pressed mix over a surface, as libadwaita lays
     /// `currentColor` over a widget; a fill mixes `text_on_accent`, the ink
     /// drawn on it.
-    pub state_ink: Color32,
+    state_ink: Color32,
     /// Cards, popovers and dialogs.
     pub shadow_raised: Shadow,
     pub shadow_window: Shadow,
@@ -178,7 +173,7 @@ const fn state_mix(state: State) -> u8 {
 }
 
 impl Theme {
-    pub const fn color(&self, role: ColorRole) -> Color32 {
+    const fn color(&self, role: ColorRole) -> Color32 {
         match role {
             ColorRole::Surface => self.surface,
             ColorRole::SurfaceRaised => self.surface_raised,
@@ -254,14 +249,12 @@ pub const fn with_alpha(color: Color32, alpha: u8) -> Color32 {
     Color32::new(color.red(), color.green(), color.blue(), alpha)
 }
 
-/// A 4 px scale.
 pub mod space {
     pub const XS: i32 = 4;
     pub const SM: i32 = 8;
     pub const MD: i32 = 12;
     pub const LG: i32 = 16;
     pub const XL: i32 = 24;
-    pub const XXL: i32 = 32;
 }
 
 pub mod inset {

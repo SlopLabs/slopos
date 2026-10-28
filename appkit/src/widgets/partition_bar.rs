@@ -1,10 +1,10 @@
-use slopos_theme_core::{inset, space};
+use slopos_theme_core::{TextRole, space};
 
 use crate::constraints::{BoxConstraints, Size};
-use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use crate::event::{EventResponse, MessageSink, WidgetEvent};
 use crate::node::{BarSegment, SegmentFill};
 use crate::paint::PaintContext;
-use crate::text::BODY;
+use crate::text::ui;
 use crate::traits::{MeasureCtx, Widget, WidgetCore};
 
 /// The narrowest a segment is drawn, so a partition a thousandth of the disk
@@ -14,11 +14,8 @@ pub const MIN_SEGMENT_WIDTH: i32 = 8;
 const HATCH_PERIOD: i32 = 8;
 const HIGHLIGHT_WIDTH: i32 = 2;
 
-/// Each segment's share of `width`: `MIN_SEGMENT_WIDTH`, or what the bar
-/// gives each when it is narrower than that, plus the rest in proportion to
-/// its size, the remainder going to the largest fractions. A segment of no
-/// size gets nothing unless all are, when they share alike. The widths add up
-/// to `width`.
+/// Each segment's share of `width`, summing to it: [`MIN_SEGMENT_WIDTH`] where
+/// it fits and the rest by size; one of no size gets none unless all are.
 pub fn segment_widths(sizes: &[u64], width: i32) -> Vec<i32> {
     let width = width.max(0);
     let weights: Vec<u128> = if sizes.iter().all(|&s| s == 0) {
@@ -88,7 +85,7 @@ impl Widget for PartitionBarWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let height = BODY.line_height + inset::CONTROL.vertical();
+        let height = ctx.style.control_height;
         let width = if constraints.is_width_bounded() {
             constraints.max_width
         } else {
@@ -101,8 +98,8 @@ impl Widget for PartitionBarWidget {
         let rect = self.layout_rect();
         let sizes: Vec<u64> = self.segments.iter().map(|s| s.size).collect();
         let widths = segment_widths(&sizes, rect.width);
-        let text_h = ctx.text_height();
         let pad = space::XS;
+        let ty = ui::centred_top(rect.y, rect.height, TextRole::Body);
         let theme = ctx.theme();
 
         ctx.fill_rect(
@@ -130,10 +127,9 @@ impl Widget for PartitionBarWidget {
             if i > 0 {
                 ctx.fill_rect(x, rect.y, 1, rect.height, theme.surface);
             }
-            let tw = ctx.text_width(&segment.label);
+            let tw = ui::width(&segment.label, TextRole::Body);
             if tw <= w - pad * 2 {
-                let ty = rect.y + (rect.height - text_h) / 2;
-                ctx.draw_text_transparent(x + (w - tw) / 2, ty, &segment.label, fg);
+                ctx.draw_text(x + (w - tw) / 2, ty, &segment.label, TextRole::Body, fg);
             }
             x += w;
         }
@@ -156,12 +152,7 @@ impl Widget for PartitionBarWidget {
         }
     }
 
-    fn event(
-        &mut self,
-        _event: &WidgetEvent,
-        _phase: EventPhase,
-        _sink: &mut MessageSink,
-    ) -> EventResponse {
+    fn event(&mut self, _event: &WidgetEvent, _sink: &mut MessageSink) -> EventResponse {
         EventResponse::Ignored
     }
 }

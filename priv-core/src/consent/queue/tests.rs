@@ -18,7 +18,7 @@ fn ask(n: u32) -> Ask {
         app: None,
         icon: None,
         detail: None,
-        verb: None,
+        verb: "Allow".into(),
         destructive: false,
         extension: None,
     }
@@ -230,8 +230,6 @@ fn a_lost_agent_refuses_everyone_from_then_on() {
     assert_eq!(q.next(0).map(|(a, _)| a.pid), Some(5));
 }
 
-/// Any sequence of steps shows every id once at most and settles every
-/// asker once at most; one withdrawn while waiting is dropped unsettled.
 #[test]
 fn random_steps_settle_each_asker_once() {
     let mut seed = 0x2545_f491_4f6c_dd1du64;
@@ -251,7 +249,9 @@ fn random_steps_settle_each_asker_once() {
         for _ in 0..64 {
             now += next() % 40_000;
             match next() % 7 {
-                0 => q.ready(VERSION),
+                0 => {
+                    q.ready(VERSION);
+                }
                 1 if offered < 64 => {
                     if let Err((n, _)) = q.offer(ask(offered), offered, now) {
                         settled[n as usize] += 1;
@@ -298,20 +298,23 @@ fn random_steps_settle_each_asker_once() {
 }
 
 #[test]
-fn an_agent_of_the_first_version_is_asked_only_to_confirm() {
+fn an_agent_of_another_version_is_asked_nothing() {
     let mut q = Questions::default();
-    q.ready(1);
-    assert_eq!(q.version(), 1);
-    assert_eq!(q.offer(admin_ask(1), 1, 0), Err((1, Refusal::Outdated)));
-    let password = Ask {
-        kind: Kind::Password,
-        person: Some("bob".into()),
-        ..ask(2)
-    };
-    assert_eq!(q.offer(password, 2, 0), Err((2, Refusal::Outdated)));
-    assert_eq!(q.offer(ask(3), 3, 0), Ok(()));
+    for version in [0, VERSION - 1, VERSION + 1] {
+        q.ready(version);
+        assert_eq!(q.offer(ask(1), 1, 0), Err((1, Refusal::Outdated)));
+    }
     q.lost();
-    assert_eq!(q.version(), 0);
+    assert_eq!(q.offer(ask(3), 3, 0), Err((3, Refusal::NoAgent)));
+}
+
+#[test]
+fn what_waited_for_an_agent_of_this_version_is_refused_when_another_takes_its_place() {
+    let mut q = ready();
+    q.offer(ask(1), 1, 0).unwrap();
+    q.offer(ask(2), 2, 0).unwrap();
+    assert_eq!(q.ready(VERSION + 1), vec![1, 2]);
+    assert!(q.next(0).is_none());
 }
 
 #[test]
@@ -367,8 +370,8 @@ fn a_desktop_that_goes_behind_refuses_what_it_was_asked_and_stays_the_agent() {
     assert_eq!(id, Some(shown.id), "the one on screen is taken off it");
     assert_eq!(askers, vec![0, 1, 2]);
     assert_eq!(q.hidden(), (None, vec![]));
-    assert_eq!(q.version(), VERSION, "the agent stays");
+    assert!(q.offer(ask(3), 3, 0).is_ok(), "the agent stays");
+    assert!(q.next(0).is_none());
     q.ready(VERSION);
-    assert!(q.offer(ask(3), 3, 0).is_ok());
     assert!(q.next(0).is_some(), "and is asked again once back");
 }

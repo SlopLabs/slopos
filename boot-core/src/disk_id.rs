@@ -1,9 +1,27 @@
-//! The names `/dev/disk/by-id` gives a disk, as systemd's
-//! `60-persistent-storage` rules and `usb_id` build them, except that a `/`
-//! or `\x` udev keeps is `_` here.
+//! The names `/dev/disk/by-id` gives a disk, as systemd's rules and `usb_id`
+//! build them, but with `_` for the `/` and `\` udev keeps.
 
 pub const DISK_ID_MAX: usize = 192;
 const STEM_MAX: usize = DISK_ID_MAX - b"-part255".len();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bus {
+    Nvme,
+    Virtio,
+    Usb,
+}
+
+impl Bus {
+    const ALL: [Bus; 3] = [Bus::Nvme, Bus::Virtio, Bus::Usb];
+
+    fn prefix(self) -> &'static str {
+        match self {
+            Bus::Nvme => "nvme-",
+            Bus::Virtio => "virtio-",
+            Bus::Usb => "usb-",
+        }
+    }
+}
 
 /// Whether udev writes `c` into a name as it is: an ASCII letter or digit,
 /// one of `#+-.:=@_`, or beyond ASCII what systemd's `unichar_is_valid` takes.
@@ -55,21 +73,20 @@ pub struct DiskId {
 }
 
 impl DiskId {
-    fn begin(bus: &[u8]) -> Option<Self> {
+    fn begin(bus: Bus) -> Option<Self> {
         let mut id = Self {
             stem: [0; STEM_MAX],
             len: 0,
             alias: 0,
         };
-        id.push(bus)?;
-        id.push(b"-")?;
+        id.push(bus.prefix().as_bytes())?;
         Some(id)
     }
 
     /// `nvme-<model>_<serial>_<nsid>`, and namespace 1's alias
     /// `nvme-<model>_<serial>`.
     pub fn nvme(model: &[u8], serial: &[u8], nsid: u32) -> Option<Self> {
-        let mut id = Self::begin(b"nvme")?;
+        let mut id = Self::begin(Bus::Nvme)?;
         id.filled(model, Spaces::Each)?;
         id.push(b"_")?;
         id.filled(serial, Spaces::Each)?;
@@ -84,7 +101,7 @@ impl DiskId {
 
     /// `virtio-<serial>`, from what `VIRTIO_BLK_T_GET_ID` answers.
     pub fn virtio(serial: &[u8]) -> Option<Self> {
-        let mut id = Self::begin(b"virtio")?;
+        let mut id = Self::begin(Bus::Virtio)?;
         id.filled(serial, Spaces::Collapse)?;
         Some(id)
     }
@@ -93,7 +110,7 @@ impl DiskId {
     /// stick with none. A blank vendor or product is an empty part, as
     /// `usb_id`'s is once it has fallen back.
     pub fn usb(vendor: &[u8], product: &[u8], serial: Option<&[u8]>, lun: u8) -> Option<Self> {
-        let mut id = Self::begin(b"usb")?;
+        let mut id = Self::begin(Bus::Usb)?;
         id.part(vendor, Spaces::Collapse)?;
         id.push(b"_")?;
         id.part(product, Spaces::Collapse)?;
@@ -181,6 +198,49 @@ impl DiskId {
         }
         self.push(bytes)
     }
+}
+
+/// A disk as its by-id names describe it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Described<'a> {
+    pub bus: Bus,
+    model: &'a str,
+}
+
+impl<'a> Described<'a> {
+    /// Its maker's model a word at a time, `_` read as whitespace: what an
+    /// NVMe or USB name carries before its last `_` part, read as the serial.
+    /// A serial with whitespace inside, which a Bulk-Only one never holds,
+    /// lends the model its first words, and a USB disk without a serial loses
+    /// its product's last word; a virtio name carries none.
+    pub fn model(&self) -> impl Iterator<Item = &'a str> {
+        self.model.split('_').filter(|word| !word.is_empty())
+    }
+}
+
+/// What the by-id `names` of one disk say of it. Namespace 1's shorter name
+/// is a prefix of its longer one, so the longest is read.
+pub fn describe<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<Described<'a>> {
+    fn digits(text: &str) -> bool {
+        !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+    }
+    let (bus, rest) = names
+        .into_iter()
+        .filter_map(|name| {
+            Bus::ALL
+                .into_iter()
+                .find_map(|bus| Some((bus, name.strip_prefix(bus.prefix())?)))
+        })
+        .max_by_key(|(_, rest)| rest.len())?;
+    let id = match bus {
+        Bus::Nvme => rest.rsplit_once('_').filter(|(_, nsid)| digits(nsid)),
+        Bus::Usb => rest.rsplit_once("-0:").filter(|(_, lun)| digits(lun)),
+        Bus::Virtio => None,
+    };
+    let model = id
+        .and_then(|(id, _)| id.rsplit_once('_'))
+        .map_or("", |(model, _serial)| model);
+    Some(Described { bus, model })
 }
 
 struct Name<'a> {

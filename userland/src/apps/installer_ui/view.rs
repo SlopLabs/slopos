@@ -1,14 +1,13 @@
 use slopos_appkit::theme::space;
 use slopos_appkit::{
     BarSegment, Button, ButtonRow, CrossAxisAlignment, Disclosure, Icon, Length, LineEditInput,
-    List, ListRow, Node, Notice, Page, PropertyList, ScrollDirection, ScrollbarVisibility, Section,
-    SegmentFill, Tag as TagChip, Text, TextRole, Tone,
+    List, ListRow, Node, Notice, PropertyList, Section, SegmentFill, Tag as TagChip, Text,
+    TextRole, Tone, column, row,
 };
+use slopos_boot_core::disk_id::Bus;
 use slopos_boot_core::install::Role;
-use slopos_installer_core::wizard::{Note, Page as Step, Row, Severity, StepState, holding, say};
-use slopos_installer_core::{
-    DEFAULT_REMOTE, Layout, Piece, Tag, disk_size, human, parse_disk_size,
-};
+use slopos_installer_core::wizard::{Kind, Note, Page, Row, StepState, holding, say};
+use slopos_installer_core::{DEFAULT_REMOTE, Failure, Layout, Piece, Tag, disk_size, parse_size};
 
 use super::{Field, InstallerApp, Msg};
 
@@ -18,22 +17,6 @@ const ESP: usize = 1;
 const BOOT: usize = 2;
 const CRASH: usize = 3;
 const OTHER_SYSTEMS: [usize; 3] = [4, 5, 6];
-
-fn column(spacing: i32, children: Vec<Node<Msg>>) -> Node<Msg> {
-    Node::VStack {
-        children,
-        spacing,
-        align: CrossAxisAlignment::Stretch,
-    }
-}
-
-fn row(children: Vec<Node<Msg>>) -> Node<Msg> {
-    Node::HStack {
-        children,
-        spacing: space::SM,
-        align: CrossAxisAlignment::Center,
-    }
-}
 
 fn caption(text: impl Into<String>) -> Node<Msg> {
     Text::new(text)
@@ -51,19 +34,13 @@ fn expand(child: Node<Msg>) -> Node<Msg> {
 }
 
 fn notice(note: Note) -> Node<Msg> {
-    let tone = match note.severity {
-        Severity::Info => Tone::Info,
-        Severity::Warning => Tone::Warning,
-        Severity::Danger => Tone::Danger,
-    };
-    Notice::new(tone, note.title).body(note.body).into()
+    Notice::new(note.tone, note.title).body(note.body).into()
 }
 
 fn notes(app: &InstallerApp) -> impl Iterator<Item = Node<Msg>> {
     app.wizard.notes().into_iter().map(notice)
 }
 
-/// A page's choices as a list, each row that cannot be chosen saying why.
 fn choices<K: PartialEq>(
     rows: &[Row<K>],
     key: Option<K>,
@@ -144,7 +121,7 @@ fn line_edit(app: &InstallerApp, field: Field, placeholder: &str) -> Node<Msg> {
             (Field::Size, Some(typed)) => (
                 &typed.text,
                 typed.caret,
-                parse_disk_size(&typed.text).is_none(),
+                parse_size(&typed.text).is_none(),
                 Msg::SizeText,
             ),
             (Field::Size, None) => {
@@ -179,8 +156,6 @@ fn waiting(said: &str) -> Node<Msg> {
     )
 }
 
-/// What the window waits on: privd's question, the engine starting, or the
-/// engine reading the disks.
 fn busy(app: &InstallerApp) -> Option<Node<Msg>> {
     let w = &app.wizard;
     if app.asking {
@@ -198,22 +173,19 @@ fn welcome(app: &InstallerApp) -> Vec<Node<Msg>> {
     page
 }
 
-fn disk_icon(row: &Row<String>) -> Option<Icon> {
-    let usb = row.key.starts_with("/dev/sd");
-    Some(if usb { Icon::Usb } else { Icon::HardDrive })
-}
-
 fn disk(app: &InstallerApp) -> Vec<Node<Msg>> {
     let w = &app.wizard;
     let mut page: Vec<Node<Msg>> = notes(app).collect();
     let rows = w.disks();
+    let icon = |row: &Row<String>| {
+        let bus = w.system()?.disk(&row.key)?.bus;
+        Some(match bus {
+            Some(Bus::Usb) => Icon::Usb,
+            _ => Icon::HardDrive,
+        })
+    };
     if !rows.is_empty() {
-        page.push(choices(
-            &rows,
-            w.disk().map(String::from),
-            disk_icon,
-            Msg::Disk,
-        ));
+        page.push(choices(&rows, w.disk().map(String::from), icon, Msg::Disk));
     }
     if w.waiting() {
         page.push(waiting(say::READING));
@@ -237,7 +209,7 @@ fn how(app: &InstallerApp) -> Vec<Node<Msg>> {
         let list = choices(&regions, w.region(), |_| None, Msg::Region);
         page.push(Section::new(say::FREE_SPACE, list).into());
     }
-    if answers.kind == slopos_installer_core::wizard::Kind::Reuse {
+    if answers.kind == Kind::Reuse {
         let list = choices(&w.root_rows(), answers.root, |_| None, Msg::Root);
         page.push(Section::new(say::PARTITION, list).into());
     }
@@ -259,7 +231,7 @@ fn how(app: &InstallerApp) -> Vec<Node<Msg>> {
         };
         let content = column(
             space::XS,
-            vec![row(vec![expand(slider), field]), caption(range)],
+            vec![row(space::SM, vec![expand(slider), field]), caption(range)],
         );
         page.push(Section::new(say::SIZE, content).into());
     }
@@ -337,7 +309,7 @@ fn review(app: &InstallerApp) -> Vec<Node<Msg>> {
     page
 }
 
-/// As tall as the steps, which the log is read beside.
+/// About as tall as the list of steps.
 const LOG_HEIGHT: i32 = 26 * space::SM;
 
 fn steps(app: &InstallerApp) -> Node<Msg> {
@@ -356,14 +328,17 @@ fn steps(app: &InstallerApp) -> Node<Msg> {
                 StepState::Pending => Tone::Secondary,
                 _ => Tone::Normal,
             };
-            row(vec![
-                Node::Icon {
-                    icon,
-                    role: TextRole::Body,
-                    tone,
-                },
-                Text::new(title).tone(text_tone).into(),
-            ])
+            row(
+                space::SM,
+                vec![
+                    Node::Icon {
+                        icon,
+                        role: TextRole::Body,
+                        tone,
+                    },
+                    Text::new(title).tone(text_tone).into(),
+                ],
+            )
         })
         .collect();
     column(space::XS, rows)
@@ -382,8 +357,6 @@ fn log(app: &InstallerApp) -> Node<Msg> {
         height: Some(Length::Px(LOG_HEIGHT)),
         child: Box::new(Node::ScrollView {
             child: Box::new(column(0, lines)),
-            direction: ScrollDirection::Vertical,
-            show_scrollbar: ScrollbarVisibility::WhenNeeded,
             scroll_y: app.log_scroll,
             on_scroll: Some(Msg::LogScroll),
             follow_end: true,
@@ -391,8 +364,6 @@ fn log(app: &InstallerApp) -> Node<Msg> {
     }
 }
 
-/// What a page holds for the person who wants more: `before` it, then the
-/// install's log.
 fn details(app: &InstallerApp, mut before: Vec<Node<Msg>>) -> Node<Msg> {
     let title = match app.details {
         true => say::HIDE_DETAILS,
@@ -410,7 +381,7 @@ fn install(app: &InstallerApp) -> Vec<Node<Msg>> {
     let bar = match progress.bytes {
         Some((done, total)) => Node::ProgressBar {
             value: Some((done.saturating_mul(100) / total.max(1)) as u32),
-            label: format!("{} of {} copied", human(done), human(total)),
+            label: format!("{} of {} copied", disk_size(done), disk_size(total)),
             tone: Tone::Accent,
         },
         None => Node::ProgressBar {
@@ -426,14 +397,14 @@ fn install(app: &InstallerApp) -> Vec<Node<Msg>> {
     ]
 }
 
-fn restart_refused(app: &InstallerApp) -> Option<Node<Msg>> {
-    app.restart_refused
+fn restart_failed(app: &InstallerApp) -> Option<Node<Msg>> {
+    app.restart_failed
         .then(|| Notice::new(Tone::Danger, say::NOT_RESTARTED).into())
 }
 
 fn done(app: &InstallerApp) -> Vec<Node<Msg>> {
     let mut page: Vec<Node<Msg>> = notes(app).collect();
-    page.extend(restart_refused(app));
+    page.extend(restart_failed(app));
     let where_to = app
         .wizard
         .done_lines()
@@ -447,14 +418,17 @@ fn done(app: &InstallerApp) -> Vec<Node<Msg>> {
 
 fn error(app: &InstallerApp) -> Vec<Node<Msg>> {
     let mut page: Vec<Node<Msg>> = notes(app).collect();
-    page.extend(restart_refused(app));
+    page.extend(restart_failed(app));
     page.extend(busy(app));
-    let why = app.wizard.failure().map(|failure| {
-        Text::new(failure.message.clone())
-            .role(TextRole::Mono)
-            .wrap_anywhere()
-            .into()
-    });
+    let why = match app.wizard.failure() {
+        Some(Failure::Stopped { why, .. }) => Some(
+            Text::new(why.clone())
+                .role(TextRole::Mono)
+                .wrap_anywhere()
+                .into(),
+        ),
+        _ => None,
+    };
     page.push(details(app, why.into_iter().collect()));
     page
 }
@@ -471,10 +445,10 @@ fn footer(app: &InstallerApp) -> Option<ButtonRow<Msg>> {
     };
     let close = |label| Button::new(label).on_press(Msg::Close);
     Some(match app.page {
-        Step::Welcome => ButtonRow::new()
+        Page::Welcome => ButtonRow::new()
             .aside(close(if app.welcome { say::TRY } else { say::CLOSE }))
             .confirm(next),
-        Step::Disk => ButtonRow::new()
+        Page::Disk => ButtonRow::new()
             .back(back())
             .aside(
                 Button::new(say::SCAN)
@@ -482,17 +456,17 @@ fn footer(app: &InstallerApp) -> Option<ButtonRow<Msg>> {
                     .enabled(!w.waiting()),
             )
             .confirm(next),
-        Step::How => ButtonRow::new().back(back()).confirm(next),
-        Step::Review => ButtonRow::new().back(back()).destructive(next),
-        Step::Install => return None,
-        Step::Done => ButtonRow::new()
+        Page::How => ButtonRow::new().back(back()).confirm(next),
+        Page::Review => ButtonRow::new().back(back()).destructive(next),
+        Page::Install => return None,
+        Page::Done => ButtonRow::new()
             .aside(close(if app.welcome {
                 say::KEEP_TRYING
             } else {
                 say::CLOSE
             }))
             .destructive(next),
-        Step::Error => ButtonRow::new()
+        Page::Error => ButtonRow::new()
             .aside(
                 Button::new(say::RESTART)
                     .on_press(Msg::Restart)
@@ -504,16 +478,19 @@ fn footer(app: &InstallerApp) -> Option<ButtonRow<Msg>> {
 
 pub(super) fn window(app: &InstallerApp) -> Node<Msg> {
     let heading = app.wizard.heading(app.welcome);
-    let content = match app.page {
-        Step::Welcome => welcome(app),
-        Step::Disk => disk(app),
-        Step::How => how(app),
-        Step::Review => review(app),
-        Step::Install => install(app),
-        Step::Done => done(app),
-        Step::Error => error(app),
+    let mut content = match app.page {
+        Page::Welcome => welcome(app),
+        Page::Disk => disk(app),
+        Page::How => how(app),
+        Page::Review => review(app),
+        Page::Install => install(app),
+        Page::Done => done(app),
+        Page::Error => error(app),
     };
-    let page = Page::new(heading.title)
+    if let Some(disk) = heading.disk {
+        content.insert(0, caption(disk));
+    }
+    let page = slopos_appkit::Page::new(heading.title)
         .subtitle(heading.subtitle)
         .content(column(space::XL, content));
     match footer(app) {

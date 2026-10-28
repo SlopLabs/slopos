@@ -1331,7 +1331,6 @@ impl Control {
         Some(&into[..read])
     }
 
-    /// String descriptor `index` in the device's language.
     pub fn string<'b>(
         &self,
         index: u8,

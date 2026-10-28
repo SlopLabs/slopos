@@ -18,46 +18,15 @@ fn tags(p: &Proposal) -> Vec<(Tag, Option<Role>)> {
 }
 
 #[test]
-fn amounts_are_shown_in_binary_units() {
-    assert_eq!(human(512), "512 B");
-    assert_eq!(human(1536), "1.5 KiB");
-    assert_eq!(human(7 * GIB), "7.0 GiB");
-    assert_eq!(human(3 << 40), "3.0 TiB");
-}
-
-#[test]
-fn sizes_are_read_in_the_units_given() {
-    assert_eq!(parse_size("4096"), Some(4096));
-    assert_eq!(parse_size("20GB"), Some(20_000_000_000));
-    assert_eq!(parse_size("512MB"), Some(512_000_000));
-    assert_eq!(parse_size("17.2GB"), Some(17_200_000_000));
-    assert_eq!(parse_size("4096B"), Some(4096));
-    assert_eq!(parse_size("20G"), Some(20 * GIB));
-    assert_eq!(parse_size("20GiB"), Some(20 * GIB));
-    assert_eq!(parse_size("512M"), Some(512 * MIB));
-    assert_eq!(parse_size("2T"), Some(2 << 40));
-    for bad in [
-        "",
-        "G",
-        "iB",
-        "1.5G",
-        "-1G",
-        "20g",
-        "20 G",
-        "20gb",
-        "20iB",
-        "5KiBiB",
-        "5BiB",
-        "16777216T",
-    ] {
-        assert_eq!(parse_size(bad), None, "{bad:?}");
-    }
-}
-
-#[test]
-fn types_are_named_as_fdisk_names_them() {
-    assert_eq!(type_name(&ESP_TYPE), "EFI system");
-    assert_eq!(type_name(&ROOT_TYPE), "SlopOS root");
+fn slopos_s_types_are_named_by_role_and_others_as_fdisk_names_them() {
+    let named: Vec<String> = install::ROLES
+        .iter()
+        .map(|role| type_name(&role.type_guid()))
+        .collect();
+    assert_eq!(
+        named,
+        ["EFI system", "SlopOS startup", "SlopOS", "Crash record"]
+    );
     assert_eq!(type_name(&LINUX), "Linux filesystem");
     let unknown = Guid([7; 16]);
     assert_eq!(type_name(&unknown), unknown.to_string());
@@ -103,7 +72,7 @@ fn a_layout_lists_partitions_and_free_regions_in_order() {
 
 #[test]
 fn an_erase_loses_the_whole_disk() {
-    let p = Case::erasing(Some(foreign()), Contents::Gpt).proposal();
+    let p = Case::erasing(Some(foreign())).proposal();
     assert!(p.erase);
     assert_eq!(
         tags(&p),
@@ -123,21 +92,11 @@ fn an_erase_loses_the_whole_disk() {
 }
 
 #[test]
-fn an_erase_of_a_disk_without_a_table_shows_what_it_held() {
-    for contents in [
-        Contents::Blank,
-        Contents::Mbr(vec![MbrPartition {
-            index: 0,
-            kind: 0x83,
-            bytes: GIB,
-        }]),
-    ] {
-        let p = Case::erasing(None, contents.clone()).proposal();
-        assert_eq!(p.contents, contents);
-        assert!(p.before.segments.is_empty());
-        assert_eq!(p.before.capacity, 16 * GIB);
-        assert_eq!(p.actions.len(), 5);
-    }
+fn an_erase_of_a_disk_without_a_table_lays_out_nothing_before() {
+    let p = Case::erasing(None).proposal();
+    assert!(p.before.segments.is_empty());
+    assert_eq!(p.before.capacity, 16 * GIB);
+    assert_eq!(p.actions.len(), 5);
 }
 
 #[test]
@@ -341,7 +300,7 @@ fn the_cli_names_the_flag_the_window_leaves_out() {
     assert!(elsewhere.to_string().ends_with("--root 3."));
     let only = Issue::OnlyErase {
         node: "/dev/vda".into(),
-        contents: Contents::Blank,
+        contents: NoTable::Blank,
     };
     assert!(only.to_string().starts_with("/dev/vda: "));
     assert!(only.to_string().contains("--mode erase"));
@@ -360,16 +319,17 @@ fn the_cli_names_the_flag_the_window_leaves_out() {
 }
 
 #[test]
-fn every_step_is_named_from_one() {
+fn every_step_is_numbered_from_one() {
+    for (step, number) in Step::ALL.into_iter().zip(1..) {
+        assert_eq!(step.number(), number);
+        assert_eq!(Step::numbered(number), Some(step));
+    }
+    assert_eq!(Step::numbered(0), None);
+    assert_eq!(Step::numbered(10), None);
     assert_eq!(
-        Event::step(1),
-        Event::Step {
-            index: 1,
-            total: 9,
-            title: STEPS[0].into()
-        }
+        Step::Default.to_string(),
+        "[7/9] Choosing what starts by default"
     );
-    assert!(matches!(Event::step(9), Event::Step { title, .. } if title == STEPS[8]));
 }
 
 #[test]
@@ -386,14 +346,16 @@ fn a_disk_s_size_is_said_as_its_label_says_it() {
 }
 
 #[test]
-fn a_typed_size_is_read_in_the_units_the_box_shows() {
-    assert_eq!(parse_disk_size("20"), Some(20_000_000_000));
-    assert_eq!(parse_disk_size("20 GB"), Some(20_000_000_000));
-    assert_eq!(parse_disk_size("17.2 gb"), Some(17_200_000_000));
-    assert_eq!(parse_disk_size("512MB"), Some(512_000_000));
-    assert_eq!(parse_disk_size("1.5 TB"), Some(1_500_000_000_000));
-    assert_eq!(parse_disk_size("9 GiB"), Some(9 * GIB));
-    assert_eq!(parse_disk_size(&disk_size(16 * GIB)), Some(17_200_000_000));
+fn a_size_is_read_in_the_units_sizes_are_shown_in() {
+    assert_eq!(parse_size("20"), Some(20_000_000_000));
+    assert_eq!(parse_size("20 GB"), Some(20_000_000_000));
+    assert_eq!(parse_size("17.2 gb"), Some(17_200_000_000));
+    assert_eq!(parse_size("512MB"), Some(512_000_000));
+    assert_eq!(parse_size("1.5 TB"), Some(1_500_000_000_000));
+    assert_eq!(parse_size("4096B"), Some(4096));
+    assert_eq!(parse_size("4096 bytes"), Some(4096));
+    assert_eq!(parse_size(&disk_size(16 * GIB)), Some(17_200_000_000));
+    assert_eq!(parse_size(&disk_size(1)), Some(1));
     let huge = "340282366920938463463374607431768211455.5 B";
     for bad in [
         "",
@@ -403,61 +365,16 @@ fn a_typed_size_is_read_in_the_units_the_box_shows() {
         "20 parsecs",
         ".5",
         "1.0000000001",
+        "-1GB",
+        "20G",
+        "512M",
+        "9 GiB",
+        "2TiB",
+        "18447 PB",
+        "1.5 B",
+        "0.0001 kB",
         huge,
     ] {
-        assert_eq!(parse_disk_size(bad), None, "{bad:?}");
+        assert_eq!(parse_size(bad), None, "{bad:?}");
     }
-}
-
-#[test]
-fn a_disk_s_model_is_read_back_from_the_names_devfs_gives_it() {
-    use slopos_boot_core::disk_id::{DISK_ID_MAX, DiskId};
-    let model = |id: Option<DiskId>| {
-        let id = id.expect("a name");
-        let names: Vec<String> = [false, true]
-            .into_iter()
-            .filter_map(|alias| {
-                let mut out = [0u8; DISK_ID_MAX];
-                let len = id.write(alias, None, &mut out)?;
-                String::from_utf8(out[..len].to_vec()).ok()
-            })
-            .collect();
-        model_of(names.iter().map(String::as_str))
-    };
-    let kingston = DiskId::nvme(b"KINGSTON SNV3S1000G   ", b"50026B7382A1B2C3  ", 1);
-    assert_eq!(model(kingston), Some("KINGSTON SNV3S1000G".into()));
-    let spaced = DiskId::nvme(b"Model X", b"  S4EW123", 2);
-    assert_eq!(model(spaced), Some("Model X".into()));
-    let stick = DiskId::usb(b"SanDisk ", b"Ultra Fit       ", Some(b"4C530001"), 0);
-    assert_eq!(model(stick), Some("SanDisk Ultra Fit".into()));
-    let unnamed = DiskId::usb(b"", b"Flash Disk", Some(b"4C530001"), 0);
-    assert_eq!(model(unnamed), Some("Flash Disk".into()));
-}
-
-#[test]
-fn a_disk_s_model_is_read_from_the_names_udev_gives_it() {
-    let nvme = [
-        "nvme-QEMU_NVMe_Ctrl_slopos-root_1",
-        "nvme-QEMU_NVMe_Ctrl_slopos-root",
-    ];
-    assert_eq!(model_of(nvme), Some("QEMU NVMe Ctrl".into()));
-    assert_eq!(
-        model_of(nvme.into_iter().rev()),
-        Some("QEMU NVMe Ctrl".into())
-    );
-    assert_eq!(
-        model_of(["nvme-KINGSTON_SNV3S1000G_50026B7382A1B2C3_2"]),
-        Some("KINGSTON SNV3S1000G".into())
-    );
-    assert_eq!(
-        model_of(["usb-QEMU_QEMU_HARDDISK_slopos-usb-0:0"]),
-        Some("QEMU QEMU HARDDISK".into())
-    );
-    assert_eq!(
-        model_of(["nvme-Model_X___S4EW123_2"]),
-        Some("Model X".into())
-    );
-    assert_eq!(model_of(["virtio-slopos-verified"]), None);
-    assert_eq!(model_of(["nvme-nothing"]), None);
-    assert_eq!(model_of([]), None);
 }

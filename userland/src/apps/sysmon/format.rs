@@ -1,6 +1,3 @@
-use std::format;
-use std::string::String;
-
 use slopos_abi::task::{TaskPriority, TaskStatus};
 
 use crate::syscall::UserTaskEntry;
@@ -15,98 +12,51 @@ pub(crate) fn task_name_bytes(task: &UserTaskEntry) -> &[u8] {
 }
 
 pub(crate) fn task_name_string(task: &UserTaskEntry) -> String {
-    task_name_from_slice(task_name_bytes(task))
+    String::from_utf8_lossy(task_name_bytes(task)).into_owned()
 }
 
-fn task_name_from_slice(bytes: &[u8]) -> String {
-    if let core::result::Result::Ok(s) = core::str::from_utf8(bytes) {
-        return s.to_string();
-    }
-
-    let mut out = String::with_capacity(bytes.len());
-    for &b in bytes {
-        if b.is_ascii_graphic() || b == b' ' {
-            out.push(b as char);
-        } else {
-            out.push('?');
-        }
-    }
-    out
-}
-
-/// No wildcard arm on purpose: a change to the ABI's [`TaskStatus`]
-/// discriminants must be a build error here.
-pub(crate) fn task_state(state: u8) -> &'static str {
-    match TaskStatus::from_u8(state) {
-        TaskStatus::Running => "Running",
-        TaskStatus::Blocked => "Waiting",
-        TaskStatus::Ready => "Ready",
-        TaskStatus::Stopped => "Stopped",
-        TaskStatus::Zombie => "Ending",
-        TaskStatus::Terminated => "Ended",
-        TaskStatus::Invalid => "Unknown",
+/// Its name and its place in the order the overview's rows and the State
+/// column keep. No wildcard arm, so a new [`TaskStatus`] is a build error
+/// until it has both.
+pub(crate) fn task_state(state: TaskStatus) -> (usize, &'static str) {
+    match state {
+        TaskStatus::Running => (0, "Running"),
+        TaskStatus::Ready => (1, "Ready"),
+        TaskStatus::Blocked => (2, "Waiting"),
+        TaskStatus::Stopped => (3, "Stopped"),
+        TaskStatus::Zombie => (4, "Ending"),
+        TaskStatus::Terminated => (5, "Ended"),
+        TaskStatus::Invalid => (6, "Unknown"),
     }
 }
 
 pub(crate) fn priority_label(priority: u8) -> &'static str {
     match TaskPriority::from_u8(priority) {
-        TaskPriority::High => "Hi",
-        TaskPriority::KernelIo => "KIO",
-        TaskPriority::Normal => "Norm",
+        TaskPriority::High => "High",
+        TaskPriority::KernelIo => "Above normal",
+        TaskPriority::Normal => "Normal",
         TaskPriority::Low => "Low",
         TaskPriority::Idle => "Idle",
     }
 }
 
-/// Only the kernel idle loop can carry `Idle`: the syscall boundary rejects
-/// userland spawn calls with that priority.
+/// Only the kernel's idle loop carries `Idle`; no spawn may ask for it.
 pub(crate) fn is_idle_task(task: &UserTaskEntry) -> bool {
     TaskPriority::from_u8(task.priority) == TaskPriority::Idle
 }
 
-pub(crate) fn trim_ascii(bytes: &[u8]) -> String {
-    let mut end = bytes.len();
-    while end > 0 && (bytes[end - 1] == 0 || bytes[end - 1] == b' ') {
-        end -= 1;
-    }
-    let slice = &bytes[..end];
-    if let core::result::Result::Ok(s) = core::str::from_utf8(slice) {
-        return s.to_string();
-    }
-
-    let mut out = String::with_capacity(slice.len());
-    for &b in slice {
-        if b.is_ascii_graphic() || b == b' ' {
-            out.push(b as char);
-        } else {
-            out.push('?');
-        }
-    }
-    out
-}
-
-pub(crate) fn truncate_name(name: &str, max_chars: usize) -> String {
-    let total = name.chars().count();
-    if total <= max_chars {
-        return name.to_string();
-    }
-
-    let mut out = String::new();
-    for ch in name.chars().take(max_chars.saturating_sub(1)) {
-        out.push(ch);
-    }
-    out.push('~');
-    out
-}
-
-pub(crate) fn format_bytes_mib(bytes: u64) -> String {
-    let whole = bytes / (1024 * 1024);
-    let frac = ((bytes % (1024 * 1024)).saturating_mul(10)) / (1024 * 1024);
-    if frac == 0 {
-        format!("{} MiB", whole)
-    } else {
-        format!("{}.{} MiB", whole, frac)
-    }
+/// Text padded out with NULs or spaces at either end, as CPUID gives it.
+pub(crate) fn padded_text(bytes: &[u8]) -> String {
+    let padding = |b: &u8| *b == 0 || *b == b' ';
+    let start = bytes
+        .iter()
+        .position(|b| !padding(b))
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|b| !padding(b))
+        .map_or(start, |last| last + 1);
+    String::from_utf8_lossy(&bytes[start..end]).into_owned()
 }
 
 pub(crate) fn format_uptime(ms: u64) -> String {

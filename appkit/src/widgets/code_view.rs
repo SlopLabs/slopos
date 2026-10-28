@@ -1,43 +1,20 @@
-//! The code surface: a gutter, a viewport of styled lines, a caret and a
-//! selection.
-//!
-//! The widget is given exactly the lines that are visible and their spans, and
-//! it reports back in **document coordinates** — a click is a `(line, col)` in
-//! the file, not a pixel in this rect. That split is what keeps the buffer, the
-//! undo history and the highlighter out of the toolkit: this draws text and
-//! resolves geometry, and the application owns the document.
-//!
-//! Geometry is fixed-cell (see [`crate::text`]): a column is one advance, which
-//! is what makes a pixel-to-column mapping a division rather than a measurement
-//! loop. Tabs are the one exception and the reason a *display* column exists
-//! beside the character column: a tab advances to the next multiple of
-//! `tab_width`, so the two indices diverge on any line that contains one.
+//! The code surface: a gutter, the lines in view, a caret and a selection,
+//! reporting in document coordinates so the buffer stays the app's.
 
 use std::any::Any;
 
 use slopos_abi::draw::Color32;
-use slopos_theme_core::{ColorRole, State, with_alpha};
+use slopos_theme_core::{ColorRole, State, TextRole, space, with_alpha};
 
+use super::scrollbar::Bar;
 use crate::constraints::{BoxConstraints, Rect, Size};
-use crate::event::{
-    EventPhase, EventResponse, Key, MessageSink, Modifiers, PointerButton, WidgetEvent,
-};
+use crate::event::{EventResponse, Key, MessageSink, Modifiers, PointerButton, WidgetEvent};
 use crate::paint::PaintContext;
+use crate::style::StyleSheet;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
-/// Horizontal padding inside the gutter, each side.
-const GUTTER_PAD: i32 = 8;
-/// Gap between the gutter and the first text column.
-const TEXT_PAD: i32 = 8;
-/// Width of the caret.
-const CARET_WIDTH: i32 = 2;
-/// Width of the overview scrollbar on the right edge.
-const SCROLLBAR_WIDTH: i32 = 6;
-/// Shortest the thumb gets, so a huge file still leaves something to grab.
-const THUMB_MIN_HEIGHT: i32 = 24;
-/// How wide the scrollbar's *grab* target is. Wider than the bar it draws,
-/// which is 6px and not something to ask a pointer to land on.
-const SCROLLBAR_GRAB: i32 = 12;
+const GUTTER_PAD: i32 = space::SM;
+const TEXT_PAD: i32 = space::SM;
 
 /// A coloured run within a line, in character indices.
 #[derive(Clone, Copy, Debug)]
@@ -47,19 +24,16 @@ pub struct StyledSpan {
     pub color: Color32,
 }
 
-/// One visible line: its number, its text and the spans that colour it.
 #[derive(Clone, Debug)]
 pub struct CodeLine {
-    /// Document line index (0-based); the gutter shows it 1-based.
+    /// From 0; the gutter counts from 1.
     pub number: usize,
     pub text: String,
     pub spans: Vec<StyledSpan>,
-    /// Extra background runs — search hits — in character indices.
+    /// Search hits, in character indices.
     pub highlights: Vec<(usize, usize)>,
 }
 
-/// What the code surface reports; the application interprets it against the
-/// document.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CodeInput {
     Click {
@@ -78,7 +52,7 @@ pub enum CodeInput {
     Scroll {
         delta_lines: i32,
     },
-    /// The scrollbar was pressed or dragged to an absolute position.
+    /// The scrollbar was pressed or dragged.
     ScrollTo {
         first_line: usize,
     },
@@ -91,41 +65,26 @@ pub enum CodeInput {
     },
 }
 
-/// Lines that fit in `height` pixels. The application sizes the document's
-/// viewport with this, so the rows it sends are exactly the rows drawn.
+/// Lines that fit in `height` pixels, which the app sends.
 pub fn visible_line_count(height: i32, line_height: i32) -> usize {
-    if height <= 0 || line_height <= 0 {
+    if line_height <= 0 {
         return 0;
     }
     (height / line_height).max(0) as usize
 }
 
-/// Pixels of a code surface's width that are not text: the gap after the
-/// gutter and the overview scrollbar on the right edge.
-///
-/// Exported because the application sizes the document's viewport itself and
-/// has to subtract exactly what the widget does.
+/// What of the width beside the gutter is not text, which the app takes off
+/// as the widget does: the gap after the gutter and the scrollbar.
 pub fn text_area_reserved() -> i32 {
-    TEXT_PAD + SCROLLBAR_WIDTH
+    TEXT_PAD + StyleSheet::current().scrollbar_width
 }
 
-/// Width of the gutter for a file of `total_lines`, at `cell_width`.
 pub fn gutter_width(total_lines: usize, cell_width: i32, show_line_numbers: bool) -> i32 {
     if !show_line_numbers {
         return TEXT_PAD;
     }
-    let digits = digit_count(total_lines.max(1));
+    let digits = total_lines.max(1).ilog10() as i32 + 1;
     GUTTER_PAD * 2 + digits * cell_width
-}
-
-fn digit_count(n: usize) -> i32 {
-    let mut digits = 1;
-    let mut value = n;
-    while value >= 10 {
-        value /= 10;
-        digits += 1;
-    }
-    digits
 }
 
 /// Display column of character `col` on `text`, expanding tabs.
@@ -147,10 +106,8 @@ pub fn display_col(text: &str, col: usize, tab_width: usize) -> usize {
     display + col.saturating_sub(text.chars().count())
 }
 
-/// Character column containing display column `display` on `text`. The exact
-/// inverse of [`display_col`]; `editor-core`'s `buffer::char_col_from_display`
-/// is the same function and the two must agree, because the viewport origin
-/// crosses between them.
+/// The character column holding display column `display`, the inverse of
+/// [`display_col`], which editor-core's `char_col_from_display` must match.
 pub fn char_col_from_display(text: &str, display: usize, tab_width: usize) -> usize {
     let tab = tab_width.max(1);
     let mut current = 0usize;
@@ -165,12 +122,8 @@ pub fn char_col_from_display(text: &str, display: usize, tab_width: usize) -> us
     len + display.saturating_sub(current)
 }
 
-/// Character column for a click `half_display` half-cells from the line's
-/// start: past a character's midpoint the caret belongs after it.
-///
-/// Half cells, because at whole-cell resolution a one-cell-wide character can
-/// never round up — the click and the character's own column are the same
-/// number — and the caret could then only ever land on a glyph's left edge.
+/// The character column a click `half_display` half-cells in lands on: after
+/// a character past its middle, which whole cells could never tell.
 pub fn char_col_at_half(text: &str, half_display: usize, tab_width: usize) -> usize {
     let tab = tab_width.max(1);
     let mut current = 0usize;
@@ -202,18 +155,14 @@ pub struct CodeViewWidget {
     selection: Option<((usize, usize), (usize, usize))>,
     show_line_numbers: bool,
     focused: bool,
-    /// Whether a selection drag is in progress. Given rather than remembered:
-    /// the widget tree is rebuilt on every message, so a flag the widget set on
-    /// the press would be gone before the first move arrived.
+    /// Given by the app: a rebuild comes between a press and its moves.
     selecting: bool,
-    /// Whether a scrollbar drag is in progress, held by the application for the
-    /// same reason as `selecting`.
     scroll_dragging: bool,
     on_input: Option<InputCallback>,
-    /// Cell metrics from the last paint/measure; hit testing must use what paint
-    /// used or a click lands on the wrong column.
     cell_w: i32,
     line_h: i32,
+    bar: i32,
+    thumb_min: i32,
 }
 
 impl CodeViewWidget {
@@ -248,6 +197,8 @@ impl CodeViewWidget {
             on_input,
             cell_w: crate::text::cell_width(),
             line_h: crate::text::cell_height(),
+            bar: 0,
+            thumb_min: 0,
         }
     }
 
@@ -269,7 +220,7 @@ impl CodeViewWidget {
         }
     }
 
-    /// Document position under a pixel, clamped into the visible rows.
+    /// Clamped into the rows in view.
     fn position_at(&self, x: i32, y: i32) -> (usize, usize) {
         let rect = self.layout_rect();
         let row = if self.line_h > 0 {
@@ -281,9 +232,7 @@ impl CodeViewWidget {
         let text = self.lines.get(row).map(|l| l.text.as_str()).unwrap_or("");
         let local_x = x - self.text_origin_x();
         if local_x < 0 {
-            // The gutter: a click on a line number means the start of the
-            // line, not the first column that happens to be scrolled into
-            // view.
+            // On a line's number, the start of the line, scrolled or not.
             return (line, 0);
         }
         let half = if self.cell_w > 0 {
@@ -297,7 +246,7 @@ impl CodeViewWidget {
         )
     }
 
-    /// Selection range on one line as display columns, or `None`.
+    /// In display columns.
     fn selection_on_line(&self, line: usize, text: &str) -> Option<(usize, usize)> {
         let ((sl, sc), (el, ec)) = self.selection?;
         if line < sl || line > el {
@@ -318,14 +267,32 @@ impl CodeViewWidget {
         Some((start, end.max(start)))
     }
 
+    /// Washes display columns `start..end` of the row at `y`.
+    fn wash(
+        &self,
+        ctx: &mut PaintContext,
+        content: Rect,
+        y: i32,
+        span: (usize, usize),
+        ink: Color32,
+    ) {
+        let x = |col: usize| {
+            self.text_origin_x() + col.saturating_sub(self.first_col) as i32 * self.cell_w
+        };
+        let (x0, x1) = (x(span.0), x(span.1));
+        if span.1 > self.first_col && x1 > x0 {
+            ctx.with_viewport(content, |ctx| {
+                ctx.fill_rect_blended(x0, y, x1 - x0, self.line_h, ink);
+            });
+        }
+    }
+
     fn paint_line_text(&self, ctx: &mut PaintContext, line: &CodeLine, y: i32, clip: Rect) {
         let default_fg = ctx.theme().text_secondary;
         let mut display = 0usize;
         let right_edge = clip.x + clip.width;
 
-        // Runs are grouped by colour so a line is a handful of string draws
-        // rather than one per character. A tab ends a run because it advances
-        // without drawing.
+        // A run of one colour is one draw; a tab ends one, drawing nothing.
         let mut run = String::new();
         let mut run_x = self.text_origin_x();
         let mut run_color = default_fg;
@@ -346,7 +313,7 @@ impl CodeViewWidget {
                 }
                 if ch == '\t' {
                     if !run.is_empty() {
-                        ctx.draw_mono_text(run_x, y, &run, run_color, Color32::TRANSPARENT);
+                        ctx.draw_text(run_x, y, &run, TextRole::Mono, run_color);
                         run.clear();
                     }
                 } else {
@@ -354,7 +321,7 @@ impl CodeViewWidget {
                         run_x = cell_x;
                         run_color = color;
                     } else if color != run_color {
-                        ctx.draw_mono_text(run_x, y, &run, run_color, Color32::TRANSPARENT);
+                        ctx.draw_text(run_x, y, &run, TextRole::Mono, run_color);
                         run.clear();
                         run_x = cell_x;
                         run_color = color;
@@ -365,68 +332,19 @@ impl CodeViewWidget {
             display += width;
         }
         if !run.is_empty() {
-            ctx.draw_mono_text(run_x, y, &run, run_color, Color32::TRANSPARENT);
+            ctx.draw_text(run_x, y, &run, TextRole::Mono, run_color);
         }
     }
 
-    /// `(thumb rect, span)` for the overview scrollbar, or `None` when the file
-    /// fits and there is nothing to scroll.
-    ///
-    /// One source for the thumb the pointer grabs and the thumb that is drawn,
-    /// so a press lands on what the eye is aiming at.
-    fn scrollbar_thumb(&self) -> Option<(Rect, usize)> {
+    fn scrollbar(&self) -> Option<Bar> {
         let rect = self.layout_rect();
-        let visible = visible_line_count(rect.height, self.line_h).max(1);
-        if self.total_lines <= visible {
-            return None;
-        }
-        let track_h = rect.height;
-        let thumb_h = ((visible as i64 * track_h as i64) / self.total_lines as i64)
-            .max(THUMB_MIN_HEIGHT as i64)
-            .min(track_h as i64) as i32;
-        let span = self.total_lines - visible;
-        let offset = ((self.first_line.min(span) as i64) * (track_h - thumb_h) as i64
-            / span.max(1) as i64) as i32;
-        let thumb = Rect::new(
-            rect.x + rect.width - SCROLLBAR_WIDTH,
-            rect.y + offset,
-            SCROLLBAR_WIDTH,
-            thumb_h,
-        );
-        Some((thumb, span))
+        let shown = visible_line_count(rect.height, self.line_h).max(1) as i64;
+        let (total, first) = (self.total_lines as i64, self.first_line as i64);
+        Bar::needed(rect, self.bar, self.thumb_min, shown, total, first)
     }
 
-    /// Whether a window-space point is on the scrollbar's column.
-    ///
-    /// The whole column, not just the thumb: pressing the track is how every
-    /// editor jumps, and a 6px target is hard enough to hit without asking for
-    /// the thumb exactly.
-    fn point_on_scrollbar(&self, x: i32, y: i32) -> bool {
-        let rect = self.layout_rect();
-        rect.contains(x, y) && x >= rect.x + rect.width - SCROLLBAR_GRAB
-    }
-
-    /// The first line that puts the thumb's middle under `y`.
     fn first_line_at(&self, y: i32) -> usize {
-        let Some((thumb, span)) = self.scrollbar_thumb() else {
-            return 0;
-        };
-        let rect = self.layout_rect();
-        let usable = rect.height - thumb.height;
-        if usable <= 0 {
-            return 0;
-        }
-        let top = (y - rect.y - thumb.height / 2).clamp(0, usable);
-        ((top as i64 * span as i64) / usable as i64) as usize
-    }
-
-    fn paint_scrollbar(&self, ctx: &mut PaintContext) {
-        let Some((thumb, _)) = self.scrollbar_thumb() else {
-            return;
-        };
-        let alpha = if self.scroll_dragging { 0x8c } else { 0x4c };
-        let ink = with_alpha(ctx.theme().text_secondary, alpha);
-        ctx.fill_rect_blended(thumb.x, thumb.y, thumb.width, thumb.height, ink);
+        self.scrollbar().map_or(0, |bar| bar.offset_at(y)) as usize
     }
 }
 
@@ -445,9 +363,11 @@ impl Widget for CodeViewWidget {
         &mut self.core
     }
 
-    fn measure(&mut self, constraints: BoxConstraints, _ctx: &mut MeasureCtx) -> Size {
+    fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         self.cell_w = crate::text::cell_width();
         self.line_h = crate::text::cell_height();
+        self.bar = ctx.style.scrollbar_width;
+        self.thumb_min = ctx.style.scrollbar_thumb_min;
         constraints.constrain(constraints.max_size())
     }
 
@@ -478,30 +398,12 @@ impl Widget for CodeViewWidget {
                 ctx.fill_rect(rect.x, y, rect.width, self.line_h, current_line);
             }
 
-            if let Some((start, end)) = self.selection_on_line(line.number, &line.text) {
-                let x0 = self.text_origin_x()
-                    + (start.saturating_sub(self.first_col) as i32) * self.cell_w;
-                let x1 = self.text_origin_x()
-                    + (end.saturating_sub(self.first_col) as i32) * self.cell_w;
-                if end > self.first_col && x1 > x0 {
-                    ctx.with_viewport(content, |ctx| {
-                        ctx.fill_rect_blended(x0, y, x1 - x0, self.line_h, theme.selection);
-                    });
-                }
+            if let Some(span) = self.selection_on_line(line.number, &line.text) {
+                self.wash(ctx, content, y, span, theme.selection);
             }
-
-            for (start, end) in &line.highlights {
-                let ds = display_col(&line.text, *start, self.tab_width);
-                let de = display_col(&line.text, *end, self.tab_width);
-                let x0 =
-                    self.text_origin_x() + (ds.saturating_sub(self.first_col) as i32) * self.cell_w;
-                let x1 =
-                    self.text_origin_x() + (de.saturating_sub(self.first_col) as i32) * self.cell_w;
-                if de > self.first_col && x1 > x0 {
-                    ctx.with_viewport(content, |ctx| {
-                        ctx.fill_rect_blended(x0, y, x1 - x0, self.line_h, found);
-                    });
-                }
+            for &(start, end) in &line.highlights {
+                let display = |col| display_col(&line.text, col, self.tab_width);
+                self.wash(ctx, content, y, (display(start), display(end)), found);
             }
 
             if self.show_line_numbers {
@@ -513,7 +415,7 @@ impl Widget for CodeViewWidget {
                 } else {
                     theme.text_disabled
                 };
-                ctx.draw_mono_text(nx, y, &number, color, Color32::TRANSPARENT);
+                ctx.draw_text(nx, y, &number, TextRole::Mono, color);
             }
 
             ctx.with_viewport(content, |ctx| {
@@ -531,11 +433,10 @@ impl Widget for CodeViewWidget {
                         let x =
                             self.text_origin_x() + (display - self.first_col) as i32 * self.cell_w;
                         let y = rect.y + row as i32 * self.line_h;
-                        // A blurred surface shows where the caret is without
-                        // claiming the keyboard: hollow rather than solid.
+                        // Hollow without focus: where it is, not claiming keys.
                         if self.focused {
                             ctx.with_viewport(content, |ctx| {
-                                ctx.fill_rect(x, y, CARET_WIDTH, self.line_h, theme.accent);
+                                ctx.fill_rect(x, y, super::CARET, self.line_h, theme.accent);
                             });
                         } else {
                             ctx.with_viewport(content, |ctx| {
@@ -547,19 +448,12 @@ impl Widget for CodeViewWidget {
             }
         }
 
-        self.paint_scrollbar(ctx);
+        if let Some(bar) = self.scrollbar() {
+            bar.paint(ctx, self.id(), self.scroll_dragging);
+        }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        if phase != EventPhase::Target && phase != EventPhase::Bubble {
-            return EventResponse::Ignored;
-        }
-
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
         match event {
             WidgetEvent::PointerDown {
                 x,
@@ -573,12 +467,10 @@ impl Widget for CodeViewWidget {
                 if *button != PointerButton::Left {
                     return EventResponse::Ignored;
                 }
-                // The scrollbar first: a press on it scrolls rather than
-                // placing the caret on whatever line happens to be behind it.
-                if self.point_on_scrollbar(*x, *y) && self.scrollbar_thumb().is_some() {
+                if self.scrollbar().is_some_and(|bar| bar.grabs(*x, *y)) {
                     let first_line = self.first_line_at(*y);
                     self.emit(CodeInput::ScrollTo { first_line }, sink);
-                    return EventResponse::CapturePointer;
+                    return EventResponse::Consumed;
                 }
                 let (line, col) = self.position_at(*x, *y);
                 self.emit(
@@ -589,7 +481,7 @@ impl Widget for CodeViewWidget {
                     },
                     sink,
                 );
-                EventResponse::CapturePointer
+                EventResponse::Consumed
             }
 
             WidgetEvent::PointerMove { x, y } => {
@@ -604,55 +496,38 @@ impl Widget for CodeViewWidget {
                 self.emit(CodeInput::Drag { line, col }, sink)
             }
 
+            // Sent whether or not a drag is live: a press and its release can
+            // come in one batch, before the rebuild that says one began.
             WidgetEvent::PointerUp {
                 button: PointerButton::Left,
                 ..
             } => {
-                // Unconditional: a press and its release can arrive in one
-                // event batch, with no rebuild between them, so this widget's
-                // `selecting` is still the value from before the press. The
-                // application ignores a release it did not start.
                 self.emit(CodeInput::Release, sink);
-                EventResponse::ReleasePointer
+                EventResponse::Consumed
             }
 
-            WidgetEvent::Scroll { delta_y, .. } => {
-                if self.line_h <= 0 {
-                    return EventResponse::Ignored;
-                }
-                let lines = -delta_y / self.line_h.max(1);
-                let lines = if lines == 0 {
-                    if *delta_y > 0 { -1 } else { 1 }
-                } else {
-                    lines
+            WidgetEvent::Scroll { delta_y, .. } if self.line_h > 0 && *delta_y != 0 => {
+                let lines = match delta_y / self.line_h {
+                    0 => delta_y.signum(),
+                    lines => lines,
                 };
                 self.emit(CodeInput::Scroll { delta_lines: lines }, sink)
             }
 
-            WidgetEvent::KeyDown { key, modifiers, .. } => {
-                if !self.focused {
-                    return EventResponse::Ignored;
-                }
-                self.emit(
-                    CodeInput::Key {
-                        key: *key,
-                        modifiers: *modifiers,
-                    },
-                    sink,
-                )
-            }
+            WidgetEvent::KeyDown { key, modifiers, .. } if self.focused => self.emit(
+                CodeInput::Key {
+                    key: *key,
+                    modifiers: *modifiers,
+                },
+                sink,
+            ),
 
-            WidgetEvent::TextInput { character } => {
-                if !self.focused {
-                    return EventResponse::Ignored;
-                }
-                self.emit(
-                    CodeInput::Text {
-                        character: *character,
-                    },
-                    sink,
-                )
-            }
+            WidgetEvent::TextInput { character } if self.focused => self.emit(
+                CodeInput::Text {
+                    character: *character,
+                },
+                sink,
+            ),
 
             _ => EventResponse::Ignored,
         }
@@ -660,6 +535,10 @@ impl Widget for CodeViewWidget {
 
     fn role(&self) -> Role {
         Role::TextField
+    }
+
+    fn hover_part(&self, x: i32, y: i32) -> Option<usize> {
+        self.scrollbar().and_then(|bar| bar.hover(x, y))
     }
 
     fn focus_policy(&self) -> FocusPolicy {

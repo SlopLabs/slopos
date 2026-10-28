@@ -1,14 +1,14 @@
 use std::any::Any;
+use std::cell::Cell;
 
 use slopos_abi::draw::Color32;
-use slopos_theme_core::{State, TextRole, Theme, space};
+use slopos_theme_core::{TextRole, Theme, space};
 
+use super::RowState;
 use super::text::break_lines;
 use crate::components::{ListRow, Wrap};
 use crate::constraints::{BoxConstraints, Rect, Size};
-use crate::event::{
-    EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
-};
+use crate::event::{EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::text::ui;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
@@ -24,7 +24,8 @@ struct Placed {
     rect: Rect,
     /// Lines of the row's detail, or of its reason when it is disabled.
     lines: Vec<(usize, usize)>,
-    title_cut: bool,
+    title_cut: Cell<bool>,
+    detail_cut: Cell<bool>,
 }
 
 /// Rows in sections, one of which may be chosen; one tab stop.
@@ -33,11 +34,13 @@ pub struct ListWidget {
     entries: Vec<Entry>,
     rows: Vec<ListRow>,
     placed: Vec<Placed>,
-    headings: Vec<Rect>,
+    headings: Vec<(Rect, Cell<bool>)>,
     selected: Option<usize>,
     on_select: Option<Pick>,
     on_activate: Option<Pick>,
     focused: bool,
+    /// Paints the selection as if focused.
+    active: bool,
 }
 
 const PAD: i32 = space::SM;
@@ -73,7 +76,13 @@ impl ListWidget {
             on_select,
             on_activate,
             focused: false,
+            active: false,
         }
+    }
+
+    pub fn active(mut self, active: bool) -> Self {
+        self.active = active;
+        self
     }
 
     fn icon_room(&self) -> i32 {
@@ -89,7 +98,7 @@ impl ListWidget {
         if row.trailing.is_empty() {
             0
         } else {
-            ui::role_width(&row.trailing, DETAIL) + space::SM
+            ui::width(&row.trailing, DETAIL) + space::SM
         }
     }
 
@@ -99,10 +108,6 @@ impl ListWidget {
 
     fn text_width(&self, row: &ListRow, width: i32) -> i32 {
         (width - PAD * 2 - self.icon_room() - Self::trailing_room(row)).max(0)
-    }
-
-    fn row_height(lines: usize) -> i32 {
-        PAD * 2 + TITLE.style().line_height + DETAIL.style().line_height * lines as i32
     }
 
     /// Lays every entry out from `top` for `width`; answers the height.
@@ -117,8 +122,8 @@ impl ListWidget {
                         y += space::MD;
                     }
                     let h = HEADING.style().line_height + space::XS;
-                    self.headings
-                        .push(Rect::new(x + PAD, y, width.unwrap_or(0) - PAD * 2, h));
+                    let at = Rect::new(x + PAD, y, width.unwrap_or(0) - PAD * 2, h);
+                    self.headings.push((at, Cell::new(false)));
                     y += h;
                 }
                 Entry::Row(r) => {
@@ -127,15 +132,17 @@ impl ListWidget {
                     let second = Self::second_line(row);
                     let lines = if second.is_empty() {
                         Vec::new()
+                    } else if row.detail_tail && row.enabled() {
+                        vec![(0, second.len())]
                     } else {
                         break_lines(second, DETAIL, Wrap::Words, text_w)
                     };
                     let h = Self::row_height(lines.len());
-                    let title_cut = text_w.is_some_and(|w| ui::role_width(&row.title, TITLE) > w);
                     self.placed.push(Placed {
                         rect: Rect::new(x, y, width.unwrap_or(0), h),
                         lines,
-                        title_cut,
+                        title_cut: Cell::new(false),
+                        detail_cut: Cell::new(false),
                     });
                     y += h;
                 }
@@ -144,14 +151,17 @@ impl ListWidget {
         y - top
     }
 
+    pub(crate) const fn row_height(lines: usize) -> i32 {
+        PAD * 2 + TITLE.style().line_height + DETAIL.style().line_height * lines as i32
+    }
+
     fn natural_width(&self) -> i32 {
         let rows = self.rows.iter().map(|row| {
-            let text = ui::role_width(&row.title, TITLE)
-                .max(ui::role_width(Self::second_line(row), DETAIL));
+            let text = ui::width(&row.title, TITLE).max(ui::width(Self::second_line(row), DETAIL));
             PAD * 2 + self.icon_room() + text + Self::trailing_room(row)
         });
         let headings = self.entries.iter().filter_map(|e| match e {
-            Entry::Heading(h) => Some(PAD * 2 + ui::role_width(h, HEADING)),
+            Entry::Heading(h) => Some(PAD * 2 + ui::width(h, HEADING)),
             Entry::Row(_) => None,
         });
         rows.chain(headings).max().unwrap_or(0)
@@ -173,20 +183,8 @@ impl ListWidget {
             .or_else(|| self.rows.iter().position(ListRow::enabled))
     }
 
-    /// The next enabled row from `from` in `step`'s direction, if any.
     fn step(&self, from: Option<usize>, forward: bool) -> Option<usize> {
-        let n = self.rows.len();
-        let mut order: Vec<usize> = (0..n).collect();
-        if !forward {
-            order.reverse();
-        }
-        let start = from.map_or(0, |f| {
-            order.iter().position(|&i| i == f).map_or(0, |p| p + 1)
-        });
-        order[start.min(n)..]
-            .iter()
-            .copied()
-            .find(|&i| self.rows[i].enabled())
+        super::next_enabled(self.rows.len(), from, forward, |i| self.rows[i].enabled())
     }
 
     fn pick(&self, row: usize, sink: &mut MessageSink, activate: bool) {
@@ -239,27 +237,26 @@ impl Widget for ListWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         let theme = ctx.theme();
         let mut headings = self.headings.iter();
-        let cursor = self.cursor();
+        let ringed = self
+            .cursor()
+            .filter(|&r| self.placed.get(r).is_some_and(|p| ctx.shows(p.rect)));
         for entry in &self.entries {
             let Entry::Row(r) = entry else {
-                if let (Entry::Heading(text), Some(at)) = (entry, headings.next()) {
+                if let (Entry::Heading(text), Some((at, cut))) = (entry, headings.next()) {
                     let ink = theme.text_secondary;
-                    ctx.draw_text_fitted(at.x, at.y, text, HEADING, at.width, ink);
+                    cut.set(ctx.draw_text_fitted(at.x, at.y, text, HEADING, at.width, ink));
                 }
                 continue;
             };
             let (row, placed) = (&self.rows[*r], &self.placed[*r]);
             let rect = placed.rect;
-            let selected = self.selected == Some(*r);
-            let hovered =
-                self.choosable() && row.enabled() && rect.contains(ctx.pointer.0, ctx.pointer.1);
-            if selected {
-                ctx.fill_rect_blended(rect.x, rect.y, rect.width, rect.height, theme.selection);
-                super::selected_edge(ctx, rect.x, rect.y, rect.height, self.focused);
-            } else if hovered {
-                let wash = theme.overlay(State::Hover);
-                ctx.fill_rect_blended(rect.x, rect.y, rect.width, rect.height, wash);
-            }
+            let state = RowState {
+                selected: self.selected == Some(*r),
+                hovered: ctx.lit(self.id()) == Some(*r),
+                focused: self.focused || self.active,
+                cursor: self.focused && ringed == Some(*r),
+            };
+            super::paint_row(ctx, rect, state);
 
             let (ink, quiet) = Self::inks(theme, row.enabled());
             let mut x = rect.x + PAD;
@@ -275,20 +272,27 @@ impl Widget for ListWidget {
                 x += self.icon_room();
             }
             let text_w = self.text_width(row, rect.width);
-            let title_top = top + (TITLE.style().line_height - ui::role_line_height(TITLE)) / 2;
-            ctx.draw_text_fitted(x, title_top, &row.title, TITLE, text_w, ink);
+            let title_lh = TITLE.style().line_height;
+            let title_top = ui::centred_top(top, title_lh, TITLE);
+            let cut = ctx.draw_text_fitted(x, title_top, &row.title, TITLE, text_w, ink);
+            placed.title_cut.set(cut);
 
             let second = Self::second_line(row);
             let detail_lh = DETAIL.style().line_height;
-            let glyph = (detail_lh - ui::role_line_height(DETAIL)) / 2;
             for (i, &(s, e)) in placed.lines.iter().enumerate() {
-                let y = top + TITLE.style().line_height + i as i32 * detail_lh + glyph;
-                ctx.draw_text_fitted(x, y, &second[s..e], DETAIL, text_w, quiet);
+                let y = ui::centred_top(top + title_lh + i as i32 * detail_lh, detail_lh, DETAIL);
+                let line = &second[s..e];
+                if row.detail_tail && row.enabled() {
+                    let cut = ctx.draw_text_tail(x, y, line, DETAIL, text_w, quiet);
+                    placed.detail_cut.set(cut);
+                } else {
+                    ctx.draw_text_fitted(x, y, line, DETAIL, text_w, quiet);
+                }
             }
             if !row.trailing.is_empty() {
-                let w = ui::role_width(&row.trailing, DETAIL);
-                let y = top + (TITLE.style().line_height - ui::role_line_height(DETAIL)) / 2;
-                ctx.draw_text_in(
+                let w = ui::width(&row.trailing, DETAIL);
+                let y = ui::centred_top(top, title_lh, DETAIL);
+                ctx.draw_text(
                     rect.x + rect.width - PAD - w,
                     y,
                     &row.trailing,
@@ -296,21 +300,13 @@ impl Widget for ListWidget {
                     quiet,
                 );
             }
-            if self.focused && cursor == Some(*r) {
-                ctx.draw_inner_focus_ring(rect);
-            }
+        }
+        if self.focused && ringed.is_none() {
+            ctx.draw_inner_focus_ring(self.layout_rect());
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        if phase != EventPhase::Target {
-            return EventResponse::Ignored;
-        }
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
         match event {
             WidgetEvent::FocusGained => {
                 self.focused = true;
@@ -393,17 +389,19 @@ impl Widget for ListWidget {
 
     fn tooltip(&self, x: i32, y: i32) -> Option<&str> {
         if let Some(r) = self.row_at(x, y) {
-            return self.placed[r]
-                .title_cut
-                .then(|| self.rows[r].title.as_str());
+            let (row, placed) = (&self.rows[r], &self.placed[r]);
+            let below_title = y >= placed.rect.y + PAD + TITLE.style().line_height;
+            let detail = (below_title && placed.detail_cut.get()).then_some(row.detail.as_str());
+            let title = placed.title_cut.get().then_some(row.title.as_str());
+            return detail.or(title);
         }
         let headings = self.entries.iter().filter_map(|e| match e {
             Entry::Heading(text) => Some(text.as_str()),
             Entry::Row(_) => None,
         });
-        let (text, at) = headings
+        let (text, (_, cut)) = headings
             .zip(&self.headings)
-            .find(|(_, at)| at.contains(x, y))?;
-        (ui::role_width(text, HEADING) > at.width).then_some(text)
+            .find(|(_, (at, _))| at.contains(x, y))?;
+        cut.get().then_some(text)
     }
 }

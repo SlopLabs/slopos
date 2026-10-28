@@ -1,10 +1,5 @@
-//! Holds a laid-out tree to what a screen owes the person reading it: no
-//! text cut short without an ellipsis, no widget over another or outside its
-//! parent, one baseline per row, focus shown all the way round a control,
-//! controls a pointer can find and text that reads against what is behind it.
-//!
-//! It paints the tree off screen and judges what was drawn, so a widget is
-//! audited by the pixels it puts down rather than by what it says of itself.
+//! Holds a laid-out tree to what a screen owes the person reading it, judging
+//! the pixels a widget puts down off screen rather than what it says of itself.
 
 use std::fmt;
 
@@ -15,7 +10,7 @@ use slopos_theme_core::contrast;
 use crate::constraints::{Rect, Size};
 use crate::event::{MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
-use crate::style::StyleSheet;
+use crate::style::{MIN_TARGET, StyleSheet};
 use crate::traits::{Widget, WidgetId};
 
 /// One line of text as drawn: its line box, ink, and the colour most of the
@@ -55,11 +50,12 @@ impl TextRun {
         Rect::new(self.x, self.top, self.width.max(1), self.height)
     }
 
-    /// The top-left of what is shown of the run, which the widget that drew
-    /// it holds.
+    /// A pixel inside the part of the run shown, on it when that is a pixel
+    /// thin.
     fn origin(&self) -> (i32, i32) {
         let shown = self.shown().unwrap_or(self.line_box());
-        (shown.x + shown.width.min(1), shown.y + shown.height.min(1))
+        let inset = |extent: i32| (extent - 1).clamp(0, 1);
+        (shown.x + inset(shown.width), shown.y + inset(shown.height))
     }
 
     fn shown(&self) -> Option<Rect> {
@@ -118,7 +114,6 @@ impl fmt::Display for Finding {
     }
 }
 
-/// Lays `root` out at `size` and answers what it breaks.
 pub fn audit(root: &mut dyn Widget, size: Size, style: &StyleSheet) -> Vec<Finding> {
     crate::tree::layout_tree(root, size, style);
     let mut findings = Vec::new();
@@ -327,16 +322,16 @@ fn check_baselines(row: &dyn Widget, runs: &[TextRun], out: &mut Vec<Finding>) {
 fn check_focus(root: &mut dyn Widget, size: Size, style: &StyleSheet, out: &mut Vec<Finding>) {
     let window = Rect::new(0, 0, size.width, size.height);
     let idle = paint_plain(root, size, style, window);
-    let reach = style.focus_ring_offset + style.focus_ring_width + 1;
+    let reach = crate::focus::RING_REACH;
     for id in crate::focus::FocusManager::tab_chain_of(root) {
         let Some((rect, shown)) = place_of(root, id, window) else {
             continue;
         };
-        if rect.width < style.min_target || rect.height < style.min_target {
+        if rect.width < MIN_TARGET || rect.height < MIN_TARGET {
             out.push(Finding {
                 rule: Rule::Target,
                 at: rect,
-                what: format!("under {} px across", style.min_target),
+                what: format!("under {MIN_TARGET} px across"),
             });
         }
         if !contains(shown, rect) {
@@ -376,7 +371,13 @@ fn place_of(widget: &dyn Widget, id: WidgetId, shown: Rect) -> Option<(Rect, Rec
 
 /// Whether what focus changed in `region` is a frame: closed on all four
 /// sides and wider than a ring cut down to one of them.
-fn frames(a: &[u8], b: &[u8], size: Size, region: Rect, reach: i32) -> Result<(), &'static str> {
+pub(crate) fn frames(
+    a: &[u8],
+    b: &[u8],
+    size: Size,
+    region: Rect,
+    reach: i32,
+) -> Result<(), &'static str> {
     let Some(region) = region.intersect(&Rect::new(0, 0, size.width, size.height)) else {
         return Err("lies outside the window");
     };
@@ -441,7 +442,7 @@ fn paint_into(
         None => PaintContext::new(&mut buffer, style),
     };
     ctx.focus_visible = true;
-    ctx.with_clip(clip, |ctx| crate::tree::paint_tree(root, ctx));
+    ctx.with_clip(clip, |ctx| root.paint(ctx));
 }
 
 pub(crate) fn paint_recording(root: &dyn Widget, size: Size, style: &StyleSheet) -> Vec<TextRun> {
@@ -453,7 +454,12 @@ pub(crate) fn paint_recording(root: &dyn Widget, size: Size, style: &StyleSheet)
 }
 
 /// `root` painted with focus shown, only `clip` of it.
-fn paint_plain(root: &dyn Widget, size: Size, style: &StyleSheet, clip: Rect) -> Vec<u8> {
+pub(crate) fn paint_plain(
+    root: &dyn Widget,
+    size: Size,
+    style: &StyleSheet,
+    clip: Rect,
+) -> Vec<u8> {
     let mut data = canvas(size);
     paint_into(&mut data, root, size, style, None, clip);
     data
@@ -467,7 +473,7 @@ pub fn audit_node<M: Clone + 'static>(
     widths: &[i32],
     height: i32,
 ) -> Vec<String> {
-    let style = StyleSheet::with_theme(slopos_theme_core::current());
+    let style = StyleSheet::current();
     let mut found = Vec::new();
     for &width in widths {
         let child = crate::tree::build_widget_tree(node);

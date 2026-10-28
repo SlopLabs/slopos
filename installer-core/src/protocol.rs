@@ -22,16 +22,17 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::str::FromStr;
 
+use slopos_boot_core::disk_id::Bus;
 use slopos_boot_core::install::{PlanError, Role};
 use slopos_remote_core::{Deframer, Fields, MAX_PAYLOAD, frame};
 
 use crate::{
-    Action, Choices, Contents, Disk, DiskState, Event, Failure, FirstPerson, Fit, Issue, Layout,
-    Listing, MbrPartition, Medium, Mode, Opened, Part, Person, Piece, Proposal, Refusal, Reinstall,
-    Segment, Setup, Span, Summary, System, Tag, Target,
+    Action, Choices, Contents, Disk, DiskState, EspTrouble, Event, Failure, FirstPerson, Fit,
+    Issue, Layout, Listing, MbrPartition, Medium, Mode, NoTable, Opened, Part, Person, Piece,
+    Proposal, Refusal, Reinstall, Segment, Setup, Span, Step, Summary, System, Tag, Target,
 };
 
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// No request comes near it.
 pub const MAX_REQUEST: usize = 64 * 1024;
 
@@ -60,12 +61,10 @@ impl fmt::Display for Malformed {
     }
 }
 
-/// What the engine reads requests out of.
 pub fn requests() -> Deframer {
     Deframer::with_limit(MAX_REQUEST)
 }
 
-/// What the driver reads replies out of.
 pub fn replies() -> Deframer {
     Deframer::with_limit(MAX_PAYLOAD)
 }
@@ -157,17 +156,7 @@ impl Reply {
                     .nest("proposal", encode_proposal(proposal)),
             ),
             Reply::Issue(issue) => (kind::ISSUE, encode_issue(issue)),
-            Reply::Event(Event::Step {
-                index,
-                total,
-                title,
-            }) => (
-                kind::STEP,
-                W::new()
-                    .num("index", *index)
-                    .num("total", *total)
-                    .text("title", title),
-            ),
+            Reply::Event(Event::Step(step)) => (kind::STEP, W::new().num("step", step.number())),
             Reply::Event(Event::Progress { done, total }) => (
                 kind::PROGRESS,
                 W::new().num("done", *done).num("total", *total),
@@ -179,11 +168,14 @@ impl Reply {
                     .text("disk", &summary.disk)
                     .num("entry", summary.entry),
             ),
-            Reply::Failed(failure) => (
+            Reply::Failed(Failure::Refused(issue)) => {
+                (kind::FAILED, W::new().nest("issue", encode_issue(issue)))
+            }
+            Reply::Failed(Failure::Stopped { step, why }) => (
                 kind::FAILED,
                 W::new()
-                    .num("step", failure.step)
-                    .text("message", &failure.message),
+                    .opt_num("step", step.map(Step::number))
+                    .text("why", why),
             ),
         };
         (kind, fields.0.encode())
@@ -204,12 +196,8 @@ impl Reply {
             }
             kind::ISSUE => Reply::Issue(decode_issue(payload)?),
             kind::STEP => {
-                let r = R::of(payload, &["index", "total", "title"])?;
-                Reply::Event(Event::Step {
-                    index: r.num("index")?,
-                    total: r.num("total")?,
-                    title: r.text("title")?.into(),
-                })
+                let r = R::of(payload, &["step"])?;
+                Reply::Event(Event::Step(step_numbered(r.num("step")?)?))
             }
             kind::PROGRESS => {
                 let r = R::of(payload, &["done", "total"])?;
@@ -229,10 +217,16 @@ impl Reply {
                 })
             }
             kind::FAILED => {
-                let r = R::of(payload, &["step", "message"])?;
-                Reply::Failed(Failure {
-                    step: r.num("step")?,
-                    message: r.text("message")?.into(),
+                let r = R::of(payload, &["issue", "step", "why"])?;
+                Reply::Failed(match r.opt("issue")? {
+                    Some(issue) => {
+                        r.absent(&["step", "why"])?;
+                        Failure::Refused(decode_issue(issue)?)
+                    }
+                    None => Failure::Stopped {
+                        step: r.opt_num("step")?.map(step_numbered).transpose()?,
+                        why: r.text("why")?.into(),
+                    },
                 })
             }
             _ => return Err(Malformed),
@@ -370,6 +364,10 @@ impl R {
     }
 }
 
+fn step_numbered(number: u32) -> Result<Step, Malformed> {
+    Step::numbered(number).ok_or(Malformed)
+}
+
 fn role_name(role: Role) -> &'static str {
     match role {
         Role::Esp => "esp",
@@ -477,17 +475,39 @@ fn encode_issue(issue: &Issue) -> W {
         Issue::Medium(why) => w.text("issue", "medium").text("text", why),
         Issue::Probe(why) => w.text("issue", "probe").text("text", why),
         Issue::Disk(why) => w.text("issue", "disk").text("text", why),
-        Issue::NothingToKeep(node) => w.text("issue", "nothing-to-keep").text("text", node),
-        Issue::NoRoot(node) => w.text("issue", "no-root").text("text", node),
-        Issue::Esp(why) => w.text("issue", "esp").text("text", why),
+        Issue::NothingToKeep(node) => w.text("issue", "nothing-to-keep").text("node", node),
+        Issue::NoRoot(node) => w.text("issue", "no-root").text("node", node),
+        Issue::Esp {
+            node,
+            trouble: EspTrouble::Full { free, needed },
+        } => w
+            .text("issue", "esp-full")
+            .text("node", node)
+            .num("free", *free)
+            .num("needed", *needed),
+        Issue::Esp {
+            node,
+            trouble: EspTrouble::WrongType,
+        } => w.text("issue", "esp-wrong-type").text("node", node),
+        Issue::Esp {
+            node,
+            trouble: EspTrouble::Unreadable(why),
+        } => w
+            .text("issue", "esp-unreadable")
+            .text("node", node)
+            .text("text", why),
         Issue::Person(why) => w.text("issue", "person").text("text", why),
         Issue::Menu(why) => w.text("issue", "menu").text("text", why),
         Issue::Remote(url) => w.text("issue", "remote").text("text", url),
         Issue::RootSize => w.text("issue", "root-size"),
+        Issue::Unprobed => w.text("issue", "unprobed"),
+        Issue::Unopened(node) => w.text("issue", "unopened").text("node", node),
+        Issue::Unproposed => w.text("issue", "unproposed"),
+        Issue::Changed(node) => w.text("issue", "changed").text("node", node),
         Issue::OnlyErase { node, contents } => w
             .text("issue", "only-erase")
             .text("node", node)
-            .nest("contents", encode_contents(contents)),
+            .nest("contents", encode_no_table(contents)),
         Issue::Plan { error, node, root } => {
             let w = w
                 .text("issue", "plan")
@@ -521,50 +541,70 @@ fn encode_issue(issue: &Issue) -> W {
 }
 
 fn decode_issue(bytes: &[u8]) -> Result<Issue, Malformed> {
-    let r = R::of(
-        bytes,
-        &[
-            "issue",
-            "text",
-            "node",
-            "contents",
-            "root",
-            "error",
-            "needed",
-            "available",
-            "limit",
-            "number",
-            "role",
-        ],
-    )?;
+    const KEYS: [&str; 12] = [
+        "issue",
+        "text",
+        "node",
+        "contents",
+        "root",
+        "error",
+        "needed",
+        "available",
+        "limit",
+        "number",
+        "role",
+        "free",
+    ];
+    let r = R::of(bytes, &KEYS)?;
     let kind = r.text("issue")?;
     let only = |keys: &[&str]| {
-        let all = [
-            "text",
-            "node",
-            "contents",
-            "root",
-            "error",
-            "needed",
-            "available",
-            "limit",
-            "number",
-            "role",
-        ];
-        let extra: Vec<&str> = all.into_iter().filter(|k| !keys.contains(k)).collect();
+        let extra: Vec<&str> = KEYS[1..]
+            .iter()
+            .copied()
+            .filter(|k| !keys.contains(k))
+            .collect();
         r.absent(&extra)
     };
     let text = |make: fn(String) -> Issue| -> Result<Issue, Malformed> {
         only(&["text"])?;
         Ok(make(r.text("text")?.into()))
     };
+    let node = |make: fn(String) -> Issue| -> Result<Issue, Malformed> {
+        only(&["node"])?;
+        Ok(make(r.text("node")?.into()))
+    };
     Ok(match kind {
         "medium" => text(Issue::Medium)?,
         "probe" => text(Issue::Probe)?,
         "disk" => text(Issue::Disk)?,
-        "nothing-to-keep" => text(Issue::NothingToKeep)?,
-        "no-root" => text(Issue::NoRoot)?,
-        "esp" => text(Issue::Esp)?,
+        "nothing-to-keep" => node(Issue::NothingToKeep)?,
+        "no-root" => node(Issue::NoRoot)?,
+        "esp-full" => {
+            only(&["node", "free", "needed"])?;
+            Issue::Esp {
+                node: r.text("node")?.into(),
+                trouble: EspTrouble::Full {
+                    free: r.num("free")?,
+                    needed: r.num("needed")?,
+                },
+            }
+        }
+        "esp-wrong-type" => {
+            only(&["node"])?;
+            Issue::Esp {
+                node: r.text("node")?.into(),
+                trouble: EspTrouble::WrongType,
+            }
+        }
+        "esp-unreadable" => {
+            only(&["node", "text"])?;
+            Issue::Esp {
+                node: r.text("node")?.into(),
+                trouble: EspTrouble::Unreadable(r.text("text")?.into()),
+            }
+        }
+        "changed" => node(Issue::Changed)?,
+        "unopened" => node(Issue::Unopened)?,
         "person" => text(Issue::Person)?,
         "menu" => text(Issue::Menu)?,
         "remote" => text(Issue::Remote)?,
@@ -572,11 +612,19 @@ fn decode_issue(bytes: &[u8]) -> Result<Issue, Malformed> {
             only(&[])?;
             Issue::RootSize
         }
+        "unprobed" => {
+            only(&[])?;
+            Issue::Unprobed
+        }
+        "unproposed" => {
+            only(&[])?;
+            Issue::Unproposed
+        }
         "only-erase" => {
             only(&["node", "contents"])?;
             Issue::OnlyErase {
                 node: r.text("node")?.into(),
-                contents: decode_contents(r.nested("contents")?)?,
+                contents: decode_no_table(r.nested("contents")?)?,
             }
         }
         "plan" => {
@@ -706,16 +754,31 @@ fn decode_layout(bytes: &[u8]) -> Result<Layout, Malformed> {
 }
 
 fn encode_contents(contents: &Contents) -> W {
-    let name = match contents {
-        Contents::Gpt => "gpt",
-        Contents::Blank => "blank",
-        Contents::Mbr(_) => "mbr",
-        Contents::UnreadableGpt => "unreadable-gpt",
-        Contents::Ext4 => "ext4",
-        Contents::Data => "data",
+    match contents {
+        Contents::Gpt => W::new().text("contents", "gpt"),
+        Contents::NoTable(no_table) => encode_no_table(no_table),
+    }
+}
+
+fn decode_contents(bytes: &[u8]) -> Result<Contents, Malformed> {
+    let r = R::of(bytes, &["contents", "mbr"])?;
+    if r.text("contents")? == "gpt" {
+        r.absent(&["mbr"])?;
+        return Ok(Contents::Gpt);
+    }
+    decode_no_table(bytes).map(Contents::NoTable)
+}
+
+fn encode_no_table(no_table: &NoTable) -> W {
+    let name = match no_table {
+        NoTable::Blank => "blank",
+        NoTable::Mbr(_) => "mbr",
+        NoTable::UnreadableGpt => "unreadable-gpt",
+        NoTable::Ext4 => "ext4",
+        NoTable::Data => "data",
     };
     let mut w = W::new().text("contents", name);
-    if let Contents::Mbr(parts) = contents {
+    if let NoTable::Mbr(parts) = no_table {
         for part in parts {
             w = w.nest(
                 "mbr",
@@ -729,19 +792,18 @@ fn encode_contents(contents: &Contents) -> W {
     w
 }
 
-fn decode_contents(bytes: &[u8]) -> Result<Contents, Malformed> {
+fn decode_no_table(bytes: &[u8]) -> Result<NoTable, Malformed> {
     let r = R::of(bytes, &["contents", "mbr"])?;
     let kind = r.text("contents")?;
     if kind != "mbr" {
         r.absent(&["mbr"])?;
     }
     Ok(match kind {
-        "gpt" => Contents::Gpt,
-        "blank" => Contents::Blank,
-        "unreadable-gpt" => Contents::UnreadableGpt,
-        "ext4" => Contents::Ext4,
-        "data" => Contents::Data,
-        "mbr" => Contents::Mbr(
+        "blank" => NoTable::Blank,
+        "unreadable-gpt" => NoTable::UnreadableGpt,
+        "ext4" => NoTable::Ext4,
+        "data" => NoTable::Data,
+        "mbr" => NoTable::Mbr(
             r.0.all("mbr")
                 .map(|bytes| {
                     let p = R::of(bytes, &["index", "kind", "bytes"])?;
@@ -844,6 +906,7 @@ fn encode_system(system: &System) -> W {
     for disk in &system.disks {
         let d = W::new()
             .text("node", &disk.node)
+            .opt_text("bus", disk.bus.map(bus_name))
             .opt_text("model", disk.model.as_deref());
         let d = match &disk.state {
             DiskState::Refused(why) => d.text("state", "refused").text("why", refusal_name(*why)),
@@ -894,8 +957,8 @@ fn decode_system(bytes: &[u8]) -> Result<System, Malformed> {
                 let d = R::of(
                     bytes,
                     &[
-                        "node", "model", "state", "why", "capacity", "block", "contents", "layout",
-                        "opened",
+                        "node", "bus", "model", "state", "why", "capacity", "block", "contents",
+                        "layout", "opened",
                     ],
                 )?;
                 let listed = ["capacity", "block", "contents", "layout", "opened"];
@@ -922,6 +985,7 @@ fn decode_system(bytes: &[u8]) -> Result<System, Malformed> {
                 };
                 Ok(Disk {
                     node: d.text("node")?.into(),
+                    bus: d.opt_text("bus")?.map(bus_named).transpose()?,
                     model: d.opt_text("model")?.map(String::from),
                     state,
                 })
@@ -938,6 +1002,23 @@ fn decode_system(bytes: &[u8]) -> Result<System, Malformed> {
         medium,
         disks,
         others,
+    })
+}
+
+fn bus_name(bus: Bus) -> &'static str {
+    match bus {
+        Bus::Nvme => "nvme",
+        Bus::Virtio => "virtio",
+        Bus::Usb => "usb",
+    }
+}
+
+fn bus_named(name: &str) -> Result<Bus, Malformed> {
+    Ok(match name {
+        "nvme" => Bus::Nvme,
+        "virtio" => Bus::Virtio,
+        "usb" => Bus::Usb,
+        _ => return Err(Malformed),
     })
 }
 
@@ -1027,7 +1108,6 @@ fn decode_part(bytes: &[u8]) -> Result<Part, Malformed> {
 fn encode_proposal(p: &Proposal) -> W {
     let mut w = W::new()
         .text("disk", &p.disk)
-        .nest("contents", encode_contents(&p.contents))
         .nest("before", encode_layout(&p.before))
         .nest("after", encode_layout(&p.after))
         .flag("erase", p.erase)
@@ -1072,7 +1152,6 @@ fn decode_proposal(bytes: &[u8]) -> Result<Proposal, Malformed> {
         bytes,
         &[
             "disk",
-            "contents",
             "before",
             "after",
             "erase",
@@ -1134,7 +1213,6 @@ fn decode_proposal(bytes: &[u8]) -> Result<Proposal, Malformed> {
     };
     Ok(Proposal {
         disk: r.text("disk")?.into(),
-        contents: decode_contents(r.nested("contents")?)?,
         before: decode_layout(r.nested("before")?)?,
         after: decode_layout(r.nested("after")?)?,
         erase: r.flag("erase")?,

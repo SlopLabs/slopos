@@ -1,29 +1,37 @@
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_abi::pixel::PixelFormat;
+use slopos_abi::window::{
+    CURSOR_SHAPE_E_RESIZE, CURSOR_SHAPE_GRAB, CURSOR_SHAPE_GRABBING, CURSOR_SHAPE_N_RESIZE,
+    CURSOR_SHAPE_NE_RESIZE, CURSOR_SHAPE_NW_RESIZE, CURSOR_SHAPE_S_RESIZE, CURSOR_SHAPE_SE_RESIZE,
+    CURSOR_SHAPE_SW_RESIZE, CURSOR_SHAPE_TEXT, CURSOR_SHAPE_W_RESIZE,
+};
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
 use slopos_gfx::rounded::Rounded;
 use slopos_image::{DecodeOptions, Image};
+use slopos_theme_core::with_alpha;
 
 use crate::gfx::{self, DamageRect, DrawBuffer};
 use crate::syscall::UserWindowInfo;
-use crate::theme::*;
 
+use super::confirm::Asking;
+use super::consent::Consent;
 use super::decorations;
-use super::dock::LauncherShelf;
+use super::dock::Dock;
 use super::frame::{self, draw_window_shadow, paint_in_outline, uncornered};
-use super::menu_bar::SystemBar;
+use super::gate::Gate;
+use super::menu_bar::MenuBar;
 use super::popover::Popover;
-use super::region::Region;
+use super::region::{Region, intersection};
 use super::surface_cache::ClientSurfaceCache;
 use slopos_abi::surface::WINDOW_STATE_MINIMIZED;
+use slopos_chrome_core::status::BAR_HEIGHT;
 
 const DEFAULT_WALLPAPER: &str = "/usr/share/slopos/wallpapers/default.png";
 const WALLPAPER_SCREEN_DIVISOR: u32 = 3;
 
-/// Hardware cursor overlay dimensions (virtio-gpu mandates 64×64).
+/// virtio-gpu's cursor size.
 pub const HW_CURSOR_DIM: u32 = 64;
-/// Reference point every cursor shape draws its click-point at, so the
-/// overlay's hotspot lands on the pointer position for every shape.
+/// Where every shape's click-point is drawn in the overlay.
 pub const HW_CURSOR_HOTSPOT: u32 = 20;
 
 struct WallpaperCache {
@@ -116,7 +124,7 @@ impl WallpaperCache {
             return false;
         };
         cache_buf.set_pixel_format(format);
-        cache_buf.clear_canvas(format.encode(DESKTOP_BG));
+        cache_buf.clear_canvas(format.encode(desktop()));
         let Some(bitmap) = BitmapRef::new(source.width, source.height, &source.pixels) else {
             self.cache.clear();
             return false;
@@ -147,6 +155,11 @@ impl WallpaperCache {
     }
 }
 
+/// Behind the wallpaper and every window.
+fn desktop() -> Color32 {
+    slopos_theme_core::current().surface_sunken
+}
+
 pub struct Renderer {
     pub output_width: u32,
     pub output_height: u32,
@@ -173,62 +186,46 @@ impl Renderer {
         self.output_pitch = pitch;
     }
 
-    /// Composite one frame into `buf`: every damaged pixel of `frame_damage`,
-    /// which must be disjoint, painted once per layer that shows there, bottom
-    /// to top.
-    ///
-    /// While the lock or login screen is up it is all that is drawn, over the
-    /// dimmed wallpaper. Otherwise each window's frame less its corners hides
-    /// what is beneath it, so a lower window paints only what no higher frame
-    /// covers whole, and its shadow and corners blend over what is drawn
-    /// before them.
+    /// Paint `frame_damage`, which is disjoint, bottom to top: a window only
+    /// where no frame above covers it whole, its shadow and corners blended
+    /// over what lies beneath; the lock or login screen alone while it is up.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         buf: &mut DrawBuffer,
         windows: &[UserWindowInfo],
-        window_count: usize,
         focused_task: u32,
-        signal_hovered_task: u32,
+        buttons_hovered_task: u32,
         mouse_x: i32,
         mouse_y: i32,
         cursor_shape: u8,
         surface_cache: &mut ClientSurfaceCache,
-        system_bar: &SystemBar,
-        shelf: &mut LauncherShelf,
+        menu_bar: &MenuBar,
+        dock: &mut Dock,
         popover: &Popover,
-        asking: &super::confirm::Asking,
-        consent: &super::consent::Consent,
-        gate: &super::gate::Gate,
+        asking: &Asking,
+        consent: &Consent,
+        gate: &Gate,
         active_app_name: &str,
         frame_damage: &Region,
         hw_cursor: bool,
     ) {
-        let output_rect = full_screen_clip(buf);
-        let frame_damage = frame_damage.intersect_rect(&output_rect);
+        let theme = slopos_theme_core::current();
+        let frame_damage = frame_damage.intersect_rect(&full_screen(buf));
         if frame_damage.is_empty() {
             return;
         }
 
         if gate.shown() {
             for rect in frame_damage.rects() {
-                if !self.draw_wallpaper(buf, rect) {
-                    gfx::fill_rect(
-                        buf,
-                        rect.x0,
-                        rect.y0,
-                        rect.x1 - rect.x0 + 1,
-                        rect.y1 - rect.y0 + 1,
-                        DESKTOP_BG,
-                    );
-                }
+                self.draw_desktop(buf, rect);
                 gfx::fill_rect_blended_clipped(
                     buf,
                     rect.x0,
                     rect.y0,
                     rect.x1 - rect.x0 + 1,
                     rect.y1 - rect.y0 + 1,
-                    SCRIM,
+                    theme.scrim,
                     rect,
                 );
                 gate.draw(buf, rect);
@@ -244,105 +241,82 @@ impl Renderer {
             return;
         }
 
-        let mut order: Vec<usize> = Vec::with_capacity(window_count);
-        for i in 0..window_count {
-            if windows[i].state != WINDOW_STATE_MINIMIZED {
-                order.push(i);
-            }
-        }
+        let order: Vec<&UserWindowInfo> = windows
+            .iter()
+            .filter(|w| w.state != WINDOW_STATE_MINIMIZED)
+            .collect();
 
         let mut exposed = frame_damage.clone();
-        let mut content_vis: Vec<Region> = Vec::with_capacity(order.len());
-        let mut shadow_vis: Vec<Region> = Vec::with_capacity(order.len());
-        content_vis.resize(order.len(), Region::new());
-        shadow_vis.resize(order.len(), Region::new());
-
-        for k in (0..order.len()).rev() {
-            let w = &windows[order[k]];
-            let opaque = frame::opaque(w);
+        let mut content_vis = vec![Region::new(); order.len()];
+        let mut shadow_vis = vec![Region::new(); order.len()];
+        for (k, w) in order.iter().enumerate().rev() {
             content_vis[k] = exposed.intersect_rect(&frame::frame_box(w));
             shadow_vis[k] = exposed.intersect_rect(&frame::bounds(w));
-            for part in &opaque {
+            for part in &frame::opaque(w) {
                 shadow_vis[k].subtract(part);
                 exposed.subtract(part);
             }
         }
-        let background_visible = exposed;
-
-        for rect in background_visible.rects() {
-            if !self.draw_wallpaper(buf, rect) {
-                gfx::fill_rect(
-                    buf,
-                    rect.x0,
-                    rect.y0,
-                    rect.x1 - rect.x0 + 1,
-                    rect.y1 - rect.y0 + 1,
-                    DESKTOP_BG,
-                );
-            }
+        for rect in exposed.rects() {
+            self.draw_desktop(buf, rect);
         }
 
-        // Bottom→top: shadow first, then content and decorations.
-        for k in 0..order.len() {
-            let w = windows[order[k]];
+        for (k, w) in order.iter().enumerate() {
             let focused = w.task_id == focused_task;
-            if let Some((caster, darkest)) = frame::shadow(&w, focused) {
+            if let Some((caster, color)) = frame::shadow(w, focused) {
                 for rect in shadow_vis[k].rects() {
-                    draw_window_shadow(buf, &caster, darkest, rect);
+                    draw_window_shadow(buf, &caster, color, rect);
                 }
             }
             if content_vis[k].is_empty() {
                 continue;
             }
-            let sig_hovered = w.task_id == signal_hovered_task;
-            let title = w.title_str();
-            let outline = frame::outline(&w);
+            let hovered = w.task_id == buttons_hovered_task;
+            let outline = frame::outline(w);
             for rect in content_vis[k].rects() {
                 buf.set_scissor(Some(*rect));
-                self.draw_window_content(buf, &w, &outline, rect, surface_cache);
+                self.draw_window_content(buf, w, &outline, rect, surface_cache);
                 decorations::draw_window_decorations(
                     buf,
                     &outline,
-                    title,
+                    w.title_str(),
                     focused,
-                    sig_hovered,
+                    hovered,
+                    !w.fixed_size,
                     rect,
                 );
                 buf.set_scissor(None);
             }
         }
 
-        // Always-on-top chrome.  Both self-clip to the passed rect, so drawing
-        // them once per damaged rect paints each portion exactly once.  The dock
-        // is drawn unconditionally: its bounds are only known after it has drawn.
+        // The dock's bounds are known only once it has drawn, so it draws
+        // into every rect.
         let bar_rect = DamageRect {
             x0: 0,
             y0: 0,
             x1: buf.width() as i32 - 1,
-            y1: SYSTEM_BAR_HEIGHT,
+            y1: BAR_HEIGHT,
         };
         for rect in frame_damage.rects() {
             buf.set_scissor(Some(*rect));
-            shelf.draw(
+            dock.draw(
                 buf,
                 self.output_width,
                 self.output_height,
                 mouse_x,
                 mouse_y,
-                Some(*rect),
+                rect,
             );
-            if intersect_rect(rect, &bar_rect).is_some() {
-                system_bar.draw(
+            if rect.intersects(&bar_rect) {
+                menu_bar.draw(
                     buf,
                     self.output_width,
                     active_app_name,
                     mouse_x,
                     mouse_y,
-                    Some(*rect),
+                    rect,
                 );
             }
-            // The popover holds a pointer grab while open, so anything drawn
-            // over it would look clickable and not be.
             popover.draw(buf, rect);
             asking.draw(buf, rect);
             consent.draw(buf, rect);
@@ -359,6 +333,19 @@ impl Renderer {
         );
     }
 
+    fn draw_desktop(&mut self, buf: &mut DrawBuffer, rect: &DamageRect) {
+        if !self.wallpaper.draw(buf, rect) {
+            gfx::fill_rect(
+                buf,
+                rect.x0,
+                rect.y0,
+                rect.x1 - rect.x0 + 1,
+                rect.y1 - rect.y0 + 1,
+                desktop(),
+            );
+        }
+    }
+
     fn draw_cursor_over(
         &self,
         buf: &mut DrawBuffer,
@@ -371,21 +358,19 @@ impl Renderer {
         if hw_cursor {
             return;
         }
-        let cursor_rect = cursor_bounds(mouse_x, mouse_y, cursor_shape);
+        let sprite = Sprite::of(cursor_shape);
+        let cursor = sprite.bounds(mouse_x, mouse_y);
         for rect in frame_damage.rects() {
-            if intersect_rect(rect, &cursor_rect).is_some() {
-                self.draw_cursor(buf, mouse_x, mouse_y, cursor_shape, rect);
+            if rect.intersects(&cursor) {
+                sprite.draw(buf, mouse_x, mouse_y, rect);
             }
         }
     }
 
-    /// Rasterize `cursor_shape` into a 64×64 BGRA hardware-cursor image.
-    /// `out` must be `HW_CURSOR_DIM * HW_CURSOR_DIM * 4` bytes; the shape is
-    /// drawn at the hotspot reference so the overlay tracks the pointer.
+    /// `cursor_shape` as the hardware cursor's straight-alpha image, of
+    /// `HW_CURSOR_DIM` squared pixels with its click-point at the hotspot.
     pub fn render_cursor_image(&self, cursor_shape: u8, out: &mut [u8]) {
-        for b in out.iter_mut() {
-            *b = 0; // transparent (alpha 0)
-        }
+        out.fill(0);
         let Some(mut buf) = DrawBuffer::new(
             out,
             HW_CURSOR_DIM,
@@ -402,302 +387,13 @@ impl Renderer {
             x1: HW_CURSOR_DIM as i32 - 1,
             y1: HW_CURSOR_DIM as i32 - 1,
         };
-        self.draw_cursor(
-            &mut buf,
-            HW_CURSOR_HOTSPOT as i32,
-            HW_CURSOR_HOTSPOT as i32,
-            cursor_shape,
-            &clip,
-        );
+        let hotspot = HW_CURSOR_HOTSPOT as i32;
+        Sprite::of(cursor_shape).draw(&mut buf, hotspot, hotspot, &clip);
     }
 
-    fn draw_cursor(
-        &self,
-        buf: &mut DrawBuffer,
-        mx: i32,
-        my: i32,
-        cursor_shape: u8,
-        clip: &DamageRect,
-    ) {
-        match cursor_shape {
-            1 => self.draw_cursor_text(buf, mx, my, clip),
-            3 | 4 => self.draw_cursor_ns(buf, mx, my, clip),
-            5 | 6 => self.draw_cursor_ew(buf, mx, my, clip),
-            7 | 10 => self.draw_cursor_nwse(buf, mx, my, clip),
-            8 | 9 => self.draw_cursor_nesw(buf, mx, my, clip),
-            11 => self.draw_cursor_grab(buf, mx, my, clip),
-            12 => self.draw_cursor_grabbing(buf, mx, my, clip),
-            _ => self.draw_cursor_default(buf, mx, my, clip),
-        }
-    }
-
-    fn draw_wallpaper(&mut self, buf: &mut DrawBuffer, clip: &DamageRect) -> bool {
-        self.wallpaper.draw(buf, clip)
-    }
-
-    fn draw_cursor_default(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
-        // Classic arrow pointer, hotspot at the top-left corner.
-        // 0 = transparent, 1 = border (black), 2 = fill (white)
-        const W: usize = 12;
-        const H: usize = 17;
-        #[rustfmt::skip]
-        const ARROW: [[u8; W]; H] = [
-            [1,0,0,0,0,0,0,0,0,0,0,0],
-            [1,1,0,0,0,0,0,0,0,0,0,0],
-            [1,2,1,0,0,0,0,0,0,0,0,0],
-            [1,2,2,1,0,0,0,0,0,0,0,0],
-            [1,2,2,2,1,0,0,0,0,0,0,0],
-            [1,2,2,2,2,1,0,0,0,0,0,0],
-            [1,2,2,2,2,2,1,0,0,0,0,0],
-            [1,2,2,2,2,2,2,1,0,0,0,0],
-            [1,2,2,2,2,2,2,2,1,0,0,0],
-            [1,2,2,2,2,2,2,2,2,1,0,0],
-            [1,2,2,2,2,2,1,1,1,1,1,0],
-            [1,2,2,1,2,2,1,0,0,0,0,0],
-            [1,2,1,0,1,2,2,1,0,0,0,0],
-            [1,1,0,0,1,2,2,1,0,0,0,0],
-            [1,0,0,0,0,1,2,2,1,0,0,0],
-            [0,0,0,0,0,1,2,2,1,0,0,0],
-            [0,0,0,0,0,0,1,1,0,0,0,0],
-        ];
-
-        for row in 0..H {
-            let py = my + row as i32;
-            let mut col = 0;
-            while col < W {
-                let pixel = ARROW[row][col];
-                if pixel == 0 {
-                    col += 1;
-                    continue;
-                }
-                let color = if pixel == 1 { CURSOR_EDGE } else { CURSOR_FILL };
-                let start = col;
-                while col < W && ARROW[row][col] == pixel {
-                    col += 1;
-                }
-                gfx::fill_rect_clipped(
-                    buf,
-                    mx + start as i32,
-                    py,
-                    (col - start) as i32,
-                    1,
-                    color,
-                    clip,
-                );
-            }
-        }
-    }
-
-    fn draw_cursor_text(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
-        const BEAM_HEIGHT: i32 = 16;
-        const SERIF_WIDTH: i32 = 5;
-        let top = my - BEAM_HEIGHT / 2;
-        gfx::fill_rect_clipped(buf, mx, top, 1, BEAM_HEIGHT, CURSOR_FILL, clip);
-        gfx::fill_rect_clipped(
-            buf,
-            mx - SERIF_WIDTH / 2,
-            top,
-            SERIF_WIDTH,
-            1,
-            CURSOR_FILL,
-            clip,
-        );
-        gfx::fill_rect_clipped(
-            buf,
-            mx - SERIF_WIDTH / 2,
-            top + BEAM_HEIGHT - 1,
-            SERIF_WIDTH,
-            1,
-            CURSOR_FILL,
-            clip,
-        );
-    }
-
-    /// Vertical double-arrow cursor (N/S resize), hotspot centred.
-    fn draw_cursor_ns(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
-        const W: usize = 9;
-        const H: usize = 17;
-        #[rustfmt::skip]
-        const BITMAP: [[u8; W]; H] = [
-            [0,0,0,0,1,0,0,0,0],
-            [0,0,0,1,2,1,0,0,0],
-            [0,0,1,2,2,2,1,0,0],
-            [0,1,2,2,2,2,2,1,0],
-            [1,2,2,2,2,2,2,2,1],
-            [1,1,1,1,2,1,1,1,1],
-            [0,0,0,1,2,1,0,0,0],
-            [0,0,0,1,2,1,0,0,0],
-            [0,0,0,1,2,1,0,0,0],
-            [0,0,0,1,2,1,0,0,0],
-            [0,0,0,1,2,1,0,0,0],
-            [1,1,1,1,2,1,1,1,1],
-            [1,2,2,2,2,2,2,2,1],
-            [0,1,2,2,2,2,2,1,0],
-            [0,0,1,2,2,2,1,0,0],
-            [0,0,0,1,2,1,0,0,0],
-            [0,0,0,0,1,0,0,0,0],
-        ];
-        self.draw_cursor_bitmap::<W, H>(buf, mx - 4, my - 8, &BITMAP, clip);
-    }
-
-    /// Horizontal double-arrow cursor (E/W resize), hotspot centred.
-    fn draw_cursor_ew(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
-        const W: usize = 17;
-        const H: usize = 9;
-        #[rustfmt::skip]
-        const BITMAP: [[u8; W]; H] = [
-            [0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0,0],
-            [0,0,0,1,1,0,0,0,0,0,0,0,1,1,0,0,0],
-            [0,0,1,2,1,0,0,0,0,0,0,0,1,2,1,0,0],
-            [0,1,2,2,1,1,1,1,1,1,1,1,1,2,2,1,0],
-            [1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1],
-            [0,1,2,2,1,1,1,1,1,1,1,1,1,2,2,1,0],
-            [0,0,1,2,1,0,0,0,0,0,0,0,1,2,1,0,0],
-            [0,0,0,1,1,0,0,0,0,0,0,0,1,1,0,0,0],
-            [0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0,0],
-        ];
-        self.draw_cursor_bitmap::<W, H>(buf, mx - 8, my - 4, &BITMAP, clip);
-    }
-
-    /// Diagonal double-arrow cursor (NW/SE resize), hotspot centred.
-    fn draw_cursor_nwse(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
-        const W: usize = 15;
-        const H: usize = 15;
-        #[rustfmt::skip]
-        const BITMAP: [[u8; W]; H] = [
-            [1,1,1,1,1,1,0,0,0,0,0,0,0,0,0],
-            [1,2,2,2,2,1,0,0,0,0,0,0,0,0,0],
-            [1,2,2,2,1,0,0,0,0,0,0,0,0,0,0],
-            [1,2,2,2,2,1,0,0,0,0,0,0,0,0,0],
-            [1,2,1,2,2,2,1,0,0,0,0,0,0,0,0],
-            [1,1,0,1,2,2,2,1,0,0,0,0,0,0,0],
-            [0,0,0,0,1,2,2,2,1,0,0,0,0,0,0],
-            [0,0,0,0,0,1,2,2,2,1,0,0,0,0,0],
-            [0,0,0,0,0,0,1,2,2,2,1,0,0,0,0],
-            [0,0,0,0,0,0,0,1,2,2,2,1,0,1,1],
-            [0,0,0,0,0,0,0,0,1,2,2,2,1,2,1],
-            [0,0,0,0,0,0,0,0,0,1,2,2,2,2,1],
-            [0,0,0,0,0,0,0,0,0,0,1,2,2,2,1],
-            [0,0,0,0,0,0,0,0,0,0,1,2,2,2,1],
-            [0,0,0,0,0,0,0,0,0,1,1,1,1,1,1],
-        ];
-        self.draw_cursor_bitmap::<W, H>(buf, mx - 7, my - 7, &BITMAP, clip);
-    }
-
-    /// Diagonal double-arrow cursor (NE/SW resize), hotspot centred.
-    fn draw_cursor_nesw(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
-        const W: usize = 15;
-        const H: usize = 15;
-        #[rustfmt::skip]
-        const BITMAP: [[u8; W]; H] = [
-            [0,0,0,0,0,0,0,0,0,1,1,1,1,1,1],
-            [0,0,0,0,0,0,0,0,0,1,2,2,2,2,1],
-            [0,0,0,0,0,0,0,0,0,0,1,2,2,2,1],
-            [0,0,0,0,0,0,0,0,0,1,2,2,2,2,1],
-            [0,0,0,0,0,0,0,0,1,2,2,2,1,2,1],
-            [0,0,0,0,0,0,0,1,2,2,2,1,0,1,1],
-            [0,0,0,0,0,0,1,2,2,2,1,0,0,0,0],
-            [0,0,0,0,0,1,2,2,2,1,0,0,0,0,0],
-            [0,0,0,0,1,2,2,2,1,0,0,0,0,0,0],
-            [1,1,0,1,2,2,2,1,0,0,0,0,0,0,0],
-            [1,2,1,2,2,2,1,0,0,0,0,0,0,0,0],
-            [1,2,2,2,2,1,0,0,0,0,0,0,0,0,0],
-            [1,2,2,2,1,0,0,0,0,0,0,0,0,0,0],
-            [1,2,2,2,2,1,0,0,0,0,0,0,0,0,0],
-            [1,1,1,1,1,1,0,0,0,0,0,0,0,0,0],
-        ];
-        self.draw_cursor_bitmap::<W, H>(buf, mx - 7, my - 7, &BITMAP, clip);
-    }
-
-    /// Open hand cursor (grab), hotspot at (6,1).
-    fn draw_cursor_grab(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
-        const W: usize = 15;
-        const H: usize = 16;
-        #[rustfmt::skip]
-        const BITMAP: [[u8; W]; H] = [
-            [0,0,0,1,1,0,1,1,0,0,0,0,0,0,0],
-            [0,0,1,2,2,1,2,2,1,0,0,0,0,0,0],
-            [0,0,1,2,2,1,2,2,1,1,1,0,0,0,0],
-            [0,0,1,2,2,1,2,2,1,2,2,1,0,0,0],
-            [0,0,1,2,2,1,2,2,1,2,2,1,1,0,0],
-            [1,1,1,2,2,1,2,2,1,2,2,1,2,1,0],
-            [1,2,1,2,2,2,2,2,2,2,2,2,2,1,0],
-            [1,2,1,2,2,2,2,2,2,2,2,2,2,1,0],
-            [0,1,2,2,2,2,2,2,2,2,2,2,1,0,0],
-            [0,1,2,2,2,2,2,2,2,2,2,2,1,0,0],
-            [0,0,1,2,2,2,2,2,2,2,2,1,0,0,0],
-            [0,0,1,2,2,2,2,2,2,2,2,1,0,0,0],
-            [0,0,0,1,2,2,2,2,2,2,1,0,0,0,0],
-            [0,0,0,1,2,2,2,2,2,2,1,0,0,0,0],
-            [0,0,0,0,1,2,2,2,2,1,0,0,0,0,0],
-            [0,0,0,0,0,1,1,1,1,0,0,0,0,0,0],
-        ];
-        self.draw_cursor_bitmap::<W, H>(buf, mx - 6, my - 1, &BITMAP, clip);
-    }
-
-    /// Closed fist cursor (grabbing), hotspot at (5,3).
-    fn draw_cursor_grabbing(&self, buf: &mut DrawBuffer, mx: i32, my: i32, clip: &DamageRect) {
-        const W: usize = 13;
-        const H: usize = 13;
-        #[rustfmt::skip]
-        const BITMAP: [[u8; W]; H] = [
-            [0,0,1,1,0,1,1,0,1,1,0,0,0],
-            [0,1,2,2,1,2,2,1,2,2,1,0,0],
-            [0,1,2,2,1,2,2,1,2,2,1,1,0],
-            [1,1,2,2,2,2,2,2,2,2,1,2,1],
-            [1,2,2,2,2,2,2,2,2,2,2,2,1],
-            [1,2,2,2,2,2,2,2,2,2,2,2,1],
-            [0,1,2,2,2,2,2,2,2,2,2,1,0],
-            [0,1,2,2,2,2,2,2,2,2,2,1,0],
-            [0,0,1,2,2,2,2,2,2,2,1,0,0],
-            [0,0,1,2,2,2,2,2,2,2,1,0,0],
-            [0,0,0,1,2,2,2,2,2,1,0,0,0],
-            [0,0,0,1,2,2,2,2,2,1,0,0,0],
-            [0,0,0,0,1,1,1,1,1,0,0,0,0],
-        ];
-        self.draw_cursor_bitmap::<W, H>(buf, mx - 5, my - 3, &BITMAP, clip);
-    }
-
-    /// Generic bitmap cursor renderer. 0=transparent, 1=border(black), 2=fill(white).
-    fn draw_cursor_bitmap<const W: usize, const H: usize>(
-        &self,
-        buf: &mut DrawBuffer,
-        ox: i32,
-        oy: i32,
-        bitmap: &[[u8; W]; H],
-        clip: &DamageRect,
-    ) {
-        for row in 0..H {
-            let py = oy + row as i32;
-            let mut col = 0;
-            while col < W {
-                let pixel = bitmap[row][col];
-                if pixel == 0 {
-                    col += 1;
-                    continue;
-                }
-                let color = if pixel == 1 { CURSOR_EDGE } else { CURSOR_FILL };
-                let start = col;
-                while col < W && bitmap[row][col] == pixel {
-                    col += 1;
-                }
-                gfx::fill_rect_clipped(
-                    buf,
-                    ox + start as i32,
-                    py,
-                    (col - start) as i32,
-                    1,
-                    color,
-                    clip,
-                );
-            }
-        }
-    }
-
-    /// The window's content inside `outline`: its last committed buffer,
-    /// cut to the frame, and where the frame has grown past the buffer, the
-    /// window's surface colour; a window whose buffer cannot be mapped yet
-    /// shows that colour alone.
+    /// The window's last committed buffer, cut to its frame, and the
+    /// window's surface colour where the frame has grown past it or before
+    /// the buffer can be mapped.
     fn draw_window_content(
         &self,
         buf: &mut DrawBuffer,
@@ -707,8 +403,8 @@ impl Renderer {
         surface_cache: &mut ClientSurfaceCache,
     ) {
         let bytes_pp = self.output_bytes_pp as usize;
-        // Buffer, not frame, dimensions: during a resize the frame may be larger
-        // than the SHM buffer, and using it as the pitch would corrupt the blit.
+        // The buffer's size, not the frame's, is its pitch while a resize
+        // has the two differ.
         let (buf_w, buf_h) = (window.width as i32, window.height as i32);
         let src_pitch = (buf_w as usize) * bytes_pp;
         let (frame_w, frame_h) = (
@@ -721,36 +417,34 @@ impl Renderer {
             x1: window.x + frame_w - 1,
             y1: window.y + frame_h - 1,
         };
-        let Some(content) = intersect_rect(clip, &content) else {
+        let Some(content) = intersection(clip, &content) else {
             return;
         };
 
         let src = surface_cache
             .get_or_create_index(
                 window.task_id,
-                window.buffer_generation,
+                window.generation,
                 window.buffer_id,
                 window.shm_token,
                 src_pitch * buf_h.max(0) as usize,
             )
             .and_then(|index| surface_cache.get_slice(index));
-        // Always show the last committed buffer, clipped to the frame: a shrink
-        // crops, a grow shows the surface colour in the gap, and no
-        // timing-dependent "resizing" flag can expose an inconsistent state.
         let shown = DamageRect {
             x0: window.x,
             y0: window.y,
             x1: window.x + buf_w.min(frame_w) - 1,
             y1: window.y + buf_h.min(frame_h) - 1,
         };
-        let shown = src.and_then(|_| intersect_rect(&content, &shown));
+        let shown = src.and_then(|_| intersection(&content, &shown));
 
         let mut gap = Region::from_rect(content);
         if let Some(shown) = shown {
             gap.subtract(&shown);
         }
+        let surface = slopos_theme_core::current().surface;
         for part in gap.rects() {
-            paint_in_outline(buf, outline, part, SURFACE);
+            paint_in_outline(buf, outline, part, surface);
         }
         let (Some(src), Some(shown)) = (src, shown) else {
             return;
@@ -761,8 +455,7 @@ impl Renderer {
             let raw = src
                 .get(off..off + 4)
                 .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
-            let ink = format.decode(raw);
-            Color32::new(ink.red(), ink.green(), ink.blue(), 0xff)
+            with_alpha(format.decode(raw), 0xff)
         };
         let dst_pitch = self.output_pitch;
         for whole in uncornered(outline, &shown).rects() {
@@ -786,7 +479,7 @@ impl Renderer {
     }
 }
 
-fn full_screen_clip(buf: &DrawBuffer) -> DamageRect {
+fn full_screen(buf: &DrawBuffer) -> DamageRect {
     DamageRect {
         x0: 0,
         y0: 0,
@@ -795,68 +488,237 @@ fn full_screen_clip(buf: &DrawBuffer) -> DamageRect {
     }
 }
 
-fn intersect_rect(a: &DamageRect, b: &DamageRect) -> Option<DamageRect> {
-    let x0 = a.x0.max(b.x0);
-    let y0 = a.y0.max(b.y0);
-    let x1 = a.x1.min(b.x1);
-    let y1 = a.y1.min(b.y1);
-    if x0 <= x1 && y0 <= y1 {
-        Some(DamageRect { x0, y0, x1, y1 })
-    } else {
-        None
+/// The pointer, white on any theme. A row's `#` is a black edge, `o` fill and
+/// anything else clear.
+struct Sprite {
+    hot_x: i32,
+    hot_y: i32,
+    rows: &'static [&'static str],
+}
+
+impl Sprite {
+    const ALL: [&'static Sprite; 8] = [&ARROW, &BEAM, &NS, &EW, &NWSE, &NESW, &GRAB, &GRABBING];
+
+    fn of(shape: u8) -> &'static Sprite {
+        match shape {
+            CURSOR_SHAPE_TEXT => &BEAM,
+            CURSOR_SHAPE_N_RESIZE | CURSOR_SHAPE_S_RESIZE => &NS,
+            CURSOR_SHAPE_W_RESIZE | CURSOR_SHAPE_E_RESIZE => &EW,
+            CURSOR_SHAPE_NW_RESIZE | CURSOR_SHAPE_SE_RESIZE => &NWSE,
+            CURSOR_SHAPE_NE_RESIZE | CURSOR_SHAPE_SW_RESIZE => &NESW,
+            CURSOR_SHAPE_GRAB => &GRAB,
+            CURSOR_SHAPE_GRABBING => &GRABBING,
+            _ => &ARROW,
+        }
+    }
+
+    fn bounds(&self, x: i32, y: i32) -> DamageRect {
+        let width = self.rows.iter().map(|row| row.len()).max().unwrap_or(0) as i32;
+        DamageRect {
+            x0: x - self.hot_x,
+            y0: y - self.hot_y,
+            x1: x - self.hot_x + width - 1,
+            y1: y - self.hot_y + self.rows.len() as i32 - 1,
+        }
+    }
+
+    fn draw(&self, buf: &mut DrawBuffer, x: i32, y: i32, clip: &DamageRect) {
+        let (left, top) = (x - self.hot_x, y - self.hot_y);
+        for (dy, row) in self.rows.iter().enumerate() {
+            let row = row.as_bytes();
+            let mut col = 0;
+            while col < row.len() {
+                let ink = match row[col] {
+                    b'#' => Color32::BLACK,
+                    b'o' => Color32::WHITE,
+                    _ => {
+                        col += 1;
+                        continue;
+                    }
+                };
+                let start = col;
+                while col < row.len() && row[col] == row[start] {
+                    col += 1;
+                }
+                gfx::fill_rect_clipped(
+                    buf,
+                    left + start as i32,
+                    top + dy as i32,
+                    (col - start) as i32,
+                    1,
+                    ink,
+                    clip,
+                );
+            }
+        }
     }
 }
 
-fn cursor_bounds(mx: i32, my: i32, cursor_shape: u8) -> DamageRect {
-    match cursor_shape {
-        // Text beam
-        1 => DamageRect {
-            x0: mx - 2,
-            y0: my - 8,
-            x1: mx + 2,
-            y1: my + 7,
-        },
-        // NS resize (9×17 centered)
-        3 | 4 => DamageRect {
-            x0: mx - 4,
-            y0: my - 8,
-            x1: mx + 4,
-            y1: my + 8,
-        },
-        // EW resize (17×9 centered)
-        5 | 6 => DamageRect {
-            x0: mx - 8,
-            y0: my - 4,
-            x1: mx + 8,
-            y1: my + 4,
-        },
-        // NWSE / NESW resize (15×15 centered)
-        7 | 8 | 9 | 10 => DamageRect {
-            x0: mx - 7,
-            y0: my - 7,
-            x1: mx + 7,
-            y1: my + 7,
-        },
-        // Grab — open hand (15×16, hotspot at (6,1))
-        11 => DamageRect {
-            x0: mx - 6,
-            y0: my - 1,
-            x1: mx + 8,
-            y1: my + 14,
-        },
-        // Grabbing — closed fist (13×13, hotspot at (5,3))
-        12 => DamageRect {
-            x0: mx - 5,
-            y0: my - 3,
-            x1: mx + 7,
-            y1: my + 9,
-        },
-        // Default arrow (12×17, top-left hotspot)
-        _ => DamageRect {
-            x0: mx,
-            y0: my,
-            x1: mx + 11,
-            y1: my + 16,
-        },
-    }
+/// Every pixel the pointer at `(x, y)` may cover, whatever its shape.
+pub fn cursor_reach(x: i32, y: i32) -> DamageRect {
+    Sprite::ALL
+        .iter()
+        .map(|sprite| sprite.bounds(x, y))
+        .reduce(|a, b| a.union(&b))
+        .unwrap_or_else(DamageRect::invalid)
 }
+
+const ARROW: Sprite = Sprite {
+    hot_x: 0,
+    hot_y: 0,
+    rows: &[
+        "#",
+        "##",
+        "#o#",
+        "#oo#",
+        "#ooo#",
+        "#oooo#",
+        "#ooooo#",
+        "#oooooo#",
+        "#ooooooo#",
+        "#oooooooo#",
+        "#ooooo#####",
+        "#oo#oo#",
+        "#o# #oo#",
+        "##  #oo#",
+        "#    #oo#",
+        "     #oo#",
+        "      ##",
+    ],
+};
+
+const BEAM: Sprite = Sprite {
+    hot_x: 3,
+    hot_y: 9,
+    rows: &[
+        "#######", "#ooooo#", "###o###", "  #o#", "  #o#", "  #o#", "  #o#", "  #o#", "  #o#",
+        "  #o#", "  #o#", "  #o#", "  #o#", "  #o#", "  #o#", "###o###", "#ooooo#", "#######",
+    ],
+};
+
+const NS: Sprite = Sprite {
+    hot_x: 4,
+    hot_y: 8,
+    rows: &[
+        "    #",
+        "   #o#",
+        "  #ooo#",
+        " #ooooo#",
+        "#ooooooo#",
+        "####o####",
+        "   #o#",
+        "   #o#",
+        "   #o#",
+        "   #o#",
+        "   #o#",
+        "####o####",
+        "#ooooooo#",
+        " #ooooo#",
+        "  #ooo#",
+        "   #o#",
+        "    #",
+    ],
+};
+
+const EW: Sprite = Sprite {
+    hot_x: 8,
+    hot_y: 4,
+    rows: &[
+        "    #       #",
+        "   ##       ##",
+        "  #o#       #o#",
+        " #oo#########oo#",
+        "#ooooooooooooooo#",
+        " #oo#########oo#",
+        "  #o#       #o#",
+        "   ##       ##",
+        "    #       #",
+    ],
+};
+
+const NWSE: Sprite = Sprite {
+    hot_x: 7,
+    hot_y: 7,
+    rows: &[
+        "######",
+        "#oooo#",
+        "#ooo#",
+        "#oooo#",
+        "#o#ooo#",
+        "## #ooo#",
+        "    #ooo#",
+        "     #ooo#",
+        "      #ooo#",
+        "       #ooo# ##",
+        "        #ooo#o#",
+        "         #oooo#",
+        "          #ooo#",
+        "          #ooo#",
+        "         ######",
+    ],
+};
+
+const NESW: Sprite = Sprite {
+    hot_x: 7,
+    hot_y: 7,
+    rows: &[
+        "         ######",
+        "         #oooo#",
+        "          #ooo#",
+        "         #oooo#",
+        "        #ooo#o#",
+        "       #ooo# ##",
+        "      #ooo#",
+        "     #ooo#",
+        "    #ooo#",
+        "## #ooo#",
+        "#o#ooo#",
+        "#oooo#",
+        "#ooo#",
+        "#oooo#",
+        "######",
+    ],
+};
+
+const GRAB: Sprite = Sprite {
+    hot_x: 6,
+    hot_y: 1,
+    rows: &[
+        "   ## ##",
+        "  #oo#oo#",
+        "  #oo#oo###",
+        "  #oo#oo#oo#",
+        "  #oo#oo#oo##",
+        "###oo#oo#oo#o#",
+        "#o#oooooooooo#",
+        "#o#oooooooooo#",
+        " #oooooooooo#",
+        " #oooooooooo#",
+        "  #oooooooo#",
+        "  #oooooooo#",
+        "   #oooooo#",
+        "   #oooooo#",
+        "    #oooo#",
+        "     ####",
+    ],
+};
+
+const GRABBING: Sprite = Sprite {
+    hot_x: 5,
+    hot_y: 3,
+    rows: &[
+        "  ## ## ##",
+        " #oo#oo#oo#",
+        " #oo#oo#oo##",
+        "##oooooooo#o#",
+        "#ooooooooooo#",
+        "#ooooooooooo#",
+        " #ooooooooo#",
+        " #ooooooooo#",
+        "  #ooooooo#",
+        "  #ooooooo#",
+        "   #ooooo#",
+        "   #ooooo#",
+        "    #####",
+    ],
+};

@@ -1,55 +1,58 @@
-use slopos_theme_core::{Surface, radius, with_alpha};
+use slopos_theme_core::{Surface, radius, stroke};
 
 use crate::constraints::{BoxConstraints, Rect, Size};
-use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use crate::event::{EventResponse, MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::traits::{MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget};
 
-/// A filled, rounded, optionally bordered surface with a soft drop shadow.
-///
-/// [`super::super::node::Node::Background`] fills a rect and nothing else, which
-/// is right for a pane and wrong for anything that floats: a palette or a
-/// popover has to read as *above* the surface behind it, and an edge and a
-/// shadow are what say so.
+/// A surface's fill inside an edge, and whether a shadow says it floats above
+/// what is behind it.
+#[derive(Copy, Clone)]
+pub(crate) struct Frame {
+    pub surface: Surface,
+    pub radius: i32,
+    pub shadow: bool,
+}
+
+impl Frame {
+    /// What floats over a page: a dialog, a menu, a tooltip.
+    pub const fn raised(radius: i32) -> Self {
+        Self {
+            surface: Surface::Raised,
+            radius,
+            shadow: true,
+        }
+    }
+
+    pub fn paint(&self, ctx: &mut PaintContext, rect: Rect) {
+        if self.shadow {
+            ctx.draw_shadow(rect, self.radius);
+        }
+        let theme = ctx.theme();
+        ctx.fill_rounded_rect(rect, self.radius, theme.fill(self.surface));
+        ctx.draw_rounded_rect(rect, self.radius, stroke::EDGE, theme.border);
+    }
+}
+
+/// A rounded surface inside an edge, which a shadow lifts above the page, as
+/// a palette or a popover is, where it floats.
 pub struct CardWidget {
     core: WidgetCore,
-    surface: Surface,
-    border: bool,
-    shadow: bool,
+    frame: Frame,
     child: Box<dyn Widget>,
 }
 
 impl CardWidget {
-    pub fn new(surface: Surface, border: bool, shadow: bool, child: Box<dyn Widget>) -> Self {
+    pub fn new(surface: Surface, shadow: bool, child: Box<dyn Widget>) -> Self {
         Self {
             core: WidgetCore::new(),
-            surface,
-            border,
-            shadow,
+            frame: Frame {
+                surface,
+                radius: radius::CARD,
+                shadow,
+            },
             child,
         }
-    }
-}
-
-/// Concentric one-pixel frames of decreasing alpha around `rect`, the theme's
-/// raised shadow.
-///
-/// Rings rather than filled rects, and blended rather than
-/// [`PaintContext::fill_rounded_rect`](crate::paint::PaintContext::fill_rounded_rect):
-/// the rounded fill encodes its colour opaquely, so a translucent shadow drawn
-/// with it paints a hard black frame instead of a soft one.
-pub fn draw_shadow(ctx: &mut PaintContext, rect: Rect) {
-    let shadow = ctx.theme().shadow_raised;
-    for ring in 1..=shadow.spread {
-        let color = with_alpha(shadow.color, (shadow.color.alpha() as i32 / ring) as u8);
-        let x = rect.x - ring;
-        let y = rect.y - ring + shadow.offset_y;
-        let w = rect.width + ring * 2;
-        let h = rect.height + ring * 2;
-        ctx.fill_rect_blended(x, y, w, 1, color);
-        ctx.fill_rect_blended(x, y + h - 1, w, 1, color);
-        ctx.fill_rect_blended(x, y + 1, 1, h - 2, color);
-        ctx.fill_rect_blended(x + w - 1, y + 1, 1, h - 2, color);
     }
 }
 
@@ -71,27 +74,12 @@ impl Widget for CardWidget {
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
-        let rect = self.layout_rect();
-        if self.shadow {
-            draw_shadow(ctx, rect);
-        }
-        let theme = ctx.theme();
-        let fill = theme.fill(self.surface);
-        ctx.fill_rounded_rect(rect.x, rect.y, rect.width, rect.height, radius::CARD, fill);
-        if self.border {
-            let edge = theme.border;
-            ctx.draw_rounded_rect(rect.x, rect.y, rect.width, rect.height, radius::CARD, edge);
-        }
+        self.frame.paint(ctx, self.layout_rect());
         self.child.paint(ctx);
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        self.child.event(event, phase, sink)
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
+        self.child.event(event, sink)
     }
 
     fn role(&self) -> Role {

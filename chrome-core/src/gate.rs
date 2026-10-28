@@ -1,7 +1,5 @@
-//! The login screen and a desktop's lock screen as a person drives them:
-//! who is chosen, what has focus, what is typed and what the screen says.
-//! Typing at the list chooses the first person whose name starts with it;
-//! typing anywhere else types the password, which Escape clears.
+//! The login and lock screens as a person drives them: typing at the list
+//! chooses a person, anywhere else types the password, which Escape clears.
 
 use alloc::format;
 use alloc::string::String;
@@ -10,9 +8,8 @@ use alloc::vec::Vec;
 use slopos_priv_core::consent::Secret;
 use slopos_priv_core::words::privd::UNCHECKED;
 
-use crate::Key;
+use crate::key::Key;
 
-pub const PASSWORD: &str = "Password";
 pub const UNLOCK: &str = "Unlock";
 pub const LOG_IN: &str = "Log in";
 pub const SWITCH_USER: &str = "Switch user…";
@@ -49,7 +46,6 @@ pub enum Asks {
     SwitchUser,
 }
 
-/// How a check came out.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Checked {
     Passed,
@@ -80,7 +76,6 @@ pub struct Gate {
 }
 
 impl Gate {
-    /// The login screen, listing `people`.
     pub fn login(people: Vec<String>) -> Gate {
         let focus = match people.is_empty() {
             true => Focus::Field,
@@ -89,7 +84,6 @@ impl Gate {
         Gate::new(people, true, focus)
     }
 
-    /// The lock screen of `person`'s desktop.
     pub fn lock(person: String) -> Gate {
         Gate::new(alloc::vec![person], false, Focus::Field)
     }
@@ -193,7 +187,6 @@ impl Gate {
         }
     }
 
-    /// Whether the message says something went wrong.
     pub fn message_is_trouble(&self) -> bool {
         matches!(self.said, Said::Wrong | Said::Unchecked)
     }
@@ -528,19 +521,24 @@ mod tests {
 
     #[test]
     fn every_word_on_the_screens_speaks_plainly() {
-        use slopos_priv_core::words::{detail, label};
+        use slopos_priv_core::words::PASSWORD;
+        use slopos_theme_core::words::{label, sentence};
         for text in [PASSWORD, UNLOCK, LOG_IN, SWITCH_USER] {
-            assert_eq!(label(text), Ok(()), "{text}");
+            assert_eq!(label(text, &[]), Ok(()), "{text}");
         }
         let mut gate = Gate::login(people());
         gate.key(Key::Press);
         gate.key(Key::Press);
-        assert_eq!(label(&gate.message().unwrap()), Ok(()));
+        assert_eq!(label(&gate.message().unwrap(), &[]), Ok(()));
         gate.checked(Checked::Passed);
-        assert_eq!(label(&gate.message().unwrap()), Ok(()));
+        assert_eq!(label(&gate.message().unwrap(), &[]), Ok(()));
         for checked in [Checked::Wrong, Checked::Unchecked] {
             gate.checked(checked);
-            assert_eq!(detail(&gate.message().unwrap()), Ok(()), "{checked:?}");
+            assert_eq!(
+                sentence(&gate.message().unwrap(), &[]),
+                Ok(()),
+                "{checked:?}"
+            );
         }
     }
 }

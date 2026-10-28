@@ -1,18 +1,12 @@
-//! Where a new window opens. An app's first window is centred in the work
-//! area, between the menu bar and the dock; each later window of the app
-//! opens a title bar's height down and right of the app's latest, and the
-//! cascade wraps back to the top of the area before a window would cross the
-//! dock, and to its left edge before one would cross the right. A window
-//! larger than the area is shrunk to the area or to its own minimum,
-//! whichever is larger.
-//!
-//! Sizes and rects are the window's whole frame, title bar included.
+//! Where a new window opens; sizes and rects are its whole frame, title bar
+//! included.
 
 use crate::positioner::{Rect, Size};
 
 /// The frame a window of `size`, which lays out no smaller than `min`, opens
-/// at in `area`: centred, or cascaded `step` down and right of `after`, the
-/// frame of the app's latest window.
+/// at in `area`: centred, or `step` down and right of `after`, its app's
+/// latest window, back at the area's edge before it would cross it; shrunk
+/// to the area or to `min`, whichever is larger.
 pub fn place(area: Rect, step: i32, size: Size, min: Size, after: Option<Rect>) -> Rect {
     let w = fit(size.w, area.w, min.w);
     let h = fit(size.h, area.h, min.h);

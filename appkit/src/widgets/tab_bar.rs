@@ -1,13 +1,17 @@
 use std::any::Any;
+use std::cell::Cell;
 
-use crate::constraints::{BoxConstraints, Rect, Size};
-use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
+use slopos_theme_core::{ColorRole, State, TextRole, space};
+
+use crate::constraints::{BoxConstraints, MAX_EXTENT, Rect, Size};
+use crate::event::{EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
+use crate::text::ui;
 use crate::traits::{
     FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget,
 };
 
-/// A row of tab labels above the active panel's content.
+/// Tabs above the panel of the one chosen.
 pub struct TabBarWidget {
     core: WidgetCore,
     tabs: Vec<String>,
@@ -15,9 +19,8 @@ pub struct TabBarWidget {
     on_change: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
     content: Vec<Box<dyn Widget>>,
     focused: bool,
-    /// Tab strip height from the last measure; layout and hit testing must read
-    /// it rather than re-derive the constant.
     tab_height: i32,
+    cut: Vec<Cell<bool>>,
 }
 
 impl TabBarWidget {
@@ -29,6 +32,7 @@ impl TabBarWidget {
     ) -> Self {
         Self {
             core: WidgetCore::new(),
+            cut: tabs.iter().map(|_| Cell::new(false)).collect(),
             tabs,
             active,
             on_change,
@@ -48,25 +52,48 @@ impl TabBarWidget {
         )
     }
 
-    /// Returns `(x_start, width)` per tab.
+    /// Each tab's offset and width, the last taking what division leaves.
     fn tab_layout(&self, total_width: i32) -> Vec<(i32, i32)> {
-        let count = self.tabs.len();
-        if count == 0 {
-            return Vec::new();
+        let count = self.tabs.len() as i32;
+        (0..count)
+            .map(|i| {
+                let each = total_width / count;
+                let w = if i == count - 1 {
+                    total_width - each * i
+                } else {
+                    each
+                };
+                (i * each, w)
+            })
+            .collect()
+    }
+
+    fn tab_at(&self, x: i32, y: i32) -> Option<usize> {
+        let rect = self.layout_rect();
+        if y < rect.y || y >= rect.y + self.tab_height {
+            return None;
         }
-        let tab_w = total_width / count as i32;
-        let mut result = Vec::with_capacity(count);
-        for i in 0..count {
-            let x = i as i32 * tab_w;
-            // Last tab gets remaining pixels to avoid rounding gaps.
-            let w = if i == count - 1 {
-                total_width - x
-            } else {
-                tab_w
-            };
-            result.push((x, w));
+        let rel_x = x - rect.x;
+        self.tab_layout(rect.width)
+            .iter()
+            .position(|&(at, w)| rel_x >= at && rel_x < at + w)
+    }
+
+    fn panel_event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
+        match self.content.get_mut(self.active) {
+            Some(panel) => panel.event(event, sink),
+            None => EventResponse::Ignored,
         }
-        result
+    }
+
+    fn switch_to(&mut self, tab: usize, sink: &mut MessageSink) -> EventResponse {
+        if tab != self.active {
+            self.active = tab;
+            if let Some(cb) = &self.on_change {
+                sink.emit_raw(cb(tab));
+            }
+        }
+        EventResponse::Consumed
     }
 }
 
@@ -90,7 +117,7 @@ impl Widget for TabBarWidget {
             max_height: if constraints.is_height_bounded() {
                 (constraints.max_height - tab_height).max(0)
             } else {
-                crate::constraints::MAX_EXTENT
+                MAX_EXTENT
             },
         };
 
@@ -116,13 +143,13 @@ impl Widget for TabBarWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
         let tab_height = self.tab_height;
-        let underline_height = 3;
         let theme = ctx.theme();
 
         ctx.fill_rect(rect.x, rect.y, rect.width, tab_height, theme.surface_sunken);
 
         let layout = self.tab_layout(rect.width);
-        let text_h = ctx.text_height();
+        let ty = ui::centred_top(rect.y, tab_height, TextRole::Body);
+        let lit = ctx.lit(self.id());
 
         for (i, (tab_x, tab_w)) in layout.iter().enumerate() {
             let abs_x = rect.x + tab_x;
@@ -130,31 +157,29 @@ impl Widget for TabBarWidget {
             if i == self.active {
                 ctx.fill_rect(abs_x, rect.y, *tab_w, tab_height, theme.surface);
 
-                ctx.fill_rect(
-                    abs_x,
-                    rect.y + tab_height - underline_height,
-                    *tab_w,
-                    underline_height,
-                    theme.accent,
-                );
+                let indicator = super::INDICATOR;
+                let y = rect.y + tab_height - indicator;
+                ctx.fill_rect(abs_x, y, *tab_w, indicator, theme.accent);
+            } else if lit == Some(i) {
+                let hover = theme.state(ColorRole::SurfaceSunken, State::Hover);
+                ctx.fill_rect(abs_x, rect.y, *tab_w, tab_height, hover);
             }
 
             let label = &self.tabs[i];
-            let text_w = ctx.text_width(label);
+            let room = *tab_w - space::SM * 2;
+            let text_w = ui::width(label, TextRole::Body).min(room);
             let tx = abs_x + (*tab_w - text_w) / 2;
-            let ty = rect.y + (tab_height - text_h) / 2;
-
             let fg = if i == self.active {
                 theme.text
             } else {
                 theme.text_secondary
             };
-            ctx.draw_text_transparent(tx, ty, label, fg);
+            let cut = ctx.draw_text_fitted(tx, ty, label, TextRole::Body, room, fg);
+            self.cut[i].set(cut);
         }
 
         ctx.fill_rect(rect.x, rect.y + tab_height, rect.width, 1, theme.border);
 
-        // A panel taller than the area left for it must not draw over the tabs.
         if let Some(panel) = self.content.get(self.active) {
             let panel_rect = self.panel_rect();
             ctx.with_clip(panel_rect, |ctx| panel.paint(ctx));
@@ -162,76 +187,31 @@ impl Widget for TabBarWidget {
 
         if self.focused {
             let tab_row = Rect::new(rect.x, rect.y, rect.width, tab_height);
-            ctx.draw_focus_ring(tab_row);
+            ctx.draw_inner_focus_ring(tab_row);
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        if phase != EventPhase::Target && phase != EventPhase::Bubble {
-            return EventResponse::Ignored;
-        }
-
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
         match event {
             WidgetEvent::PointerDown { x, y, .. } => {
                 let rect = self.layout_rect();
                 if *y < rect.y || *y >= rect.y + self.tab_height {
-                    if let Some(panel) = self.content.get_mut(self.active) {
-                        return panel.event(event, phase, sink);
-                    }
-                    return EventResponse::Ignored;
+                    return self.panel_event(event, sink);
                 }
-
-                let layout = self.tab_layout(rect.width);
-                let rel_x = *x - rect.x;
-                for (i, (tab_x, tab_w)) in layout.iter().enumerate() {
-                    if rel_x >= *tab_x && rel_x < *tab_x + *tab_w {
-                        if i != self.active {
-                            self.active = i;
-                            if let Some(cb) = &self.on_change {
-                                sink.emit_raw(cb(i));
-                            }
-                        }
-                        return EventResponse::Consumed;
-                    }
+                match self.tab_at(*x, *y) {
+                    Some(tab) => self.switch_to(tab, sink),
+                    None => EventResponse::Ignored,
                 }
-                EventResponse::Ignored
             }
 
             WidgetEvent::KeyDown { key, .. } if self.focused => match key {
-                Key::Named(NamedKey::Left) => {
-                    if !self.tabs.is_empty() && self.active > 0 {
-                        self.active -= 1;
-                        if let Some(cb) = &self.on_change {
-                            sink.emit_raw(cb(self.active));
-                        }
-                        EventResponse::Consumed
-                    } else {
-                        EventResponse::Ignored
-                    }
+                Key::Named(NamedKey::Left) if self.active > 0 => {
+                    self.switch_to(self.active - 1, sink)
                 }
-                Key::Named(NamedKey::Right) => {
-                    if !self.tabs.is_empty() && self.active + 1 < self.tabs.len() {
-                        self.active += 1;
-                        if let Some(cb) = &self.on_change {
-                            sink.emit_raw(cb(self.active));
-                        }
-                        EventResponse::Consumed
-                    } else {
-                        EventResponse::Ignored
-                    }
+                Key::Named(NamedKey::Right) if self.active + 1 < self.tabs.len() => {
+                    self.switch_to(self.active + 1, sink)
                 }
-                _ => {
-                    if let Some(panel) = self.content.get_mut(self.active) {
-                        panel.event(event, phase, sink)
-                    } else {
-                        EventResponse::Ignored
-                    }
-                }
+                _ => self.panel_event(event, sink),
             },
 
             WidgetEvent::FocusGained => {
@@ -243,13 +223,7 @@ impl Widget for TabBarWidget {
                 EventResponse::Ignored
             }
 
-            _ => {
-                if let Some(panel) = self.content.get_mut(self.active) {
-                    panel.event(event, phase, sink)
-                } else {
-                    EventResponse::Ignored
-                }
-            }
+            _ => self.panel_event(event, sink),
         }
     }
 
@@ -258,11 +232,23 @@ impl Widget for TabBarWidget {
     }
 
     fn focus_policy(&self) -> FocusPolicy {
-        FocusPolicy::StrongFocus
+        match self.tabs.is_empty() {
+            true => FocusPolicy::None,
+            false => FocusPolicy::TabFocus,
+        }
     }
 
-    /// Only the visible panel: every panel shares one rect, so exposing them
-    /// all sends a hit test — and the focus derived from it — to the last.
+    fn hover_part(&self, x: i32, y: i32) -> Option<usize> {
+        self.tab_at(x, y)
+    }
+
+    fn tooltip(&self, x: i32, y: i32) -> Option<&str> {
+        let tab = self.tab_at(x, y)?;
+        self.cut[tab].get().then_some(self.tabs[tab].as_str())
+    }
+
+    /// Only the shown panel: every panel shares one rect, so a hit test would
+    /// otherwise find the last.
     fn children(&self) -> &[Box<dyn Widget>] {
         self.content
             .get(self.active)

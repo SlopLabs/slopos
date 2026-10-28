@@ -1,9 +1,7 @@
-//! `extension <dir> <out-dir> <libc.so>` — packs the extension laid out in
+//! `extension <dir> <out-dir> <libc.so>` packs the extension laid out in
 //! `<dir>` into `<out-dir>/<name>.ext` and its sidecar `<name>.meta`, once it
-//! checks out as `extctl` checks an install: the image, what its actions
-//! say, and its programs against `<libc.so>`, the one they will bind
-//! against. Prints what it wrote, its root and the grant a first install
-//! asks the person for.
+//! checks out as `extctl` checks an install, its programs against `<libc.so>`.
+//! Prints what it wrote, its root and the grant a first install asks for.
 
 use std::fs;
 use std::path::Path;
@@ -19,11 +17,9 @@ fn run(dir: &Path, out: &Path, libc: &Path) -> Result<String, String> {
         image_at,
         sidecar_at,
     } = pack_into(dir, out)?;
-    let checked = image.declaration.words().and_then(|()| {
-        fs::read(libc)
-            .map_err(|e| format!("{}: {e}", libc.display()))
-            .and_then(|libc| symbols::check_image(&mut image, &libc).map_err(|e| e.to_string()))
-    });
+    let checked = fs::read(libc)
+        .map_err(|e| format!("{}: {e}", libc.display()))
+        .and_then(|libc| symbols::check_image(&mut image, &libc).map_err(|e| e.to_string()));
     if let Err(why) = checked {
         let _ = fs::remove_file(&image_at);
         let _ = fs::remove_file(&sidecar_at);

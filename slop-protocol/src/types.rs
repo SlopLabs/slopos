@@ -1,23 +1,13 @@
 //! Core protocol types: Request, Event, ProtocolError, OutputInfo.
 
-/// The newest version this tree speaks. A change to the wire adds a version.
-pub const PROTOCOL_VERSION: u32 = 4;
+/// The one version the compositor and its clients speak. A change to the wire
+/// takes the next.
+pub const PROTOCOL_VERSION: u32 = 5;
 
-/// The oldest version a compositor built from this tree still serves.
-/// Raising it cuts off every client built against an older one, so it rises
-/// only as a stated decision with its reason, never as a side effect.
-pub const PROTOCOL_VERSION_MIN: u32 = 3;
-
-const _: () = assert!(0 < PROTOCOL_VERSION_MIN && PROTOCOL_VERSION_MIN <= PROTOCOL_VERSION);
-
-/// Compile-time-safe surface identifier: prevents accidental interchange with
-/// toplevel IDs or raw integers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[repr(transparent)]
 pub struct SurfaceId(u32);
 
-/// Compile-time-safe toplevel identifier: prevents accidental interchange with
-/// surface IDs or raw integers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[repr(transparent)]
 pub struct ToplevelId(u32);
@@ -42,28 +32,11 @@ impl ToplevelId {
     }
 }
 
-/// Capability flags advertised by the compositor in [`Event::Hello`].
-pub mod caps {
-    pub const TOPLEVEL: u64 = 1 << 0;
-    pub const CLIPBOARD: u64 = 1 << 1;
-    pub const INTERACTIVE_MOVE_RESIZE: u64 = 1 << 2;
-}
-
-/// Toplevel window state flags (bitfield in [`Event::Configure`]).
+/// [`Event::Configure`]'s `states`.
 pub mod toplevel_state {
     pub const ACTIVATED: u32 = 1 << 0;
     pub const MAXIMIZED: u32 = 1 << 1;
-    pub const FULLSCREEN: u32 = 1 << 2;
     pub const RESIZING: u32 = 1 << 3;
-    pub const MINIMIZED: u32 = 1 << 4;
-}
-
-/// Resize edge flags for [`Request::InteractiveResize`].
-pub mod resize_edge {
-    pub const TOP: u32 = 1;
-    pub const BOTTOM: u32 = 2;
-    pub const LEFT: u32 = 4;
-    pub const RIGHT: u32 = 8;
 }
 
 /// Move-only file descriptor wrapper. Closes on drop unless consumed via
@@ -116,14 +89,12 @@ pub struct OutputInfo {
     pub scale: u32,
 }
 
-/// Maximum byte length for title and app-id strings on the wire.
-pub const MAX_STRING_LEN: usize = 128;
+pub use slopos_abi::window::WINDOW_STRING_MAX;
 
 /// Client-to-server request.
 pub enum Request {
-    /// The version the client speaks, its first request. The compositor
-    /// answers in that version or refuses the connection. Like
-    /// [`Event::Hello`], its encoding never changes.
+    /// The client's first request; a compositor of another version refuses
+    /// the connection. Like [`Event::Hello`], its encoding never changes.
     Hello {
         version: u32,
     },
@@ -169,20 +140,16 @@ pub enum Request {
     },
     ToplevelSetTitle {
         toplevel: ToplevelId,
-        title: [u8; MAX_STRING_LEN],
+        title: [u8; WINDOW_STRING_MAX],
         len: u8,
     },
     ToplevelSetAppId {
         toplevel: ToplevelId,
-        app_id: [u8; MAX_STRING_LEN],
+        app_id: [u8; WINDOW_STRING_MAX],
         len: u8,
     },
     ToplevelDestroy {
         toplevel: ToplevelId,
-    },
-    /// Acknowledge a [`Event::Configure`] serial before committing.
-    AckConfigure {
-        serial: u32,
     },
 
     /// Request a cursor shape for `surface`. `serial` must match the surface's
@@ -224,7 +191,7 @@ pub enum Request {
     /// The smallest and largest size the window can lay itself out at, in
     /// pixels, as xdg-shell's `set_min_size` and `set_max_size`: 0 is no
     /// limit, and a maximum equal to the minimum is a window that does not
-    /// resize. Version 4.
+    /// resize.
     ToplevelSetSizeLimits {
         toplevel: ToplevelId,
         min_width: u32,
@@ -232,34 +199,18 @@ pub enum Request {
         max_width: u32,
         max_height: u32,
     },
-
-    /// Start an interactive window move. Serial must match a recent pointer event.
-    InteractiveMove {
-        toplevel: ToplevelId,
-        serial: u32,
-    },
-    /// Start an interactive window resize. Serial must match a recent pointer event.
-    InteractiveResize {
-        toplevel: ToplevelId,
-        serial: u32,
-        edges: u32,
-    },
 }
 
 /// Server-to-client event.
 #[derive(Clone)]
 pub enum Event {
-    /// The newest version the compositor speaks, sent on accept before
-    /// anything else. Its encoding never changes: it is how two versions
-    /// find each other.
+    /// The version the compositor speaks, sent on accept before anything
+    /// else. Its encoding never changes: it is how two versions find each
+    /// other.
     Hello {
         version: u32,
+        /// Always 0, there only because the encoding never changes.
         capabilities: u64,
-    },
-
-    /// Object destroy acknowledgement -- client may reuse the ID.
-    ObjectDestroyed {
-        id: u32,
     },
 
     OutputInfo {
@@ -283,11 +234,10 @@ pub enum Event {
         buffer_id: u32,
     },
 
-    /// Window state/size change. Client must [`Request::AckConfigure`] the
-    /// serial before committing a buffer at the new size.
+    /// The size the window is to lay itself out at, and its
+    /// [`toplevel_state`].
     Configure {
         toplevel: ToplevelId,
-        serial: u32,
         width: u32,
         height: u32,
         states: u32,
@@ -324,23 +274,13 @@ pub enum Event {
         value: i32,
     },
 
-    KeyboardEnter {
-        surface: SurfaceId,
-    },
-    KeyboardLeave {
-        surface: SurfaceId,
-    },
     Key {
         serial: u32,
         time: u32,
-        /// Legacy PS/2 set-1 make code (low 7 bits). Preserved for consumers
-        /// that decode it directly.
-        scancode: u32,
-        /// Legacy single-byte text/pseudo-code (nav keys use 0x80..=0x88).
-        ascii: u32,
-        /// Canonical layout-independent keycode (USB HID usage).
+        /// The USB HID usage, whatever the layout.
         keycode: u32,
-        /// Final text codepoint after layout + modifiers (0 = no text).
+        /// The text the layout and modifiers make, Ctrl+letter's control
+        /// code included; 0 for none.
         codepoint: u32,
         /// `MODIFIER_*` snapshot at the time of the event, so a client can
         /// resolve the key without tracking modifier/lock state itself.

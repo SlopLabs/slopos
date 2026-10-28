@@ -1,32 +1,37 @@
-use slopos_theme_core::{Icon, TextRole, Tone};
+use slopos_theme_core::{Icon, TextRole, Tone, space};
 
 use super::FixedSizeWidget;
 use crate::audit::{Arrangement, Rule, audit, audit_node};
 use crate::catalogue::{Catalogue, Msg, PAGES};
 use crate::components::{
-    Button, ButtonRow, Disclosure, List, ListRow, PropertyList, Tag, Text, WindowSpec,
+    Button, ButtonRow, Dialog, Disclosure, List, ListRow, PropertyList, Tag, Text, WindowSpec,
 };
 use crate::constraints::{BoxConstraints, CrossAxisAlignment, Rect, Size};
 use crate::event::{
-    EventPhase, EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent,
+    EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent,
 };
 use crate::layout::HStackWidget;
 use crate::node::{App, Node};
 use crate::paint::PaintContext;
 use crate::style::StyleSheet;
-use crate::traits::{FocusPolicy, MeasureCtx, Widget, WidgetCore, measure_widget, place_widget};
+use crate::traits::{
+    FocusPolicy, Kept, KeptAt, MeasureCtx, Widget, WidgetCore, measure_widget, place_widget,
+};
 use crate::tree::build_widget_tree;
 use crate::widgets::line_edit::LineEditInput;
 
 const WIDTHS: [i32; 3] = [360, 640, 960];
 
 fn style() -> StyleSheet {
-    StyleSheet::with_theme(slopos_theme_core::current())
+    StyleSheet::current()
 }
 
+/// Laid out and painted, as a window's first frame is, which tells each
+/// widget what it cut short.
 fn built<M: Clone + 'static>(node: impl Into<Node<M>>, size: Size) -> Box<dyn Widget> {
     let mut root = build_widget_tree(&node.into());
     crate::tree::layout_tree(root.as_mut(), size, &style());
+    crate::audit::paint_recording(root.as_ref(), size, &style());
     root
 }
 
@@ -73,9 +78,9 @@ impl Widget for Scribble {
     fn paint(&self, ctx: &mut PaintContext) {
         let r = self.layout_rect();
         let ink = (self.ink)(ctx.theme());
-        ctx.draw_text_in(r.x, r.y, self.text, TextRole::Body, ink);
+        ctx.draw_text(r.x, r.y, self.text, TextRole::Body, ink);
     }
-    fn event(&mut self, _: &WidgetEvent, _: EventPhase, _: &mut MessageSink) -> EventResponse {
+    fn event(&mut self, _: &WidgetEvent, _: &mut MessageSink) -> EventResponse {
         EventResponse::Ignored
     }
     fn focus_policy(&self) -> FocusPolicy {
@@ -122,7 +127,7 @@ impl Widget for Placed {
             }
         }
     }
-    fn event(&mut self, _: &WidgetEvent, _: EventPhase, _: &mut MessageSink) -> EventResponse {
+    fn event(&mut self, _: &WidgetEvent, _: &mut MessageSink) -> EventResponse {
         EventResponse::Ignored
     }
     fn arrangement(&self) -> Arrangement {
@@ -145,7 +150,6 @@ fn placed(children: Vec<Box<dyn Widget>>, rects: Vec<Rect>) -> Placed {
     }
 }
 
-/// Each rule rejects what it is for, and the forms it accepts pass.
 pub(super) fn test_audit_finds_text_past_its_widget() {
     let mut root = placed(
         vec![Box::new(Scribble::new("A sentence wider than its box", 40))],
@@ -193,13 +197,9 @@ pub(super) fn test_audit_finds_text_past_its_widget() {
     let field: Node<()> = Node::SizedBox {
         width: Some(crate::constraints::Length::Px(160)),
         height: None,
-        child: Box::new(Node::TextField {
-            text: String::from("/usr/local/share/slopos/a/path/longer/than/its/field"),
-            placeholder: String::new(),
-            on_change: None,
-            max_length: None,
-            read_only: false,
-        }),
+        child: Box::new(line_edit(
+            "/usr/local/share/slopos/a/path/longer/than/its/field",
+        )),
     };
     assert_clean("a field scrolls its text", audit_node(&field, &WIDTHS, 100));
 }
@@ -302,22 +302,21 @@ pub(super) fn test_the_catalogue_filter_narrows_its_pages() {
             catalogue.update(Msg::Filter(LineEditInput::Text { character }));
         }
     };
+    let page = |name| PAGES.iter().position(|p| *p == name);
     type_in(&mut catalogue, "DIA");
     catalogue.update(Msg::Show(0));
-    assert_eq!(catalogue.shown_page(), 9);
+    assert_eq!(Some(catalogue.shown_page()), page("dialog"));
     catalogue.update(Msg::Step(false));
-    assert_eq!(catalogue.shown_page(), 8);
+    assert_eq!(Some(catalogue.shown_page()), page("icons"));
     type_in(&mut catalogue, "zz");
     catalogue.update(Msg::Show(0));
-    assert_eq!(catalogue.shown_page(), 8);
+    assert_eq!(Some(catalogue.shown_page()), page("icons"));
     let mut root = build_widget_tree(&catalogue.view());
     let found = audit(root.as_mut(), catalogue.window().min_size, &style());
     let found: Vec<String> = found.iter().map(|f| f.to_string()).collect();
     assert_clean("no page matches", found);
 }
 
-/// Text keeps to the height it is given and says what it left out; a box
-/// narrower than an ellipsis shows nothing rather than all of it.
 pub(super) fn test_text_keeps_to_its_box() {
     let shown = |node: Node<()>, size: Size| {
         let column = Node::VStack {
@@ -368,15 +367,14 @@ pub(super) fn test_text_keeps_to_its_box() {
     assert_eq!(shown(narrow(), Size::new(400, 100)), "");
 }
 
-/// A list with nothing to open leaves Enter to the page's button.
 pub(super) fn test_list_leaves_enter_to_the_page() {
     let rows = || vec![ListRow::new("One"), ListRow::new("Two")];
     let enter = key_down(NamedKey::Enter);
     let mut sink = MessageSink::new();
     let mut chooses =
         build_widget_tree(&List::new(rows()).selected(Some(1)).on_select(|i| i).into());
-    chooses.event(&WidgetEvent::FocusGained, EventPhase::Target, &mut sink);
-    let resp = chooses.event(&enter, EventPhase::Target, &mut sink);
+    chooses.event(&WidgetEvent::FocusGained, &mut sink);
+    let resp = chooses.event(&enter, &mut sink);
     assert_eq!(resp, EventResponse::Ignored);
 
     let list = List::new(rows())
@@ -384,17 +382,17 @@ pub(super) fn test_list_leaves_enter_to_the_page() {
         .on_select(|i| i)
         .on_activate(|i| i + 10);
     let mut opens = build_widget_tree(&list.into());
-    opens.event(&WidgetEvent::FocusGained, EventPhase::Target, &mut sink);
-    let resp = opens.event(&enter, EventPhase::Target, &mut sink);
+    opens.event(&WidgetEvent::FocusGained, &mut sink);
+    let resp = opens.event(&enter, &mut sink);
     assert_eq!(resp, EventResponse::Consumed);
     assert_eq!(sink.drain_typed::<usize>(), vec![11]);
 
     let list = List::new(rows()).on_activate(|i| i + 10);
     let mut only_opens = built(list, Size::new(300, 200));
-    only_opens.event(&WidgetEvent::FocusGained, EventPhase::Target, &mut sink);
+    only_opens.event(&WidgetEvent::FocusGained, &mut sink);
     let down = key_down(NamedKey::Down);
-    only_opens.event(&down, EventPhase::Target, &mut sink);
-    only_opens.event(&enter, EventPhase::Target, &mut sink);
+    only_opens.event(&down, &mut sink);
+    only_opens.event(&enter, &mut sink);
     assert_eq!(
         sink.drain_typed::<usize>(),
         vec![11],
@@ -407,7 +405,7 @@ pub(super) fn test_list_leaves_enter_to_the_page() {
         button: PointerButton::Left,
         modifiers: Modifiers::default(),
     };
-    only_opens.event(&press, EventPhase::Target, &mut sink);
+    only_opens.event(&press, &mut sink);
     assert_eq!(sink.drain_typed::<usize>(), vec![10], "a click opens");
 }
 
@@ -415,21 +413,18 @@ fn dialog_over(page: Node<()>) -> Node<()> {
     Node::ZStack {
         children: vec![
             page,
-            Node::Dialog {
-                title: String::from("Erase this disk?"),
-                icon: None,
-                content: Box::new(Text::new("Everything on it goes.").into()),
-                footer: ButtonRow::new()
-                    .cancel(Button::new("Cancel").on_press(()))
-                    .destructive(Button::new("Erase").on_press(())),
-                on_dismiss: None,
-                anchor: None,
-            },
+            Dialog::new("Erase this disk?")
+                .content(Text::new("Everything on it goes."))
+                .footer(
+                    ButtonRow::new()
+                        .cancel(Button::new("Cancel").on_press(()))
+                        .destructive(Button::new("Erase").on_press(())),
+                )
+                .into(),
         ],
     }
 }
 
-/// Left and Right move along a dialog's buttons, round from the last.
 pub(super) fn test_arrows_move_along_a_button_row() {
     let root = built(dialog_over(Node::Empty), Size::new(640, 480));
     let chain = crate::focus::FocusManager::tab_chain_of(root.as_ref());
@@ -442,7 +437,6 @@ pub(super) fn test_arrows_move_along_a_button_row() {
     assert_eq!(beside(cancel, false), Some(erase));
 }
 
-/// A dialog's scrim hides the tooltips beneath it.
 pub(super) fn test_no_tooltip_through_a_scrim() {
     let tools: Node<()> = crate::components::Toolbar::new()
         .start(crate::components::IconButton::new(
@@ -462,26 +456,18 @@ pub(super) fn test_no_tooltip_through_a_scrim() {
     assert_eq!(crate::tooltip::find(root.as_ref(), x, y), None);
 }
 
-/// Content taller than the window scrolls inside the dialog, its buttons
-/// still shown.
 pub(super) fn test_a_tall_dialog_scrolls() {
     let long = "A sentence that goes on. ".repeat(80);
-    let dialog: Node<()> = Node::Dialog {
-        title: String::from("Read this first"),
-        icon: None,
-        content: Box::new(Text::new(long).wrap().into()),
-        footer: ButtonRow::new().confirm(Button::new("Close").on_press(())),
-        on_dismiss: None,
-        anchor: None,
-    };
+    let dialog: Node<()> = Dialog::new("Read this first")
+        .content(Text::new(long).wrap())
+        .footer(ButtonRow::new().confirm(Button::new("Close").on_press(())))
+        .into();
     assert_clean("a tall dialog", audit_node(&dialog, &WIDTHS, 400));
     let root = built(dialog, Size::new(640, 400));
     let chain = crate::focus::FocusManager::tab_chain_of(root.as_ref());
     assert_eq!(chain.len(), 2, "the content scrolls, then Close: {chain:?}");
 }
 
-/// A dialog takes focus from the page while it is open, and gives it back when
-/// it closes.
 pub(super) fn test_a_dialog_takes_focus_from_the_page() {
     let page = || -> Node<()> {
         ButtonRow::new()
@@ -518,8 +504,6 @@ pub(super) fn test_a_dialog_takes_focus_from_the_page() {
     );
 }
 
-/// A scroll view keeps where it was scrolled to across a rebuild that shows
-/// the same, a dialog over it included, and not one that shows another.
 pub(super) fn test_a_rebuild_keeps_what_was_scrolled() {
     let page = || -> Node<()> {
         let lines = (0..60).map(|i| Text::new(format!("Line {i}")).into());
@@ -541,7 +525,6 @@ pub(super) fn test_a_rebuild_keeps_what_was_scrolled() {
             rows: (0..rows)
                 .map(|i| vec![Text::new(format!("{i}")).into()])
                 .collect(),
-            row_height: 28,
             selected: None,
             on_select: None,
             on_activate: None,
@@ -559,16 +542,16 @@ pub(super) fn test_a_rebuild_keeps_what_was_scrolled() {
     };
     let rebuilt = |before: Node<()>, after: Node<()>| {
         let mut before = built(before, size);
-        before.event(&wheel, EventPhase::Target, &mut MessageSink::new());
+        before.event(&wheel, &mut MessageSink::new());
         let mut kept = Vec::new();
-        crate::tree::kept_scrolls(before.as_ref(), &mut kept);
-        assert!(kept.iter().any(|k| k.offset.1 > 0), "{kept:?}");
+        crate::tree::kept(before.as_ref(), &mut kept);
+        assert!(kept.iter().any(|k| scrolled_down(k) > 0), "{kept:?}");
         let mut after = build_widget_tree(&after);
-        crate::tree::restore_scrolls(after.as_mut(), &kept);
+        crate::tree::restore_kept(after.as_mut(), &kept);
         crate::tree::layout_tree(after.as_mut(), size, &style());
         let mut now = Vec::new();
-        crate::tree::kept_scrolls(after.as_ref(), &mut now);
-        (kept[0].offset, now[0].offset)
+        crate::tree::kept(after.as_ref(), &mut now);
+        (kept[0].at, now[0].at)
     };
     let (was, is) = rebuilt(page(), page());
     assert_eq!(is, was);
@@ -577,10 +560,16 @@ pub(super) fn test_a_rebuild_keeps_what_was_scrolled() {
     let (was, is) = rebuilt(table(100, 1), table(99, 1));
     assert_eq!(is, was, "a row more or less moves nothing");
     let (_, is) = rebuilt(table(100, 1), table(100, 2));
-    assert_eq!(is, (0, 0), "another table starts at the top");
+    assert_eq!(is, KeptAt::Scroll(0), "another table starts at the top");
 }
 
-/// A wheel turn over a table in a page scrolls the table first.
+fn scrolled_down(kept: &Kept) -> i32 {
+    match kept.at {
+        KeptAt::Scroll(y) => y,
+        KeptAt::Cursor(_) => 0,
+    }
+}
+
 pub(super) fn test_the_wheel_moves_the_innermost_view() {
     let table = Node::Table {
         columns: vec![crate::node::TableColumn {
@@ -591,7 +580,6 @@ pub(super) fn test_the_wheel_moves_the_innermost_view() {
         rows: (0..100)
             .map(|i| vec![Text::new(format!("{i}")).into()])
             .collect(),
-        row_height: 28,
         selected: None,
         on_select: None,
         on_activate: None,
@@ -621,15 +609,13 @@ pub(super) fn test_the_wheel_moves_the_innermost_view() {
         delta_x: 0,
         delta_y: 120,
     };
-    root.event(&wheel, EventPhase::Target, &mut MessageSink::new());
+    root.event(&wheel, &mut MessageSink::new());
     let mut kept = Vec::new();
-    crate::tree::kept_scrolls(root.as_ref(), &mut kept);
-    let offsets: Vec<i32> = kept.iter().map(|k| k.offset.1).collect();
+    crate::tree::kept(root.as_ref(), &mut kept);
+    let offsets: Vec<i32> = kept.iter().map(scrolled_down).collect();
     assert_eq!(offsets, vec![0, 120], "the page stays, the table moves");
 }
 
-/// A choice whose words do not fit ends them in an ellipsis and shows them
-/// whole in a tooltip.
 pub(super) fn test_long_choices_end_in_an_ellipsis() {
     let long = "Erase the whole disk, every partition on it, and install SlopOS";
     let choices: Node<()> = Node::VStack {
@@ -640,15 +626,10 @@ pub(super) fn test_long_choices_end_in_an_ellipsis() {
                 on_toggle: Some(()),
                 enabled: true,
             },
-            Node::RadioGroup {
-                options: vec![crate::node::RadioOption {
-                    label: String::from(long),
-                    detail: String::from(long),
-                    enabled: true,
-                }],
-                selected: Some(0),
-                on_select: Some(|_| ()),
-            },
+            List::new(vec![ListRow::new(long).detail(long)])
+                .selected(Some(0))
+                .on_select(|_| ())
+                .into(),
         ],
         spacing: 0,
         align: CrossAxisAlignment::Stretch,
@@ -665,24 +646,17 @@ pub(super) fn test_long_choices_end_in_an_ellipsis() {
     }
 }
 
-/// The page scrolls a list's or a radio group's choice into view, not only
-/// its top.
 pub(super) fn test_a_page_shows_the_chosen_row() {
     let rows = (0..40).map(|i| ListRow::new(format!("Row {i}"))).collect();
-    let list = List::new(rows).selected(Some(30)).on_select(|i| i).into();
-    let options = (0..20)
-        .map(|i| crate::node::RadioOption {
-            label: format!("Option {i}"),
-            detail: String::from("With a line of detail under it."),
-            enabled: true,
-        })
+    let list: Node<usize> = List::new(rows).selected(Some(30)).on_select(|i| i).into();
+    let detailed = (0..20)
+        .map(|i| ListRow::new(format!("Option {i}")).detail("With a line of detail under it."))
         .collect();
-    let radios = Node::RadioGroup {
-        options,
-        selected: Some(15),
-        on_select: Some(|i| i),
-    };
-    for content in [list, radios] {
+    let options = List::new(detailed)
+        .selected(Some(15))
+        .on_select(|i| i)
+        .into();
+    for content in [list, options] {
         let page: Node<usize> = crate::components::Page::new("Choices")
             .content(content)
             .into();
@@ -696,8 +670,6 @@ pub(super) fn test_a_page_shows_the_chosen_row() {
     }
 }
 
-/// Controls at the edge of a dialog's content keep their whole focus ring,
-/// and the page's text beneath the dialog is judged against the page.
 pub(super) fn test_a_dialog_shows_its_controls_whole() {
     let content = Node::VStack {
         children: vec![
@@ -707,13 +679,7 @@ pub(super) fn test_a_dialog_shows_its_controls_whole() {
                 on_toggle: Some(()),
                 enabled: true,
             },
-            Node::TextField {
-                text: String::from("A name"),
-                placeholder: String::new(),
-                on_change: None,
-                max_length: None,
-                read_only: false,
-            },
+            line_edit("A name"),
             Button::new("Choose a disk…").on_press(()).into(),
         ],
         spacing: slopos_theme_core::space::SM,
@@ -731,20 +697,15 @@ pub(super) fn test_a_dialog_shows_its_controls_whole() {
     let dialog = Node::ZStack {
         children: vec![
             page,
-            Node::Dialog {
-                title: String::from("Install"),
-                icon: None,
-                content: Box::new(content),
-                footer: ButtonRow::new().confirm(Button::new("Close").on_press(())),
-                on_dismiss: None,
-                anchor: None,
-            },
+            Dialog::new("Install")
+                .content(content)
+                .footer(ButtonRow::new().confirm(Button::new("Close").on_press(())))
+                .into(),
         ],
     };
     assert_clean("a dialog's controls", audit_node(&dialog, &WIDTHS, 600));
 }
 
-/// A cut cell shows its whole text in a tooltip.
 pub(super) fn test_a_table_names_a_cut_cell() {
     let name = "a-very-long-name-that-does-not-fit-its-column";
     let table: Node<()> = Node::Table {
@@ -754,7 +715,6 @@ pub(super) fn test_a_table_names_a_cut_cell() {
             sort_indicator: None,
         }],
         rows: vec![vec![Text::new(name).into()]],
-        row_height: 28,
         selected: None,
         on_select: None,
         on_activate: None,
@@ -772,12 +732,9 @@ fn key_down(named: NamedKey) -> WidgetEvent {
     WidgetEvent::KeyDown {
         key: Key::Named(named),
         modifiers: Modifiers::default(),
-        repeat: false,
     }
 }
 
-/// Enter presses the confirming button, Escape the cancelling one; a
-/// destructive button is pressed by neither, nor a disabled one.
 pub(super) fn test_button_row_answers_enter_and_escape() {
     let enter = Key::Named(NamedKey::Enter);
     let escape = Key::Named(NamedKey::Escape);
@@ -817,8 +774,6 @@ pub(super) fn test_button_row_answers_enter_and_escape() {
     assert!(sink.drain_typed::<&str>().is_empty());
 }
 
-/// Too narrow for one row, the leading buttons go above the trailing ones,
-/// and none crosses another or the row's edge.
 pub(super) fn test_button_row_stacks_when_narrow() {
     let row: Node<()> = ButtonRow::new()
         .back(Button::new("Back to the start"))
@@ -852,8 +807,6 @@ fn click(x: i32, y: i32) -> WidgetEvent {
     }
 }
 
-/// A click chooses a row and the arrows move the choice past rows that
-/// cannot be chosen; a click on one of those chooses nothing.
 pub(super) fn test_list_skips_what_cannot_be_chosen() {
     let list: Node<usize> = List::new(vec![
         ListRow::new("One"),
@@ -865,18 +818,16 @@ pub(super) fn test_list_skips_what_cannot_be_chosen() {
     .into();
     let mut widget = built(list, Size::new(300, 400));
     let mut sink = MessageSink::new();
-    widget.event(&WidgetEvent::FocusGained, EventPhase::Target, &mut sink);
-    widget.event(&key_down(NamedKey::Down), EventPhase::Target, &mut sink);
+    widget.event(&WidgetEvent::FocusGained, &mut sink);
+    widget.event(&key_down(NamedKey::Down), &mut sink);
     assert_eq!(sink.drain_typed::<usize>(), vec![2]);
 
     let rect = widget.layout_rect();
     let second = rect.y + 60;
-    widget.event(&click(rect.x + 10, second), EventPhase::Target, &mut sink);
+    widget.event(&click(rect.x + 10, second), &mut sink);
     assert!(sink.drain_typed::<usize>().is_empty());
 }
 
-/// A disabled row says why in place of its detail, and the list passes the
-/// audit, its reason wrapped rather than cut.
 pub(super) fn test_list_rows_pass_the_audit() {
     let list: Node<usize> = List::new(vec![
         ListRow::new("A disk with a long model name that will not fit")
@@ -891,8 +842,6 @@ pub(super) fn test_list_rows_pass_the_audit() {
     assert_clean("a list", audit_node(&list, &[200, 360, 640], 400));
 }
 
-/// A person shows as their initial, in capitals, on a circle: alone as a
-/// portrait and at the head of a list row, which pass the audit.
 pub(super) fn test_avatars_show_an_initial_and_pass_the_audit() {
     let people: Node<usize> = Node::VStack {
         children: vec![
@@ -918,8 +867,37 @@ pub(super) fn test_avatars_show_an_initial_and_pass_the_audit() {
     assert_eq!(texts, ["C", "C", "carol", "Ö", "ölund", "Logged in"]);
 }
 
-/// The names stand in one column, as wide as the widest, and each value's
-/// first line shares its name's baseline.
+pub(super) fn test_a_long_placeholder_is_cut_short() {
+    let field: Node<LineEditInput> = crate::components::SearchField::new("", 0)
+        .placeholder("Every command, file and setting on this computer")
+        .into();
+    let size = Size::new(160, 60);
+    let root = built(field, size);
+    let runs = crate::audit::paint_recording(root.as_ref(), size, &style());
+    let cut = runs.iter().filter(|r| r.mark == crate::audit::Mark::Elided);
+    let shown: String = cut.map(|r| r.text.as_str()).collect();
+    assert!(
+        shown.starts_with("Every") && shown.ends_with('…'),
+        "{shown}"
+    );
+}
+
+pub(super) fn test_the_pointer_leaving_forgets_the_tooltip() {
+    use slopos_protocol::types::{Event as ProtocolEvent, SurfaceId};
+    use slopos_windowing::Event;
+    let leave = ProtocolEvent::PointerLeave {
+        surface: SurfaceId::NONE,
+    };
+    assert!(matches!(
+        Event::from_protocol(&leave),
+        Some(Event::PointerLeave)
+    ));
+    let mut tip = crate::run::Tip::default();
+    tip.note(&WidgetEvent::PointerMove { x: 5, y: 5 }, (5, 5), 0);
+    assert!(!tip.clear());
+    assert!(!tip.ripe(crate::tooltip::DELAY_MS));
+}
+
 pub(super) fn test_property_list_lines_names_and_values_up() {
     let list: Node<()> = PropertyList::new()
         .row("Disk", "KINGSTON SNV3S1000G")
@@ -946,8 +924,6 @@ pub(super) fn test_property_list_lines_names_and_values_up() {
     assert_clean("a property list", audit_node(&list, &WIDTHS, 200));
 }
 
-/// Prose wraps at spaces, a path anywhere, and a single line ends in an
-/// ellipsis whose whole text is its tooltip.
 pub(super) fn test_text_wraps_or_ends_in_an_ellipsis() {
     let prose: Node<()> = Text::new("one two three four five six").wrap().into();
     let widget = built(prose, Size::new(60, 400));
@@ -974,7 +950,6 @@ pub(super) fn test_text_wraps_or_ends_in_an_ellipsis() {
     }
 }
 
-/// The header toggles, and the content is there only while expanded.
 pub(super) fn test_disclosure_opens_and_closes() {
     let closed: Node<&str> = Disclosure::new("Details", Text::new("inside"))
         .on_toggle("toggle")
@@ -983,13 +958,13 @@ pub(super) fn test_disclosure_opens_and_closes() {
     assert!(widget.children().is_empty());
     let r = widget.layout_rect();
     let mut sink = MessageSink::new();
-    widget.event(&click(r.x + 4, r.y + 4), EventPhase::Target, &mut sink);
+    widget.event(&click(r.x + 4, r.y + 4), &mut sink);
     let up = WidgetEvent::PointerUp {
         x: r.x + 4,
         y: r.y + 4,
         button: PointerButton::Left,
     };
-    widget.event(&up, EventPhase::Target, &mut sink);
+    widget.event(&up, &mut sink);
     assert_eq!(sink.drain_typed::<&str>(), vec!["toggle"]);
 
     let open: Node<&str> = Disclosure::new("Details", Text::new("inside"))
@@ -998,7 +973,6 @@ pub(super) fn test_disclosure_opens_and_closes() {
     assert_eq!(built(open, Size::new(300, 200)).children().len(), 1);
 }
 
-/// A tooltip is the topmost widget's under the pointer.
 pub(super) fn test_tooltip_names_an_icon_button() {
     let tools: Node<()> = crate::components::Toolbar::new()
         .start(crate::components::IconButton::new(
@@ -1025,8 +999,6 @@ pub(super) fn test_tooltip_names_an_icon_button() {
     );
 }
 
-/// A slider dragged past the part of a dialog or a property list that holds
-/// it still follows the pointer.
 pub(super) fn test_a_drag_follows_the_pointer_out_of_its_part() {
     use crate::widgets::slider::{SliderGrab, SliderInput};
     fn slider() -> Node<SliderInput> {
@@ -1046,14 +1018,10 @@ pub(super) fn test_a_drag_follows_the_pointer_out_of_its_part() {
         }
         w.children().iter().find_map(|c| slider_at(c.as_ref()))
     }
-    let in_dialog = Node::Dialog {
-        title: String::from("Size"),
-        icon: None,
-        content: Box::new(slider()),
-        footer: ButtonRow::new().confirm(Button::new("Done").on_press(SliderInput::End)),
-        on_dismiss: None,
-        anchor: None,
-    };
+    let in_dialog: Node<SliderInput> = Dialog::new("Size")
+        .content(slider())
+        .footer(ButtonRow::new().confirm(Button::new("Done").on_press(SliderInput::End)))
+        .into();
     let in_list = PropertyList::new().row_with("Root size", slider()).into();
     for (holder, node) in [("dialog", in_dialog), ("property list", in_list)] {
         let mut root = built(node, Size::new(800, 400));
@@ -1063,7 +1031,7 @@ pub(super) fn test_a_drag_follows_the_pointer_out_of_its_part() {
             y: r.y + r.height / 2,
         };
         let mut sink = MessageSink::new();
-        root.event(&past, EventPhase::Target, &mut sink);
+        root.event(&past, &mut sink);
         assert!(
             matches!(
                 sink.drain_typed::<SliderInput>()[..],
@@ -1074,8 +1042,6 @@ pub(super) fn test_a_drag_follows_the_pointer_out_of_its_part() {
     }
 }
 
-/// A disclosure's title and a list's heading cut short show whole in a
-/// tooltip.
 pub(super) fn test_a_cut_heading_shows_whole() {
     let long = "Everything this machine has installed beside the base system";
     let disclosure: Node<()> = Disclosure::new(long, Text::new("More")).into();
@@ -1095,4 +1061,226 @@ pub(super) fn test_window_spec_fixes_or_floors_the_size() {
     let fixed = WindowSpec::new(800, 600).fixed().min_size(10, 10);
     let size = Size::new(800, 600);
     assert_eq!(fixed.limits(), (size, Some(size)));
+}
+
+fn line_edit<M>(text: &str) -> Node<M> {
+    Node::LineEdit {
+        text: String::from(text),
+        placeholder: String::new(),
+        caret: 0,
+        focused: false,
+        icon: None,
+        suffix: String::new(),
+        invalid: false,
+        tab_stop: true,
+        on_input: None,
+    }
+}
+
+pub(super) fn test_a_click_focuses_fields_but_not_buttons() {
+    use crate::components::{IconButton, SearchField, column};
+    let controls: Node<()> = column(
+        slopos_theme_core::space::SM,
+        vec![
+            Button::new("Save").on_press(()).into(),
+            IconButton::new(Icon::Trash, "Move to trash")
+                .on_press(())
+                .into(),
+            Node::Checkbox {
+                checked: false,
+                label: String::from("Show hidden files"),
+                on_toggle: Some(()),
+                enabled: true,
+            },
+            Disclosure::new("Details", Text::new("More"))
+                .on_toggle(())
+                .into(),
+            SearchField::new("", 0).on_input(|_| ()).into(),
+            List::new(vec![ListRow::new("One")])
+                .on_select(|_| ())
+                .into(),
+        ],
+    );
+    let root = built(controls, Size::new(400, 600));
+    let clicks: Vec<bool> = root
+        .children()
+        .iter()
+        .map(|child| {
+            let r = child.layout_rect();
+            let at = crate::event::control_at(root.as_ref(), r.x + 4, r.y + 4);
+            assert_eq!(at.map(|w| w.id()), Some(child.id()));
+            assert!(child.focus_policy().is_tab_focusable());
+            child.focus_policy().is_click_focusable()
+        })
+        .collect();
+    assert_eq!(clicks, [false, false, false, false, true, true]);
+}
+
+pub(super) fn test_a_search_field_names_what_it_finds() {
+    use crate::components::SearchField;
+    let size = Size::new(300, 40);
+    let plain = built(SearchField::<()>::new("", 0), size);
+    assert_eq!(plain.accessible_name(), Some("Search"));
+    assert!(plain.focus_policy().is_tab_focusable());
+    let palette = SearchField::<()>::new("", 0)
+        .placeholder("File name")
+        .tab_stop(false);
+    let palette = built(palette, size);
+    assert_eq!(palette.accessible_name(), Some("File name"));
+    assert!(!palette.focus_policy().is_tab_focusable());
+}
+
+pub(super) fn test_a_sorted_heading_shows_a_chevron() {
+    use crate::node::{SortIndicator, TableColumn, TableColumnWidth};
+    let column = |label: &str, sort_indicator| TableColumn {
+        label: String::from(label),
+        width: TableColumnWidth::Flex(1),
+        sort_indicator,
+    };
+    let table: Node<()> = Node::Table {
+        columns: vec![
+            column("Name", Some(SortIndicator::Descending)),
+            column("Size", None),
+        ],
+        rows: vec![vec![
+            Text::new("notes.txt").into(),
+            Text::new("2 KB").into(),
+        ]],
+        selected: None,
+        on_select: None,
+        on_activate: None,
+        on_header_click: None,
+        on_context_menu: None,
+        shows: 0,
+    };
+    let size = Size::new(400, 200);
+    let root = built(table, size);
+    let texts: Vec<String> = crate::audit::paint_recording(root.as_ref(), size, &style())
+        .into_iter()
+        .map(|run| run.text)
+        .collect();
+    assert_eq!(texts[..2], ["Name", "Size"]);
+}
+
+pub(super) fn test_every_label_cut_short_shows_whole() {
+    use crate::components::SearchField;
+    use crate::node::{MenuItem, MenuItemKind, TableColumn, TableColumnWidth};
+    const LONG: &str = "A label far longer than the room it is given";
+    let text = |s: &str| -> Node<()> { Text::new(s).into() };
+    let column = |label: &str| TableColumn {
+        label: String::from(label),
+        width: TableColumnWidth::Flex(1),
+        sort_indicator: None,
+    };
+    let table = |heading: &str, cell: Node<()>| Node::Table {
+        columns: vec![column(heading)],
+        rows: vec![vec![cell]],
+        selected: None,
+        on_select: None,
+        on_activate: None,
+        on_header_click: None,
+        on_context_menu: None,
+        shows: 0,
+    };
+    let named_file = crate::components::row(
+        space::SM,
+        vec![
+            Node::Icon {
+                icon: Icon::File,
+                role: TextRole::Body,
+                tone: Tone::Secondary,
+            },
+            Node::Expand {
+                weight: 1,
+                child: Box::new(text(LONG)),
+            },
+        ],
+    );
+    let first_row = style().row_height + 10;
+    let item = MenuItem {
+        label: LONG,
+        shortcut: None,
+        enabled: true,
+        kind: MenuItemKind::Action,
+    };
+    let detail = space::SM + TextRole::Body.style().line_height + 2;
+    let cases: Vec<(&str, Node<()>, (i32, i32))> = vec![
+        (
+            "tab",
+            Node::TabBar {
+                tabs: vec![String::from(LONG), String::from("B")],
+                active: 0,
+                on_change: None,
+                content: vec![text("a"), text("b")],
+            },
+            (30, 10),
+        ),
+        (
+            "progress",
+            Node::ProgressBar {
+                value: Some(40),
+                label: String::from(LONG),
+                tone: Tone::Accent,
+            },
+            (60, 30),
+        ),
+        ("tag", Tag::new(LONG, Tone::Info).into(), (60, 30)),
+        ("heading", table(LONG, text("a")), (40, 10)),
+        ("cell", table("Name", named_file), (60, first_row)),
+        (
+            "menu row",
+            Node::Menu {
+                items: vec![item],
+                on_action: None,
+            },
+            (40, 10),
+        ),
+        (
+            "placeholder",
+            SearchField::new("", 0).placeholder(LONG).into(),
+            (60, 30),
+        ),
+        (
+            "folder",
+            List::new(vec![ListRow::new("main.rs").detail_tail(LONG)]).into(),
+            (60, detail),
+        ),
+    ];
+    for (what, node, (x, y)) in cases {
+        let root = built(node, Size::new(120, 60));
+        let tip = crate::tooltip::find(root.as_ref(), x, y);
+        assert_eq!(tip.as_deref(), Some(LONG), "{what}");
+    }
+}
+
+pub(super) fn test_a_line_shown_a_pixel_deep_belongs_to_its_view() {
+    let role = TextRole::Body;
+    let (lh, fh) = (role.style().line_height, crate::text::ui::font_height(role));
+    let lines: Vec<Node<()>> = (0..6)
+        .map(|i| Text::new(format!("Line {i}")).into())
+        .collect();
+    let shown = 2 * lh + (lh - fh) / 2 + 1;
+    let view: Node<()> = Node::VStack {
+        children: vec![
+            Node::SizedBox {
+                width: None,
+                height: Some(crate::constraints::Length::Px(shown)),
+                child: Box::new(Node::ScrollView {
+                    child: Box::new(Node::VStack {
+                        children: lines,
+                        spacing: 0,
+                        align: CrossAxisAlignment::Stretch,
+                    }),
+                    scroll_y: 0,
+                    on_scroll: None,
+                    follow_end: false,
+                }),
+            },
+            Node::Divider,
+            Text::new("Below").into(),
+        ],
+        spacing: 0,
+        align: CrossAxisAlignment::Stretch,
+    };
+    assert_clean("a line a pixel deep", audit_node(&view, &[360], 200));
 }

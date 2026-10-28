@@ -1,8 +1,5 @@
-//! Minimal TrueType font parser.
-//!
-//! Parses the subset of TTF tables needed for basic Latin text rendering:
-//! `head`, `maxp`, `cmap`, `hhea`, `hmtx`, `loca`, `glyf`, and the pair
-//! adjustments of `GPOS`'s `kern` feature.
+//! The TrueType tables text is drawn from: `head`, `maxp`, a format 4 `cmap`,
+//! `hhea`, `hmtx`, `loca`, `glyf`, and the pairs of `GPOS`'s `kern` feature.
 
 use core::cell::{Cell, OnceCell};
 
@@ -18,10 +15,8 @@ pub struct TtfFont<'a> {
     loca_offset: usize,
     glyf_offset: usize,
     pairs: KVec<PairSubtable>,
-    /// Recently asked pairs and their kerning, direct-mapped by the pair:
-    /// reading the class tables costs several binary searches, and text
-    /// repeats its pairs. Made by the first pair asked, so a font that is only
-    /// rasterised into an atlas never allocates it; empty when it could not be.
+    /// Recent pairs' kerning, direct-mapped: text repeats its pairs, and the
+    /// class tables cost several binary searches. Made by the first pair asked.
     kern_memo: OnceCell<KVec<Cell<u64>>>,
 }
 
@@ -300,10 +295,8 @@ impl<'a> TtfFont<'a> {
         }
     }
 
-    /// How far `right` moves when it follows `left`, in font units: the first
-    /// glyph's x-advance adjustment from each `kern` lookup, summed. The other
-    /// adjustments a pair can carry (placements, the second glyph's advance)
-    /// are not read; Inter's `kern` lookups carry none.
+    /// The first glyph's x-advance adjustment from each `kern` lookup, summed,
+    /// in font units; placements are not read, and Inter's lookups carry none.
     pub fn kerning(&self, left: u16, right: u16) -> i32 {
         if self.pairs.is_empty() {
             return 0;
@@ -466,11 +459,8 @@ impl<'a> TtfFont<'a> {
         let mut start = 0usize;
         for &end in &end_pts {
             let end = end as usize;
-            // `endPtsOfContours` comes from the file and is not checked to be
-            // monotonic, so a malformed font can put `end` behind `start`, which
-            // underflows the capacity below. The whole glyph goes rather than
-            // the rest of it: the contours already read are half a shape, and
-            // drawing half a shape is worse than drawing the fallback.
+            // Malformed `endPtsOfContours` can run backwards; drop the glyph
+            // rather than draw half a shape.
             if end >= num_points || end < start {
                 return None;
             }
@@ -576,9 +566,8 @@ impl<'a> TtfFont<'a> {
     }
 }
 
-/// Every pair-adjustment subtable the `kern` feature of the default script's
-/// default language system names, extension lookups unwrapped, in lookup
-/// order.
+/// The pair-adjustment subtables of the default language system's `kern`
+/// feature, extension lookups unwrapped, in lookup order.
 fn kern_pair_subtables(data: &[u8]) -> Option<KVec<PairSubtable>> {
     let (gpos, _) = find_table(data, b"GPOS")?;
     if read_u16(data, gpos)? != 1 {
@@ -653,9 +642,8 @@ fn default_lang_sys(data: &[u8], scripts: usize) -> Option<usize> {
     None
 }
 
-/// The first glyph's x-advance adjustment from one PairPos subtable, or
-/// `None` when the subtable does not apply to the pair: format 1 applies only
-/// to the pairs it lists, format 2 to every pair whose first glyph it covers.
+/// `None` when the subtable does not apply: format 1 to pairs it lists,
+/// format 2 to every pair whose first glyph it covers.
 fn pair_x_advance(data: &[u8], sub: usize, left: u16, right: u16) -> Option<i16> {
     let coverage = coverage_index(data, sub + read_u16(data, sub + 2)? as usize, left)?;
     let format1 = read_u16(data, sub + 4)?;

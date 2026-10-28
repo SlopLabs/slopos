@@ -1,42 +1,43 @@
-use slopos_abi::InputEvent;
-use slopos_abi::input::MODIFIER_SUPER;
-use slopos_abi::task::TaskPriority;
-use slopos_chrome_core::Rect as ChromeRect;
-
-use crate::syscall::{UserWindowInfo, input, process, tty};
-use crate::theme::*;
 use std::time::Instant;
 
-use super::protocol::ProtocolBridge;
+use slopos_abi::InputEvent;
+use slopos_abi::input::MODIFIER_SUPER;
+use slopos_abi::surface::{WINDOW_STATE_MAXIMIZED, WINDOW_STATE_MINIMIZED, WINDOW_STATE_NORMAL};
+use slopos_abi::task::TaskPriority;
+use slopos_abi::window::{
+    CURSOR_SHAPE_DEFAULT, CURSOR_SHAPE_E_RESIZE, CURSOR_SHAPE_GRAB, CURSOR_SHAPE_GRABBING,
+    CURSOR_SHAPE_N_RESIZE, CURSOR_SHAPE_NE_RESIZE, CURSOR_SHAPE_NW_RESIZE, CURSOR_SHAPE_S_RESIZE,
+    CURSOR_SHAPE_SE_RESIZE, CURSOR_SHAPE_SW_RESIZE, CURSOR_SHAPE_W_RESIZE,
+};
+use slopos_chrome_core::positioner::Rect as ChromeRect;
+use slopos_protocol::toplevel_state::{ACTIVATED, MAXIMIZED, RESIZING};
 
 use super::MAX_WINDOWS;
-use super::decorations;
-use super::dock::LauncherShelf;
-use super::menu_bar::SystemBar;
+use super::decorations::{self, WindowButton};
+use super::dock::Dock;
+use super::frame::TITLE_BAR_HEIGHT;
+use super::menu_bar::MenuBar;
 use super::popover::Panel;
-use slopos_abi::surface::{WINDOW_STATE_MAXIMIZED, WINDOW_STATE_MINIMIZED};
+use super::protocol::ProtocolBridge;
+use crate::syscall::{UserWindowInfo, input, process};
 
-/// What a press on compositor chrome asks the frame loop to do.
-///
-/// Input dispatch sees an immutable view of the chrome, so a press records its
-/// intent here and `render_frame` applies it. At most one is outstanding: two
-/// presses in one batch mean the second is what the person meant.
+/// What a press asks of the window manager.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ChromeRequest {
-    PopoverToggle(Panel),
-    PopoverDismiss,
-    /// A press inside the open popover, in screen coordinates.
-    PopoverPress {
-        x: i32,
-        y: i32,
-    },
+pub enum Pressed {
+    /// The client's under the pointer: a press on its content, or of any
+    /// button but the primary.
+    PassOn,
+    /// Taken by a frame, the dock or the desktop.
+    Taken,
+    TogglePanel(Panel),
+    DismissPanel,
+    /// Within the open popover, at the pointer.
+    InPanel,
 }
 
-const WINDOW_STATE_NORMAL: u8 = 0;
-const CLOSE_REQUEST_GRACE_MS: u64 = 1500;
 const MAX_CURSOR_TRAIL: usize = 16;
 
-// Edge bits follow the Wayland convention: TOP=1, BOTTOM=2, LEFT=4, RIGHT=8.
+/// Wayland's edge bits: top 1, bottom 2, left 4, right 8.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ResizeEdge(u8);
 
@@ -73,7 +74,6 @@ impl ResizeEdge {
     }
 
     pub fn cursor_shape(self) -> u8 {
-        use slopos_abi::window::*;
         match self.0 {
             1 => CURSOR_SHAPE_N_RESIZE,
             2 => CURSOR_SHAPE_S_RESIZE,
@@ -88,22 +88,19 @@ impl ResizeEdge {
     }
 }
 
-/// What the pointer is over, resolved by a single top-of-z-order walk that
-/// stops at the first hit. Cursor shape, pointer focus, hover feedback, and
-/// click routing all derive from this one answer, so they always agree.
+/// What the pointer is over, from the top down. Its shape, pointer focus,
+/// hover and where a press goes all follow from this one answer.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CursorPart {
-    /// The popover holds a pointer grab, so this outranks every window beneath.
+    /// The open popover holds the pointer, so it outranks every window.
     Popover,
-    /// Light dismiss: the press is spent closing the popover and must not also
-    /// reach whatever is under it.
+    /// A press here closes the popover and reaches nothing else.
     PopoverOutside,
-    SystemBar(Option<Panel>),
-    Shelf(usize),
+    MenuBar(Option<Panel>),
+    Dock(usize),
     ResizeEdge(ResizeEdge),
-    /// A window's signal button: 0 = close, 1 = minimize, 2 = expand.
-    SignalButton(u8),
-    /// A window's draggable title bar: the frame strip minus the buttons.
+    Button(WindowButton),
+    /// The title bar less its buttons.
     TitleBar,
     Content,
     Desktop,
@@ -112,9 +109,9 @@ pub enum CursorPart {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct CursorHit {
     pub part: CursorPart,
-    /// Index into the window array for window parts; `usize::MAX` otherwise.
+    /// `usize::MAX` for a part of no window.
     pub window_idx: usize,
-    /// Task id of the hit window, or 0 for non-window parts.
+    /// 0 for a part of no window.
     pub task_id: u32,
 }
 
@@ -138,12 +135,38 @@ impl CursorHit {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Geometry {
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+}
+
+impl Geometry {
+    fn of(w: &UserWindowInfo) -> Geometry {
+        Geometry {
+            x: w.x,
+            y: w.y,
+            w: w.effective_width(),
+            h: w.effective_height(),
+        }
+    }
+}
+
+/// A window zoom resized: where it was before and where zoom put it.
+#[derive(Clone, Copy)]
+struct Zoomed {
+    task_id: u32,
+    generation: u32,
+    before: Geometry,
+    after: Geometry,
+}
+
 pub struct InputHandler {
     pub mouse_x: i32,
     pub mouse_y: i32,
     pub mouse_buttons: u8,
-
-    chrome_request: Option<ChromeRequest>,
 
     pub dragging: bool,
     drag_task: u32,
@@ -161,19 +184,14 @@ pub struct InputHandler {
     resize_grab_mouse_y: i32,
     resize_last_configure_ms: u64,
 
-    /// Pre-maximize geometry for restore: (task_id, x, y, w, h).
-    restore_geometry: [(u32, i32, i32, u32, u32); MAX_WINDOWS],
+    zoomed: Vec<Zoomed>,
 
-    /// Keyboard focus. Private so every change goes through `set_focused()`.
     focused_task: u32,
     pub needs_full_redraw: bool,
 
     pub cursor_trail: [(i32, i32); MAX_CURSOR_TRAIL],
     pub cursor_trail_count: usize,
 
-    pending_close_tasks: [u32; MAX_WINDOWS],
-    pending_close_deadlines: [u64; MAX_WINDOWS],
-    pending_close_count: usize,
     clock_origin: Instant,
 
     local_modifier_state: u8,
@@ -201,15 +219,11 @@ impl InputHandler {
             resize_grab_mouse_x: 0,
             resize_grab_mouse_y: 0,
             resize_last_configure_ms: 0,
-            restore_geometry: [(0, 0, 0, 0, 0); MAX_WINDOWS],
+            zoomed: Vec::new(),
             focused_task: 0,
             needs_full_redraw: false,
-            chrome_request: None,
             cursor_trail: [(0, 0); MAX_CURSOR_TRAIL],
             cursor_trail_count: 0,
-            pending_close_tasks: [0; MAX_WINDOWS],
-            pending_close_deadlines: [0; MAX_WINDOWS],
-            pending_close_count: 0,
             clock_origin: Instant::now(),
             local_modifier_state: 0,
             raw_event_buf: [InputEvent::default(); 64],
@@ -226,11 +240,8 @@ impl InputHandler {
         self.clock_origin.elapsed().as_millis() as u64
     }
 
-    /// Drain raw input events from the kernel queue into the frame buffer.
-    ///
-    /// State is not folded here: the main loop dispatches events in stream
-    /// order, so each press is hit-tested at the pointer position accumulated
-    /// up to that event, never at the end-of-batch position.
+    /// The frame's events, which the frame dispatches in order, so each
+    /// press is tested where the pointer was then.
     pub fn drain_events(&mut self) {
         self.cursor_trail_count = 0;
         self.raw_event_count = input::poll_batch(&mut self.raw_event_buf);
@@ -249,7 +260,6 @@ impl InputHandler {
         }
     }
 
-    /// Called per motion event while a grab is active.
     pub fn apply_grab_motion(&mut self, proto: Option<&mut ProtocolBridge>) {
         if self.dragging {
             self.update_drag(proto);
@@ -258,7 +268,6 @@ impl InputHandler {
         }
     }
 
-    /// The kernel's `MODIFIER_*` snapshot is authoritative; this caches it.
     pub(super) fn set_modifier_state(&mut self, mods: u8) {
         self.local_modifier_state = mods;
     }
@@ -283,7 +292,6 @@ impl InputHandler {
             }
         }
 
-        // Topmost visible is last in the z-ordered array.
         if self.focused_task != 0 {
             let still_visible = (0..window_count as usize).any(|i| {
                 windows[i].task_id == self.focused_task
@@ -301,9 +309,7 @@ impl InputHandler {
             }
         }
 
-        // Keyboard input must never fall into a void while a window is
-        // visible: any path that leaves focus at 0 would drop every
-        // subsequent keystroke.
+        // A key must never fall into nothing while a window shows.
         if self.focused_task == 0 {
             for i in (0..window_count as usize).rev() {
                 if windows[i].state != WINDOW_STATE_MINIMIZED {
@@ -314,7 +320,6 @@ impl InputHandler {
         }
     }
 
-    /// Ends any active grab at the position accumulated up to this event.
     pub fn on_button_release(&mut self, button: u8, proto: Option<&mut ProtocolBridge>) {
         self.mouse_buttons &= !button;
         if button & 0x01 == 0 {
@@ -327,31 +332,26 @@ impl InputHandler {
         }
     }
 
-    /// Hit-tests at the pointer position accumulated up to this event, routing
-    /// from `resolve_cursor_hit` so a click lands on whatever the cursor is
-    /// visually over. Returns `true` only for a plain content click, which the
-    /// caller forwards to the client; every other part the compositor consumes.
+    #[allow(clippy::too_many_arguments)]
     pub fn on_button_press(
         &mut self,
         button: u8,
-        fb_width: i32,
-        fb_height: i32,
+        area: ChromeRect,
         windows: &[UserWindowInfo; MAX_WINDOWS],
         window_count: u32,
-        shelf: &LauncherShelf,
-        popover: Option<ChromeRect>,
+        dock: &Dock,
+        popover: Option<slopos_appkit::Rect>,
         screen_width: u32,
-        bar: &SystemBar,
+        bar: &MenuBar,
         mut proto: Option<&mut ProtocolBridge>,
-    ) -> bool {
+    ) -> Pressed {
         self.mouse_buttons |= button;
         if button & 0x01 == 0 {
-            return true;
+            return Pressed::PassOn;
         }
 
-        // A press while a grab is active means the matching release was lost
-        // (kernel queue overwritten under a motion flood), so end the stale
-        // grab and process the press normally.
+        // A press during a grab means its release was lost under a flood of
+        // motion.
         if self.dragging {
             self.stop_drag();
         }
@@ -359,31 +359,15 @@ impl InputHandler {
             self.stop_resize(proto.as_deref_mut());
         }
 
-        let hit = self.resolve_cursor_hit(windows, window_count, shelf, popover, screen_width, bar);
+        let hit = self.resolve_cursor_hit(windows, window_count, dock, popover, screen_width, bar);
         match hit.part {
-            // Coordinates travel with the request: the panel resolves the
-            // widget under them from the same rect the renderer drew.
-            CursorPart::Popover => {
-                self.chrome_request = Some(ChromeRequest::PopoverPress {
-                    x: self.mouse_x,
-                    y: self.mouse_y,
-                });
-                false
-            }
-            CursorPart::PopoverOutside => {
-                self.chrome_request = Some(ChromeRequest::PopoverDismiss);
-                false
-            }
-            // The bar consumes every click; only a named item opens a popover.
-            CursorPart::SystemBar(item) => {
-                if let Some(panel) = item {
-                    self.chrome_request = Some(ChromeRequest::PopoverToggle(panel));
-                }
-                false
-            }
-            CursorPart::Shelf(idx) => {
-                self.handle_shelf_click(idx, shelf, windows, window_count, &mut proto);
-                false
+            CursorPart::Popover => Pressed::InPanel,
+            CursorPart::PopoverOutside => Pressed::DismissPanel,
+            CursorPart::MenuBar(Some(panel)) => Pressed::TogglePanel(panel),
+            CursorPart::MenuBar(None) => Pressed::Taken,
+            CursorPart::Dock(idx) => {
+                self.dock_click(idx, dock, windows, window_count, &mut proto);
+                Pressed::Taken
             }
             CursorPart::ResizeEdge(edge) => {
                 let window = windows[hit.window_idx];
@@ -392,20 +376,13 @@ impl InputHandler {
                     p.raise_window(window.task_id);
                 }
                 self.set_focused(window.task_id);
-                false
+                Pressed::Taken
             }
-            CursorPart::SignalButton(btn) => {
+            CursorPart::Button(button) => {
                 let window = windows[hit.window_idx];
-                self.handle_signal_button(
-                    btn,
-                    &window,
-                    fb_width,
-                    fb_height,
-                    windows,
-                    window_count,
-                    &mut proto,
-                );
-                false
+                let shown = &windows[..window_count as usize];
+                self.window_button(button, &window, shown, area, &mut proto);
+                Pressed::Taken
             }
             CursorPart::TitleBar => {
                 let window = windows[hit.window_idx];
@@ -414,142 +391,113 @@ impl InputHandler {
                     p.raise_window(window.task_id);
                 }
                 self.set_focused(window.task_id);
-                false
+                Pressed::Taken
             }
             CursorPart::Content => {
                 let window = windows[hit.window_idx];
-                // Super+LMB on content moves a non-maximized window.
-                if self.local_modifier_state & MODIFIER_SUPER != 0 && window.state != 2 {
-                    self.start_drag(&window);
-                    if let Some(ref mut p) = proto {
-                        p.raise_window(window.task_id);
-                    }
-                    self.set_focused(window.task_id);
-                    return false;
-                }
                 if let Some(ref mut p) = proto {
                     p.raise_window(window.task_id);
                 }
                 self.set_focused(window.task_id);
-                true
+                // Super and a press move a window that is not maximized.
+                if self.local_modifier_state & MODIFIER_SUPER != 0
+                    && window.state != WINDOW_STATE_MAXIMIZED
+                {
+                    self.start_drag(&window);
+                    return Pressed::Taken;
+                }
+                Pressed::PassOn
             }
-            // Focus stays on the last focused window so keystrokes survive.
-            CursorPart::Desktop => false,
+            // Focus stays where it was, so keys typed next still land.
+            CursorPart::Desktop => Pressed::Taken,
         }
     }
 
-    /// `button_id`: 0 = close, 1 = minimize, 2 = expand (maximize/restore).
-    #[allow(clippy::too_many_arguments)]
-    fn handle_signal_button(
+    fn window_button(
         &mut self,
-        button_id: u8,
+        button: WindowButton,
         window: &UserWindowInfo,
-        fb_width: i32,
-        fb_height: i32,
-        windows: &[UserWindowInfo; MAX_WINDOWS],
-        window_count: u32,
+        windows: &[UserWindowInfo],
+        area: ChromeRect,
         proto: &mut Option<&mut ProtocolBridge>,
     ) {
-        match button_id {
-            0 => {
-                self.request_window_close(window.task_id, windows, window_count, proto);
+        match button {
+            WindowButton::Close => {
+                if let Some(p) = proto.as_deref_mut() {
+                    p.send_close_for_task(window.task_id);
+                }
             }
-            1 => {
+            WindowButton::Minimize => {
                 if let Some(p) = proto.as_deref_mut() {
                     p.set_window_state(window.task_id, WINDOW_STATE_MINIMIZED);
                 }
             }
-            2 if window.fixed_size => {}
-            2 => {
-                if window.state == WINDOW_STATE_MAXIMIZED {
-                    if let Some(geo) = self.restore_geometry.iter().find(|g| g.0 == window.task_id)
-                    {
-                        if let Some(p) = proto.as_deref_mut() {
-                            p.set_window_position(window.task_id, geo.1, geo.2);
-                            p.set_window_size(window.task_id, geo.3, geo.4);
-                            p.send_configure_for_task(
-                                window.task_id,
-                                geo.3,
-                                geo.4,
-                                slopos_protocol::toplevel_state::ACTIVATED,
-                            );
-                        }
-                    }
-                    if let Some(p) = proto.as_deref_mut() {
-                        p.set_window_state(window.task_id, WINDOW_STATE_NORMAL);
-                    }
-                } else {
-                    if let Some(slot) = self
-                        .restore_geometry
-                        .iter_mut()
-                        .find(|g| g.0 == 0 || g.0 == window.task_id)
-                    {
-                        *slot = (
-                            window.task_id,
-                            window.x,
-                            window.y,
-                            window.effective_width(),
-                            window.effective_height(),
-                        );
-                    }
-                    let area = work_area(fb_width as u32, fb_height as u32);
-                    let max_y = area.y + TITLE_BAR_HEIGHT;
-                    let max_w = area.w as u32;
-                    let max_h = (area.h - TITLE_BAR_HEIGHT) as u32;
-                    if let Some(p) = proto.as_deref_mut() {
-                        let (w, h) =
-                            p.clamp_window_size(window.task_id, max_w as i32, max_h as i32);
-                        let (max_w, max_h) = (w as u32, h as u32);
-                        p.set_window_position(window.task_id, area.x, max_y);
-                        p.set_window_size(window.task_id, max_w, max_h);
-                        p.set_window_state(window.task_id, WINDOW_STATE_MAXIMIZED);
-                        p.send_configure_for_task(
-                            window.task_id,
-                            max_w,
-                            max_h,
-                            slopos_protocol::toplevel_state::ACTIVATED
-                                | slopos_protocol::toplevel_state::MAXIMIZED,
-                        );
-                    }
+            WindowButton::Zoom if window.fixed_size => {}
+            WindowButton::Zoom => {
+                if let Some(p) = proto.as_deref_mut() {
+                    self.zoom(window, windows, area, p);
                 }
-                self.needs_full_redraw = true;
             }
-            _ => {}
         }
     }
 
-    pub fn process_pending_close_requests(
+    /// Fill `area` with the window, or as much of it as the window's limits
+    /// allow, centred and still a window; or put back where zoom found it a
+    /// window zoom resized that is still maximized or where zoom put it.
+    fn zoom(
         &mut self,
-        windows: &[UserWindowInfo; MAX_WINDOWS],
-        window_count: u32,
+        window: &UserWindowInfo,
+        windows: &[UserWindowInfo],
+        area: ChromeRect,
+        p: &mut ProtocolBridge,
     ) {
-        if self.pending_close_count == 0 {
-            return;
-        }
-
-        let now = self.now_ms();
-        let mut i = 0usize;
-        while i < self.pending_close_count {
-            let task_id = self.pending_close_tasks[i];
-
-            if !window_exists(windows, window_count, task_id) {
-                self.remove_pending_close_at(i);
-                continue;
+        let task = window.task_id;
+        let incarnation =
+            |z: &Zoomed, w: &UserWindowInfo| z.task_id == w.task_id && z.generation == w.generation;
+        self.zoomed
+            .retain(|z| windows.iter().any(|w| incarnation(z, w)));
+        self.needs_full_redraw = true;
+        let now = Geometry::of(window);
+        if let Some(at) = self.zoomed.iter().position(|z| incarnation(z, window)) {
+            let zoomed = self.zoomed.swap_remove(at);
+            if window.state == WINDOW_STATE_MAXIMIZED || now == zoomed.after {
+                let to = zoomed.before;
+                p.set_window_position(task, to.x, to.y);
+                p.set_window_size(task, to.w, to.h);
+                p.set_window_state(task, WINDOW_STATE_NORMAL);
+                p.send_configure_for_task(task, to.w, to.h, ACTIVATED);
+                return;
             }
-
-            if now >= self.pending_close_deadlines[i] {
-                // No kernel terminate_task: protocol cleanup destroys the
-                // surface on disconnect.
-                self.remove_pending_close_at(i);
-                self.needs_full_redraw = true;
-                continue;
-            }
-
-            i += 1;
         }
+        let room = (area.w, area.h - TITLE_BAR_HEIGHT);
+        let (w, h) = p.clamp_window_size(task, room.0, room.1);
+        let (x, y, state, states) = match (w, h) == room {
+            true => (
+                area.x,
+                area.y + TITLE_BAR_HEIGHT,
+                WINDOW_STATE_MAXIMIZED,
+                ACTIVATED | MAXIMIZED,
+            ),
+            false => (
+                area.x + (room.0 - w).max(0) / 2,
+                area.y + TITLE_BAR_HEIGHT + (room.1 - h).max(0) / 2,
+                WINDOW_STATE_NORMAL,
+                ACTIVATED,
+            ),
+        };
+        let (w, h) = (w as u32, h as u32);
+        p.set_window_position(task, x, y);
+        p.set_window_size(task, w, h);
+        p.set_window_state(task, state);
+        p.send_configure_for_task(task, w, h, states);
+        self.zoomed.push(Zoomed {
+            task_id: task,
+            generation: window.generation,
+            before: now,
+            after: Geometry { x, y, w, h },
+        });
     }
 
-    /// `window.y` is the content top; the title bar sits above it.
     pub fn hit_test_content_area(&self, window: &UserWindowInfo) -> bool {
         self.mouse_x >= window.x
             && self.mouse_x < window.x + window.effective_width() as i32
@@ -557,8 +505,6 @@ impl InputHandler {
             && self.mouse_y < window.y + window.effective_height() as i32
     }
 
-    /// Content area plus the decorations `TITLE_BAR_HEIGHT` above `window.y`,
-    /// so a top window's whole frame occludes what sits beneath it.
     pub fn hit_test_frame_area(&self, window: &UserWindowInfo) -> bool {
         let frame_y = window.y - TITLE_BAR_HEIGHT;
         self.mouse_x >= window.x
@@ -567,9 +513,6 @@ impl InputHandler {
             && self.mouse_y < window.y + window.effective_height() as i32
     }
 
-    /// The single entry point for focus changes. Focus is tracked locally;
-    /// `ProtocolBridge::forward_input_events` routes keys to the focused
-    /// surface from the main loop.
     fn set_focused(&mut self, task_id: u32) {
         self.focused_task = task_id;
     }
@@ -630,7 +573,7 @@ impl InputHandler {
             new_y += dy;
         }
 
-        // Clamping keeps the anchored corner fixed.
+        // The corner held keeps still.
         let (w, h) = self.limit_size(proto.as_deref(), new_w, new_h);
         if self.resize_edges.has_left() {
             new_x -= w - new_w;
@@ -644,8 +587,8 @@ impl InputHandler {
             p.set_window_position(self.resize_task, new_x, new_y);
             p.set_window_size(self.resize_task, new_w as u32, new_h as u32);
 
-            // Throttled to ~100 ms so clients re-render during the drag rather
-            // than only at the end.
+            // Every 100 ms, so the client draws during the drag and not only
+            // at its end.
             let now = self.now_ms();
             if now.saturating_sub(self.resize_last_configure_ms) >= 100 {
                 self.resize_last_configure_ms = now;
@@ -653,16 +596,13 @@ impl InputHandler {
                     self.resize_task,
                     new_w as u32,
                     new_h as u32,
-                    slopos_protocol::toplevel_state::ACTIVATED
-                        | slopos_protocol::toplevel_state::RESIZING,
+                    ACTIVATED | RESIZING,
                 );
             }
         }
     }
 
-    /// `(w, h)` held to the compositor's floor and the window's own limits.
     fn limit_size(&self, proto: Option<&ProtocolBridge>, w: i32, h: i32) -> (i32, i32) {
-        let (w, h) = (w.max(MIN_WINDOW_WIDTH), h.max(MIN_WINDOW_HEIGHT));
         proto.map_or((w, h), |p| p.clamp_window_size(self.resize_task, w, h))
     }
 
@@ -690,7 +630,7 @@ impl InputHandler {
                     self.resize_task,
                     final_w as u32,
                     final_h as u32,
-                    slopos_protocol::toplevel_state::ACTIVATED,
+                    ACTIVATED,
                 );
             }
         }
@@ -699,41 +639,30 @@ impl InputHandler {
         self.resize_edges = ResizeEdge::NONE;
     }
 
-    pub fn take_chrome_request(&mut self) -> Option<ChromeRequest> {
-        self.chrome_request.take()
-    }
-
-    /// The single source of truth for cursor shape, pointer focus, hover
-    /// feedback and click routing. A window's whole frame — content and
-    /// decorations — occludes everything beneath, so the walk never falls
-    /// through to a lower window once inside a frame.
+    /// What the pointer is over: a window's whole frame hides everything
+    /// beneath it.
     pub fn resolve_cursor_hit(
         &self,
         windows: &[UserWindowInfo; MAX_WINDOWS],
         window_count: u32,
-        shelf: &LauncherShelf,
-        popover: Option<ChromeRect>,
+        dock: &Dock,
+        popover: Option<slopos_appkit::Rect>,
         screen_width: u32,
-        bar: &SystemBar,
+        bar: &MenuBar,
     ) -> CursorHit {
         let (mx, my) = (self.mouse_x, self.mouse_y);
 
-        // An open popover holds a pointer grab, so nothing below is consulted.
-        // The client underneath gets a correct `PointerLeave` because
-        // `sync_pointer_focus` drops focus for any part that is not `Content`.
         if let Some(rect) = popover {
-            if rect.contains(mx, my) {
-                return CursorHit::ui(CursorPart::Popover);
-            }
-            return CursorHit::ui(CursorPart::PopoverOutside);
+            return match rect.contains(mx, my) {
+                true => CursorHit::ui(CursorPart::Popover),
+                false => CursorHit::ui(CursorPart::PopoverOutside),
+            };
         }
-
-        // Compositor chrome is drawn above all windows, so it wins here too.
-        if SystemBar::covers(my) {
-            return CursorHit::ui(CursorPart::SystemBar(bar.hit_test(screen_width, mx, my)));
+        if MenuBar::covers(my) {
+            return CursorHit::ui(CursorPart::MenuBar(bar.hit_test(screen_width, mx, my)));
         }
-        if let Some(idx) = shelf.hit_test(mx, my) {
-            return CursorHit::ui(CursorPart::Shelf(idx));
+        if let Some(idx) = dock.hit_test(mx, my) {
+            return CursorHit::ui(CursorPart::Dock(idx));
         }
 
         for i in (0..window_count as usize).rev() {
@@ -742,9 +671,8 @@ impl InputHandler {
                 continue;
             }
 
-            // The resize grab zone is the shadow around the frame; state 2 is
-            // maximized, which has none.
-            if w.state != 2 && !w.fixed_size {
+            // Its shadow takes a resize, and a maximized window has none.
+            if w.state != WINDOW_STATE_MAXIMIZED && !w.fixed_size {
                 let edge = decorations::hit_test_resize_edge(
                     w.x,
                     w.y,
@@ -759,15 +687,12 @@ impl InputHandler {
             }
 
             let frame_y = w.y - TITLE_BAR_HEIGHT;
-
-            // Signal buttons sit highest within the title bar.
-            if let Some(btn) = decorations::hit_test_signal_button(w.x, frame_y, mx, my) {
-                return CursorHit::window(CursorPart::SignalButton(btn), i, w.task_id);
+            if let Some(button) = decorations::button_at(w.x, frame_y, mx, my) {
+                return CursorHit::window(CursorPart::Button(button), i, w.task_id);
             }
             if self.hit_test_content_area(&w) {
                 return CursorHit::window(CursorPart::Content, i, w.task_id);
             }
-            // Anything else inside the frame is the draggable title bar.
             if self.hit_test_frame_area(&w) {
                 return CursorHit::window(CursorPart::TitleBar, i, w.task_id);
             }
@@ -776,9 +701,8 @@ impl InputHandler {
         CursorHit::ui(CursorPart::Desktop)
     }
 
-    /// An active grab takes precedence over the resolved hit.
+    /// A grab's shape before what the pointer is over.
     pub fn cursor_shape_for(&self, hit: &CursorHit, windows: &[UserWindowInfo; MAX_WINDOWS]) -> u8 {
-        use slopos_abi::window::*;
         if self.dragging {
             return CURSOR_SHAPE_GRABBING;
         }
@@ -788,20 +712,20 @@ impl InputHandler {
         match hit.part {
             CursorPart::ResizeEdge(edge) => edge.cursor_shape(),
             CursorPart::TitleBar => CURSOR_SHAPE_GRAB,
-            // The client owns the cursor only over its own content.
+            // A client shapes the pointer over its own content alone.
             CursorPart::Content => windows[hit.window_idx].cursor_shape,
-            CursorPart::SignalButton(_)
-            | CursorPart::SystemBar(_)
-            | CursorPart::Shelf(_)
+            CursorPart::Button(_)
+            | CursorPart::MenuBar(_)
+            | CursorPart::Dock(_)
             | CursorPart::Popover
             | CursorPart::PopoverOutside
             | CursorPart::Desktop => CURSOR_SHAPE_DEFAULT,
         }
     }
 
-    /// Task id whose signal-button cluster should reveal its glyphs. Gated by
-    /// the resolved topmost hit so an occluded window never lights up.
-    pub fn signal_hovered_task(
+    /// The window whose buttons show their glyphs: the one on top under the
+    /// pointer, never one hidden beneath.
+    pub fn buttons_hovered_task(
         &self,
         hit: &CursorHit,
         windows: &[UserWindowInfo; MAX_WINDOWS],
@@ -810,78 +734,23 @@ impl InputHandler {
             return 0;
         }
         let w = &windows[hit.window_idx];
-        let frame_y = w.y - TITLE_BAR_HEIGHT;
-        if decorations::hit_test_signal_group(w.x, frame_y, self.mouse_x, self.mouse_y) {
-            hit.task_id
-        } else {
-            0
+        let group = decorations::buttons_group(w.x, w.y - TITLE_BAR_HEIGHT);
+        match group.contains(self.mouse_x, self.mouse_y) {
+            true => hit.task_id,
+            false => 0,
         }
     }
 
-    fn request_window_close(
-        &mut self,
-        task_id: u32,
-        _windows: &[UserWindowInfo; MAX_WINDOWS],
-        _window_count: u32,
-        proto: &mut Option<&mut ProtocolBridge>,
-    ) {
-        if let Some(idx) = self.pending_close_index(task_id) {
-            // Second close click: protocol cleanup destroys the surface, so
-            // dropping the pending entry is all that is left to do.
-            self.remove_pending_close_at(idx);
-            self.needs_full_redraw = true;
-            return;
-        }
-
-        let close_sent = if let Some(p) = proto.as_deref_mut() {
-            p.send_close_for_task(task_id)
-        } else {
-            false
-        };
-
-        if !close_sent || self.pending_close_count >= MAX_WINDOWS {
-            // Nothing more to do: protocol cleanup destroys the surface on
-            // disconnect.
-            self.needs_full_redraw = true;
-            return;
-        }
-
-        let now = self.now_ms();
-        let idx = self.pending_close_count;
-        self.pending_close_tasks[idx] = task_id;
-        self.pending_close_deadlines[idx] = now.saturating_add(CLOSE_REQUEST_GRACE_MS);
-        self.pending_close_count += 1;
-        self.needs_full_redraw = true;
-    }
-
-    fn pending_close_index(&self, task_id: u32) -> Option<usize> {
-        (0..self.pending_close_count).find(|&i| self.pending_close_tasks[i] == task_id)
-    }
-
-    fn remove_pending_close_at(&mut self, idx: usize) {
-        if idx >= self.pending_close_count {
-            return;
-        }
-
-        let last = self.pending_close_count - 1;
-        self.pending_close_tasks[idx] = self.pending_close_tasks[last];
-        self.pending_close_deadlines[idx] = self.pending_close_deadlines[last];
-        self.pending_close_tasks[last] = 0;
-        self.pending_close_deadlines[last] = 0;
-        self.pending_close_count -= 1;
-    }
-
-    fn handle_shelf_click(
+    fn dock_click(
         &mut self,
         idx: usize,
-        shelf: &LauncherShelf,
+        dock: &Dock,
         windows: &[UserWindowInfo; MAX_WINDOWS],
         window_count: u32,
         proto: &mut Option<&mut ProtocolBridge>,
     ) {
-        let entry = match shelf.entry(idx) {
-            Some(e) => e,
-            None => return,
+        let Some(entry) = dock.entry(idx) else {
+            return;
         };
 
         if entry.running && entry.task_id != 0 {
@@ -905,11 +774,8 @@ impl InputHandler {
         }
     }
 
-    /// Focus is not set here: spawn returns a kernel task id while focus is
-    /// keyed by the protocol bridge's surface pseudo-ids, and the two id spaces
-    /// never match. `sync_keyboard_focus` picks the window up once it maps.
-    /// The app takes the session's environment, `HOME` among it for its
-    /// loader.
+    /// With the session's environment, `HOME` among it for its loader. Its
+    /// window takes focus once it maps.
     fn spawn_program(&mut self, path: &str) {
         let stdio = [
             process::clone_fd(0, 0),
@@ -928,11 +794,7 @@ impl InputHandler {
             0,
         );
         if tid <= 0 {
-            tty::write(b"COMPOSITOR: spawn failed for program\n");
+            log!("spawn failed for program");
         }
     }
-}
-
-fn window_exists(windows: &[UserWindowInfo; MAX_WINDOWS], count: u32, task_id: u32) -> bool {
-    (0..count as usize).any(|i| windows[i].task_id == task_id)
 }

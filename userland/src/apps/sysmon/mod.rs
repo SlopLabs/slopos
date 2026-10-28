@@ -1,5 +1,4 @@
-use std::format;
-use std::string::String;
+use std::sync::OnceLock;
 
 use slopos_abi::PAGE_SIZE;
 use slopos_net_core::{Ipv4, Mac};
@@ -9,11 +8,12 @@ use crate::syscall::process as sys_proc;
 use slopos_abi::errno::Errno;
 use slopos_abi::signal::SIGKILL;
 use slopos_abi::task::TaskStatus;
-use slopos_appkit::theme::{inset, space};
+use slopos_appkit::theme::space;
+use slopos_appkit::theme::words::Bytes;
 use slopos_appkit::{
-    Action, App, Button, ButtonRow, ContextMenuAt, CrossAxisAlignment, EdgeInsets, Key, MenuItem,
-    MenuItemKind, Modifiers, NamedKey, Node, PropertyList, ScrollDirection, ScrollbarVisibility,
-    Section, SortIndicator, TableColumn, TableColumnWidth, Text, Tone, WindowSpec,
+    Action, App, Button, ButtonRow, ContextMenuAt, Dialog, Key, MenuItem, MenuItemKind, Modifiers,
+    NamedKey, Node, Page, PropertyList, Section, SortIndicator, StatusBar, TableColumn,
+    TableColumnWidth, Text, Tone, WindowSpec, column,
 };
 
 mod format;
@@ -78,17 +78,10 @@ impl App for SysmonApp {
                 self.dismiss_transients();
                 Action::Rebuild
             }
-            SysmonMsg::SortColumn(col_idx) => {
-                let col = match col_idx {
-                    0 => SortColumn::Pid,
-                    1 => SortColumn::Name,
-                    2 => SortColumn::State,
-                    3 => SortColumn::CpuPct,
-                    4 => SortColumn::Priority,
-                    5 => SortColumn::Cpu,
-                    _ => SortColumn::Runtime,
-                };
-                self.cycle_sort_for_column(col);
+            SysmonMsg::SortColumn(index) => {
+                if let Some(column) = process_columns().get(index) {
+                    self.cycle_sort_for_column(column.sort);
+                }
                 Action::Rebuild
             }
             SysmonMsg::SelectRow(row) => {
@@ -119,8 +112,7 @@ impl App for SysmonApp {
                 Action::Rebuild
             }
             SysmonMsg::Kill => {
-                // Re-checked here rather than trusted from when the dialog
-                // opened: a refresh in between may have recycled the id.
+                // A refresh since the dialog opened may have recycled the id.
                 self.last_kill = match self.pending_kill_target() {
                     Some(target) => {
                         let name = target.name.clone();
@@ -176,7 +168,9 @@ impl App for SysmonApp {
     }
 
     fn window(&self) -> WindowSpec {
-        WindowSpec::new(640, 480)
+        let least = TableColumn::least_width(&self.process_table_columns());
+        let spec = WindowSpec::new(least.max(640), 480);
+        spec.min_size(least, spec.min_size.height)
     }
 }
 
@@ -208,49 +202,28 @@ impl SysmonApp {
         let (used, total, pct) = self.memory();
         let memory = Node::ProgressBar {
             value: Some(pct),
-            label: format!(
-                "{} of {} used ({pct}%)",
-                format_bytes_mib(used),
-                format_bytes_mib(total)
-            ),
+            label: format!("{} of {} used ({pct}%)", Bytes(used), Bytes(total)),
             tone: load_tone(pct),
         };
-        let mut counts = [0usize; 4];
+        let mut counts = std::collections::BTreeMap::new();
         for task in &self.tasks[..self.task_count] {
-            let at = match TaskStatus::from_u8(task.state) {
-                TaskStatus::Running => 0,
-                TaskStatus::Ready => 1,
-                TaskStatus::Blocked => 2,
-                TaskStatus::Stopped
-                | TaskStatus::Zombie
-                | TaskStatus::Terminated
-                | TaskStatus::Invalid => 3,
-            };
-            counts[at] += 1;
+            *counts
+                .entry(task_state(TaskStatus::from_u8(task.state)))
+                .or_insert(0usize) += 1;
         }
-        let tasks = PropertyList::new()
-            .row("All", self.task_count.to_string())
-            .row("Running", counts[0].to_string())
-            .row("Ready to run", counts[1].to_string())
-            .row("Waiting", counts[2].to_string())
-            .row("Stopped or ending", counts[3].to_string());
+        let mut tasks = PropertyList::new().row("All", self.task_count.to_string());
+        for ((_, state), count) in counts {
+            tasks = tasks.row(state, count.to_string());
+        }
         let network: Node<SysmonMsg> = match &self.net {
             Ok(Some(net)) => PropertyList::new()
                 .row(
                     "Received",
-                    format!(
-                        "{} in {}",
-                        format_bytes_mib(net.rx_bytes),
-                        packets(net.rx_packets)
-                    ),
+                    format!("{} in {}", Bytes(net.rx_bytes), packets(net.rx_packets)),
                 )
                 .row(
                     "Sent",
-                    format!(
-                        "{} in {}",
-                        format_bytes_mib(net.tx_bytes),
-                        packets(net.tx_packets)
-                    ),
+                    format!("{} in {}", Bytes(net.tx_bytes), packets(net.tx_packets)),
                 )
                 .into(),
             Ok(None) => Text::new(NO_NETWORK).tone(Tone::Secondary).into(),
@@ -267,7 +240,7 @@ impl SysmonApp {
             Section::new("Tasks", tasks).into(),
             Section::new("Network", network).into(),
         ];
-        page(column(space::XL, sections))
+        Page::untitled().content(column(space::XL, sections)).into()
     }
 
     fn memory(&self) -> (u64, u64, u32) {
@@ -281,68 +254,34 @@ impl SysmonApp {
         (used, total, pct)
     }
 
-    fn view_processes(&self) -> Node<SysmonMsg> {
-        let sort_ind = |col: SortColumn| -> Option<SortIndicator> {
-            if self.sort_column == col {
-                Some(if self.sort_ascending {
-                    SortIndicator::Ascending
-                } else {
-                    SortIndicator::Descending
-                })
-            } else {
-                None
-            }
+    fn process_table_columns(&self) -> Vec<TableColumn> {
+        let sort = match self.sort_ascending {
+            true => SortIndicator::Ascending,
+            false => SortIndicator::Descending,
         };
+        process_columns()
+            .iter()
+            .map(|column| TableColumn {
+                label: String::from(column.heading),
+                width: column.width,
+                sort_indicator: (self.sort_column == column.sort).then_some(sort),
+            })
+            .collect()
+    }
 
-        let columns = vec![
-            TableColumn {
-                label: String::from("PID"),
-                width: TableColumnWidth::Fixed(60),
-                sort_indicator: sort_ind(SortColumn::Pid),
-            },
-            TableColumn {
-                label: String::from("Name"),
-                width: TableColumnWidth::Flex(2),
-                sort_indicator: sort_ind(SortColumn::Name),
-            },
-            TableColumn {
-                label: String::from("State"),
-                width: TableColumnWidth::Fixed(70),
-                sort_indicator: sort_ind(SortColumn::State),
-            },
-            TableColumn {
-                label: String::from("CPU %"),
-                width: TableColumnWidth::Fixed(70),
-                sort_indicator: sort_ind(SortColumn::CpuPct),
-            },
-            TableColumn {
-                label: String::from("Priority"),
-                width: TableColumnWidth::Fixed(70),
-                sort_indicator: sort_ind(SortColumn::Priority),
-            },
-            TableColumn {
-                label: String::from("CPU"),
-                width: TableColumnWidth::Fixed(50),
-                sort_indicator: sort_ind(SortColumn::Cpu),
-            },
-            TableColumn {
-                label: String::from("Run time"),
-                width: TableColumnWidth::Flex(1),
-                sort_indicator: sort_ind(SortColumn::Runtime),
-            },
-        ];
-
+    fn view_processes(&self) -> Node<SysmonMsg> {
+        let columns = self.process_table_columns();
         let mut rows: Vec<Vec<Node<SysmonMsg>>> = Vec::new();
         for row_idx in 0..self.task_count {
             let Some(idx) = self.sorted_task_index(row_idx) else {
                 continue;
             };
             let task = &self.tasks[idx];
-            let state_str = task_state(task.state);
+            let (_, state) = task_state(TaskStatus::from_u8(task.state));
             rows.push(vec![
                 cell(&format!("{}", task.task_id)),
-                cell(&truncate_name(&task_name_string(task), 16)),
-                cell(state_str),
+                cell(&task_name_string(task)),
+                cell(state),
                 cell(&format_pct(self.task_cpu_pct[idx])),
                 cell(priority_label(task.priority)),
                 cell(&format!("{}", task.last_cpu)),
@@ -353,9 +292,6 @@ impl SysmonApp {
         let table = Node::Table {
             columns,
             rows,
-            row_height: 20,
-            // Resolved from the selected task each frame, so a re-sort carries
-            // the highlight with its task rather than leaving it on the row.
             selected: self.selected_row(),
             on_select: Some(SysmonMsg::SelectRow),
             on_activate: None,
@@ -364,17 +300,16 @@ impl SysmonApp {
             shows: 0,
         };
 
-        let body = Node::VStack {
-            spacing: 0,
-            align: CrossAxisAlignment::Stretch,
-            children: vec![
+        let body = column(
+            0,
+            vec![
                 Node::Expand {
                     weight: 1,
                     child: Box::new(table),
                 },
                 self.view_status_line(),
             ],
-        };
+        );
 
         let mut layers = vec![body];
         layers.extend(
@@ -393,7 +328,7 @@ impl SysmonApp {
             child: Box::new(Node::Menu {
                 items: vec![MenuItem {
                     label: "End task",
-                    shortcut: Some("Del"),
+                    shortcut: Some("Delete"),
                     enabled: self.is_killable(menu.target.pid()),
                     kind: MenuItemKind::Action,
                 }],
@@ -404,26 +339,25 @@ impl SysmonApp {
 
     fn view_kill_dialog(&self) -> Option<Node<SysmonMsg>> {
         let target = self.confirm_kill.as_ref()?;
-        Some(Node::Dialog {
-            title: format!("End “{}”?", target.name),
-            icon: None,
-            content: Box::new(
-                Text::new(format!(
-                    "Task {} stops at once, without saving its work.",
-                    target.pid()
-                ))
-                .wrap()
+        Some(
+            Dialog::new(format!("End “{}”?", target.name))
+                .content(
+                    Text::new(format!(
+                        "Task {} stops at once, without saving its work.",
+                        target.pid()
+                    ))
+                    .wrap(),
+                )
+                .footer(
+                    ButtonRow::new()
+                        .cancel(Button::new("Cancel").on_press(SysmonMsg::Cancel))
+                        .destructive(Button::new("End task").on_press(SysmonMsg::Kill)),
+                )
+                .on_dismiss(SysmonMsg::Cancel)
                 .into(),
-            ),
-            footer: ButtonRow::new()
-                .cancel(Button::new("Cancel").on_press(SysmonMsg::Cancel))
-                .destructive(Button::new("End task").on_press(SysmonMsg::Kill)),
-            on_dismiss: Some(SysmonMsg::Cancel),
-            anchor: None,
-        })
+        )
     }
 
-    /// Footer: the outcome of the last kill, else the available gestures.
     fn view_status_line(&self) -> Node<SysmonMsg> {
         let (text, tone) = match &self.last_kill {
             Some(KillOutcome::Sent { name }) => (format!("Ended “{name}”."), Tone::Success),
@@ -431,32 +365,29 @@ impl SysmonApp {
                 format!(
                     "Couldn't end “{name}”, because you aren't allowed to. Ask an administrator to end it."
                 ),
-                Tone::Warning,
+                Tone::Danger,
             ),
             Some(KillOutcome::Failed { name, errno }) if *errno == Errno::ESRCH.raw() => {
                 (format!("“{name}” had already ended."), Tone::Warning)
             }
             Some(KillOutcome::Failed { name, .. }) => {
-                (format!("Couldn't end “{name}”. Try again."), Tone::Warning)
+                (format!("Couldn't end “{name}”. Try again."), Tone::Danger)
             }
             Some(KillOutcome::Vanished { name }) => {
                 (format!("“{name}” had already ended."), Tone::Warning)
             }
             None => (
-                String::from("Right-click a task, or press the Menu key, to end it."),
+                String::from("Right-click a task, or choose it and press Delete, to end it."),
                 Tone::Secondary,
             ),
         };
-        Node::Padding {
-            padding: EdgeInsets::symmetric(space::SM, space::XS),
-            child: Box::new(Text::new(text).tone(tone).into()),
-        }
+        StatusBar::new(text).tone(tone).into()
     }
 
     fn view_hardware(&self) -> Node<SysmonMsg> {
         let processor = PropertyList::new()
-            .row("Model", trim_ascii(&self.cpu_info.brand_string))
-            .row("Vendor", trim_ascii(&self.cpu_info.vendor))
+            .row("Model", padded_text(&self.cpu_info.brand_string))
+            .row("Vendor", padded_text(&self.cpu_info.vendor))
             .row("Cores", self.cpu_info.cpu_count.to_string())
             .row(
                 "Family and model",
@@ -471,14 +402,10 @@ impl SysmonApp {
         let memory = PropertyList::new()
             .row(
                 "Total",
-                format!(
-                    "{} ({} pages)",
-                    format_bytes_mib(total),
-                    self.sys_info.total_pages
-                ),
+                format!("{} ({} pages)", Bytes(total), self.sys_info.total_pages),
             )
-            .row("Free", format_bytes_mib(free))
-            .row("In use", format_bytes_mib(used));
+            .row("Free", Bytes(free).to_string())
+            .row("In use", Bytes(used).to_string());
         let scheduler = PropertyList::new()
             .row(
                 "Context switches",
@@ -495,11 +422,11 @@ impl SysmonApp {
             );
         let stats = heap_stats();
         let heap = PropertyList::new()
-            .row("Arena", format_bytes_mib(stats.arena_size as u64))
-            .row("Cached", format_bytes_mib(stats.cached_size as u64))
+            .row("Arena", Bytes(stats.arena_size as u64).to_string())
+            .row("Cached", Bytes(stats.cached_size as u64).to_string())
             .row(
                 "Largest free block",
-                format_bytes_mib(stats.largest_free as u64),
+                Bytes(stats.largest_free as u64).to_string(),
             )
             .row(
                 "Direct allocations",
@@ -535,7 +462,7 @@ impl SysmonApp {
             Section::new("Network", network).into(),
             Section::new("Startup", startup).into(),
         ];
-        page(column(space::XL, sections))
+        Page::untitled().content(column(space::XL, sections)).into()
     }
 }
 
@@ -550,7 +477,7 @@ fn packets(n: u64) -> String {
     }
 }
 
-/// An interface's operational state, as RFC 2863 names them, in words.
+/// RFC 2863's operational states, in words.
 fn connection(state: u8) -> &'static str {
     use slopos_abi::net::{
         NET_OPER_DORMANT, NET_OPER_LOWERLAYERDOWN, NET_OPER_TESTING, NET_OPER_UP,
@@ -564,27 +491,63 @@ fn connection(state: u8) -> &'static str {
     }
 }
 
-fn column(spacing: i32, children: Vec<Node<SysmonMsg>>) -> Node<SysmonMsg> {
-    Node::VStack {
-        spacing,
-        align: CrossAxisAlignment::Stretch,
-        children,
+struct Column {
+    heading: &'static str,
+    sort: SortColumn,
+    width: TableColumnWidth,
+}
+
+impl Column {
+    fn fitting<'a>(
+        heading: &'static str,
+        sort: SortColumn,
+        values: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
+        Self {
+            heading,
+            sort,
+            width: TableColumnWidth::fitting(heading, values),
+        }
     }
 }
 
-/// A tab's content, scrolled when it does not fit.
-fn page(content: Node<SysmonMsg>) -> Node<SysmonMsg> {
-    Node::ScrollView {
-        direction: ScrollDirection::Vertical,
-        show_scrollbar: ScrollbarVisibility::WhenNeeded,
-        scroll_y: 0,
-        on_scroll: None,
-        follow_end: false,
-        child: Box::new(Node::Padding {
-            padding: inset::PAGE,
-            child: Box::new(content),
-        }),
-    }
+/// The longest id shown whole.
+const LONGEST_PID: u32 = 9_999_999;
+/// The longest run time shown whole.
+const LONGEST_RUN_US: u64 = 100 * 3600 * 1_000_000 - 1;
+
+/// The process table's columns in order, each but the name as wide as the
+/// widest it shows.
+fn process_columns() -> &'static [Column; 7] {
+    static COLUMNS: OnceLock<[Column; 7]> = OnceLock::new();
+    COLUMNS.get_or_init(|| {
+        let states = (0..=u8::MAX).map(|state| task_state(TaskStatus::from_u8(state)).1);
+        [
+            Column::fitting("PID", SortColumn::Pid, [LONGEST_PID.to_string().as_str()]),
+            Column {
+                heading: "Name",
+                sort: SortColumn::Name,
+                width: TableColumnWidth::Flex(1),
+            },
+            Column::fitting("State", SortColumn::State, states),
+            Column::fitting("CPU %", SortColumn::CpuPct, [format_pct(1000).as_str()]),
+            Column::fitting(
+                "Priority",
+                SortColumn::Priority,
+                (0..=u8::MAX).map(priority_label),
+            ),
+            Column::fitting(
+                "CPU",
+                SortColumn::Cpu,
+                [(MAX_CPUS - 1).to_string().as_str()],
+            ),
+            Column::fitting(
+                "Run time",
+                SortColumn::Runtime,
+                [format_runtime(LONGEST_RUN_US).as_str()],
+            ),
+        ]
+    })
 }
 
 fn load_tone(pct: u32) -> Tone {

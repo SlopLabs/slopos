@@ -1,16 +1,9 @@
-//! Rectangle-set region algebra for occlusion culling and damage tracking.
-//!
-//! Subtracting each opaque window's box front-to-back carves the covered area
-//! out of the still-visible region.
-//!
-//! A region is not necessarily disjoint after a [`push`](Region::push); every
-//! [`subtract`](Region::subtract) / [`intersect_rect`](Region::intersect_rect)
-//! result is exact, with no pixel double-counted.
+//! Sets of rects, for what is covered and what to repaint; only `push` and
+//! `push_region` let rects overlap.
 
 use slopos_abi::damage::DamageRect;
 use std::vec::Vec;
 
-/// A set of inclusive integer rectangles.
 #[derive(Clone, Default)]
 pub struct Region {
     rects: Vec<DamageRect>,
@@ -21,7 +14,6 @@ impl Region {
         Self { rects: Vec::new() }
     }
 
-    /// A region containing a single rect (ignored if invalid/empty).
     pub fn from_rect(rect: DamageRect) -> Self {
         let mut r = Self::new();
         r.push(rect);
@@ -37,18 +29,15 @@ impl Region {
         })
     }
 
-    /// Add a rect to the region, allowing overlap with existing rects.
-    ///
-    /// The region may then double-cover pixels: use it only for one that will be
-    /// subtracted from or intersected, never blend-painted.
+    /// Overlapping what is there, so only for a region that is subtracted
+    /// from or intersected, never painted.
     pub fn push(&mut self, rect: DamageRect) {
         if rect.is_valid() {
             self.rects.push(rect);
         }
     }
 
-    /// Add a rect as a **disjoint** union: the new rect's area is first removed
-    /// from every existing rect, so the region stays a non-overlapping cover.
+    /// Keeping the region disjoint.
     pub fn add(&mut self, rect: DamageRect) {
         if !rect.is_valid() {
             return;
@@ -81,22 +70,16 @@ impl Region {
         &self.rects
     }
 
-    /// The region clipped to `clip`: every stored rect intersected with `clip`,
-    /// empties dropped.
     pub fn intersect_rect(&self, clip: &DamageRect) -> Region {
         let mut out = Region::new();
         for r in &self.rects {
-            if let Some(i) = rect_intersect(r, clip) {
+            if let Some(i) = intersection(r, clip) {
                 out.rects.push(i);
             }
         }
         out
     }
 
-    /// Subtract `cut` from every rect in the region (set difference).
-    ///
-    /// Each stored rect is replaced by the up to four disjoint rectangles
-    /// covering the part of it **not** inside `cut`.
     pub fn subtract(&mut self, cut: &DamageRect) {
         if !cut.is_valid() {
             return;
@@ -107,9 +90,8 @@ impl Region {
         }
     }
 
-    /// Coalesce down to at most `N` rects by repeatedly merging the pair whose
-    /// bounding-box union has the smallest area. The result is a superset of the
-    /// precise region — never fewer pixels than were painted.
+    /// At most `N` rects, merging the pair whose union is smallest until it
+    /// fits: never fewer pixels than the region.
     pub fn to_bounded<const N: usize>(&self) -> ([DamageRect; N], usize) {
         let mut work: Vec<DamageRect> = self.rects.clone();
         while work.len() > N {
@@ -135,9 +117,8 @@ impl Region {
     }
 }
 
-/// Intersection of two inclusive rects, or `None` if disjoint.
 #[inline]
-fn rect_intersect(a: &DamageRect, b: &DamageRect) -> Option<DamageRect> {
+pub fn intersection(a: &DamageRect, b: &DamageRect) -> Option<DamageRect> {
     let x0 = a.x0.max(b.x0);
     let y0 = a.y0.max(b.y0);
     let x1 = a.x1.min(b.x1);
@@ -149,10 +130,9 @@ fn rect_intersect(a: &DamageRect, b: &DamageRect) -> Option<DamageRect> {
     }
 }
 
-/// Push the parts of `r` that are NOT covered by `cut` into `out` (up to four
-/// disjoint rects). If `r` and `cut` are disjoint, `r` is pushed unchanged.
+/// At most four disjoint rects.
 fn subtract_into(r: &DamageRect, cut: &DamageRect, out: &mut Vec<DamageRect>) {
-    let Some(overlap) = rect_intersect(r, cut) else {
+    let Some(overlap) = intersection(r, cut) else {
         out.push(*r);
         return;
     };
@@ -276,7 +256,7 @@ mod tests {
         for i in 0..rects.len() {
             for j in (i + 1)..rects.len() {
                 assert!(
-                    rect_intersect(&rects[i], &rects[j]).is_none(),
+                    intersection(&rects[i], &rects[j]).is_none(),
                     "remainder rects {i} and {j} overlap"
                 );
             }
@@ -345,7 +325,7 @@ mod tests {
         for i in 0..rects.len() {
             for j in (i + 1)..rects.len() {
                 assert!(
-                    rect_intersect(&rects[i], &rects[j]).is_none(),
+                    intersection(&rects[i], &rects[j]).is_none(),
                     "add() must keep rects disjoint"
                 );
             }

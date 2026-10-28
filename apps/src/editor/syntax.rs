@@ -1,9 +1,5 @@
-//! Token colours.
-//!
-//! The palette is One Dark — the values an editor's "one dark" has had since
-//! Atom shipped it, which is what makes the surface read as an editor to anyone
-//! who has used one. Colours are data, so this is a table rather than a
-//! derivation.
+//! Token colours: One Dark's, which read as an editor's to anyone who has used
+//! one.
 
 use slopos_abi::draw::Color32;
 use slopos_editor_core::syntax::TokenKind;

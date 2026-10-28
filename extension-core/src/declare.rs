@@ -31,16 +31,14 @@
 //!   keep     300                an answer kept for the same command and directory
 //!   allow    admin confirm      admin [confirm|password], user [alone|
 //!   allow    program /bin/x     confirm|password], paired, program <path>
-//!   describe "greet the network"  completes "{App} wants to ..."
-//!   detail   "Everyone on it sees the greeting."
-//!   verb     "Send"              the allowing button
+//!   describe "greet everyone"   completes "{App} wants to ..."
+//!   detail   "Everyone on the network sees the greeting."
+//!   verb     "Send"             the allowing button
 //!   destructive                 the allowing button in the danger tone
 //! ```
 //!
 //! An action is `ext.<name>.<action>` to privd, and never allows `root`.
-//! What an action says is held to [`slopos_priv_core::words`] when the
-//! extension goes in ([`crate::admit::install`]) and not as it parses, so
-//! one installed before the words tighten keeps activating.
+//! What an action says is held to [`slopos_priv_core::words`].
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -159,13 +157,6 @@ impl Action {
         self.name.rsplit('.').next().unwrap_or(&self.name)
     }
 
-    /// Whether what it says passes [`slopos_priv_core::words`].
-    pub fn words(&self) -> Result<(), &'static str> {
-        words::describe(&self.describe)?;
-        self.detail.as_deref().map_or(Ok(()), words::detail)?;
-        self.verb.as_deref().map_or(Ok(()), words::verb)
-    }
-
     /// What privd runs for it: its program as `uid`, the extension's first
     /// user, holding what it declares within `held`, its `program` lines
     /// meaning programs of the activation `label` names.
@@ -211,18 +202,6 @@ impl Action {
 }
 
 impl Declaration {
-    /// Whether what every action says passes [`slopos_priv_core::words`], as
-    /// an install holds it to.
-    pub fn words(&self) -> Result<(), String> {
-        for action in &self.actions {
-            action
-                .words()
-                .map_err(|why| format!("its action {}: {why}", action.short()))?;
-        }
-        Ok(())
-    }
-
-    /// `text` as the declaration of the extension `name`.
     pub fn parse(name: &str, text: &str) -> Result<Declaration, LineError> {
         let mut out = Declaration::default();
         let mut open: Option<(usize, Block)> = None;
@@ -337,10 +316,6 @@ impl Declaration {
         Ok(())
     }
 
-    /// What needs every line, `starts` holding each service's: a service
-    /// runs as a user declared anywhere, the first when it names none, and
-    /// listens on no socket another does; its `after` names one declared,
-    /// and no chain of them returns to where it began.
     fn finish(&mut self, starts: &[usize]) -> Result<(), LineError> {
         let first = self.users.first().cloned();
         for (at, &line) in starts.iter().enumerate() {
@@ -405,7 +380,6 @@ impl Declaration {
         Ok(())
     }
 
-    /// What it asks to be granted.
     pub fn grant(&self) -> Grant {
         let caps = self
             .services
@@ -496,8 +470,6 @@ fn valid_command(word: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.".contains(&b))
 }
 
-/// Canonical and absolute: no empty, `.` or `..` component and nothing but
-/// printable ASCII, with a trailing `/` when `dir`.
 fn canonical(path: &str, dir: bool) -> bool {
     let body = if dir {
         match path.strip_suffix('/') {
@@ -517,7 +489,6 @@ fn canonical(path: &str, dir: bool) -> bool {
         })
 }
 
-/// A file of the image, by the path it has at `/opt/<name>`.
 fn own_file(name: &str, path: &str) -> bool {
     canonical(path, false)
         && path
@@ -763,9 +734,9 @@ impl ActionDraft {
                 Ok(())
             }
             "keep" => once(&mut self.keep, policy::keep(rest)?),
-            "describe" => once(&mut self.describe, policy::quoted(rest)?),
-            "detail" => once(&mut self.detail, policy::quoted(rest)?),
-            "verb" => once(&mut self.verb, policy::quoted(rest)?),
+            "describe" => once(&mut self.describe, policy::said(rest, words::describe)?),
+            "detail" => once(&mut self.detail, policy::said(rest, words::detail)?),
+            "verb" => once(&mut self.verb, policy::said(rest, words::verb)?),
             "destructive" => flag(&mut self.destructive, rest),
             _ => Err("unknown action setting"),
         }

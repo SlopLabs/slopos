@@ -1,21 +1,17 @@
-//! An in-window menu bar: the titles only.
-//!
-//! The dropdown is an ordinary [`super::popup::PopupWidget`] holding a
-//! [`super::menu::MenuWidget`], which the application opens at the anchor this
-//! widget reports. Keeping the two apart is what lets the application decide
-//! what a menu contains at the moment it opens, rather than building every
-//! menu's items on every frame.
+//! An in-window menu bar, the titles alone: the app opens a menu in a
+//! [`super::popup::PopupWidget`] at the place this reports.
 
 use std::any::Any;
 
-use slopos_theme_core::{ColorRole, State, space};
+use slopos_theme_core::{ColorRole, State, TextRole, radius, space};
 
-use crate::constraints::{BoxConstraints, Size};
-use crate::event::{EventPhase, EventResponse, MessageSink, PointerButton, WidgetEvent};
+use crate::constraints::{BoxConstraints, Rect, Size};
+use crate::event::{EventResponse, MessageSink, PointerButton, WidgetEvent};
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
+use crate::text::ui;
+use crate::traits::{MeasureCtx, Role, Widget, WidgetCore};
 
-const ITEM_PAD_H: i32 = 10;
+const PAD: i32 = space::MD;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MenuBarInput {
@@ -34,9 +30,8 @@ pub struct MenuBarWidget {
     titles: Vec<String>,
     open: Option<usize>,
     on_input: Option<InputCallback>,
-    hovered: Option<usize>,
     widths: Vec<i32>,
-    height: i32,
+    item_height: i32,
 }
 
 impl MenuBarWidget {
@@ -46,27 +41,27 @@ impl MenuBarWidget {
             titles,
             open,
             on_input,
-            hovered: None,
             widths: Vec::new(),
-            height: 28,
+            item_height: 0,
         }
     }
 
     fn title_at(&self, x: i32) -> Option<usize> {
-        let rect = self.layout_rect();
-        let mut cursor = rect.x;
-        for (index, width) in self.widths.iter().enumerate() {
-            if x >= cursor && x < cursor + width {
-                return Some(index);
-            }
-            cursor += width;
-        }
-        None
+        let mut right = self.layout_rect().x;
+        self.widths.iter().position(|&w| {
+            right += w;
+            x >= right - w && x < right
+        })
     }
 
     fn title_x(&self, index: usize) -> i32 {
+        self.layout_rect().x + self.widths[..index].iter().sum::<i32>()
+    }
+
+    /// Where the menu of title `index` opens.
+    fn anchor(&self, index: usize) -> (i32, i32) {
         let rect = self.layout_rect();
-        rect.x + self.widths.iter().take(index).sum::<i32>()
+        (self.title_x(index), rect.y + rect.height)
     }
 
     fn emit(&self, input: MenuBarInput, sink: &mut MessageSink) -> EventResponse {
@@ -89,74 +84,47 @@ impl Widget for MenuBarWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        self.height = ctx.style.menu_item_height + space::XS;
+        self.item_height = ctx.style.menu_item_height;
         self.widths = self
             .titles
             .iter()
-            .map(|t| ctx.text_width(t) + ITEM_PAD_H * 2)
+            .map(|t| ui::width(t, TextRole::Body) + PAD * 2)
             .collect();
-        let natural: i32 = self.widths.iter().sum();
-        let width = if constraints.is_width_bounded() {
-            constraints.max_width
-        } else {
-            natural
+        let width = match constraints.is_width_bounded() {
+            true => constraints.max_width,
+            false => self.widths.iter().sum(),
         };
-        constraints.constrain(Size::new(width, self.height))
+        constraints.constrain(Size::new(width, ctx.style.menu_bar_height))
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
         let theme = ctx.theme();
-        let text_h = ctx.text_height();
-        let mut x = rect.x;
-
+        let text_y = ui::centred_top(rect.y, rect.height, TextRole::Body);
+        let pill_y = rect.y + (rect.height - self.item_height) / 2;
+        let lit = ctx.lit(self.id());
         for (index, title) in self.titles.iter().enumerate() {
-            let width = *self.widths.get(index).unwrap_or(&0);
-            let is_open = self.open == Some(index);
-            if is_open {
-                ctx.fill_rounded_rect(
-                    x + 2,
-                    rect.y + 2,
-                    width - 4,
-                    rect.height - 4,
-                    4,
-                    theme.state(ColorRole::Chrome, State::Pressed),
-                );
-            } else if self.hovered == Some(index) {
-                ctx.fill_rounded_rect(
-                    x + 2,
-                    rect.y + 2,
-                    width - 4,
-                    rect.height - 4,
-                    4,
-                    theme.state(ColorRole::Chrome, State::Hover),
-                );
-            }
-            let color = if is_open {
-                theme.text
-            } else {
-                theme.text_secondary
+            let (x, w) = (self.title_x(index), self.widths[index]);
+            let open = self.open == Some(index);
+            let state = match (open, lit == Some(index)) {
+                (true, _) => State::Pressed,
+                (false, true) => State::Hover,
+                (false, false) => State::Normal,
             };
-            ctx.draw_text_transparent(
-                x + ITEM_PAD_H,
-                rect.y + (rect.height - text_h) / 2,
-                title,
-                color,
-            );
-            x += width;
+            if state != State::Normal {
+                let pill = Rect::new(x, pill_y, w, self.item_height);
+                let fill = theme.state(ColorRole::Chrome, state);
+                ctx.fill_rounded_rect(pill, radius::CONTROL, fill);
+            }
+            let ink = match open {
+                true => theme.text,
+                false => theme.text_secondary,
+            };
+            ctx.draw_text_fitted(x + PAD, text_y, title, TextRole::Body, w - PAD * 2, ink);
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        if phase != EventPhase::Target && phase != EventPhase::Bubble {
-            return EventResponse::Ignored;
-        }
-
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
         match event {
             WidgetEvent::PointerDown { x, y, button, .. } => {
                 if !self.layout_rect().contains(*x, *y) || *button != PointerButton::Left {
@@ -168,48 +136,18 @@ impl Widget for MenuBarWidget {
                 if self.open == Some(index) {
                     return self.emit(MenuBarInput::Close, sink);
                 }
-                let rect = self.layout_rect();
-                self.emit(
-                    MenuBarInput::Open {
-                        index,
-                        x: self.title_x(index),
-                        y: rect.y + rect.height,
-                    },
-                    sink,
-                )
+                let (x, y) = self.anchor(index);
+                self.emit(MenuBarInput::Open { index, x, y }, sink)
             }
 
-            WidgetEvent::PointerMove { x, y } => {
-                let inside = self.layout_rect().contains(*x, *y);
-                let hovered = if inside { self.title_at(*x) } else { None };
-                let changed = hovered != self.hovered;
-                self.hovered = hovered;
-                // While a menu is open, crossing onto another title switches to
-                // it — the behaviour every menu bar has, and the reason a menu
-                // bar is a widget rather than a row of buttons.
-                if let (Some(index), Some(open)) = (hovered, self.open) {
-                    if index != open {
-                        let rect = self.layout_rect();
-                        return self.emit(
-                            MenuBarInput::Hover {
-                                index,
-                                x: self.title_x(index),
-                                y: rect.y + rect.height,
-                            },
-                            sink,
-                        );
+            WidgetEvent::PointerMove { x, y } if self.layout_rect().contains(*x, *y) => {
+                match (self.title_at(*x), self.open) {
+                    (Some(index), Some(open)) if index != open => {
+                        let (x, y) = self.anchor(index);
+                        self.emit(MenuBarInput::Hover { index, x, y }, sink)
                     }
+                    _ => EventResponse::Ignored,
                 }
-                if changed {
-                    EventResponse::Consumed
-                } else {
-                    EventResponse::Ignored
-                }
-            }
-
-            WidgetEvent::PointerLeave => {
-                self.hovered = None;
-                EventResponse::Ignored
             }
 
             _ => EventResponse::Ignored,
@@ -220,7 +158,7 @@ impl Widget for MenuBarWidget {
         Role::Menu
     }
 
-    fn focus_policy(&self) -> FocusPolicy {
-        FocusPolicy::None
+    fn hover_part(&self, x: i32, _y: i32) -> Option<usize> {
+        self.title_at(x)
     }
 }

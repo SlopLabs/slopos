@@ -1,13 +1,11 @@
-//! Outline processing: convert TTF glyph outlines to rasterizer-ready edges.
-//!
-//! Handles quadratic Bézier curve flattening, scaling from font units to
-//! pixels, and implied on-curve point insertion.
+//! Glyph outlines as the rasterizer's edges: scaled to pixels, curves
+//! flattened.
 
 use slopos_ostd::KVec;
 
 use crate::ttf_parser::{GlyphOutline, OutlinePoint};
 
-/// A line segment in pixel coordinates used by the rasterizer.
+/// A line segment in pixels.
 #[derive(Clone, Copy, Debug)]
 pub struct Edge {
     pub x0: f32,
@@ -16,10 +14,8 @@ pub struct Edge {
     pub y1: f32,
 }
 
-/// Convert a glyph outline from font units to pixel-space edges, each point at
-/// `(x_offset + x · scale, y_offset − y · scale)`.
-///
-/// The Y axis is flipped on the way: TTF is Y-up, the screen is Y-down.
+/// Each point at `(x_offset + x · scale, y_offset − y · scale)`: TTF is Y-up,
+/// the screen Y-down.
 pub fn outline_to_edges(
     outline: &GlyphOutline,
     scale: f32,
@@ -127,7 +123,6 @@ fn flatten_quadratic_bezier(
         return;
     }
 
-    // Subdivide at t=0.5
     let qx0 = (x0 + cx) * 0.5;
     let qy0 = (y0 + cy) * 0.5;
     let qx1 = (cx + x1) * 0.5;

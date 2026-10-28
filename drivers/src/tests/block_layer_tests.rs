@@ -1,11 +1,5 @@
-//! The block layer on real disks: a GPT written through a whole-disk claim,
-//! read back by a table re-read into partition nodes and `/dev/disk/by-*`
-//! links, and the claims that keep a mounted partition's window from moving.
-//!
-//! Destructive, so only the scratch disks: the NVMe namespaces, one with
-//! 512-byte and one with 4096-byte logical blocks, and for by-id names the
-//! virtio disk and the stick. The table takes the first and last blocks; the
-//! windows sit below the regions the engine tests write.
+//! The block layer on the scratch disks, whose tables it overwrites below the
+//! regions the engine tests write: partition nodes, `by-*` links and claims.
 
 use slopos_abi::fs::block_ioctl;
 use slopos_boot_core::Guid;
@@ -280,12 +274,6 @@ pub fn test_block_partitions_on_4096_byte_blocks() -> TestResult {
     partitioned_disk(b"nvme1n2", 0x4C, b"nvme-QEMU_NVMe_Ctrl_slopos-4kn_2")
 }
 
-/// QEMU's disks are named under `/dev/disk/by-id` by the `serial=` the
-/// harness gives each: an NVMe namespace by its controller's model and serial
-/// and its namespace, the first namespace by the two alone as well; a virtio
-/// disk by its ID string; the stick by INQUIRY's vendor and product, its
-/// serial string and its LUN. Each is listed, links to its node, and names it
-/// as a mount source.
 pub fn test_block_by_id_names() -> TestResult {
     const LINKS: [(&[u8], &[u8]); 7] = [
         (b"nvme-QEMU_NVMe_Ctrl_slopos-root_1", b"nvme0n1"),
@@ -314,8 +302,6 @@ pub fn test_block_by_id_names() -> TestResult {
     pass!()
 }
 
-/// A partition of the virtio disk and of the stick is named by its disk's
-/// by-id name with `-part<N>`, until a re-read finds it gone.
 pub fn test_block_by_id_partition_names() -> TestResult {
     let disks: [(&[u8], &[u8], &[u8]); 2] = [
         (b"vdb", b"virtio-slopos-scratch-part1", b"vdb1"),
@@ -372,7 +358,6 @@ fn by_id_dir(fs: &dyn FileSystem) -> Option<InodeId> {
     fs.lookup(disk, b"by-id").ok()
 }
 
-/// `link` is listed, links to `node` and names it as a mount source.
 #[inline(never)]
 fn by_id_link(fs: &dyn FileSystem, by_id: InodeId, link: &[u8], node: &[u8]) -> TestResult {
     let mut listed = false;
@@ -426,7 +411,6 @@ fn resolve_by_id(link: &[u8]) -> Result<Resolved, VfsError> {
     Ok(resolved)
 }
 
-/// How many of `/dev/disk/by-id`'s links point at `node`.
 #[inline(never)]
 fn links_to(fs: &dyn FileSystem, by_id: InodeId, node: &[u8]) -> Option<usize> {
     let mut links = [0; 64];

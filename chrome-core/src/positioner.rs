@@ -1,11 +1,6 @@
-//! Placing a surface relative to another, and keeping it on screen.
-//!
-//! The parameter set is `xdg_positioner`'s — anchor rectangle, anchor edge,
-//! gravity, size, offset, work area, constraint policy — so wiring up the
-//! protocol's popup role reuses this rather than growing a second placer that
-//! disagrees at the edges. Geometry only: no framebuffer, no descriptors.
+//! Placing a surface against another and keeping it on screen, by the
+//! parameters of `xdg_positioner`, so a popup role would reuse it.
 
-/// An axis-aligned rectangle in surface-local or screen coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Rect {
     pub x: i32,
@@ -45,12 +40,15 @@ impl Rect {
         self.w <= 0 || self.h <= 0
     }
 
-    /// Whether `(x, y)` falls inside. Also the light-dismiss predicate, so the
-    /// renderer's idea of the surface's extent and the input path's cannot
-    /// diverge.
     #[inline]
     pub const fn contains(&self, x: i32, y: i32) -> bool {
         !self.is_empty() && x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
+    }
+}
+
+impl From<slopos_abi::damage::DamageRect> for Rect {
+    fn from(r: slopos_abi::damage::DamageRect) -> Rect {
+        Rect::new(r.x0, r.y0, r.x1 - r.x0 + 1, r.y1 - r.y0 + 1)
     }
 }
 

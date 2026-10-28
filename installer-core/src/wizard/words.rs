@@ -1,102 +1,108 @@
-//! The words the window shows, so the copy rules hold them: page headings,
-//! the rows a page chooses from, its notes and its summary. Device
-//! names, sizes in bytes and paths are captions; what a person acts on is in
-//! the voice the desktop speaks.
+//! The words the window shows, so the copy rules hold them. Device names,
+//! sizes and paths are captions; what a person acts on is in the desktop's
+//! voice.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use slopos_boot_core::install::Role;
+use slopos_theme_core::Tone;
 
 use super::{Kind, Page, Wizard};
 use crate::{
-    Contents, DiskState, Listing, Mode, Part, Piece, Span, System, capitalised, disk_size, short,
+    Contents, DiskState, Listing, Mode, NoTable, Part, Piece, Span, System, Tag, capitalised,
+    disk_size, short,
 };
 
-/// The window's fixed words.
-pub mod say {
-    pub const BACK: &str = "Back";
-    pub const NEXT: &str = "Next";
-    pub const CLOSE: &str = "Close";
-    pub const TRY: &str = "Try SlopOS";
-    pub const KEEP_TRYING: &str = "Keep trying SlopOS";
-    pub const RESTART: &str = "Restart";
-    pub const SCAN: &str = "Scan again";
-    pub const SHOW_DETAILS: &str = "Show details";
-    pub const HIDE_DETAILS: &str = "Hide details";
-    pub const ASKING: &str = "Allow the install in the dialog to continue.";
-    pub const STARTING: &str = "Starting the installer…";
-    pub const READING: &str = "Reading the disks…";
-    pub const FREE_SPACE: &str = "Free space";
-    pub const PARTITION: &str = "Partition";
-    pub const NOW: &str = "This disk now";
-    pub const AFTER: &str = "After the install";
-    pub const SIZE: &str = "Size";
-    pub const OPTIONS: &str = "Options";
-    pub const REMOTE: &str = "Source code address";
-    pub const REMOTE_CAPTION: &str = "Where /src/slopos fetches from and pushes to.";
-    pub const FIRST: &str = "Put SlopOS first in the startup order";
-    pub const SUMMARY: &str = "Summary";
-    pub const PARTITIONS: &str = "What happens to each partition";
-    pub const STEPS: &str = "Steps";
-    pub const NOT_RESTARTED: &str = "The computer didn't restart. Choose Restart to try again.";
-    pub const NOT_STARTED: &str = "The installer couldn't start. Try again.";
-    pub const SENTENCES: [&str; 3] = [ASKING, NOT_RESTARTED, NOT_STARTED];
-    pub const LABELS: [&str; 22] = [
-        BACK,
-        NEXT,
-        CLOSE,
-        TRY,
-        KEEP_TRYING,
-        RESTART,
-        SCAN,
-        SHOW_DETAILS,
-        HIDE_DETAILS,
-        STARTING,
-        READING,
-        FREE_SPACE,
-        PARTITION,
-        NOW,
-        AFTER,
-        SIZE,
-        OPTIONS,
-        REMOTE,
-        FIRST,
-        SUMMARY,
-        PARTITIONS,
-        STEPS,
-    ];
+/// Each constant of a shape is listed in `ALL` beside it, so the copy rules
+/// hold every one.
+macro_rules! said {
+    ($($shape:ident { $($name:ident = $text:literal,)* })*) => {
+        $($(pub const $name: &str = $text;)*)*
+
+        #[cfg(test)]
+        pub(crate) const ALL: &[(Shape, &str)] = &[$($((Shape::$shape, $name),)*)*];
+    };
 }
 
-/// A page's title and the sentence under it.
+pub mod say {
+    #[cfg(test)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Shape {
+        Label,
+        Sentence,
+        Caption,
+    }
+
+    said! {
+        Label {
+            BACK = "Back",
+            NEXT = "Next",
+            CLOSE = "Close",
+            INSTALL = "Install SlopOS",
+            REVIEW = "Review",
+            TRY_AGAIN = "Try again",
+            TRY = "Try SlopOS",
+            KEEP_TRYING = "Keep trying SlopOS",
+            RESTART = "Restart",
+            SCAN = "Scan again",
+            SHOW_DETAILS = "Show details",
+            HIDE_DETAILS = "Hide details",
+            STARTING = "Starting the installer…",
+            READING = "Reading the disks…",
+            FREE_SPACE = "Free space",
+            PARTITION = "Partition",
+            NOW = "This disk now",
+            AFTER = "After the install",
+            SIZE = "Size",
+            OPTIONS = "Options",
+            REMOTE = "Source code address",
+            FIRST = "Put SlopOS first in the startup order",
+            SUMMARY = "Summary",
+            PARTITIONS = "What happens to each partition",
+            STEPS = "Steps",
+            INSTALL_HERE = "Install",
+            ERASE_PARTITION = "Erase partition and install",
+            ERASE_REINSTALL = "Erase and reinstall SlopOS",
+        }
+        Sentence {
+            ASKING = "Allow the install in the dialog to continue.",
+            REMOTE_CAPTION = "Where /src/slopos fetches from and pushes to.",
+            NOT_RESTARTED = "The computer didn't restart. Choose Restart to try again.",
+            NOT_STARTED = "The installer couldn't start. Try again.",
+            MISMATCHED = "This window doesn't match the installer. Restart the computer from the installer, then try again.",
+            STOPPED_BEFORE_REVIEW = "The installer stopped before the review. Try again.",
+            OUT_OF_TURN = "The installer answered out of turn. Try again.",
+        }
+        Caption {
+            STOPPED = "the installer stopped before it said how the install ended",
+            INSTALL_OUT_OF_TURN = "the installer answered the install out of turn",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Heading {
     pub title: String,
     pub subtitle: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Severity {
-    Info,
-    Warning,
-    /// What stops the page going on.
-    Danger,
+    /// The disk the page is about, as a caption under the subtitle.
+    pub disk: Option<String>,
 }
 
 /// Something the person should know before going on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Note {
-    pub severity: Severity,
+    pub tone: Tone,
     pub title: String,
-    /// The details: a size, a node or what a program said; may be empty.
+    /// A size, a node or what a program said; may be empty.
     pub body: String,
 }
 
 impl Note {
-    fn new(severity: Severity, title: impl Into<String>, body: impl Into<String>) -> Note {
+    fn new(tone: Tone, title: impl Into<String>, body: impl Into<String>) -> Note {
         Note {
-            severity,
+            tone,
             title: title.into(),
             body: body.into(),
         }
@@ -104,15 +110,14 @@ impl Note {
 
     fn issue(issue: &crate::Issue) -> Note {
         Note::new(
-            Severity::Danger,
+            Tone::Danger,
             issue.words(),
             issue.detail().unwrap_or_default(),
         )
     }
 }
 
-/// A choice a page lists: a disk, a way to install, free space or a
-/// partition, with the reason when it cannot be chosen.
+/// A choice a page lists, with the reason when it cannot be chosen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row<K> {
     pub key: K,
@@ -120,12 +125,6 @@ pub struct Row<K> {
     /// What it is, in a caption.
     pub detail: String,
     pub reason: Option<String>,
-}
-
-impl<K> Row<K> {
-    pub fn enabled(&self) -> bool {
-        self.reason.is_none()
-    }
 }
 
 impl Kind {
@@ -160,13 +159,19 @@ pub fn holding(listing: &Listing) -> String {
             }
             said
         }
-        Contents::Blank => "Empty".into(),
-        other => capitalised(&other.holds().unwrap_or_default()),
+        Contents::NoTable(NoTable::Blank) => "Empty".into(),
+        Contents::NoTable(other) => capitalised(&other.holds().unwrap_or_default()),
     }
 }
 
-/// A partition of `listing` as a reuse lists it: its own name or its type,
-/// and its size, with its node in the caption.
+/// What the window says once the engine stopped before an install.
+pub(super) fn ended() -> String {
+    format!(
+        "The installer stopped. Choose {} to start it again.",
+        say::INSTALL
+    )
+}
+
 fn partition_row(listing: &Listing, number: u32) -> (String, String) {
     listing
         .layout
@@ -178,10 +183,10 @@ fn partition_row(listing: &Listing, number: u32) -> (String, String) {
                 node,
                 kind,
                 name,
-                ..
+                role,
             } if *n == number => {
                 let size = disk_size(segment.bytes);
-                Some(match name.is_empty() {
+                Some(match role.is_some() || name.is_empty() {
                     true => (format!("{kind} · {size}"), short(node).into()),
                     false => (
                         format!("{name} · {size}"),
@@ -195,6 +200,53 @@ fn partition_row(listing: &Listing, number: u32) -> (String, String) {
 }
 
 impl Wizard {
+    pub fn primary_label(&self) -> String {
+        match self.page {
+            Page::Welcome => say::INSTALL.into(),
+            Page::Disk => say::NEXT.into(),
+            Page::How => say::REVIEW.into(),
+            Page::Review => self.scenario(),
+            Page::Install => String::new(),
+            Page::Done => say::RESTART.into(),
+            Page::Error => say::TRY_AGAIN.into(),
+        }
+    }
+
+    fn scenario(&self) -> String {
+        match self.kind() {
+            Some(Kind::Erase) | None => Kind::Erase.title().into(),
+            Some(Kind::Free) => match self.proposal().and_then(|p| p.setup.beside.first()) {
+                Some(other) => format!("Install beside {other}"),
+                None => say::INSTALL_HERE.into(),
+            },
+            Some(Kind::Reuse) => say::ERASE_PARTITION.into(),
+            Some(Kind::Reinstall) if self.keeps_root() => Kind::Reinstall.title().into(),
+            Some(Kind::Reinstall) => say::ERASE_REINSTALL.into(),
+        }
+    }
+
+    /// The Review page's checkbox, worded by the damage the install does.
+    pub fn confirmation(&self) -> String {
+        let formatted = Tag::Format.word();
+        let said: String = match self.kind() {
+            Some(Kind::Erase) | None => "everything on this disk will be deleted".into(),
+            Some(Kind::Free) if self.formats() => format!(
+                "new partitions will be made in free space, and the partitions marked {formatted} will be erased"
+            ),
+            Some(Kind::Free) => {
+                "new partitions will be made in free space, and nothing else on the disk changes"
+                    .into()
+            }
+            Some(Kind::Reinstall) if self.keeps_root() => {
+                "SlopOS will be replaced, and its accounts and their files kept".into()
+            }
+            Some(Kind::Reuse | Kind::Reinstall) => {
+                format!("what's marked {formatted} will be erased")
+            }
+        };
+        format!("I understand that {said}")
+    }
+
     pub(super) fn listing(&self) -> Option<&Listing> {
         self.system
             .as_ref()?
@@ -216,28 +268,17 @@ impl Wizard {
         }
     }
 
-    /// A disk as a sentence names it: by its title, or as the disk of its
-    /// size when its maker is unknown.
+    /// Its title and, where the title is not its node already, its node.
     fn disk_named(&self, node: &str) -> String {
-        let title = self.disk_title(node);
-        match self.system.as_ref().and_then(|s| s.disk(node)) {
-            Some(disk) if disk.model.is_none() && disk.listing().is_some() => {
-                format!("the {title}")
-            }
-            _ => title,
+        match self.disk_title(node) {
+            title if title == short(node) => title,
+            title => format!("{title} ({})", short(node)),
         }
     }
 
     /// The title and the sentence under it of the page in front; `live` on
     /// a live boot's own window, which offers to try SlopOS first.
     pub fn heading(&self, live: bool) -> Heading {
-        let disk = self
-            .summary
-            .as_ref()
-            .map(|s| s.disk.as_str())
-            .or(self.answers.as_ref().map(|a| a.disk.as_str()))
-            .map(|node| self.disk_named(node))
-            .unwrap_or_default();
         let (title, subtitle) = match self.page {
             Page::Welcome if live => (
                 "Welcome to SlopOS".into(),
@@ -254,7 +295,7 @@ impl Wizard {
             ),
             Page::How => (
                 "How do you want to install SlopOS?".into(),
-                format!("On {disk}."),
+                "Choose what happens to this disk.".into(),
             ),
             Page::Review => (
                 "Ready to install".into(),
@@ -262,7 +303,7 @@ impl Wizard {
             ),
             Page::Install => (
                 "Installing SlopOS".into(),
-                format!("On {disk}. This takes a few minutes."),
+                "This takes a few minutes.".into(),
             ),
             Page::Done => (
                 "SlopOS is installed".into(),
@@ -279,7 +320,15 @@ impl Wizard {
                 ),
             ),
         };
-        Heading { title, subtitle }
+        let disk = match self.page {
+            Page::How | Page::Install => self.answers.as_ref().map(|a| self.disk_named(&a.disk)),
+            _ => None,
+        };
+        Heading {
+            title,
+            subtitle,
+            disk,
+        }
     }
 
     /// The Disk page's disks: those that may be chosen first, each with what
@@ -438,14 +487,14 @@ impl Wizard {
             Page::Disk => {
                 if lacking && unread.is_none() {
                     notes.push(Note::new(
-                        Severity::Info,
+                        Tone::Info,
                         "Developer tools aren't on this installer, so they won't be installed.",
                         "",
                     ));
                 }
                 if let Some(node) = unread {
                     notes.push(Note::new(
-                        Severity::Warning,
+                        Tone::Warning,
                         "The installer's developer tools couldn't be read, so they won't be installed.",
                         format!("They are on {}. The system log says why.", short(node)),
                     ));
@@ -453,7 +502,7 @@ impl Wizard {
                 let offered = |s: &System| s.disks.iter().any(|d| d.listing().is_some());
                 if self.system.as_ref().is_some_and(|s| !offered(s)) {
                     notes.push(Note::new(
-                        Severity::Warning,
+                        Tone::Warning,
                         "There's no disk to install SlopOS on.",
                         format!("Connect a disk, then choose {}.", say::SCAN),
                     ));
@@ -461,12 +510,12 @@ impl Wizard {
             }
             Page::Review => {
                 for line in self.proposal().into_iter().flat_map(|p| p.left_out()) {
-                    notes.push(Note::new(Severity::Warning, line, ""));
+                    notes.push(Note::new(Tone::Warning, line, ""));
                 }
             }
             Page::Done if lacking => {
                 notes.push(Note::new(
-                    Severity::Info,
+                    Tone::Info,
                     match unread {
                         Some(_) => {
                             "Developer tools weren't installed, since they couldn't be read from the installer."
@@ -482,7 +531,7 @@ impl Wizard {
         }
         notes.extend(self.issue().map(Note::issue));
         if let Some(note) = self.note() {
-            notes.push(Note::new(Severity::Warning, note, ""));
+            notes.push(Note::new(Tone::Warning, note, ""));
         }
         notes
     }
@@ -493,10 +542,7 @@ impl Wizard {
             return Vec::new();
         };
         let mut lines = Vec::new();
-        lines.push((
-            "Disk",
-            format!("{} ({})", self.disk_title(&a.disk), short(&a.disk)),
-        ));
+        lines.push(("Disk", self.disk_named(&a.disk)));
         lines.push(("Method", a.kind.title().into()));
         if let Some((_, part)) = p.role(Role::Root) {
             let node = match part {

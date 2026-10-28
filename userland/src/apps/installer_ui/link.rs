@@ -21,8 +21,8 @@ pub trait Link {
     /// back as [`Msg::Engine`].
     fn start(&mut self, sender: &AppSender<Msg>);
     fn send(&mut self, request: &Request);
-    /// Ask privd to restart the computer; a refusal comes back as
-    /// [`Msg::RestartRefused`].
+    /// Ask privd to restart the computer; a restart that does not happen
+    /// comes back as [`Msg::NotRestarted`].
     fn restart(&mut self, sender: &AppSender<Msg>);
 }
 
@@ -71,17 +71,17 @@ impl Link for Privd {
             let ran = null().map_err(privd::NotRun::from).and_then(|null| {
                 privd::run_feeding(REBOOT, &["reboot"], &[], null.raw(), null.raw())
             });
-            let by_person = match ran {
+            let failed = match ran {
                 Ok(status) => {
                     eprintln!("installer-ui: the restart exited {status}");
-                    false
+                    true
                 }
                 Err(not) => {
                     eprintln!("installer-ui: no restart: {}", not.reason);
-                    not.by_person
+                    !not.by_person
                 }
             };
-            sender.send(Msg::RestartRefused { by_person });
+            sender.send(Msg::NotRestarted { failed });
         });
     }
 }
@@ -92,8 +92,6 @@ fn null() -> Result<OwnedFd, String> {
     fs::open_cstr(c"/dev/null", O_RDWR).map_err(|e| format!("/dev/null: {e}"))
 }
 
-/// Why the engine did not start: what privd told the person, or what broke,
-/// which goes to the log.
 enum NotStarted {
     Said(String),
     Broke(String),

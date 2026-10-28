@@ -24,6 +24,8 @@ mod medium;
 mod root;
 mod serve;
 
+pub use disk::not_offered;
+
 use crate::syscall::core as sys_core;
 
 pub fn installer_main() {

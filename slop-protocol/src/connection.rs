@@ -343,13 +343,6 @@ impl Connection {
     pub fn probe_disconnected(&mut self) -> bool {
         matches!(self.try_fill_buf(), Err(ProtocolError::Disconnected))
     }
-
-    /// Consume the connection and return the raw FD without closing it.
-    pub fn into_raw_fd(mut self) -> i32 {
-        let fd = self.fd;
-        self.fd = -1;
-        fd
-    }
 }
 
 impl Drop for Connection {

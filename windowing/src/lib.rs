@@ -1,24 +1,6 @@
 #![forbid(unsafe_code)]
-//! slopos-windowing — compositor connection, surface management, and event loop.
-//!
-//! Create a window, get a pixel buffer, receive input events, and run an event
-//! loop, without pulling in the widget toolkit.
-//!
-//! # Quick start (raw drawing)
-//!
-//! ```rust,ignore
-//! use slopos_windowing::{WindowedApp, Window, ControlFlow, run};
-//! use slopos_gfx::DrawBuffer;
-//!
-//! struct MyApp;
-//! impl WindowedApp for MyApp {
-//!     fn draw(&mut self, fb: &mut DrawBuffer<'_>) { /* ... */ }
-//! }
-//!
-//! pub fn main() -> ! { run(MyApp, 640, 480) }
-//! ```
-
-#![allow(dead_code)]
+//! A window on the compositor without the widget toolkit: a connection, a
+//! surface to draw into, its input events and an event loop ([`run`]).
 
 pub mod app;
 pub mod clipboard;
@@ -30,7 +12,9 @@ pub mod window;
 
 pub use app::{ControlFlow, WindowedApp, run};
 pub use clipboard::Clipboard;
-pub use connection::{Protocol, ProtocolHandle, UiMessage, UiQueue, UiSender, connect};
+pub use connection::{
+    ConnectError, Protocol, ProtocolHandle, UiMessage, UiQueue, UiSender, connect,
+};
 pub use event::Event;
 pub use slopos_abi::handle::{
     DisplayHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
@@ -44,7 +28,6 @@ pub use window::{EVENT_BUF_LEN, Window};
 #[cfg(feature = "alloc")]
 pub use slopos_gfx::HeadlessSurface;
 
-/// Get monotonic time in milliseconds.
 #[inline]
 pub fn get_time_ms() -> u64 {
     slopos_cabi::monotonic_ms()

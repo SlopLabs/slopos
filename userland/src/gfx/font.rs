@@ -1,25 +1,18 @@
+//! The fixed-cell face the terminal and the console draw in.
+
 use std::sync::OnceLock;
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_font::atlas::GlyphAtlas;
 
-use super::font_loader;
-
 const FONT_SIZE_PX: u16 = 16;
 
 static ATLAS: OnceLock<Option<GlyphAtlas>> = OnceLock::new();
 
-fn atlas() -> Option<&'static GlyphAtlas> {
+pub fn atlas() -> Option<&'static GlyphAtlas> {
     ATLAS
-        .get_or_init(|| {
-            let font_data = font_loader::load_font("mono")?;
-            GlyphAtlas::new_with_source(
-                font_data,
-                FONT_SIZE_PX,
-                slopos_font::FontSource::Filesystem,
-            )
-        })
+        .get_or_init(|| GlyphAtlas::new(slopos_appkit::text::load_font("mono")?, FONT_SIZE_PX))
         .as_ref()
 }
 
@@ -34,8 +27,7 @@ pub fn cell_height() -> i32 {
     atlas().map_or(FALLBACK_CELL_H, |a| a.cell_height())
 }
 
-/// Draw a glyph by Unicode codepoint; non-ASCII codepoints fall back to the
-/// atlas replacement glyph.
+/// A codepoint outside the atlas's glyph set draws as its replacement glyph.
 pub fn draw_glyph<T: Canvas>(
     target: &mut T,
     x: i32,
@@ -45,19 +37,4 @@ pub fn draw_glyph<T: Canvas>(
     bg: Color32,
 ) -> Option<DamageRect> {
     atlas()?.draw_char(target, x, y, cp, fg, bg)
-}
-
-pub fn draw_string<T: Canvas>(
-    target: &mut T,
-    x: i32,
-    y: i32,
-    text: &str,
-    fg: Color32,
-    bg: Color32,
-) -> Option<DamageRect> {
-    atlas()?.draw_str(target, x, y, text, fg, bg)
-}
-
-pub fn string_width(text: &str) -> i32 {
-    atlas().map_or(text.len() as i32 * FALLBACK_CELL_W, |a| a.str_width(text))
 }

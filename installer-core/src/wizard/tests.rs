@@ -7,7 +7,9 @@ use slopos_boot_core::install::{Mode as PlanMode, PlanError};
 use crate::fixtures::{
     Case, GIB, MODEL, NODE, foreign, installed, machine as system, no_room, opened,
 };
-use crate::{Contents, DiskState, Reinstall, Tag};
+use slopos_theme_core::Tone;
+
+use crate::{DiskState, NoTable, Reinstall, Step, Tag};
 
 fn sent(out: Vec<Out>) -> Vec<Request> {
     out.into_iter()
@@ -106,7 +108,7 @@ fn a_refusal_or_another_protocol_leaves_the_person_at_welcome() {
         },
     );
     assert_eq!(w.page(), Page::Welcome);
-    assert_eq!(w.note(), Some(MISMATCHED));
+    assert_eq!(w.note(), Some(say::MISMATCHED));
     assert!(w.can_advance(), "nothing is owed once the versions differ");
     w.on(Input::Ended);
     assert_eq!(w.on(Input::Next), [Out::Start]);
@@ -184,7 +186,7 @@ fn opening_chooses_free_space_where_it_fits_and_every_change_proposes() {
 fn a_tile_whose_choice_does_not_fit_cannot_be_chosen() {
     let (mut w, first) = at_how(
         opened(Err(no_room()), None),
-        Case::erasing(Some(foreign()), Contents::Gpt).proposal(),
+        Case::erasing(Some(foreign())).proposal(),
     );
     assert_eq!(
         first.mode,
@@ -321,8 +323,8 @@ fn an_install_shows_each_step_and_refuses_to_close() {
     assert!(!w.can_close() && !w.can_advance() && !w.can_go_back());
     w.on(Input::Back);
     assert_eq!(w.page(), Page::Install);
-    reply(&mut w, Reply::Event(Event::step(1)));
-    reply(&mut w, Reply::Event(Event::step(4)));
+    reply(&mut w, Reply::Event(Event::Step(Step::Partition)));
+    reply(&mut w, Reply::Event(Event::Step(Step::CopySystem)));
     reply(&mut w, Reply::Event(Event::Progress { done: 5, total: 10 }));
     reply(&mut w, Reply::Event(Event::Log { line: "x".into() }));
     let states: Vec<StepState> = w.steps().iter().map(|(_, s)| *s).collect();
@@ -338,7 +340,7 @@ fn an_install_shows_each_step_and_refuses_to_close() {
     );
     assert_eq!(w.progress().bytes, Some((5, 10)));
     assert_eq!(w.progress().log, ["x"]);
-    reply(&mut w, Reply::Event(Event::step(5)));
+    reply(&mut w, Reply::Event(Event::Step(Step::CopyStartup)));
     assert_eq!(w.progress().bytes, None, "a step's copy is its own");
     let summary = Summary {
         disk: NODE.into(),
@@ -346,7 +348,7 @@ fn an_install_shows_each_step_and_refuses_to_close() {
     };
     reply(&mut w, Reply::Done(summary.clone()));
     assert_eq!(w.page(), Page::Done);
-    assert_eq!(w.summary(), Some(&summary));
+    assert_eq!(w.summary.as_ref(), Some(&summary));
     assert!(w.can_close());
     assert_eq!(w.primary_label(), say::RESTART);
     assert!(w.steps().iter().all(|(_, s)| *s == StepState::Done));
@@ -375,10 +377,10 @@ fn the_region_shown_is_the_one_the_engine_takes() {
 fn an_install_answered_out_of_turn_ends_on_the_error_page() {
     let (mut w, _) = at_how(opened(Ok(()), None), free_proposal());
     review(&mut w);
-    reply(&mut w, Reply::Event(Event::step(2)));
+    reply(&mut w, Reply::Event(Event::Step(Step::Reread)));
     reply(&mut w, Reply::Issue(Issue::RootSize));
     assert_eq!(w.page(), Page::Error);
-    assert_eq!(w.failure().map(|f| f.step), Some(2));
+    assert_eq!(w.failure().and_then(Failure::step), Some(Step::Reread));
     assert!(w.can_close());
 }
 
@@ -402,9 +404,9 @@ fn nothing_closes_the_window_while_it_installs() {
     assert!(w.on(Input::Restart).is_empty());
     reply(
         &mut w,
-        Reply::Failed(Failure {
-            step: 2,
-            message: "x".into(),
+        Reply::Failed(Failure::Stopped {
+            step: Some(Step::Reread),
+            why: "x".into(),
         }),
     );
     assert_eq!(w.on(Input::Restart), [Out::Restart]);
@@ -435,12 +437,12 @@ fn the_last_answer_stays_shown_while_a_change_is_proposed() {
 fn back_to_review_opens_the_disk_again_and_proposes_the_same_choices() {
     let (mut w, first) = at_how(opened(Ok(()), None), free_proposal());
     review(&mut w);
-    reply(&mut w, Reply::Event(Event::step(3)));
+    reply(&mut w, Reply::Event(Event::Step(Step::Format)));
     reply(
         &mut w,
-        Reply::Failed(Failure {
-            step: 3,
-            message: "mke2fs exited".into(),
+        Reply::Failed(Failure::Stopped {
+            step: Some(Step::Format),
+            why: "mke2fs exited".into(),
         }),
     );
     assert_eq!(w.page(), Page::Error);
@@ -475,9 +477,9 @@ fn a_free_install_cut_short_is_offered_as_a_reinstall() {
         review(&mut w);
         reply(
             &mut w,
-            Reply::Failed(Failure {
-                step: 4,
-                message: "copying".into(),
+            Reply::Failed(Failure::Stopped {
+                step: Some(Step::CopySystem),
+                why: "copying".into(),
             }),
         );
         w.on(Input::Next);
@@ -554,16 +556,16 @@ fn an_engine_that_stops_during_back_to_review_says_so() {
     review(&mut w);
     reply(
         &mut w,
-        Reply::Failed(Failure {
-            step: 1,
-            message: "x".into(),
+        Reply::Failed(Failure::Stopped {
+            step: Some(Step::Partition),
+            why: "x".into(),
         }),
     );
     sent(w.on(Input::Next));
     w.on(Input::Ended);
     assert_eq!(w.page(), Page::Error);
     assert!(w.note().is_some());
-    assert_eq!(w.failure().map(|f| f.step), Some(1));
+    assert_eq!(w.failure().and_then(Failure::step), Some(Step::Partition));
 }
 
 #[test]
@@ -599,7 +601,7 @@ fn a_reinstall_that_keeps_the_root_says_so() {
 fn erasing_names_the_disk() {
     let (mut w, _) = at_how(
         opened(Err(no_room()), None),
-        Case::erasing(Some(foreign()), Contents::Gpt).proposal(),
+        Case::erasing(Some(foreign())).proposal(),
     );
     w.on(Input::Next);
     assert_eq!(w.primary_label(), Kind::Erase.title());
@@ -610,10 +612,10 @@ fn erasing_names_the_disk() {
 fn an_engine_that_stops_ends_the_install_as_a_failure() {
     let (mut w, _) = at_how(opened(Ok(()), None), free_proposal());
     review(&mut w);
-    reply(&mut w, Reply::Event(Event::step(6)));
+    reply(&mut w, Reply::Event(Event::Step(Step::Menu)));
     w.on(Input::Ended);
     assert_eq!(w.page(), Page::Error);
-    assert_eq!(w.failure().map(|f| f.step), Some(6));
+    assert_eq!(w.failure().and_then(Failure::step), Some(Step::Menu));
     assert_eq!(
         w.on(Input::Next),
         [Out::Start],
@@ -648,7 +650,7 @@ fn the_disks_offered_come_first_each_named_by_its_model() {
     assert!(rows[0].detail.starts_with("nvme0n1 · 3 partitions, "));
     assert_eq!(rows[1].title, "17.2 GB disk");
     assert_eq!(
-        (rows[1].detail.as_str(), rows[1].enabled()),
+        (rows[1].detail.as_str(), rows[1].reason.is_none()),
         ("vda · Empty", true)
     );
     assert_eq!(
@@ -661,10 +663,10 @@ fn the_disks_offered_come_first_each_named_by_its_model() {
 fn a_tile_says_what_it_does_or_why_not_without_a_flag() {
     let (w, _) = at_how(
         opened(Err(no_room()), None),
-        Case::erasing(Some(foreign()), Contents::Gpt).proposal(),
+        Case::erasing(Some(foreign())).proposal(),
     );
     let rows = w.tile_rows();
-    let open: Vec<(Kind, bool)> = rows.iter().map(|r| (r.key, r.enabled())).collect();
+    let open: Vec<(Kind, bool)> = rows.iter().map(|r| (r.key, r.reason.is_none())).collect();
     assert_eq!(
         open,
         [
@@ -677,7 +679,7 @@ fn a_tile_says_what_it_does_or_why_not_without_a_flag() {
     for issue in [
         Issue::OnlyErase {
             node: NODE.into(),
-            contents: Contents::Blank,
+            contents: NoTable::Blank,
         },
         Issue::NothingToKeep("/dev/nvme0n1p3".into()),
         Issue::RootSize,
@@ -741,7 +743,7 @@ fn every_free_space_is_listed_once_two_take_the_install() {
     let rows = w.region_rows();
     let said: Vec<(usize, &str, bool)> = rows
         .iter()
-        .map(|r| (r.key, r.title.as_str(), r.enabled()))
+        .map(|r| (r.key, r.title.as_str(), r.reason.is_none()))
         .collect();
     assert_eq!(
         said,
@@ -758,7 +760,7 @@ fn every_free_space_is_listed_once_two_take_the_install() {
 }
 
 #[test]
-fn a_partition_is_listed_by_its_name_and_size() {
+fn a_partition_is_listed_by_its_name_or_slopos_s_type_and_size() {
     let mut w = at_disk();
     sent(w.on(Input::Next));
     reply(&mut w, Reply::System(system(Some(opened(Ok(()), None)))));
@@ -772,17 +774,19 @@ fn a_partition_is_listed_by_its_name_and_size() {
     let rows = w.root_rows();
     let said: Vec<(u32, &str, &str, bool)> = rows
         .iter()
-        .map(|r| (r.key, r.title.as_str(), r.detail.as_str(), r.enabled()))
+        .map(|r| {
+            (
+                r.key,
+                r.title.as_str(),
+                r.detail.as_str(),
+                r.reason.is_none(),
+            )
+        })
         .collect();
     assert_eq!(
         said,
         [
-            (
-                1,
-                "EFI system partition · 105 MB",
-                "nvme0n1p1 · EFI system",
-                false
-            ),
+            (1, "EFI system · 105 MB", "nvme0n1p1", false),
             (2, "theirs · 2.1 GB", "nvme0n1p2 · Linux filesystem", true),
             (3, "theirs · 8.2 GB", "nvme0n1p3 · Linux filesystem", true),
         ]
@@ -859,7 +863,7 @@ fn each_action_is_listed_with_its_tag() {
     assert_eq!(tags, ["Shared", "New", "New", "New", "Kept"]);
     assert_eq!(lines[0].1, "EFI system · nvme0n1p1 · 105 MB");
     assert_eq!(lines[4].1, "Linux filesystem · nvme0n1p2 · 537 MB");
-    let erased = Case::erasing(Some(foreign()), Contents::Gpt).proposal();
+    let erased = Case::erasing(Some(foreign())).proposal();
     assert_eq!(
         erased.action_lines()[0],
         (Tag::Erase, "Everything on nvme0n1".into())
@@ -870,15 +874,15 @@ fn each_action_is_listed_with_its_tag() {
 fn every_log_line_is_kept_across_steps() {
     let (mut w, _) = at_how(opened(Ok(()), None), free_proposal());
     review(&mut w);
-    reply(&mut w, Reply::Event(Event::step(3)));
+    reply(&mut w, Reply::Event(Event::Step(Step::Format)));
     reply(&mut w, Reply::Event(Event::Log { line: "a".into() }));
     reply(&mut w, Reply::Event(Event::Log { line: "b".into() }));
-    reply(&mut w, Reply::Event(Event::step(4)));
+    reply(&mut w, Reply::Event(Event::Step(Step::CopySystem)));
     assert_eq!(w.progress().log, ["a", "b"]);
     assert!(
         w.heading(false)
-            .subtitle
-            .starts_with(&alloc::format!("On {MODEL}"))
+            .disk
+            .is_some_and(|disk| disk.starts_with(MODEL))
     );
 }
 
@@ -888,9 +892,9 @@ fn the_heading_says_where_and_how_the_install_ended() {
     review(&mut w);
     reply(
         &mut w,
-        Reply::Failed(Failure {
-            step: 4,
-            message: "copying".into(),
+        Reply::Failed(Failure::Stopped {
+            step: Some(Step::CopySystem),
+            why: "copying".into(),
         }),
     );
     assert!(
@@ -903,21 +907,31 @@ fn the_heading_says_where_and_how_the_install_ended() {
     review(&mut w);
     reply(
         &mut w,
-        Reply::Failed(Failure {
-            step: 0,
-            message: "/dev/nvme0n1 changed since it was reviewed; nothing was written".into(),
-        }),
+        Reply::Failed(Failure::Refused(Issue::Changed(NODE.into()))),
     );
     assert!(
         w.heading(false)
             .subtitle
             .contains("before writing anything")
     );
+    let changed = Issue::Changed(NODE.into());
+    assert_eq!(
+        w.issue(),
+        Some(&changed),
+        "a refusal is said in its own words"
+    );
+    assert!(w.notes().iter().any(|note| note.title == changed.words()));
 
     let (mut w, _) = at_how(opened(Ok(()), None), free_proposal());
     review(&mut w);
     w.on(Input::Ended);
-    assert_eq!(w.failure().map(|f| f.message.as_str()), Some(STOPPED));
+    assert_eq!(
+        w.failure(),
+        Some(&Failure::Stopped {
+            step: None,
+            why: say::STOPPED.into()
+        })
+    );
 
     let (mut w, _) = at_how(opened(Ok(()), None), free_proposal());
     review(&mut w);
@@ -957,10 +971,10 @@ fn an_installer_without_developer_tools_says_so_once_probed() {
     };
     let lacking = probed(None);
     assert_eq!(lacking.len(), 1);
-    assert_eq!(lacking[0].severity, Severity::Info);
+    assert_eq!(lacking[0].tone, Tone::Info);
     let unread = probed(Some("/dev/sdb"));
     assert_eq!(unread.len(), 1);
-    assert_eq!(unread[0].severity, Severity::Warning);
+    assert_eq!(unread[0].tone, Tone::Warning);
     assert!(unread[0].body.contains("sdb"));
 }
 

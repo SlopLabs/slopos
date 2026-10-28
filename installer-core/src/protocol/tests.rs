@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use slopos_boot_core::install::{Mode as PlanMode, PlanError};
 
-use crate::fixtures::{Case, GIB, foreign};
+use crate::fixtures::{Case, GIB, foreign, no_tables};
 use crate::{Opened, Reinstall};
 
 fn payload(frame: &[u8]) -> (u8, &[u8]) {
@@ -36,25 +36,19 @@ fn issues() -> Vec<Issue> {
         node: "/dev/vda".into(),
         root: None,
     };
-    vec![
+    let mut issues = vec![
         Issue::Medium("/media/install holds no installer".into()),
         Issue::Probe("/dev: gone".into()),
         Issue::Disk("".into()),
-        Issue::OnlyErase {
-            node: "/dev/vda".into(),
-            contents: Contents::Mbr(vec![MbrPartition {
-                index: 1,
-                kind: 0x07,
-                bytes: GIB,
-            }]),
-        },
-        Issue::OnlyErase {
-            node: "/dev/vda".into(),
-            contents: Contents::Blank,
-        },
         Issue::NothingToKeep("/dev/vda3".into()),
         Issue::NoRoot("/dev/vda".into()),
-        Issue::Esp("full".into()),
+        Issue::Esp {
+            node: "/dev/vda1".into(),
+            trouble: EspTrouble::Full {
+                free: 512 << 10,
+                needed: 3 << 20,
+            },
+        },
         Issue::Person("bad".into()),
         Issue::Menu("no".into()),
         Issue::RootSize,
@@ -82,7 +76,24 @@ fn issues() -> Vec<Issue> {
         }),
         plan(PlanError::RootElsewhere(2)),
         plan(PlanError::NoSlot),
-    ]
+        Issue::Esp {
+            node: "/dev/vda1".into(),
+            trouble: EspTrouble::Unreadable("not a FAT32 volume".into()),
+        },
+        Issue::Esp {
+            node: "/dev/vda1".into(),
+            trouble: EspTrouble::WrongType,
+        },
+        Issue::Unprobed,
+        Issue::Unopened("/dev/vda".into()),
+        Issue::Unproposed,
+        Issue::Changed("/dev/vda".into()),
+    ];
+    issues.extend(no_tables().into_iter().map(|contents| Issue::OnlyErase {
+        node: "/dev/vda".into(),
+        contents,
+    }));
+    issues
 }
 
 fn system() -> System {
@@ -99,26 +110,30 @@ fn system() -> System {
         disks: vec![
             Disk {
                 node: "/dev/sda".into(),
+                bus: Some(Bus::Usb),
                 model: Some("QEMU QEMU HARDDISK".into()),
                 state: DiskState::Refused(Refusal::Medium),
             },
             Disk {
                 node: "/dev/sdb".into(),
+                bus: Some(Bus::Usb),
                 model: None,
                 state: DiskState::Refused(Refusal::ReadOnly),
             },
             Disk {
                 node: "/dev/sdc".into(),
+                bus: None,
                 model: None,
                 state: DiskState::Unreadable("/dev/sdc: I/O error".into()),
             },
             Disk {
                 node: "/dev/vda".into(),
+                bus: Some(Bus::Virtio),
                 model: None,
                 state: DiskState::Listed(Listing {
                     capacity: 4 * GIB,
                     block: 4096,
-                    contents: Contents::Mbr(vec![
+                    contents: Contents::NoTable(NoTable::Mbr(vec![
                         MbrPartition {
                             index: 0,
                             kind: 0x83,
@@ -129,13 +144,14 @@ fn system() -> System {
                             kind: 0x07,
                             bytes: 2 * GIB,
                         },
-                    ]),
+                    ])),
                     layout: Layout::empty(4 * GIB),
                     opened: None,
                 }),
             },
             Disk {
                 node: "/dev/nvme0n1".into(),
+                bus: Some(Bus::Nvme),
                 model: Some("KINGSTON SNV3S1000G".into()),
                 state: DiskState::Listed(Listing {
                     capacity: 16 * GIB,
@@ -146,9 +162,9 @@ fn system() -> System {
                         erase: Ok(()),
                         free: Ok(()),
                         largest: Some(1),
-                        regions: vec![Ok(()), Err(issues()[12].clone())],
-                        reuse: Err(issues()[13].clone()),
-                        roots: vec![(2, Err(issues()[16].clone())), (5, Ok(()))],
+                        regions: vec![Ok(()), Err(issues()[10].clone())],
+                        reuse: Err(issues()[11].clone()),
+                        roots: vec![(2, Err(issues()[14].clone())), (5, Ok(()))],
                         reinstall: Some(Reinstall {
                             root: 5,
                             keep: true,
@@ -173,8 +189,8 @@ fn proposals() -> Vec<Proposal> {
     vec![
         sized.proposal(),
         kept,
-        Case::erasing(Some(foreign()), Contents::Gpt).proposal(),
-        Case::erasing(None, Contents::Blank).proposal(),
+        Case::erasing(Some(foreign())).proposal(),
+        Case::erasing(None).proposal(),
     ]
 }
 
@@ -187,7 +203,7 @@ fn replies() -> Vec<Reply> {
             disks: Vec::new(),
             ..system()
         }),
-        Reply::Event(Event::step(4)),
+        Reply::Event(Event::Step(Step::CopySystem)),
         Reply::Event(Event::Progress {
             done: 0,
             total: u64::MAX,
@@ -199,9 +215,14 @@ fn replies() -> Vec<Reply> {
             disk: "/dev/vda".into(),
             entry: 0xffff,
         }),
-        Reply::Failed(Failure {
-            step: 0,
-            message: "/dev/vda changed since it was reviewed; nothing was written".into(),
+        Reply::Failed(Failure::Refused(Issue::Changed("/dev/vda".into()))),
+        Reply::Failed(Failure::Stopped {
+            step: Some(Step::Register),
+            why: "writing BootOrder: EIO".into(),
+        }),
+        Reply::Failed(Failure::Stopped {
+            step: None,
+            why: String::new(),
         }),
     ];
     all.extend(issues().into_iter().map(Reply::Issue));
@@ -278,7 +299,6 @@ fn next(state: &mut u64) -> u64 {
     *state
 }
 
-/// Every truncation and scattered pair of byte changes of `bytes`.
 fn mutations(bytes: &[u8], seed: u64, rounds: usize, mut check: impl FnMut(&[u8])) {
     let mut state = seed;
     for len in 0..=bytes.len() {
@@ -296,8 +316,6 @@ fn mutations(bytes: &[u8], seed: u64, rounds: usize, mut check: impl FnMut(&[u8]
     }
 }
 
-/// A mutated frame decodes to a message or to `Malformed`, never a panic,
-/// and a message it decodes to encodes to one that decodes the same.
 #[test]
 fn mutated_frames_decode_or_are_malformed() {
     for request in requests() {
@@ -365,6 +383,24 @@ fn a_structure_has_one_encoding() {
         "a reuse names its root"
     );
     assert!(propose(reuse.with("root", "3")).is_ok());
+    let step =
+        |number: &str| Reply::decode(kind::STEP, &Fields::new().with("step", number).encode());
+    assert_eq!(step("1"), Ok(Reply::Event(Event::Step(Step::Partition))));
+    assert_eq!(step("9"), Ok(Reply::Event(Event::Step(Step::Register))));
+    for bad in ["0", "10"] {
+        assert_eq!(step(bad), Err(Malformed), "{bad:?}");
+    }
+    let refused = Fields::new().with("issue", "unproposed").encode();
+    let failed = |fields: Fields| Reply::decode(kind::FAILED, &fields.encode());
+    assert_eq!(
+        failed(Fields::new().with("issue", refused.clone())),
+        Ok(Reply::Failed(Failure::Refused(Issue::Unproposed)))
+    );
+    assert_eq!(
+        failed(Fields::new().with("issue", refused).with("why", "x")),
+        Err(Malformed),
+        "a refusal says nothing beside its issue"
+    );
     assert_eq!(Request::decode(0x7f, &[]), Err(Malformed));
     assert_eq!(Reply::decode(kind::PROBE, &[]), Err(Malformed));
 }

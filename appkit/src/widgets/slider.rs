@@ -1,15 +1,19 @@
 use std::any::Any;
 
+use slopos_theme_core::{State, stroke};
+
 use crate::constraints::{BoxConstraints, Rect, Size};
-use crate::event::{
-    EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
-};
+use crate::event::{EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent};
+use crate::focus::RING_REACH;
 use crate::paint::PaintContext;
+use crate::style::MIN_TARGET;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
-/// What a slider reports. A drag spans several events and the widget tree is
-/// rebuilt between them, so the application keeps the drag's [`SliderGrab`]
-/// from `Begin` to `End`, as it keeps a [`crate::DragInput`]'s.
+pub(crate) const KNOB: i32 = 16;
+const TRACK: i32 = 4;
+
+/// What a slider reports; the app keeps a drag's [`SliderGrab`] from `Begin`
+/// to `End`, since the tree is rebuilt between them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SliderInput {
     /// A press begins a drag: at the value under the pointer, or where the
@@ -20,9 +24,8 @@ pub enum SliderInput {
     End,
 }
 
-/// Where on the knob a drag holds it, so the knob keeps its place under the
-/// pointer rather than jumping its centre there; the default holds it by its
-/// centre.
+/// Where on the knob a drag holds it, so the knob does not jump its centre to
+/// the pointer.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SliderGrab(pub(crate) i32);
 
@@ -93,7 +96,6 @@ pub struct SliderWidget {
     grab: Option<SliderGrab>,
     on_input: Option<Box<dyn Fn(SliderInput) -> Box<dyn Any>>>,
     focused: bool,
-    thumb: i32,
 }
 
 impl SliderWidget {
@@ -115,7 +117,6 @@ impl SliderWidget {
             grab,
             on_input,
             focused: false,
-            thumb: 0,
         }
     }
 
@@ -126,8 +127,7 @@ impl SliderWidget {
     /// The span the thumb's centre travels, in window coordinates.
     fn track(&self) -> (i32, i32) {
         let rect = self.layout_rect();
-        let half = self.thumb / 2;
-        (rect.x + half, (rect.width - self.thumb).max(1))
+        (rect.x + KNOB / 2, (rect.width - KNOB).max(1))
     }
 
     /// The value under window column `x`.
@@ -156,12 +156,12 @@ impl SliderWidget {
 
     fn knob(&self) -> Rect {
         let rect = self.layout_rect();
-        let half = self.thumb / 2;
+        let half = KNOB / 2;
         Rect::new(
             self.thumb_x() - half,
             rect.y + rect.height / 2 - half,
-            self.thumb,
-            self.thumb,
+            KNOB,
+            KNOB,
         )
     }
 
@@ -205,9 +205,7 @@ impl Widget for SliderWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        self.thumb = ctx.style.checkbox_size;
-        let ring = ctx.style.focus_ring_width + ctx.style.focus_ring_offset;
-        let height = (self.thumb + ring * 2).max(ctx.style.min_target);
+        let height = (KNOB + RING_REACH * 2).max(MIN_TARGET);
         let width = if constraints.is_width_bounded() {
             constraints.max_width
         } else {
@@ -221,7 +219,7 @@ impl Widget for SliderWidget {
         let theme = ctx.theme();
         let (left, width) = self.track();
         let mid = rect.y + rect.height / 2;
-        let bar = 4;
+        let bar = TRACK;
         let cx = self.thumb_x();
         let knob = self.knob();
         let (fill, thumb) = if self.enabled {
@@ -229,44 +227,35 @@ impl Widget for SliderWidget {
         } else {
             (theme.text_disabled, theme.text_disabled)
         };
-        ctx.fill_rounded_rect(left, mid - bar / 2, width, bar, bar / 2, theme.border);
-        ctx.fill_rounded_rect(left, mid - bar / 2, cx - left, bar, bar / 2, fill);
+        let track = Rect::new(left, mid - bar / 2, width, bar);
+        ctx.fill_rounded_rect(track, bar / 2, theme.border);
+        let done = Rect::new(left, track.y, cx - left, bar);
+        ctx.fill_rounded_rect(done, bar / 2, fill);
 
-        ctx.fill_rounded_rect(
-            knob.x,
-            knob.y,
-            knob.width,
-            knob.height,
-            knob.width / 2,
-            thumb,
-        );
+        let state = match (self.grab, ctx.lit(self.id())) {
+            _ if !self.enabled => State::Normal,
+            (Some(_), _) => State::Pressed,
+            (None, Some(_)) => State::Hover,
+            (None, None) => State::Normal,
+        };
+        if state != State::Normal {
+            let halo = knob.inflate(RING_REACH);
+            ctx.fill_circle(halo.x, halo.y, halo.width, theme.overlay(state));
+        }
+        ctx.fill_rounded_rect(knob, knob.width / 2, thumb);
         if self.enabled {
-            ctx.draw_rounded_rect(
-                knob.x,
-                knob.y,
-                knob.width,
-                knob.height,
-                knob.width / 2,
-                theme.border_strong,
-            );
+            let edge = theme.border_strong;
+            ctx.draw_rounded_rect(knob, knob.width / 2, stroke::EDGE, edge);
         }
         if self.focused {
             ctx.draw_focus_ring(knob);
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        if phase != EventPhase::Target && phase != EventPhase::Bubble {
-            return EventResponse::Ignored;
-        }
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
         match event {
-            // Every widget the pointer missed gets the release too, and each
-            // message costs a rebuild; a slider disabled mid-drag still ends it.
+            // A release reaches every widget, so only a live drag's is taken;
+            // one disabled mid-drag still ends it.
             WidgetEvent::PointerUp {
                 button: PointerButton::Left,
                 ..
@@ -329,5 +318,9 @@ impl Widget for SliderWidget {
         } else {
             FocusPolicy::None
         }
+    }
+
+    fn hover_part(&self, x: i32, y: i32) -> Option<usize> {
+        super::button::Press::hover_part(self.enabled, self.layout_rect(), x, y)
     }
 }

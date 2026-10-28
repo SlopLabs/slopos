@@ -1,9 +1,5 @@
-//! Terminal emulator — a standalone compositor client that owns a PTY master,
-//! spawns `/bin/shell` on the slave, and bridges keystrokes <-> shell output
-//! through the kernel line discipline.
-//!
-//! Single-threaded `slopfut` `block_on` root: `ProtocolHandle` is `Rc`/`!Send`,
-//! so the protocol client and the master fd are never touched off-thread.
+//! Terminal: a compositor client holding a pty's master, with `/bin/shell` on
+//! its slave. One thread, as `ProtocolHandle` is `!Send`.
 
 pub mod grid;
 pub mod input;
@@ -22,36 +18,33 @@ use grid::TerminalGrid;
 use input::{CompositorEvent, KeyAction, KeyBytes, MouseEventKind, PointerState, Selection};
 use slopos_terminal_core::damage::{CellDamage, DamageHistory};
 
-/// The grid a window opens with.
 const OPEN_COLS: i32 = 80;
 const OPEN_ROWS: i32 = 30;
-/// Buffers `SoftSurface` cycles. The damage history is sized to match so a
-/// recycled slot's age always resolves against a recorded frame.
+/// As many as `SoftSurface` cycles, so a recycled slot's age always resolves
+/// against a recorded frame.
 const SURFACE_BUFFERS: usize = 2;
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 const MASTER_READ_CHUNK: usize = 1024;
-/// Output bytes per loop turn before returning to compositor input.
+/// Per loop turn, so output cannot starve input.
 const MASTER_READ_BUDGET: usize = 4 * 1024;
 const MASTER_WRITE_QUEUE_CAP: usize = 64 * 1024;
-/// Queued input bytes per loop turn before returning to events/output.
 const MASTER_WRITE_BUDGET: usize = 4 * 1024;
 
 pub fn terminal_user_main() {
     use slopos_windowing::connection;
 
-    // The terminal's stderr goes nowhere visible, so panics route to the
-    // kernel serial console instead.
+    // Its stderr goes nowhere visible.
     std::panic::set_hook(Box::new(|info| {
         let _ = tty::write(b"terminal: PANIC: ");
         let msg = std::format!("{info}\n");
         let _ = tty::write(msg.as_bytes());
     }));
 
-    let handle = connection::connect().expect("compositor not running");
+    let handle = connection::connect().unwrap_or_else(|e| panic!("{e}"));
     surface::init_handle(handle.clone());
 
-    let (cw, ch) = cell_metrics();
+    let (cw, ch) = render::cell_size();
     let width = OPEN_COLS * cw + 2 * render::MARGIN;
     let height = OPEN_ROWS * ch + 2 * render::MARGIN;
     if !surface::init(width, height) {
@@ -78,18 +71,16 @@ pub fn terminal_user_main() {
         }
     };
 
-    // The shell needs a sane TERM size before the first Configure arrives.
+    // The shell needs a size before the first configure arrives.
     let cols = render::cells_in(width, cw, grid::MAX_COLS);
     let rows = render::cells_in(height, ch, grid::MAX_ROWS);
     push_winsize(master_fd, rows, cols);
 
     spawn_shell_on_slave(slave_fd);
 
-    // The shell holds its own clone; dropping this last terminal-side ref is
-    // what makes the master's EOF/SIGHUP fire when the shell exits.
+    // Only the shell's copy left, so its exit reaches the master as end of file.
     let _ = fs::close_fd_raw(slave_fd);
 
-    // Master must be non-blocking so the drain loop can read-until-WouldBlock.
     let _ = fs::set_fd_nonblocking(master_fd);
 
     let compositor_fd = with_client_fd(&handle);
@@ -123,22 +114,12 @@ pub fn terminal_user_main() {
 }
 
 enum ExitReason {
-    /// Master hit EOF / hangup.
     ShellGone,
     Closed,
     Error,
 }
 
-/// Font cell `(width, height)` in pixels, each at least 1. The terminal core is
-/// font-agnostic, so the app feeds these into the pure selection geometry.
-fn cell_metrics() -> (i32, i32) {
-    (
-        crate::gfx::font::cell_width().max(1),
-        crate::gfx::font::cell_height().max(1),
-    )
-}
-
-/// Push a TIOCSWINSZ to the master so the kernel SIGWINCHes the slave fg pgrp.
+/// The kernel tells the slave's foreground group with `SIGWINCH`.
 fn push_winsize(master_fd: i32, rows: u16, cols: u16) {
     let ws = slopos_abi::syscall::UserWinsize {
         ws_row: rows,
@@ -149,15 +130,12 @@ fn push_winsize(master_fd: i32, rows: u16, cols: u16) {
     let _ = fs::tiocswinsz(master_fd, &ws);
 }
 
-/// The compositor socket fd is stable for the process lifetime.
 fn with_client_fd(handle: &slopos_windowing::ProtocolHandle) -> i32 {
     handle.borrow_client().fd()
 }
 
-/// The child starts with an empty fd table, so the `CloneFd` actions install
-/// exactly the slave and no cloexec juggling is needed. `TASK_FLAG_NEW_PGRP` is
-/// deliberately omitted: the shell runs its own `setsid()` + `TIOCSCTTY`. The
-/// shell takes the session's environment, its search path among it.
+/// No `TASK_FLAG_NEW_PGRP`: the shell makes its own session and takes the slave
+/// as its terminal.
 fn spawn_shell_on_slave(slave_fd: i32) {
     let actions = [
         process::clone_fd(slave_fd, 0),
@@ -182,14 +160,10 @@ fn spawn_shell_on_slave(slave_fd: i32) {
 
 fn enqueue_mouse(queue: &mut MasterWriteQueue, report: Option<KeyBytes>) {
     if let Some(bytes) = report {
-        if !queue.enqueue_action_back(bytes.as_bytes().to_vec()) {
-            // Drop the whole report rather than truncating it.
-        }
+        queue.enqueue_action_back(bytes.as_bytes().to_vec());
     }
 }
 
-/// The `block_on` root: selects over compositor readiness, master readiness and
-/// the cursor-blink timer.
 async fn event_loop(
     master_fd: i32,
     compositor_fd: i32,
@@ -204,23 +178,19 @@ async fn event_loop(
     let mut cursor_on = true;
     let mut last_blink = Instant::now();
     let mut history = DamageHistory::new(SURFACE_BUFFERS);
-    // Reported but not yet presented. Only a present clears it, so a skipped
-    // frame carries its damage forward rather than losing it.
+    // Only a present clears it, so a skipped frame carries its damage forward.
     let mut pending = CellDamage::new();
     pending.set_rows(grid.rows as usize);
     let mut pending_writes = MasterWriteQueue::new();
-    // Destination memfd handed to the compositor between a PasteReady and its
-    // PasteResult: the receiver provides the buffer.
+    // Between a paste's ready and its result: the receiver provides the buffer.
     let mut pending_paste: Option<ShmBuffer> = None;
     // One motion report per cell crossed rather than one per pixel.
     let mut last_mouse_cell: Option<(usize, usize)> = None;
 
-    // The first frame has no buffer contents to build on.
     let _ = grid.take_damage();
     render_full(grid, &selection, cursor_on, &mut history, &mut pending);
 
     loop {
-        // Set by app-owned state the grid cannot report damage for.
         let mut repaint_all = false;
         loop {
             let polled = handle.borrow_client().poll_event();
@@ -228,9 +198,8 @@ async fn event_loop(
                 Ok(Some(evt)) => evt,
                 _ => break,
             };
-            // The terminal polls the socket directly, so it must route buffer
-            // releases itself or both buffers stay in flight and the surface
-            // falls back to single-buffer updates.
+            // Polling the socket directly, it routes releases itself, or both
+            // buffers stay in flight.
             if let slopos_protocol::types::Event::BufferRelease { buffer_id, .. } = &evt {
                 surface::release_buffer(*buffer_id);
                 continue;
@@ -241,13 +210,10 @@ async fn event_loop(
                         KeyAction::ToMaster(bytes) => {
                             let action = bytes.as_bytes().to_vec();
                             if is_priority_keyboard_control(bytes.as_bytes()) {
-                                if !pending_writes.write_priority_action(master_fd, action) {
-                                    // Drop the whole control action rather than truncating it.
-                                }
-                            } else if !pending_writes.enqueue_action_back(action) {
-                                // Drop the whole key action rather than truncating it.
+                                pending_writes.write_priority_action(master_fd, action);
+                            } else {
+                                pending_writes.enqueue_action_back(action);
                             }
-                            // Any keypress cancels a scrollback view.
                             if grid.viewing_history() {
                                 grid.scroll_view_down(usize::MAX);
                             }
@@ -259,15 +225,11 @@ async fn event_loop(
                             grid.scroll_view_down(n);
                         }
                         KeyAction::CopySelection => {
-                            // Keyboard copy never touches the master, so it
-                            // cannot raise SIGINT.
                             if selection.is_active() {
                                 copy_selection(handle, grid, &selection);
                             }
                         }
                         KeyAction::RequestPaste => {
-                            // The compositor answers asynchronously; the paste
-                            // arms below carry it to the master.
                             let _ = handle.borrow_client().clipboard_paste();
                         }
                         KeyAction::None => {}
@@ -278,26 +240,21 @@ async fn event_loop(
                 }
                 CompositorEvent::Resize(w, h) => {
                     if surface::resize(w as u32, h as u32) {
-                        let (cw, ch) = cell_metrics();
+                        let (cw, ch) = render::cell_size();
                         let cols = render::cells_in(w, cw, grid::MAX_COLS);
                         let rows = render::cells_in(h, ch, grid::MAX_ROWS);
-                        // A width change re-wraps scrollback, so the selection
-                        // endpoints go through the reflow to stay valid. A
-                        // height change leaves absolute line numbering intact.
+                        // A new width re-wraps scrollback, the selection with it.
                         let mut pts = selection.endpoints();
                         let outcome = grid.resize(rows, cols, &mut pts);
                         if outcome.reflowed && selection.is_active() {
                             match (pts[0], pts[1]) {
                                 (Some(a), Some(h)) => selection.set_endpoints(a, h),
-                                // An endpoint was evicted from the re-wrapped
-                                // history; a stale range must not be copied.
+                                // An end left the history.
                                 _ => selection.clear(),
                             }
                         }
                         push_winsize(master_fd, rows, cols);
-                        // A cell coordinate means something else now.
                         last_mouse_cell = None;
-                        // New buffers: nothing recorded describes them.
                         history.clear();
                         pending.set_rows(grid.rows as usize);
                         let _ = grid.take_damage();
@@ -309,15 +266,14 @@ async fn event_loop(
                 }
                 CompositorEvent::PointerMotion(x, y) | CompositorEvent::PointerEnter(x, y) => {
                     let (x, y) = (x - render::MARGIN, y - render::MARGIN);
-                    // Only on enter is the focus serial that authorizes a
-                    // cursor request current.
+                    // Only an enter carries the serial a cursor request needs.
                     if matches!(evt, slopos_protocol::types::Event::PointerEnter { .. }) {
                         surface::set_cursor_shape(slopos_abi::CURSOR_SHAPE_TEXT);
                     }
                     ptr.last_x = x;
                     ptr.last_y = y;
                     ptr.has_focus = true;
-                    let (cw, ch) = cell_metrics();
+                    let (cw, ch) = render::cell_size();
                     if input::mouse_reporting(grid, mods) {
                         let cell = input::pixel_to_cell(x, y, cw, ch, grid);
                         if last_mouse_cell != Some(cell) {
@@ -353,7 +309,7 @@ async fn event_loop(
                         } else {
                             MouseEventKind::WheelDown
                         };
-                        let (cw, ch) = cell_metrics();
+                        let (cw, ch) = render::cell_size();
                         for _ in 0..notches.unsigned_abs() {
                             enqueue_mouse(
                                 &mut pending_writes,
@@ -385,7 +341,7 @@ async fn event_loop(
                     } else {
                         ptr.button_state &= !code;
                     }
-                    let (cw, ch) = cell_metrics();
+                    let (cw, ch) = render::cell_size();
                     if input::mouse_reporting(grid, mods) {
                         last_mouse_cell =
                             Some(input::pixel_to_cell(ptr.last_x, ptr.last_y, cw, ch, grid));
@@ -411,16 +367,13 @@ async fn event_loop(
                         if input::update_selection(&mut ptr, &mut selection, grid, cw, ch) {
                             repaint_all = true;
                         }
-                        // A bare click leaves the selection inactive, so only
-                        // a real drag reaches the clipboard here.
+                        // A bare click leaves the selection inactive.
                         if !pressed && selection.is_active() {
                             copy_selection(handle, grid, &selection);
                         }
                     }
                 }
                 CompositorEvent::PasteReady(len) => {
-                    // `len` is the clipboard size; hand back a destination
-                    // memfd of exactly that size to copy into.
                     pending_paste = None;
                     if len > 0 {
                         if let Ok(dst) = ShmBuffer::create(len as usize) {
@@ -445,15 +398,11 @@ async fn event_loop(
             }
         }
 
-        // Output damages the cells it writes, so nothing extra is needed here.
         let drained = drain_master(master_fd, grid);
 
-        // On the turn the query arrived: a program blocked reading a CPR would
-        // otherwise wait for the next compositor or timer wake.
-        let replies = grid.take_replies();
-        if !replies.is_empty() && !pending_writes.enqueue_action_back(replies) {
-            // Drop the whole answer rather than truncating it.
-        }
+        // On this turn: a program blocked reading a reply would otherwise wait
+        // for the next wake.
+        pending_writes.enqueue_action_back(grid.take_replies());
 
         pending_writes.drain(master_fd, MASTER_WRITE_BUDGET);
 
@@ -463,8 +412,7 @@ async fn event_loop(
         }
 
         if repaint_all {
-            // Selection shading is app state, so the grid records no damage
-            // for it and the whole view has to repaint.
+            // The grid records no damage for the selection's shading.
             pending.add_all(grid.cols);
         }
         pending.union(&grid.take_damage());
@@ -474,8 +422,6 @@ async fn event_loop(
         if elapsed >= BLINK_INTERVAL {
             cursor_on = !cursor_on;
             last_blink = Instant::now();
-            // A blink inverts one cell; damaging only it keeps the frame
-            // proportional to what changed.
             grid.damage_cursor();
             pending.union(&grid.take_damage());
             present_pending(grid, &selection, cursor_on, &mut history, &mut pending);
@@ -494,8 +440,7 @@ async fn event_loop(
     }
 }
 
-/// For the first frame and after a resize, where the buffers hold nothing a
-/// partial repaint could build on.
+/// Where the buffers hold nothing a partial repaint could build on.
 fn render_full(
     grid: &TerminalGrid,
     selection: &Selection,
@@ -505,8 +450,7 @@ fn render_full(
 ) {
     render::render_full(grid, selection, cursor_on);
     pending.clear();
-    // Only one slot was fully painted; no recorded frame describes what the
-    // others still hold.
+    // No recorded frame describes what the other slots hold.
     history.clear();
     let mut all = CellDamage::new();
     all.set_rows(grid.rows as usize);
@@ -514,8 +458,6 @@ fn render_full(
     history.push(all);
 }
 
-/// `pending` is cleared only once the frame is actually committed, so damage
-/// can never be forgotten without having been shown.
 fn present_pending(
     grid: &TerminalGrid,
     selection: &Selection,
@@ -526,8 +468,6 @@ fn present_pending(
     if pending.is_empty() {
         return;
     }
-    // The target slot holds an older frame, so it needs this frame's damage
-    // plus everything painted since it was last presented.
     match history.resolve(surface::buffer_age(), pending) {
         Some(repaint) => {
             render::render_damage(grid, selection, cursor_on, &repaint);
@@ -567,55 +507,45 @@ impl MasterWriteQueue {
         MASTER_WRITE_QUEUE_CAP.saturating_sub(self.queued_bytes)
     }
 
-    fn enqueue_action_back(&mut self, data: Vec<u8>) -> bool {
-        self.enqueue_action(data, false, 0)
+    fn enqueue_action_back(&mut self, data: Vec<u8>) {
+        self.enqueue_action(self.actions.len(), data, 0)
     }
 
-    fn enqueue_action_front(&mut self, data: Vec<u8>, written: usize) -> bool {
-        self.enqueue_action(data, true, written)
-    }
-
-    fn enqueue_action(&mut self, data: Vec<u8>, front: bool, written: usize) -> bool {
-        if written > data.len() {
-            return false;
-        }
-        let remaining = data.len() - written;
-        if remaining == 0 {
-            return true;
-        }
-        if remaining > self.remaining_capacity() {
-            return false;
+    /// Drops what does not fit whole: a truncated sequence would garble what
+    /// follows it.
+    fn enqueue_action(&mut self, at: usize, data: Vec<u8>, written: usize) {
+        let remaining = data.len().saturating_sub(written);
+        if remaining == 0 || remaining > self.remaining_capacity() {
+            return;
         }
         let action = QueuedWrite {
             bytes: data,
             written,
         };
-        if front {
-            self.actions.push_front(action);
-        } else {
-            self.actions.push_back(action);
-        }
+        self.actions.insert(at, action);
         self.queued_bytes += remaining;
-        true
     }
 
-    fn write_priority_action(&mut self, fd: i32, data: Vec<u8>) -> bool {
+    fn write_priority_action(&mut self, fd: i32, data: Vec<u8>) {
         if data.len() > self.remaining_capacity() {
-            return false;
+            return;
         }
         if !self.is_empty() {
-            return self.enqueue_action_front(data, 0);
+            // Behind a write already begun, which it would cut in two.
+            let begun = self
+                .actions
+                .front()
+                .is_some_and(|action| action.written > 0);
+            return self.enqueue_action(usize::from(begun), data, 0);
         }
         match fs::write_slice(fd, &data) {
-            Ok(n) if n == data.len() => true,
-            Ok(n) => self.enqueue_action_front(data, n),
-            Err(e) if e == crate::syscall::SyscallError::EAGAIN => {
-                self.enqueue_action_front(data, 0)
-            }
+            Ok(n) if n == data.len() => {}
+            Ok(n) => self.enqueue_action(0, data, n),
+            Err(e) if e == crate::syscall::SyscallError::EAGAIN => self.enqueue_action(0, data, 0),
             Err(e) => {
                 let msg = std::format!("terminal: priority write error {e:?}\n");
                 let _ = tty::write(msg.as_bytes());
-                self.enqueue_action_front(data, 0)
+                self.enqueue_action(0, data, 0)
             }
         }
     }
@@ -665,8 +595,8 @@ enum MasterDrain {
     Eof,
 }
 
-/// Reads until `WouldBlock`. Every byte is mirrored to the kernel console so
-/// `just boot-log` keeps showing shell output.
+/// Mirrors every byte to the kernel console, so `just boot-log` shows the
+/// shell's output.
 fn drain_master(master_fd: i32, grid: &mut TerminalGrid) -> MasterDrain {
     let mut buf = [0u8; MASTER_READ_CHUNK];
     let mut got_any = false;
@@ -686,11 +616,6 @@ fn drain_master(master_fd: i32, grid: &mut TerminalGrid) -> MasterDrain {
                 if total >= MASTER_READ_BUDGET {
                     return MasterDrain::Data;
                 }
-                if n < buf.len() {
-                    // A short read still needs one more turn to confirm
-                    // WouldBlock, so no bytes are left buffered.
-                    continue;
-                }
             }
             Err(e) if e == crate::syscall::SyscallError::EAGAIN => {
                 return if got_any {
@@ -700,7 +625,6 @@ fn drain_master(master_fd: i32, grid: &mut TerminalGrid) -> MasterDrain {
                 };
             }
             Err(e) => {
-                // EBADF after close, EIO: either way the session is over.
                 let msg = std::format!("terminal: master read error {e:?}\n");
                 let _ = tty::write(msg.as_bytes());
                 return MasterDrain::Eof;
@@ -709,11 +633,9 @@ fn drain_master(master_fd: i32, grid: &mut TerminalGrid) -> MasterDrain {
     }
 }
 
-/// Hard ceiling on a single clipboard copy (16 MiB), matching the compositor.
+/// The compositor's ceiling on one copy.
 const MAX_CLIPBOARD_BYTES: usize = 16 * 1024 * 1024;
 
-/// Copies the full selection with no truncation: the memfd is sized to it
-/// before `collect_selection` fills it.
 fn copy_selection(
     handle: &slopos_windowing::ProtocolHandle,
     grid: &TerminalGrid,
@@ -728,16 +650,14 @@ fn copy_selection(
     };
     let n = input::collect_selection(grid, selection, shm.as_mut_slice());
     if n > 0 {
-        // The compositor dups the fd via SCM_RIGHTS, so dropping `shm` here
-        // leaves the clipboard backing alive on its side.
+        // The compositor keeps its own copy of the descriptor.
         let _ = handle.borrow_client().clipboard_copy(shm.fd(), n as u32);
     }
 }
 
-/// Bracketed-paste markers are added only when the slave-side application
-/// enabled DECSET 2004; a raw `cat` must not see them. `sanitize_paste` strips
-/// every control byte first, so the bracket cannot be escaped and a clipboard
-/// can never type Ctrl+C.
+/// Bracketed only when the program asked for it with DECSET 2004.
+/// `sanitize_paste` strips every control byte first, so the bracket cannot be
+/// escaped and a clipboard never types Ctrl+C.
 fn write_paste(
     master_fd: i32,
     pending_writes: &mut MasterWriteQueue,
@@ -747,7 +667,6 @@ fn write_paste(
     if data.is_empty() {
         return;
     }
-    // Sanitizing never grows the payload (it only drops/normalizes bytes).
     let mut clean = std::vec![0u8; data.len()];
     let n = input::sanitize_paste(data, &mut clean);
     if n == 0 {
@@ -770,8 +689,6 @@ fn write_paste(
     if bracketed {
         action.extend_from_slice(b"\x1b[201~");
     }
-    if !pending_writes.enqueue_action_back(action) {
-        // Drop the whole paste action rather than truncating it.
-    }
+    pending_writes.enqueue_action_back(action);
     pending_writes.drain(master_fd, MASTER_WRITE_BUDGET);
 }

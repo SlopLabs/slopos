@@ -31,23 +31,6 @@ pub fn language(answer: &[u8]) -> Option<u16> {
     }
 }
 
-/// The text as printable ASCII, `?` for anything else; returns bytes written.
-pub fn decode(bytes: &[u8], out: &mut [u8]) -> usize {
-    let Some(body) = body(bytes) else {
-        return 0;
-    };
-    let mut written = 0;
-    for (pair, slot) in body.chunks_exact(2).zip(out.iter_mut()) {
-        let unit = u16::from_le_bytes([pair[0], pair[1]]);
-        *slot = match u8::try_from(unit) {
-            Ok(c) if (0x20..0x7f).contains(&c) => c,
-            _ => b'?',
-        };
-        written += 1;
-    }
-    written
-}
-
 /// The characters as Linux decodes a string descriptor: up to U+0000, an
 /// unpaired surrogate skipped and a high one last ending the text.
 fn chars(bytes: &[u8]) -> Option<impl Iterator<Item = char> + '_> {
@@ -114,19 +97,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn languages_and_text_decode_within_blength() {
+    fn text_is_read_within_blength() {
         let text = [12, 3, b'Q', 0, b'E', 0, b'M', 0, b'U', 0, 0xe9, 0, b'x', 0];
         let mut out = [0u8; 16];
-        let n = decode(&text, &mut out);
-        assert_eq!(&out[..n], b"QEMU?");
+        let n = utf8(&text, &mut out).unwrap();
+        assert_eq!(&out[..n], "QEMU\u{e9}".as_bytes());
         let mut short = [0u8; 2];
-        assert_eq!(decode(&text, &mut short), 2);
-        let odd = [5, 3, b'A', 0, b'B'];
-        assert_eq!(decode(&odd, &mut out), 1);
-        let lying = [200, 3, b'A', 0];
-        assert_eq!(decode(&lying, &mut out), 1);
+        assert_eq!(utf8(&text, &mut short), Some(2));
+        assert_eq!(utf8(&[5, 3, b'A', 0, b'B'], &mut out), Some(1));
+        assert_eq!(utf8(&[200, 3, b'A', 0], &mut out), Some(1));
         for len in 0..text.len() {
-            let _ = decode(&text[..len], &mut out);
             let _ = language(&text[..len]);
             let _ = utf8(&text[..len], &mut out);
             let _ = identity(&text[..len], &mut out);

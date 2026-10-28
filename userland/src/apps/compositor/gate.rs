@@ -1,11 +1,5 @@
-//! The login screen and the lock screen, drawn over the dimmed wallpaper in
-//! place of every surface. While either is up every key is its own and no
-//! pointer press reaches a client, so what is typed there reaches the
-//! mechanism privd runs alone: `org.slopos.login` lets a person in from the
-//! login screen, and `org.slopos.session.unlock` answers whether a locked
-//! desktop's own person typed their password. Ctrl+Alt+Delete, the secure
-//! attention key, is read here and nowhere else: on a desktop it locks it,
-//! so the screen that asks for a password after it is this one.
+//! The login and lock screens, in place of every surface, and the secure
+//! attention key, read here alone, so the screen that asks after it is this.
 
 use std::string::String;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,12 +13,12 @@ use slopos_abi::input::keycode::{
 };
 use slopos_abi::input::{MODIFIER_ALT, MODIFIER_CTRL};
 use slopos_appkit::Rect;
-use slopos_appkit::embed::Embedded;
-use slopos_appkit::traits::Role as Shows;
-use slopos_chrome_core::Key;
+use slopos_appkit::traits::Role;
 use slopos_chrome_core::clock::WallTime;
 use slopos_chrome_core::gate::{self as model, Asks, Checked, Focus, Target};
+use slopos_chrome_core::key::Key;
 
+use super::overlay::Overlay;
 use super::views;
 use crate::gfx::{DamageRect, DrawBuffer};
 use crate::init_control::{self, Command};
@@ -34,8 +28,8 @@ use crate::syscall::core as sys_core;
 /// over, should that desktop never come in front.
 const STARTING_FOR: Duration = Duration::from_secs(30);
 
-const LOGIN: &str = "org.slopos.login";
-const UNLOCK: &str = "org.slopos.session.unlock";
+const LOGIN_ACTION: &str = "org.slopos.login";
+const UNLOCK_ACTION: &str = "org.slopos.session.unlock";
 
 /// How many times the desktop has locked or unlocked: a lock still being
 /// retold stops once the desktop has unlocked since.
@@ -44,7 +38,7 @@ static LOCKS: AtomicU64 = AtomicU64::new(0);
 /// the unlock that followed it.
 static TELLING: Mutex<()> = Mutex::new(());
 
-pub enum Role {
+pub enum Kind {
     /// The login screen, which is always up and lists the people.
     Greeter,
     /// A person's desktop, whose lock screen names them.
@@ -54,42 +48,31 @@ pub enum Role {
 pub struct Gate {
     model: model::Gate,
     shown: bool,
-    /// What the screen draws, laid out on `screen` at `minute`; built afresh
-    /// once `stale`.
-    tree: Option<Embedded>,
+    overlay: Overlay,
     screen: Rect,
     minute: Option<i64>,
-    stale: bool,
     /// What the mechanism privd ran answered, while it runs.
     asking: Option<Receiver<Checked>>,
-    dirty: bool,
     /// When a login passed, while that person's desktop starts.
     started: Option<Instant>,
-    /// Where the pointer is, which a tree built afresh lights up.
-    pointer: (i32, i32),
-    taken: slopos_chrome_core::key::Taken,
     ctrl: bool,
     alt: bool,
 }
 
 impl Gate {
-    pub fn new(role: Role) -> Gate {
-        let (model, shown) = match role {
-            Role::Greeter => (model::Gate::login(people()), true),
-            Role::Desktop { name } => (model::Gate::lock(name), false),
+    pub fn new(kind: Kind) -> Gate {
+        let (model, shown) = match kind {
+            Kind::Greeter => (model::Gate::login(people()), true),
+            Kind::Desktop { name } => (model::Gate::lock(name), false),
         };
         Gate {
             model,
             shown,
-            tree: None,
+            overlay: Overlay::new(),
             screen: Rect::new(0, 0, 0, 0),
             minute: None,
-            stale: true,
             asking: None,
-            dirty: true,
             started: None,
-            pointer: (-1, -1),
-            taken: slopos_chrome_core::key::Taken::default(),
             ctrl: false,
             alt: false,
         }
@@ -111,42 +94,34 @@ impl Gate {
         }
     }
 
-    /// Whether the screen changed since the last frame, laid out again on
-    /// `screen` when it did, or when the minute it shows went by.
-    pub fn take_dirty(&mut self, screen: Rect) -> bool {
+    /// What to repaint, the screen laid out again on `screen` when it
+    /// changed or the minute it shows went by.
+    pub fn take_damage(
+        &mut self,
+        screen: Rect,
+        pointer: (i32, i32),
+    ) -> impl Iterator<Item = DamageRect> + use<> {
         if !self.shown {
-            self.tree = None;
-            return std::mem::take(&mut self.dirty);
+            self.overlay.hide();
+            return self.overlay.take_damage();
         }
         let now = sys_core::realtime_secs().and_then(WallTime::from_unix);
         let minute = now.map(|t| t.minute());
-        if self.stale || self.tree.is_none() || self.screen != screen || self.minute != minute {
-            let node = views::gate(&self.model, now.as_ref());
-            let mut tree = Embedded::new(&node, screen);
-            tree.hover(self.pointer.0, self.pointer.1);
-            self.tree = Some(tree);
+        if self.overlay.stale() || self.screen != screen || self.minute != minute {
             let role = match self.model.focus() {
-                Focus::People => Shows::List,
-                Focus::Field => Shows::TextField,
-                Focus::Switch | Focus::Submit => Shows::Button,
+                Focus::People => Role::List,
+                Focus::Field => Role::TextField,
+                Focus::Switch | Focus::Submit => Role::Button,
             };
-            if let Some(tree) = &mut self.tree {
-                tree.focus(role, views::gate_focus_name(&self.model));
-            }
+            let focus = Some((role, views::gate_focus_name(&self.model)));
+            let node = views::gate(&self.model, now.as_ref());
+            self.overlay.show(&node, screen, pointer, focus);
             self.screen = screen;
             self.minute = minute;
-            self.stale = false;
-            self.dirty = true;
         }
-        std::mem::take(&mut self.dirty)
+        self.overlay.take_damage()
     }
 
-    fn changed(&mut self) {
-        self.stale = true;
-        self.dirty = true;
-    }
-
-    /// Lock the desktop and tell init it is locked.
     pub fn lock(&mut self) {
         if self.greeter() || self.shown {
             return;
@@ -180,7 +155,7 @@ impl Gate {
         };
         self.model.reset(listed);
         self.started = None;
-        self.changed();
+        self.overlay.changed();
     }
 
     /// Settle what the mechanism answered.
@@ -206,17 +181,16 @@ impl Gate {
             }
             _ => {}
         }
-        self.changed();
+        self.overlay.changed();
     }
 
-    /// Whether a key press is the screen's, which then takes it: the secure
-    /// attention key always, any key while it is up, and a repeat of a key
-    /// pressed into it.
+    /// The secure attention key always, any key while it is up, and a repeat
+    /// of a key pressed into it.
     pub fn takes_press(&mut self, event: &InputEvent) -> bool {
         let keycode = event.key_keycode();
         self.track(keycode, true);
         if keycode == KEY_DELETE && self.chord(event.key_modifiers()) {
-            self.taken.take(event);
+            self.overlay.taken.take(event);
             match self.greeter() {
                 true if self.asking.is_none() && self.started.is_none() => self.reset(),
                 true => {}
@@ -225,12 +199,12 @@ impl Gate {
             return true;
         }
         if !self.shown {
-            return self.taken.repeats(event);
+            return self.overlay.taken.repeats(event);
         }
-        self.taken.take(event);
+        self.overlay.taken.take(event);
         if let Some(key) = Key::read(event) {
             let asks = self.model.key(key);
-            self.changed();
+            self.overlay.changed();
             self.act(asks);
         }
         true
@@ -238,25 +212,19 @@ impl Gate {
 
     pub fn takes_release(&mut self, keycode: u16) -> bool {
         self.track(keycode, false);
-        self.taken.release(keycode)
+        self.overlay.taken.release(keycode)
     }
 
-    /// The primary button went down or up at `(x, y)` over the screen.
     pub fn click(&mut self, x: i32, y: i32, pressed: bool) {
-        let Some(tree) = self.tree.as_mut() else {
-            return;
-        };
-        let sent: Vec<Target> = tree.click(x, y, pressed);
-        self.dirty = true;
+        let sent: Vec<Target> = self.overlay.click(x, y, pressed);
         for target in sent {
             let asks = self.model.click(target);
-            self.changed();
+            self.overlay.changed();
             self.act(asks);
         }
     }
 
-    /// The wheel turned by `value_v120` over the screen: a person chosen
-    /// for each notch.
+    /// A person chosen for each notch.
     pub fn wheel(&mut self, value_v120: i32) {
         if value_v120 == 0 {
             return;
@@ -264,14 +232,11 @@ impl Gate {
         for _ in 0..(value_v120.unsigned_abs() / 120).max(1) {
             self.model.scroll(value_v120 > 0);
         }
-        self.changed();
+        self.overlay.changed();
     }
 
     pub fn hover(&mut self, x: i32, y: i32) {
-        self.pointer = (x, y);
-        if let Some(tree) = self.tree.as_mut() {
-            self.dirty |= tree.hover(x, y);
-        }
+        self.overlay.hover(x, y);
     }
 
     /// Ctrl and Alt as the modifiers say or as their keys were seen.
@@ -300,8 +265,11 @@ impl Gate {
     /// answers once privd has.
     fn check(&mut self, person: String, secret: slopos_priv_core::consent::Secret) {
         let (action, args) = match self.greeter() {
-            true => (LOGIN, vec!["login".to_owned(), "desktop".into(), person]),
-            false => (UNLOCK, vec!["unlock".to_owned()]),
+            true => (
+                LOGIN_ACTION,
+                vec!["login".to_owned(), "desktop".into(), person],
+            ),
+            false => (UNLOCK_ACTION, vec!["unlock".to_owned()]),
         };
         let mut input = secret.bytes().to_vec();
         input.push(b'\n');
@@ -321,7 +289,7 @@ impl Gate {
                         match init_control::ask(Command::Locked(false)) {
                             Ok(()) => Checked::Passed,
                             Err(why) => {
-                                eprintln!("compositor: init: {why}");
+                                log!("init: {why}");
                                 Checked::Unchecked
                             }
                         }
@@ -337,30 +305,19 @@ impl Gate {
     }
 
     pub fn draw(&self, buf: &mut DrawBuffer, clip: &DamageRect) {
-        let (true, Some(tree)) = (self.shown, &self.tree) else {
-            return;
-        };
-        let clip = Rect::new(
-            clip.x0,
-            clip.y0,
-            clip.x1 - clip.x0 + 1,
-            clip.y1 - clip.y0 + 1,
-        );
-        tree.paint(buf, clip);
+        if self.shown {
+            self.overlay.draw(buf, clip);
+        }
     }
 }
 
-/// How the mechanism answered: run, refused or not reached; why it was not
-/// reached goes to the log.
+/// Why the mechanism was not reached goes to the log.
 fn asked(action: &str, args: &[&str], input: &[u8]) -> Checked {
-    let answered = crate::syscall::fs::open_cstr(c"/dev/null", slopos_abi::fs::O_RDWR)
-        .map_err(|e| crate::privd::NotRun::from(format!("/dev/null: {e}")))
-        .and_then(|null| crate::privd::run_feeding(action, args, input, null.raw(), 2));
-    match answered {
+    match super::privd(action, args, input) {
         Ok(0) => Checked::Passed,
         Ok(_) => Checked::Wrong,
         Err(why) => {
-            eprintln!("compositor: {action}: {why}");
+            log!("{action}: {why}");
             Checked::Unchecked
         }
     }
@@ -375,7 +332,7 @@ fn tell_unlocked() {
         .spawn(|| {
             let _telling = TELLING.lock().unwrap_or_else(PoisonError::into_inner);
             if let Err(why) = init_control::ask(Command::Locked(false)) {
-                eprintln!("compositor: init: {why}");
+                log!("init: {why}");
             }
         });
 }
@@ -397,7 +354,7 @@ fn tell_locked() {
                 match init_control::ask(Command::Locked(true)) {
                     Ok(()) => return,
                     Err(why) if why.starts_with("refused:") => {
-                        eprintln!("compositor: init: {why}");
+                        log!("init: {why}");
                         return;
                     }
                     Err(_) => {}
@@ -405,17 +362,13 @@ fn tell_locked() {
                 drop(telling);
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
-            eprintln!("compositor: init did not hear that the desktop locked");
+            log!("init did not hear that the desktop locked");
         });
 }
 
-/// The people the user database lists, as anyone reads it.
 fn people() -> Vec<String> {
-    use slopos_slibc_core::passwd::{BASE_PASSWD, Passwd, lines};
-    let text = std::fs::read("/etc/passwd").unwrap_or_else(|_| BASE_PASSWD.as_bytes().to_vec());
-    lines(&text)
-        .filter_map(Passwd::parse)
-        .filter(|p| slopos_abi::fs::PERSON_UIDS.contains(&p.uid))
-        .map(|p| String::from_utf8_lossy(p.name).into_owned())
+    crate::accounts::people()
+        .into_iter()
+        .map(|p| p.name)
         .collect()
 }

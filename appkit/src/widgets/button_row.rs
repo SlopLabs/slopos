@@ -3,13 +3,20 @@ use std::any::Any;
 use slopos_theme_core::space;
 
 use crate::constraints::{BoxConstraints, MAX_EXTENT, Rect, Size};
-use crate::event::{
-    EventPhase, EventResponse, Key, MessageSink, Modifiers, NamedKey, WidgetEvent, route,
-};
+use crate::event::{EventResponse, Key, MessageSink, Modifiers, NamedKey, WidgetEvent, route};
 use crate::paint::PaintContext;
 use crate::traits::{MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget};
 
 type Emit = Box<dyn Fn() -> Box<dyn Any>>;
+
+/// What Escape does in a footer.
+pub enum Escape {
+    /// No button goes back, so the key is not the footer's.
+    Unbound,
+    /// The way back is disabled, so the key does nothing.
+    Disabled,
+    Press(Emit),
+}
 
 /// The buttons that end a page: `leading` from the left edge, the rest from
 /// the right, on one row when they fit and the leading ones above otherwise.
@@ -17,10 +24,8 @@ pub struct ButtonRowWidget {
     core: WidgetCore,
     buttons: Vec<Box<dyn Widget>>,
     leading: usize,
-    /// What Enter presses.
     on_enter: Option<Emit>,
-    /// The way back Escape presses, `Some(None)` while it is disabled.
-    on_escape: Option<Option<Emit>>,
+    on_escape: Escape,
     stacked: bool,
 }
 
@@ -29,7 +34,7 @@ impl ButtonRowWidget {
         buttons: Vec<Box<dyn Widget>>,
         leading: usize,
         on_enter: Option<Emit>,
-        on_escape: Option<Option<Emit>>,
+        on_escape: Escape,
     ) -> Self {
         Self {
             core: WidgetCore::new(),
@@ -42,12 +47,7 @@ impl ButtonRowWidget {
     }
 
     fn span(widths: impl Iterator<Item = i32>) -> i32 {
-        let mut total = 0;
-        let mut n = 0;
-        for w in widths {
-            total += w;
-            n += 1;
-        }
+        let (total, n) = widths.fold((0, 0), |(total, n), w| (total + w, n + 1));
         total + space::SM * (n - 1).max(0)
     }
 
@@ -161,13 +161,8 @@ impl Widget for ButtonRowWidget {
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        route(&mut self.buttons, event, phase, sink)
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
+        route(&mut self.buttons, event, sink)
     }
 
     fn take_unhandled_key(
@@ -187,15 +182,14 @@ impl Widget for ButtonRowWidget {
                 sink.emit_raw(f());
                 true
             }
-            Key::Named(NamedKey::Escape) => {
-                let Some(back) = &self.on_escape else {
-                    return false;
-                };
-                if let Some(f) = back {
+            Key::Named(NamedKey::Escape) => match &self.on_escape {
+                Escape::Unbound => false,
+                Escape::Disabled => true,
+                Escape::Press(f) => {
                     sink.emit_raw(f());
+                    true
                 }
-                true
-            }
+            },
             _ => false,
         }
     }

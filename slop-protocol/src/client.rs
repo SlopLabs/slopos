@@ -3,8 +3,8 @@
 
 use crate::connection::Connection;
 use crate::types::{
-    Event, MAX_STRING_LEN, OutputInfo, PROTOCOL_VERSION, ProtocolError, Request, SurfaceId,
-    ToplevelId,
+    Event, OutputInfo, PROTOCOL_VERSION, ProtocolError, Request, SurfaceId, ToplevelId,
+    WINDOW_STRING_MAX,
 };
 use slopos_abi::net::{AF_UNIX, SOCK_STREAM};
 
@@ -12,8 +12,6 @@ pub struct Client {
     conn: Connection,
     /// Cached display geometry from the initial OutputInfo event.
     pub output: OutputInfo,
-    /// Compositor capability flags from the Hello handshake.
-    pub capabilities: u64,
     next_id: u32,
     /// Serial of the most recent `Event::PointerEnter`, echoed in
     /// `SetCursorShape` to prove the request belongs to the current focus.
@@ -25,7 +23,7 @@ pub struct Client {
 
 impl Client {
     /// Connect to the compositor and perform the version handshake: a
-    /// compositor speaking this client's version or a newer one is accepted.
+    /// compositor speaking another version than [`PROTOCOL_VERSION`] is refused.
     ///
     /// Display geometry (`OutputInfo`) is received lazily via
     /// [`ensure_output_info()`] before the first surface operation.
@@ -39,19 +37,11 @@ impl Client {
 
         let mut conn = Connection::new(fd);
 
-        let hello: Event = conn.wait_recv(5000)?;
-        let capabilities = match hello {
-            Event::Hello {
-                version,
-                capabilities,
-            } => {
-                if version < PROTOCOL_VERSION {
-                    return Err(ProtocolError::VersionMismatch);
-                }
-                capabilities
-            }
+        match conn.wait_recv(5000)? {
+            Event::Hello { version, .. } if version == PROTOCOL_VERSION => {}
+            Event::Hello { .. } => return Err(ProtocolError::VersionMismatch),
             _ => return Err(ProtocolError::MalformedMessage),
-        };
+        }
 
         conn.send(&Request::Hello {
             version: PROTOCOL_VERSION,
@@ -60,7 +50,6 @@ impl Client {
         Ok(Self {
             conn,
             output: OutputInfo::default(),
-            capabilities,
             next_id: 1,
             last_pointer_enter_serial: 0,
             last_key_serial: 0,
@@ -148,7 +137,6 @@ impl Client {
         self.conn.send(&Request::SurfaceCommit { surface })
     }
 
-    /// Request a FrameDone callback for this surface.
     pub fn surface_frame(&mut self, surface: SurfaceId) -> Result<(), ProtocolError> {
         self.conn.send(&Request::SurfaceFrame { surface })
     }
@@ -171,8 +159,8 @@ impl Client {
         toplevel: ToplevelId,
         title_data: &[u8],
     ) -> Result<(), ProtocolError> {
-        let mut title = [0u8; MAX_STRING_LEN];
-        let copy_len = title_data.len().min(MAX_STRING_LEN);
+        let mut title = [0u8; WINDOW_STRING_MAX];
+        let copy_len = title_data.len().min(WINDOW_STRING_MAX);
         title[..copy_len].copy_from_slice(&title_data[..copy_len]);
         self.conn.send(&Request::ToplevelSetTitle {
             toplevel,
@@ -186,8 +174,8 @@ impl Client {
         toplevel: ToplevelId,
         app_id_data: &[u8],
     ) -> Result<(), ProtocolError> {
-        let mut app_id = [0u8; MAX_STRING_LEN];
-        let copy_len = app_id_data.len().min(MAX_STRING_LEN);
+        let mut app_id = [0u8; WINDOW_STRING_MAX];
+        let copy_len = app_id_data.len().min(WINDOW_STRING_MAX);
         app_id[..copy_len].copy_from_slice(&app_id_data[..copy_len]);
         self.conn.send(&Request::ToplevelSetAppId {
             toplevel,
@@ -213,11 +201,6 @@ impl Client {
 
     pub fn toplevel_destroy(&mut self, toplevel: ToplevelId) -> Result<(), ProtocolError> {
         self.conn.send(&Request::ToplevelDestroy { toplevel })
-    }
-
-    /// Acknowledge a Configure event's serial before committing a resized buffer.
-    pub fn ack_configure(&mut self, serial: u32) -> Result<(), ProtocolError> {
-        self.conn.send(&Request::AckConfigure { serial })
     }
 
     /// Request a cursor shape for `surface`. The last pointer-enter serial is
@@ -269,71 +252,19 @@ impl Client {
         )
     }
 
-    /// Start an interactive move. Serial must come from a recent pointer event.
-    pub fn interactive_move(
-        &mut self,
-        toplevel: ToplevelId,
-        serial: u32,
-    ) -> Result<(), ProtocolError> {
-        self.conn
-            .send(&Request::InteractiveMove { toplevel, serial })
-    }
-
-    /// Start an interactive resize. Serial must come from a recent pointer event.
-    pub fn interactive_resize(
-        &mut self,
-        toplevel: ToplevelId,
-        serial: u32,
-        edges: u32,
-    ) -> Result<(), ProtocolError> {
-        self.conn.send(&Request::InteractiveResize {
-            toplevel,
-            serial,
-            edges,
-        })
-    }
-
     /// Poll for one event (non-blocking). Returns `Ok(None)` if nothing pending.
     ///
     /// The first `OutputInfo` event is consumed silently to populate the
     /// cached display geometry. Subsequent ones are returned to the caller.
     pub fn poll_event(&mut self) -> Result<Option<Event>, ProtocolError> {
         match self.conn.recv::<Event>()? {
-            Some(Event::PointerEnter {
-                surface,
-                serial,
-                x,
-                y,
-            }) => {
+            Some(event @ Event::PointerEnter { serial, .. }) => {
                 self.last_pointer_enter_serial = serial;
-                Ok(Some(Event::PointerEnter {
-                    surface,
-                    serial,
-                    x,
-                    y,
-                }))
+                Ok(Some(event))
             }
-            Some(Event::Key {
-                serial,
-                time,
-                scancode,
-                ascii,
-                keycode,
-                codepoint,
-                modifiers,
-                pressed,
-            }) => {
+            Some(event @ Event::Key { serial, .. }) => {
                 self.last_key_serial = serial;
-                Ok(Some(Event::Key {
-                    serial,
-                    time,
-                    scancode,
-                    ascii,
-                    keycode,
-                    codepoint,
-                    modifiers,
-                    pressed,
-                }))
+                Ok(Some(event))
             }
             Some(Event::OutputInfo {
                 width,

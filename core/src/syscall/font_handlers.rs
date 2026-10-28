@@ -64,7 +64,7 @@ define_syscall!(syscall_font_set
             return Err(Errno::EFAULT);
         }
 
-        replace_and_schedule_free(builder.finish(slopos_font::FontSource::Syscall));
+        replace_and_schedule_free(builder.finish());
         klog_info!(
             "FONT_SET: applied {}x{} coverage font ({} glyphs + replacement)",
             width,
@@ -93,7 +93,7 @@ define_syscall!(syscall_font_set
 
         match slopos_font::bitmap::bitmap_to_coverage(&font_data, width, height, glyph_count) {
             Some(builder) => {
-                replace_and_schedule_free(builder.finish(slopos_font::FontSource::Syscall));
+                replace_and_schedule_free(builder.finish());
                 klog_info!(
                     "FONT_SET: applied {}x{} bitmap font ({} glyphs)",
                     width,

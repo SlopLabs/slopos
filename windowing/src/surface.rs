@@ -1,7 +1,4 @@
-//! Compositor-managed windowing surface.
-//!
-//! `Surface` handles the windowing lifecycle: display info query, pixel format
-//! negotiation, compositor surface/toplevel creation, and protocol teardown.
+//! A window's compositor objects: its surface and toplevel, made and torn down.
 
 use slopos_abi::handle::{
     DisplayHandle, HasDisplayHandle, HasWindowHandle, RawWindowHandle, WindowHandle,
@@ -13,10 +10,19 @@ use crate::connection::ProtocolHandle;
 
 #[derive(Debug, Clone, Copy)]
 pub enum SurfaceError {
-    NoDisplay,
     BadSize,
     ShmFailed,
     AttachFailed,
+}
+
+impl core::fmt::Display for SurfaceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            SurfaceError::BadSize => "the window's size is out of range",
+            SurfaceError::ShmFailed => "no shared memory for the window's pixels",
+            SurfaceError::AttachFailed => "the compositor did not take the window",
+        })
+    }
 }
 
 /// Owns the compositor surface and toplevel objects, not a pixel buffer.
@@ -101,11 +107,6 @@ impl Surface {
     #[inline]
     pub fn bytes_pp(&self) -> u8 {
         self.bytes_pp
-    }
-
-    #[inline]
-    pub fn protocol_handle(&self) -> &ProtocolHandle {
-        &self.handle
     }
 }
 

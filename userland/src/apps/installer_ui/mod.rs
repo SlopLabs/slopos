@@ -1,11 +1,5 @@
-//! `/bin/installer-ui` — the installer as a window, for the person at a live
-//! system's desktop.
-//!
-//! It holds no capability and never touches a disk: its pages are
-//! `slopos_installer_core::wizard::Wizard`'s, rendered, and what the wizard
-//! asks for goes out through a [`Link`] — privd, which starts
-//! `installer --serve` on two pipes once the person allows it, and the
-//! engine's frames on them.
+//! `/bin/installer-ui` — the installer as a window. It holds no capability
+//! and touches no disk: privd runs `installer --serve` for it.
 
 mod link;
 mod view;
@@ -17,24 +11,22 @@ use slopos_appkit::{
 };
 use slopos_installer_core::protocol::Reply;
 use slopos_installer_core::wizard::{Input, Out, Page, Wizard};
-use slopos_installer_core::{disk_size, parse_disk_size};
+use slopos_installer_core::{disk_size, parse_size};
 
 pub use link::{Link, Privd, relay};
 
 use crate::syscall::{core as sys_core, process};
 
-pub const WIDTH: i32 = 900;
-pub const HEIGHT: i32 = 540;
+const WIDTH: i32 = 900;
+const HEIGHT: i32 = 540;
 
 /// The argument init opens the window with on a live boot, whose first page
 /// asks whether to try SlopOS or install it; without it the window asks
 /// privd for the engine at once.
 pub const WELCOME: &str = "--welcome";
 
-/// What privd, and then the engine, said.
 #[derive(Clone, Debug)]
 pub enum EngineSays {
-    /// privd is asking the person.
     Asking,
     Started,
     Refused(String),
@@ -45,9 +37,9 @@ pub enum EngineSays {
 #[derive(Clone, Debug)]
 pub enum Msg {
     Engine(EngineSays),
-    /// The restart did not happen; the person refused it when `by_person`.
-    RestartRefused {
-        by_person: bool,
+    /// The restart did not happen: `failed`, or the person refused it.
+    NotRestarted {
+        failed: bool,
     },
     /// A row of the list on the page, by its place.
     Disk(usize),
@@ -82,7 +74,7 @@ pub struct InstallerApp {
     page: Page,
     asking: bool,
     restarting: bool,
-    restart_refused: bool,
+    restart_failed: bool,
     grab: Option<SliderGrab>,
     size_typed: Option<LineInput>,
     remote: LineInput,
@@ -101,7 +93,7 @@ impl InstallerApp {
             page: Page::Welcome,
             asking: false,
             restarting: false,
-            restart_refused: false,
+            restart_failed: false,
             grab: None,
             size_typed: None,
             remote: LineInput::new(),
@@ -131,7 +123,7 @@ impl InstallerApp {
                 Out::Send(request) => self.link.send(&request),
                 Out::Restart if !self.restarting => {
                     self.restarting = true;
-                    self.restart_refused = false;
+                    self.restart_failed = false;
                     if let Some(sender) = &self.sender {
                         self.link.restart(sender);
                     }
@@ -145,7 +137,7 @@ impl InstallerApp {
             self.log_scroll = i32::MAX;
             self.field = None;
             self.size_typed = None;
-            self.restart_refused = false;
+            self.restart_failed = false;
         }
         if self.wizard.page() != Page::How || self.wizard.root_span().is_none() {
             self.grab = None;
@@ -230,7 +222,7 @@ impl InstallerApp {
             LineEditInput::Text { character } => line.insert(character),
             LineEditInput::Caret { col } => line.set_caret(col),
             LineEditInput::Key { key, modifiers } if !line.handle_key(key, modifiers) => {
-                let unread = field == Field::Size && parse_disk_size(&line.text).is_none();
+                let unread = field == Field::Size && parse_size(&line.text).is_none();
                 return match key {
                     Key::Named(NamedKey::Enter) if !unread => self.on(Input::Next),
                     Key::Named(NamedKey::Escape) => self.on(Input::Back),
@@ -245,7 +237,7 @@ impl InstallerApp {
         let text = line.text.clone();
         match field {
             Field::Remote => self.on(Input::Remote(text)),
-            Field::Size => match parse_disk_size(&text) {
+            Field::Size => match parse_size(&text) {
                 Some(bytes) => self.resize(self.as_shown(bytes)),
                 None => Action::Rebuild,
             },
@@ -291,9 +283,9 @@ impl App for InstallerApp {
     fn update(&mut self, msg: Msg) -> Action {
         match msg {
             Msg::Engine(said) => self.engine(said),
-            Msg::RestartRefused { by_person } => {
+            Msg::NotRestarted { failed } => {
                 self.restarting = false;
-                self.restart_refused = !by_person;
+                self.restart_failed = failed;
                 Action::Rebuild
             }
             Msg::Disk(row) => match self.wizard.disks().get(row) {

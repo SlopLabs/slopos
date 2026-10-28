@@ -1,7 +1,4 @@
-//! High-level event types for windowed applications.
-//!
-//! Converts `slopos_protocol::Event` values from the compositor socket into a
-//! clean enum that applications can match on without knowing protocol details.
+//! The compositor's events a window acts on.
 
 use slopos_protocol::types::Event as ProtocolEvent;
 
@@ -11,31 +8,27 @@ pub enum Event {
         x: i32,
         y: i32,
     },
+    /// The pointer left the window, or something now covers it.
+    PointerLeave,
     PointerPress {
         button: u8,
     },
     PointerRelease {
         button: u8,
     },
-    /// `axis`: 0 = vertical, 1 = horizontal (see `POINTER_AXIS_*` in ABI).
-    /// `value_v120`: scroll amount in value120 units (+-120 = one wheel click).
+    /// `axis` a `POINTER_AXIS_*`; `value_v120` in 120ths of a notch.
     PointerAxis {
         axis: u32,
         value_v120: i32,
     },
     KeyPress {
-        scancode: u8,
-        ascii: u8,
-        /// Canonical layout-independent keycode (USB HID usage).
+        /// The USB HID usage, whatever the layout.
         keycode: u16,
-        /// Final text codepoint after layout + modifiers (0 = no text).
+        /// The text the layout and modifiers make; 0 for none.
         codepoint: u32,
-        /// `MODIFIER_*` snapshot at the time of the event.
         modifiers: u8,
     },
     KeyRelease {
-        scancode: u8,
-        ascii: u8,
         keycode: u16,
         codepoint: u32,
         modifiers: u8,
@@ -55,17 +48,16 @@ pub enum Event {
     ClipboardData {
         len: u32,
     },
-    Other,
 }
 
 impl Event {
-    /// Returns `None` for protocol events with no windowing equivalent.
     pub fn from_protocol(evt: &ProtocolEvent) -> Option<Self> {
         match evt {
             ProtocolEvent::PointerEnter { x, y, .. }
             | ProtocolEvent::PointerMotion { x, y, .. } => {
                 Some(Event::PointerMotion { x: *x, y: *y })
             }
+            ProtocolEvent::PointerLeave { .. } => Some(Event::PointerLeave),
             ProtocolEvent::PointerButton {
                 button, pressed, ..
             } => {
@@ -84,35 +76,27 @@ impl Event {
                 value_v120: *value,
             }),
             ProtocolEvent::Key {
-                scancode,
-                ascii,
                 keycode,
                 codepoint,
                 modifiers,
                 pressed,
                 ..
             } => {
-                let sc = u8::try_from(*scancode).ok()?;
-                let a = u8::try_from(*ascii).ok()?;
-                let kc = u16::try_from(*keycode).unwrap_or(0);
-                let m = u8::try_from(*modifiers).unwrap_or(0);
-                if *pressed {
-                    Some(Event::KeyPress {
-                        scancode: sc,
-                        ascii: a,
-                        keycode: kc,
-                        codepoint: *codepoint,
-                        modifiers: m,
-                    })
-                } else {
-                    Some(Event::KeyRelease {
-                        scancode: sc,
-                        ascii: a,
-                        keycode: kc,
-                        codepoint: *codepoint,
-                        modifiers: m,
-                    })
-                }
+                let keycode = u16::try_from(*keycode).unwrap_or(0);
+                let codepoint = *codepoint;
+                let modifiers = u8::try_from(*modifiers).unwrap_or(0);
+                Some(match pressed {
+                    true => Event::KeyPress {
+                        keycode,
+                        codepoint,
+                        modifiers,
+                    },
+                    false => Event::KeyRelease {
+                        keycode,
+                        codepoint,
+                        modifiers,
+                    },
+                })
             }
             ProtocolEvent::PasteReady { len, .. } => Some(Event::ClipboardOffer { len: *len }),
             ProtocolEvent::PasteResult { len, .. } => Some(Event::ClipboardData { len: *len }),

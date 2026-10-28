@@ -1,15 +1,5 @@
-//! App entries, what the dock launches: `share/slopos/apps/<id>.app`, lines of
-//! `key=value` naming the app's `id`, its `name`, the program it `exec`s, an
-//! `icon`, a PNG in the same tree's `share/slopos/icons/`, and `boot=medium`
-//! for an app shown only on a boot from the install medium.
-//!
-//! Entries are read from the `share` of each extension shown at
-//! `/opt/<name>`, by name, then the base's `/usr/share`, then
-//! `/usr/local/share`, then the person's `~/.local/share`; a later entry
-//! replaces an earlier one with the same id, as the XDG data directories
-//! rank. An extension's entry replaces none, as its commands come last on
-//! `PATH`: it shows only the apps it declares, and none another extension
-//! showed first.
+//! App entries, which the dock launches: `share/slopos/apps/<id>.app`, as
+//! the XDG data directories rank them, an extension's replacing none.
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -21,7 +11,6 @@ use slopos_abi::fs::O_NOFOLLOW;
 use slopos_abi::syscall::posix::{O_NOCTTY, O_NONBLOCK};
 use slopos_extension_core::declare::mount_point;
 
-/// A tree holding entries as `<dir>/slopos/apps`.
 #[derive(Debug)]
 pub struct Share {
     pub dir: PathBuf,
@@ -38,8 +27,8 @@ impl Share {
     }
 }
 
-/// The trees holding entries, in the order a later one replaces an earlier
-/// one's entry.
+/// Each extension's share by name, the base's, `/usr/local`'s, then the
+/// person's: a later one's entry replaces an earlier's with its id.
 pub fn shares(home: Option<&str>) -> Vec<Share> {
     let mut shares: Vec<Share> = crate::activation::apps()
         .into_iter()
@@ -59,6 +48,10 @@ const ENTRY_MAX: u64 = 4096;
 /// More than a share ever holds, so a directory of millions is not listed
 /// whole.
 const ENTRIES_PER_SHARE_MAX: usize = 64;
+/// Well past the size an icon is drawn at, so a huge one is refused before
+/// it is decoded.
+const ICON_BYTES_MAX: u64 = 1 << 20;
+const ICON_PIXELS_MAX: usize = 256 * 256;
 
 /// The bytes of the regular file at `path`, if it holds at most `max`. The
 /// session writes these files and the compositor reads them, so a link, a
@@ -78,6 +71,16 @@ pub fn read_bounded(path: &Path, max: u64) -> Option<Vec<u8>> {
     (bytes.len() as u64 <= max).then_some(bytes)
 }
 
+/// The PNG at `path`, read as an entry is.
+pub fn read_icon(path: &Path) -> Option<slopos_image::Image> {
+    let bytes = read_bounded(path, ICON_BYTES_MAX)?;
+    let options = slopos_image::DecodeOptions {
+        max_pixels: ICON_PIXELS_MAX,
+        ..slopos_image::DecodeOptions::default()
+    };
+    slopos_image::decode(&bytes, options).ok()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppEntry {
     pub id: String,
@@ -87,10 +90,9 @@ pub struct AppEntry {
     pub medium: bool,
 }
 
-/// The entry `text` states as `id`, whose icon is in `icons`. Every line is
-/// `key=value`; a key this reader does not know is passed over, so an entry
-/// can say more than an older dock reads, but a `boot` naming a boot this
-/// reader does not know makes no entry.
+/// Lines of `key=value`: `id`, `name`, the program it `exec`s, an `icon` in
+/// `icons`, and `boot=medium` for an app of the install medium alone. A key
+/// not known is passed over, but a `boot` not known makes no entry.
 pub fn parse(id: &str, text: &str, icons: &Path) -> Option<AppEntry> {
     let mut fields = BTreeMap::new();
     for line in text.lines().filter(|line| !line.is_empty()) {
@@ -135,9 +137,8 @@ pub fn pinned(home: Option<&str>) -> Vec<AppEntry> {
     read(&shares(home), crate::privd::on_the_medium())
 }
 
-/// Every entry under `shares` shown on a boot, one from the install medium
-/// when `medium`, a later one replacing an earlier with its id, ordered by
-/// name.
+/// Every entry under `shares` shown on a boot, of the install medium when
+/// `medium`, ordered by name.
 pub fn read(shares: &[Share], medium: bool) -> Vec<AppEntry> {
     let mut entries = BTreeMap::new();
     for share in shares {

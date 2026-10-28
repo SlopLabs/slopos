@@ -1,4 +1,4 @@
-//! The apps outside the base. Each binary is `main` over one of these.
+//! The apps outside the base.
 
 #![forbid(unsafe_code)]
 

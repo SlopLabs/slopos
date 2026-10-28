@@ -1,4 +1,4 @@
-use super::traits::WidgetId;
+use super::traits::{Widget, WidgetId};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PointerButton {
@@ -11,8 +11,8 @@ pub enum PointerButton {
 pub struct Modifiers {
     pub shift: bool,
     pub ctrl: bool,
+    /// Set by AltGr too, which sets `altgr` beside it.
     pub alt: bool,
-    /// AltGr (right Alt) — distinct from `alt`. Set together with `alt`.
     pub altgr: bool,
     pub super_key: bool,
     pub caps_lock: bool,
@@ -30,8 +30,7 @@ impl Modifiers {
         }
     }
 
-    /// A "plain Alt" chord (left Alt only) — a shortcut modifier, as opposed to
-    /// AltGr which composes layout text.
+    /// Alt as a shortcut modifier rather than AltGr composing text.
     pub fn plain_alt(&self) -> bool {
         self.alt && !self.altgr
     }
@@ -52,10 +51,8 @@ pub enum WidgetEvent {
         x: i32,
         y: i32,
         button: PointerButton,
-        /// Modifier state at the press, as the last key event reported it.
-        /// The compositor sends no modifiers with a pointer event — Wayland
-        /// does not either — so this is the keyboard's most recent snapshot,
-        /// which is what a shift-click needs and all it needs.
+        /// The last key event's: the compositor sends none with a pointer
+        /// event, as Wayland does not.
         modifiers: Modifiers,
     },
     PointerUp {
@@ -67,23 +64,15 @@ pub enum WidgetEvent {
         x: i32,
         y: i32,
     },
-    PointerEnter,
-    PointerLeave,
     Scroll {
-        /// Where the pointer was. A wheel turn belongs to what is *under* the
-        /// pointer, and without the position it can only be offered to every
-        /// widget in turn until one consumes — which hands it to whatever the
-        /// container happens to visit first.
         x: i32,
         y: i32,
         delta_x: i32,
         delta_y: i32,
     },
-
     KeyDown {
         key: Key,
         modifiers: Modifiers,
-        repeat: bool,
     },
     KeyUp {
         key: Key,
@@ -92,39 +81,16 @@ pub enum WidgetEvent {
     TextInput {
         character: char,
     },
-
     FocusGained,
     FocusLost,
-
-    Configure {
-        width: u32,
-        height: u32,
-    },
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum EventPhase {
-    /// Root -> target (preview / intercept).
-    Tunnel,
-    /// The direct target widget.
-    Target,
-    /// Target -> root (bubbling).
-    Bubble,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum EventResponse {
-    /// Event not consumed, continue propagation.
     Ignored,
-    /// Event consumed, stop propagation.
     Consumed,
-    /// Capture all pointer events to this widget until release.
-    CapturePointer,
-    /// Release a previous pointer capture.
-    ReleasePointer,
     /// Not taken, and not to reach what is beneath: a modal layer's answer to
-    /// what none of its controls took. Such a key still reaches Tab and the
-    /// layer's default and cancel buttons.
+    /// what none of its controls took, which still reaches Tab and its footer.
     Blocked,
 }
 
@@ -134,55 +100,40 @@ impl EventResponse {
     }
 }
 
-pub struct HitTestResult {
-    /// The deepest widget containing the point.
-    pub target: WidgetId,
-    /// Ancestor chain from target to root (target first, root last).
-    pub chain: Vec<WidgetId>,
+/// The innermost focusable widget under `(x, y)`, through the topmost child
+/// at each level.
+pub(crate) fn control_at(widget: &dyn Widget, x: i32, y: i32) -> Option<&dyn Widget> {
+    if !widget.layout_rect().contains(x, y) {
+        return None;
+    }
+    let inner = widget
+        .children()
+        .iter()
+        .rev()
+        .find(|child| child.layout_rect().contains(x, y))
+        .and_then(|child| control_at(child.as_ref(), x, y));
+    inner.or_else(|| widget.focus_policy().is_focusable().then_some(widget))
 }
 
-/// Walks in reverse paint order, so the topmost child is tested first.
-pub fn hit_test(
-    root: &dyn super::traits::Widget,
-    point_x: i32,
-    point_y: i32,
-) -> Option<HitTestResult> {
-    let mut chain = Vec::new();
-    if hit_test_recursive(root, point_x, point_y, &mut chain) {
-        chain.reverse();
-        let target = chain[0];
-        Some(HitTestResult { target, chain })
-    } else {
-        None
+/// What the pointer at `(x, y)` lights: the first widget from the root down,
+/// through the topmost child under the point, that answers a hover part.
+pub(crate) fn lit_at(widget: &dyn Widget, x: i32, y: i32) -> Option<(WidgetId, usize)> {
+    if !widget.layout_rect().contains(x, y) {
+        return None;
     }
+    if let Some(part) = widget.hover_part(x, y) {
+        return Some((widget.id(), part));
+    }
+    let child = widget
+        .children()
+        .iter()
+        .rev()
+        .find(|child| child.layout_rect().contains(x, y))?;
+    lit_at(child.as_ref(), x, y)
 }
 
-fn hit_test_recursive(
-    widget: &dyn super::traits::Widget,
-    px: i32,
-    py: i32,
-    chain: &mut Vec<WidgetId>,
-) -> bool {
-    let rect = widget.layout_rect();
-    if !rect.contains(px, py) {
-        return false;
-    }
-
-    // Layout leaves every rect in absolute coordinates; no per-level conversion.
-    let children = widget.children();
-    for child in children.iter().rev() {
-        if hit_test_recursive(child.as_ref(), px, py, chain) {
-            chain.push(widget.id());
-            return true;
-        }
-    }
-
-    chain.push(widget.id());
-    true
-}
-
-/// Message queue widgets push to during event handling. Type-erased so the
-/// object-safe `Widget` trait need not know the application's message type.
+/// Type-erased, so the object-safe `Widget` need not know the app's message
+/// type.
 pub struct MessageSink {
     messages: Vec<Box<dyn std::any::Any>>,
 }
@@ -198,7 +149,7 @@ impl MessageSink {
         self.messages.push(msg);
     }
 
-    /// Drain all pending messages that match type `M`, leaving others in place.
+    /// The messages of type `M`, leaving the others.
     pub fn drain_typed<M: 'static>(&mut self) -> Vec<M> {
         let mut typed = Vec::new();
         let mut remaining = Vec::new();
@@ -228,9 +179,8 @@ impl Default for MessageSink {
 /// leaves the child it began in; anything else to each in turn until one
 /// takes it.
 pub(crate) fn route(
-    children: &mut [Box<dyn super::traits::Widget>],
+    children: &mut [Box<dyn Widget>],
     event: &WidgetEvent,
-    phase: EventPhase,
     sink: &mut MessageSink,
 ) -> EventResponse {
     let at = match event {
@@ -238,9 +188,8 @@ pub(crate) fn route(
         WidgetEvent::PointerMove { .. } | WidgetEvent::PointerUp { .. } => {
             let mut response = EventResponse::Ignored;
             for child in children {
-                let r = child.event(event, phase, sink);
-                if r.is_consumed() && response != EventResponse::CapturePointer {
-                    response = r;
+                if child.event(event, sink).is_consumed() {
+                    response = EventResponse::Consumed;
                 }
             }
             return response;
@@ -251,21 +200,10 @@ pub(crate) fn route(
         if at.is_some_and(|(x, y)| !child.layout_rect().contains(x, y)) {
             continue;
         }
-        let r = child.event(event, phase, sink);
+        let r = child.event(event, sink);
         if r.is_consumed() {
             return r;
         }
     }
     EventResponse::Ignored
-}
-
-/// Containers route to their own children, so the hit test result is only the
-/// framework's focus input and plays no part in routing.
-pub fn dispatch_event(
-    root: &mut dyn super::traits::Widget,
-    _hit: &HitTestResult,
-    event: &WidgetEvent,
-    sink: &mut MessageSink,
-) -> EventResponse {
-    root.event(event, EventPhase::Target, sink)
 }

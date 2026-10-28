@@ -1,9 +1,5 @@
-//! Every action the editor can take, named once.
-//!
-//! A command is the single spelling of an action: the menus list them, the
-//! palette searches them, the keymap resolves to them and `update` executes
-//! them. Adding a menu entry therefore cannot produce an action the palette
-//! cannot reach, and a shortcut cannot drift from the label that documents it.
+//! Every action the editor can take, named once for the menus, the palette and
+//! the keymap.
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Command {
@@ -49,11 +45,7 @@ pub enum Command {
 }
 
 impl Command {
-    /// Whether this command reads or reopens the prompt that is showing.
-    ///
-    /// Everything else closes a modal prompt first: a command acts wherever it
-    /// acts, and the question left open behind it is an overlay with a caret
-    /// nobody is driving.
+    /// Whether it reads or reopens the prompt showing; any other closes it.
     pub fn reads_prompt(&self) -> bool {
         matches!(
             self,
@@ -65,7 +57,6 @@ impl Command {
         )
     }
 
-    /// The palette's label for this command, and the menus'.
     pub fn label(&self) -> &'static str {
         match self {
             Command::NewFile => "New file",
@@ -103,12 +94,10 @@ impl Command {
             Command::ToggleLineNumbers => "Toggle line numbers",
             Command::RevealInSidebar => "Reveal in sidebar",
             Command::KeyboardShortcuts => "Keyboard shortcuts",
-            Command::About => "About Editor",
+            Command::About => concat!("About ", super::said::name!()),
         }
     }
 
-    /// The chord shown beside the label. One table, so the menu, the palette and
-    /// the keymap cannot disagree about what a shortcut is.
     pub fn shortcut(&self) -> Option<&'static str> {
         Some(match self {
             Command::NewFile => "Ctrl+N",
@@ -234,7 +223,7 @@ pub const MENUS: &[MenuDef] = &[
     },
 ];
 
-/// Commands the palette offers, in the order it lists them unfiltered.
+/// In the order the palette lists them unfiltered.
 pub const PALETTE_COMMANDS: &[Command] = &[
     Command::Save,
     Command::SaveAs,
@@ -273,7 +262,6 @@ pub const PALETTE_COMMANDS: &[Command] = &[
     Command::Quit,
 ];
 
-/// The command a menu item resolves to: `(menu, item)` indexes the tables above.
 pub fn menu_command(menu: usize, item: usize) -> Option<Command> {
     match MENUS.get(menu)?.entries.get(item)? {
         MenuEntry::Item(command) => Some(*command),

@@ -1,36 +1,31 @@
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_gfx::DrawBuffer;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
-
-use slopos_theme_core::{Icon, TextRole, Theme, radius};
+use slopos_gfx::rounded::Rounded;
+use slopos_theme_core::{Icon, TextRole, Theme, radius, stroke};
 
 use super::audit::{Mark, TextRun};
 use super::constraints::Rect;
+use super::focus::RING_REACH;
 use super::style::StyleSheet;
-use super::text::BODY;
+use super::text::ui;
 use super::traits::WidgetId;
 
-/// Paint target handed to each widget; the framework sets the clip rect before
-/// calling `paint()`, and widgets may only paint within it.
+/// What a widget paints into; it paints only within `clip`, in window
+/// coordinates.
 pub struct PaintContext<'a, 'b> {
     pub buffer: &'a mut DrawBuffer<'b>,
-    /// Window coordinates.
     pub clip: Rect,
     /// The clip less every viewport's: an edge that cuts text short.
     fixed: Rect,
     viewport: Option<Rect>,
+    /// What every viewport around shows, whatever part of it is repainted.
+    shown: Rect,
     layer: WidgetId,
-    /// Accumulated over all ancestor ScrollViews.
-    pub scroll_offset_x: i32,
-    pub scroll_offset_y: i32,
     pub focus_visible: bool,
-    /// Where the pointer is, in window coordinates.
-    ///
-    /// Hover is derived from this at paint time rather than remembered: the
-    /// widget tree is rebuilt on every message, so a stored hover flag is gone
-    /// by the next frame — which makes a widget draw one thing and hit-test
-    /// another.
-    pub pointer: (i32, i32),
+    /// The widget and part the pointer lights, which every widget paints its
+    /// hover from: it is rebuilt between messages and keeps none.
+    pub hovered: Option<(WidgetId, usize)>,
     pub style: &'a StyleSheet,
     /// Every line of text drawn, for [`crate::audit`].
     runs: Option<&'a mut Vec<TextRun>>,
@@ -45,11 +40,10 @@ impl<'a, 'b> PaintContext<'a, 'b> {
             clip: Rect::new(0, 0, w, h),
             fixed: Rect::new(0, 0, w, h),
             viewport: None,
+            shown: Rect::new(0, 0, w, h),
             layer: WidgetId::NONE,
-            scroll_offset_x: 0,
-            scroll_offset_y: 0,
             focus_visible: false,
-            pointer: (-1, -1),
+            hovered: None,
             style,
             runs: None,
         }
@@ -82,7 +76,7 @@ impl<'a, 'b> PaintContext<'a, 'b> {
         }
     }
 
-    /// Draw a 1px outline rectangle.
+    /// A 1 px outline.
     pub fn draw_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: Color32) {
         self.fill_rect(x, y, w, 1, color);
         self.fill_rect(x, y + h - 1, w, 1, color);
@@ -90,59 +84,48 @@ impl<'a, 'b> PaintContext<'a, 'b> {
         self.fill_rect(x + w - 1, y + 1, 1, h - 2, color);
     }
 
-    pub fn fill_rounded_rect(
-        &mut self,
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-        radius: i32,
-        color: Color32,
-    ) {
+    /// Blended, so a translucent `color` washes over what is there.
+    pub fn fill_rounded_rect(&mut self, rect: Rect, radius: i32, color: Color32) {
         let clip = self.clip.to_damage_rect();
-        self.buffer.with_scissor(clip, |b| {
-            slopos_gfx::canvas_ops::rounded_rect_filled(b, x, y, w, h, radius, color);
-        });
+        let shape = Rounded::new(rect.x, rect.y, rect.width, rect.height, radius);
+        shape.draw(self.buffer, &clip, color);
     }
 
-    pub fn draw_rounded_rect(
-        &mut self,
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-        radius: i32,
-        color: Color32,
-    ) {
+    /// An outline `width` thick inside `rect`, with rounded corners.
+    pub fn draw_rounded_rect(&mut self, rect: Rect, radius: i32, width: i32, color: Color32) {
         let clip = self.clip.to_damage_rect();
-        self.buffer.with_scissor(clip, |b| {
-            slopos_gfx::canvas_ops::rounded_rect(b, x, y, w, h, radius, color);
-        });
+        let outline = Rounded::new(rect.x, rect.y, rect.width, rect.height, radius);
+        outline.stroke(self.buffer, width, &clip, color);
     }
 
-    /// `wash`, translucent, laid over what `rect` holds, with rounded corners.
-    pub fn fill_rounded_wash(&mut self, rect: Rect, radius: i32, wash: Color32) {
-        let under = self.sample_under(rect);
-        let fill = slopos_theme_core::contrast::over(wash, under);
-        self.fill_rounded_rect(rect.x, rect.y, rect.width, rect.height, radius, fill);
+    pub fn fill_circle(&mut self, x: i32, y: i32, diameter: i32, color: Color32) {
+        let clip = self.clip.to_damage_rect();
+        Rounded::circle(x, y, diameter).draw(self.buffer, &clip, color);
     }
 
-    /// Body text with its line box's top-left at `(x, y)`.
-    pub fn draw_text(&mut self, x: i32, y: i32, text: &str, fg: Color32, bg: Color32) {
-        self.text_line(x, y, text, TextRole::Body, fg, bg, false);
+    /// The theme's raised shadow under the `rect` rounded at `radius`, which
+    /// something opaque then covers.
+    pub fn draw_shadow(&mut self, rect: Rect, radius: i32) {
+        let shadow = self.theme().shadow_raised;
+        let caster = Rounded::new(
+            rect.x,
+            rect.y + shadow.offset_y,
+            rect.width,
+            rect.height,
+            radius,
+        );
+        let clip = self.clip.to_damage_rect();
+        let under = Rounded::new(rect.x, rect.y, rect.width, rect.height, radius).bands()[1];
+        caster.draw_shadow(self.buffer, shadow.spread, &clip, &under, shadow.color);
     }
 
-    pub fn draw_text_transparent(&mut self, x: i32, y: i32, text: &str, fg: Color32) {
-        self.draw_text(x, y, text, fg, Color32::TRANSPARENT);
+    /// `text` in `role` with its line's top-left at `(x, y)`.
+    pub fn draw_text(&mut self, x: i32, y: i32, text: &str, role: TextRole, fg: Color32) {
+        self.text_line(x, y, text, role, fg, Mark::Whole);
     }
 
-    /// Text in `role`, composited over what is there.
-    pub fn draw_text_in(&mut self, x: i32, y: i32, text: &str, role: TextRole, fg: Color32) {
-        self.text_line(x, y, text, role, fg, Color32::TRANSPARENT, false);
-    }
-
-    /// Text in `role` cut short to `max_w` with an ellipsis; answers whether
-    /// it was cut.
+    /// `text` in `role` cut short to `max_w` with an ellipsis; answers whether
+    /// it was cut, which a tooltip then shows whole.
     pub fn draw_text_fitted(
         &mut self,
         x: i32,
@@ -152,16 +135,44 @@ impl<'a, 'b> PaintContext<'a, 'b> {
         max_w: i32,
         fg: Color32,
     ) -> bool {
-        match crate::text::ui::role_elide_end(text, role, max_w) {
+        if self.runs.is_some() {
+            match ui::elide_end(text, role, max_w) {
+                (kept, false) if kept.len() == text.len() => {
+                    self.note_line(x, y, text, role, fg, Mark::Whole)
+                }
+                (kept, true) => {
+                    let after = x + ui::width(kept, role);
+                    self.note_line(x, y, kept, role, fg, Mark::Elided);
+                    self.note_line(after, y, ui::ELLIPSIS, role, fg, Mark::Elided);
+                }
+                _ => self.note_line(x, y, text, role, fg, Mark::Dropped),
+            }
+        }
+        let dr = self.clip.to_damage_rect();
+        let bg = Color32::TRANSPARENT;
+        ui::draw_elided(self.buffer, x, y, text, role, max_w, fg, bg, &dr)
+    }
+
+    /// [`Self::draw_text_fitted`] cut from the start, keeping the end, as a
+    /// file name's end tells it apart.
+    pub fn draw_text_tail(
+        &mut self,
+        x: i32,
+        y: i32,
+        text: &str,
+        role: TextRole,
+        max_w: i32,
+        fg: Color32,
+    ) -> bool {
+        match ui::elide_start(text, role, max_w) {
             (kept, false) if kept.len() == text.len() => {
-                self.text_line(x, y, text, role, fg, Color32::TRANSPARENT, false);
+                self.text_line(x, y, text, role, fg, Mark::Whole);
                 false
             }
             (kept, true) => {
-                let after = x + crate::text::ui::role_width(kept, role);
-                self.text_line(x, y, kept, role, fg, Color32::TRANSPARENT, true);
-                let ellipsis = crate::text::ui::ELLIPSIS;
-                self.text_line(after, y, ellipsis, role, fg, Color32::TRANSPARENT, true);
+                let after = x + ui::width(ui::ELLIPSIS, role);
+                self.text_line(x, y, ui::ELLIPSIS, role, fg, Mark::Elided);
+                self.text_line(after, y, kept, role, fg, Mark::Elided);
                 true
             }
             _ => {
@@ -171,47 +182,10 @@ impl<'a, 'b> PaintContext<'a, 'b> {
         }
     }
 
-    /// Fixed-cell text, for content whose columns must line up (code, hex,
-    /// tabular numbers).
-    pub fn draw_mono_text(&mut self, x: i32, y: i32, text: &str, fg: Color32, bg: Color32) {
-        if self.runs.is_some() {
-            let (width, height) = (crate::text::string_width(text), crate::text::cell_height());
-            let under = self.sample_under(Rect::new(x, y, width, height));
-            self.note(TextRun {
-                x,
-                top: y,
-                baseline: y + height * 4 / 5,
-                width,
-                height,
-                text: String::from(text),
-                fg,
-                bg: under,
-                clip: self.clip,
-                fixed: self.fixed,
-                viewport: self.viewport,
-                layer: self.layer,
-                mark: Mark::Whole,
-            });
-        }
-        let dr = self.clip.to_damage_rect();
-        crate::text::draw_str_clipped(self.buffer, x, y, text, fg, bg, &dr);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn text_line(
-        &mut self,
-        x: i32,
-        y: i32,
-        text: &str,
-        role: TextRole,
-        fg: Color32,
-        bg: Color32,
-        elided: bool,
-    ) {
-        let mark = if elided { Mark::Elided } else { Mark::Whole };
+    fn text_line(&mut self, x: i32, y: i32, text: &str, role: TextRole, fg: Color32, mark: Mark) {
         self.note_line(x, y, text, role, fg, mark);
         let dr = self.clip.to_damage_rect();
-        crate::text::ui::draw_role(self.buffer, x, y, text, role, fg, bg, &dr);
+        ui::draw(self.buffer, x, y, text, role, fg, Color32::TRANSPARENT, &dr);
     }
 
     /// Notes a line for the audit, with the colour most of its box holds.
@@ -219,13 +193,13 @@ impl<'a, 'b> PaintContext<'a, 'b> {
         if self.runs.is_none() || text.trim().is_empty() {
             return;
         }
-        let height = crate::text::ui::role_line_height(role);
-        let width = crate::text::ui::role_width(text, role);
+        let height = ui::font_height(role);
+        let width = ui::width(text, role);
         let under = self.sample_under(Rect::new(x, y, width, height));
         self.note(TextRun {
             x,
             top: y,
-            baseline: y + crate::text::ui::role_ascent(role),
+            baseline: y + ui::ascent(role),
             width,
             height,
             text: String::from(text),
@@ -268,63 +242,45 @@ impl<'a, 'b> PaintContext<'a, 'b> {
             .map_or(Color32::TRANSPARENT, |(raw, _)| format.decode(*raw))
     }
 
-    pub fn text_width(&self, text: &str) -> i32 {
-        crate::text::ui::width(text, BODY.size)
-    }
-
-    /// The font's own line height for body text, less than [`BODY`]'s box.
-    pub fn text_height(&self) -> i32 {
-        crate::text::ui::line_height(BODY.size)
-    }
-
-    /// See [`MeasureCtx::baseline_in`](crate::traits::MeasureCtx::baseline_in).
-    pub fn baseline_in(&self, height: i32) -> i32 {
-        crate::text::ui::baseline_in(height, BODY.size)
-    }
-
     /// `icon` in the `size × size` box at `(x, y)`.
     pub fn draw_icon(&mut self, icon: Icon, x: i32, y: i32, size: i32, color: Color32) {
         let dr = self.clip.to_damage_rect();
-        crate::text::icons::draw_clipped(self.buffer, x, y, icon, size, color, &dr);
+        super::text::icons::draw_clipped(self.buffer, x, y, icon, size, color, &dr);
     }
 
     pub fn theme(&self) -> &'static Theme {
         self.style.theme
     }
 
-    pub fn mono_cell_width(&self) -> i32 {
-        crate::text::cell_width()
+    /// The part of widget `id` the pointer lights, as its
+    /// [`Widget::hover_part`](crate::traits::Widget::hover_part) answered.
+    pub fn lit(&self, id: WidgetId) -> Option<usize> {
+        self.hovered
+            .filter(|&(at, _)| at == id)
+            .map(|(_, part)| part)
     }
 
-    pub fn mono_cell_height(&self) -> i32 {
-        crate::text::cell_height()
-    }
-
-    /// A rounded ring just outside `rect`; a no-op unless focus is visible.
+    /// A rounded ring just outside `rect`, while focus is visible.
     pub fn draw_focus_ring(&mut self, rect: Rect) {
         if !self.focus_visible {
             return;
         }
-        let color = self.style.theme.focus;
-        let offset = self.style.focus_ring_offset;
-        for i in 0..self.style.focus_ring_width {
-            let out = offset + i + 1;
-            self.draw_rounded_rect(
-                rect.x - out,
-                rect.y - out,
-                rect.width + out * 2,
-                rect.height + out * 2,
-                radius::CONTROL + out,
-                color,
-            );
-        }
+        let ring = rect.inflate(RING_REACH);
+        let clip = self.clip.to_damage_rect();
+        let outline = Rounded::new(
+            ring.x,
+            ring.y,
+            ring.width,
+            ring.height,
+            radius::CONTROL + RING_REACH,
+        );
+        outline.stroke(self.buffer, stroke::FOCUS, &clip, self.style.theme.focus);
     }
 
     /// [`Self::draw_focus_ring`] inside `rect`, for a view whose edges meet
     /// its neighbours' or the window's.
     pub fn draw_inner_focus_ring(&mut self, rect: Rect) {
-        let reach = self.style.focus_ring_offset + self.style.focus_ring_width;
-        self.draw_focus_ring(rect.inflate(-reach));
+        self.draw_focus_ring(rect.inflate(-RING_REACH));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -342,7 +298,7 @@ impl<'a, 'b> PaintContext<'a, 'b> {
         slopos_gfx::image::draw_image_clipped(self.buffer, bitmap, x, y, w, h, fit, sampling, &dr);
     }
 
-    /// Run `f` with the clip rect intersected against `new_clip`.
+    /// Runs `f` with the clip narrowed to `new_clip`.
     pub fn with_clip<F: FnOnce(&mut PaintContext<'_, '_>)>(&mut self, new_clip: Rect, f: F) {
         let (old_clip, old_fixed) = (self.clip, self.fixed);
         self.clip = self.clip.intersect(&new_clip).unwrap_or(Rect::ZERO);
@@ -351,42 +307,31 @@ impl<'a, 'b> PaintContext<'a, 'b> {
         (self.clip, self.fixed) = (old_clip, old_fixed);
     }
 
-    /// Run `f` clipped to `rect`, a view onto content that goes on past it,
+    /// Runs `f` clipped to `rect`, a view onto content that goes on past it,
     /// as a scroll view's or a field's: what its edge cuts is not cut short.
     pub fn with_viewport<F: FnOnce(&mut PaintContext<'_, '_>)>(&mut self, rect: Rect, f: F) {
         let (old_clip, old_fixed, old_viewport) = (self.clip, self.fixed, self.viewport);
+        let old_shown = self.shown;
         self.clip = self.clip.intersect(&rect).unwrap_or(Rect::ZERO);
         self.fixed = Rect::new(i32::MIN / 4, i32::MIN / 4, i32::MAX / 2, i32::MAX / 2);
         self.viewport = Some(rect);
+        self.shown = self.shown.intersect(&rect).unwrap_or(Rect::ZERO);
         f(self);
         (self.clip, self.fixed, self.viewport) = (old_clip, old_fixed, old_viewport);
+        self.shown = old_shown;
     }
 
-    /// Run `f` as the layer `root` paints over what was painted before,
+    /// Whether every viewport around what is painting shows all of `rect`.
+    pub(crate) fn shows(&self, rect: Rect) -> bool {
+        self.shown.intersect(&rect) == Some(rect)
+    }
+
+    /// Runs `f` as the layer `root` paints over what was painted before,
     /// which its text may lie over.
     pub fn with_layer<F: FnOnce(&mut PaintContext<'_, '_>)>(&mut self, root: WidgetId, f: F) {
         let old = self.layer;
         self.layer = root;
         f(self);
         self.layer = old;
-    }
-
-    pub fn with_scroll_offset<F: FnOnce(&mut PaintContext<'_, '_>)>(
-        &mut self,
-        dx: i32,
-        dy: i32,
-        f: F,
-    ) {
-        let old_x = self.scroll_offset_x;
-        let old_y = self.scroll_offset_y;
-        self.scroll_offset_x += dx;
-        self.scroll_offset_y += dy;
-        f(self);
-        self.scroll_offset_x = old_x;
-        self.scroll_offset_y = old_y;
-    }
-
-    pub fn is_focus_visible(&self) -> bool {
-        self.focus_visible
     }
 }

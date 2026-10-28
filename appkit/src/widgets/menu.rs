@@ -1,24 +1,28 @@
 use std::any::Any;
+use std::cell::Cell;
+use std::hash::{Hash, Hasher};
 
-use slopos_theme_core::{radius, space};
+use slopos_theme_core::{TextRole, radius, space};
 
-use crate::constraints::{BoxConstraints, Size};
-use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
+use super::RowState;
+use crate::constraints::{BoxConstraints, Rect, Size};
+use crate::event::{EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
 use crate::node::{MenuItem, MenuItemKind};
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
+use crate::text::ui;
+use crate::traits::{FocusPolicy, Kept, KeptAt, MeasureCtx, Role, Widget, WidgetCore};
 
-/// Renders items and handles navigation; positioning is the enclosing
-/// `PopupWidget`'s job.
+const PAD: i32 = space::MD;
+
+/// A menu's items, which an enclosing [`super::popup::PopupWidget`] places.
 pub struct MenuWidget {
     core: WidgetCore,
     items: Vec<MenuItem>,
     on_action: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
-    hovered_index: Option<usize>,
+    cursor: Option<usize>,
     focused: bool,
-    /// Item height from the last measure; hit testing must use the same value
-    /// paint did, or clicks land on the neighbouring row.
     item_height: i32,
+    cut: Vec<Cell<bool>>,
 }
 
 impl MenuWidget {
@@ -28,73 +32,41 @@ impl MenuWidget {
     ) -> Self {
         Self {
             core: WidgetCore::new(),
+            cut: items.iter().map(|_| Cell::new(false)).collect(),
             items,
             on_action,
-            hovered_index: None,
+            cursor: None,
             focused: false,
             item_height: 0,
         }
     }
 
-    /// Index of the item at window-space `(x, y)`, or `None` outside the menu.
-    ///
-    /// The horizontal test is not redundant: an enclosing popup forwards every
-    /// pointer move to its child whatever its position, so a `y`-only test
-    /// highlights whichever row the pointer is *level* with while the pointer
-    /// is somewhere else entirely.
     fn item_at(&self, x: i32, y: i32) -> Option<usize> {
-        if self.item_height <= 0 {
-            return None;
-        }
         let rect = self.layout_rect();
-        if !rect.contains(x, y) {
+        if self.item_height <= 0 || !rect.contains(x, y) {
             return None;
         }
-        let rel_y = y - rect.y;
-        let idx = (rel_y / self.item_height) as usize;
-        (idx < self.items.len()).then_some(idx)
+        let at = ((y - rect.y) / self.item_height) as usize;
+        (at < self.items.len()).then_some(at)
     }
 
-    fn is_activatable(&self, idx: usize) -> bool {
+    fn item_rect(&self, at: usize) -> Rect {
+        let rect = self.layout_rect();
+        let y = rect.y + at as i32 * self.item_height;
+        Rect::new(rect.x, y, rect.width, self.item_height)
+    }
+
+    fn actionable(&self, at: usize) -> bool {
         self.items
-            .get(idx)
+            .get(at)
             .is_some_and(|i| matches!(i.kind, MenuItemKind::Action) && i.enabled)
     }
 
-    /// Next non-separator, enabled item, wrapping around.
-    fn next_actionable(&self, from: Option<usize>, forward: bool) -> Option<usize> {
-        if self.items.is_empty() {
-            return None;
+    fn choose(&self, at: usize, sink: &mut MessageSink) -> EventResponse {
+        if let Some(cb) = &self.on_action {
+            sink.emit_raw(cb(at));
         }
-        let len = self.items.len();
-        let start = match from {
-            Some(idx) => {
-                if forward {
-                    (idx + 1) % len
-                } else {
-                    (idx + len - 1) % len
-                }
-            }
-            None => {
-                if forward {
-                    0
-                } else {
-                    len - 1
-                }
-            }
-        };
-
-        for offset in 0..len {
-            let idx = if forward {
-                (start + offset) % len
-            } else {
-                (start + len - offset) % len
-            };
-            if self.is_activatable(idx) {
-                return Some(idx);
-            }
-        }
-        None
+        EventResponse::Consumed
     }
 }
 
@@ -107,179 +79,105 @@ impl Widget for MenuWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let item_h = ctx.style.menu_item_height;
-        self.item_height = item_h;
-        let padding_h = space::MD;
-
-        let mut max_label_w = 0i32;
-        let mut max_shortcut_w = 0i32;
-
-        for item in &self.items {
-            match &item.kind {
-                MenuItemKind::Action | MenuItemKind::Submenu(_) => {
-                    let lw = ctx.text_width(item.label);
-                    max_label_w = max_label_w.max(lw);
-                    if let Some(sc) = item.shortcut {
-                        let sw = ctx.text_width(sc);
-                        max_shortcut_w = max_shortcut_w.max(sw);
-                    }
-                }
-                MenuItemKind::Separator => {}
-            }
-        }
-
-        let shortcut_gap = if max_shortcut_w > 0 { space::LG } else { 0 };
-        let w = (padding_h * 2 + max_label_w + shortcut_gap + max_shortcut_w)
-            .max(ctx.style.menu_min_width);
-        let h = self.items.len() as i32 * item_h;
-
+        self.item_height = ctx.style.menu_item_height;
+        let actions = self
+            .items
+            .iter()
+            .filter(|item| matches!(item.kind, MenuItemKind::Action));
+        let label_w = actions
+            .clone()
+            .map(|item| ui::width(item.label, TextRole::Body))
+            .max()
+            .unwrap_or(0);
+        let shortcut_w = actions
+            .filter_map(|item| item.shortcut)
+            .map(|sc| ui::width(sc, TextRole::Body))
+            .max()
+            .unwrap_or(0);
+        let gap = if shortcut_w > 0 { space::LG } else { 0 };
+        let w = (PAD * 2 + label_w + gap + shortcut_w).max(ctx.style.menu_min_width);
+        let h = self.items.len() as i32 * self.item_height;
         constraints.constrain(Size::new(w, h))
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
-        let item_h = self.item_height;
-        let padding_h = space::MD;
-        let radius = radius::CONTROL;
         let theme = ctx.theme();
-
-        super::card::draw_shadow(ctx, rect);
-        ctx.fill_rounded_rect(
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            radius,
-            theme.surface_raised,
-        );
-        ctx.draw_rounded_rect(
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            radius,
-            theme.border,
-        );
-
-        let text_h = ctx.text_height();
+        super::card::Frame::raised(radius::CONTROL).paint(ctx, rect);
 
         for (i, item) in self.items.iter().enumerate() {
-            let y = rect.y + i as i32 * item_h;
-
-            match &item.kind {
-                MenuItemKind::Separator => {
-                    let line_y = y + item_h / 2;
-                    ctx.fill_rect(
-                        rect.x + padding_h,
-                        line_y,
-                        rect.width - padding_h * 2,
-                        1,
-                        theme.border,
-                    );
-                }
-                MenuItemKind::Action | MenuItemKind::Submenu(_) => {
-                    if self.hovered_index == Some(i) && item.enabled {
-                        ctx.fill_rect(rect.x + 1, y, rect.width - 2, item_h, theme.accent);
-                    }
-
-                    let fg = if !item.enabled {
-                        theme.text_disabled
-                    } else if self.hovered_index == Some(i) {
-                        theme.text_on_accent
-                    } else {
-                        theme.text
-                    };
-
-                    let label_x = rect.x + padding_h;
-                    let label_y = y + (item_h - text_h) / 2;
-                    ctx.draw_text_transparent(label_x, label_y, item.label, fg);
-
-                    if let Some(sc) = item.shortcut {
-                        let sc_w = ctx.text_width(sc);
-                        let sc_x = rect.x + rect.width - padding_h - sc_w;
-                        let sc_fg = if self.hovered_index == Some(i) && item.enabled {
-                            theme.text_on_accent
-                        } else {
-                            theme.text_secondary
-                        };
-                        ctx.draw_text_transparent(sc_x, label_y, sc, sc_fg);
-                    }
-                }
+            let row = self.item_rect(i);
+            if let MenuItemKind::Separator = item.kind {
+                let mid = row.y + row.height / 2;
+                ctx.fill_rect(row.x + PAD, mid, row.width - PAD * 2, 1, theme.border);
+                continue;
             }
+            let state = RowState {
+                hovered: ctx.lit(self.id()) == Some(i),
+                focused: self.focused,
+                cursor: self.cursor == Some(i),
+                ..RowState::default()
+            };
+            super::paint_row(ctx, row, state);
+            let (ink, quiet) = match item.enabled {
+                true => (theme.text, theme.text_secondary),
+                false => (theme.text_disabled, theme.text_disabled),
+            };
+            let text_y = ui::centred_top(row.y, row.height, TextRole::Body);
+            let mut room = row.width - PAD * 2;
+            if let Some(sc) = item.shortcut {
+                let sc_w = ui::width(sc, TextRole::Body);
+                let sc_x = row.x + row.width - PAD - sc_w;
+                ctx.draw_text(sc_x, text_y, sc, TextRole::Body, quiet);
+                room -= sc_w + space::LG;
+            }
+            let cut =
+                ctx.draw_text_fitted(row.x + PAD, text_y, item.label, TextRole::Body, room, ink);
+            self.cut[i].set(cut);
+        }
+        if self.focused && self.cursor.is_none() {
+            ctx.draw_inner_focus_ring(rect);
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        if phase != EventPhase::Target && phase != EventPhase::Bubble {
-            return EventResponse::Ignored;
-        }
-
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
         match event {
-            WidgetEvent::PointerMove { x, y } => {
-                let hovered = self.item_at(*x, *y).filter(|&idx| self.is_activatable(idx));
-                let changed = hovered != self.hovered_index;
-                self.hovered_index = hovered;
-                if changed {
-                    EventResponse::Consumed
-                } else {
-                    EventResponse::Ignored
+            WidgetEvent::PointerDown { x, y, .. } => {
+                match self.item_at(*x, *y).filter(|&at| self.actionable(at)) {
+                    Some(at) => self.choose(at, sink),
+                    None => EventResponse::Ignored,
                 }
             }
-
-            WidgetEvent::PointerDown { x, y, .. } => {
-                if !self.layout_rect().contains(*x, *y) {
-                    return EventResponse::Ignored;
-                }
-                let Some(idx) = self.item_at(*x, *y).filter(|&i| self.is_activatable(i)) else {
-                    return EventResponse::Ignored;
+            WidgetEvent::KeyDown { key, .. } if self.focused => {
+                let len = self.items.len();
+                let next = |from, forward| {
+                    super::next_enabled(len, from, forward, |at| self.actionable(at))
                 };
-                if let Some(cb) = &self.on_action {
-                    sink.emit_raw(cb(idx));
-                }
+                let cursor = match key {
+                    Key::Named(NamedKey::Up) => next(self.cursor, false),
+                    Key::Named(NamedKey::Down) => next(self.cursor, true),
+                    Key::Named(NamedKey::Home) => next(None, true),
+                    Key::Named(NamedKey::End) => next(None, false),
+                    Key::Named(NamedKey::Enter | NamedKey::Space) => {
+                        return match self.cursor.filter(|&at| self.actionable(at)) {
+                            Some(at) => self.choose(at, sink),
+                            None => EventResponse::Ignored,
+                        };
+                    }
+                    _ => return EventResponse::Ignored,
+                };
+                self.cursor = cursor.or(self.cursor);
                 EventResponse::Consumed
             }
-
-            // The popup forwards keys whatever the pointer is doing, so an
-            // unguarded Enter runs whichever row it is level with.
-            WidgetEvent::KeyDown { key, .. } if self.focused => match key {
-                Key::Named(NamedKey::Up) => {
-                    self.hovered_index = self.next_actionable(self.hovered_index, false);
-                    EventResponse::Consumed
-                }
-                Key::Named(NamedKey::Down) => {
-                    self.hovered_index = self.next_actionable(self.hovered_index, true);
-                    EventResponse::Consumed
-                }
-                Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
-                    let Some(idx) = self.hovered_index.filter(|&i| self.is_activatable(i)) else {
-                        return EventResponse::Ignored;
-                    };
-                    if let Some(cb) = &self.on_action {
-                        sink.emit_raw(cb(idx));
-                    }
-                    EventResponse::Consumed
-                }
-                Key::Named(NamedKey::Escape) => EventResponse::Ignored,
-                _ => EventResponse::Ignored,
-            },
-
-            // Focus does not move the highlight: a press on a separator would
-            // otherwise light a row the pointer is nowhere near.
             WidgetEvent::FocusGained => {
                 self.focused = true;
                 EventResponse::Ignored
             }
             WidgetEvent::FocusLost => {
                 self.focused = false;
-                self.hovered_index = None;
+                self.cursor = None;
                 EventResponse::Ignored
             }
-
             _ => EventResponse::Ignored,
         }
     }
@@ -290,5 +188,38 @@ impl Widget for MenuWidget {
 
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::StrongFocus
+    }
+
+    fn focus_rect(&self) -> Rect {
+        match self.cursor {
+            Some(at) => self.item_rect(at),
+            None => self.layout_rect(),
+        }
+    }
+
+    fn hover_part(&self, x: i32, y: i32) -> Option<usize> {
+        self.item_at(x, y).filter(|&at| self.actionable(at))
+    }
+
+    fn tooltip(&self, x: i32, y: i32) -> Option<&str> {
+        let at = self.item_at(x, y)?;
+        self.cut[at].get().then_some(self.items[at].label)
+    }
+
+    fn kept(&self) -> Option<Kept> {
+        let mut shows = std::hash::DefaultHasher::new();
+        for item in &self.items {
+            item.label.hash(&mut shows);
+        }
+        Some(Kept {
+            shows: shows.finish(),
+            at: KeptAt::Cursor(self.cursor),
+        })
+    }
+
+    fn keep(&mut self, at: KeptAt) {
+        if let KeptAt::Cursor(cursor) = at {
+            self.cursor = cursor.filter(|&at| self.actionable(at));
+        }
     }
 }

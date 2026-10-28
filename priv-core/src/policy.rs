@@ -24,19 +24,19 @@
 //! or `password`, `admin` takes `confirm` or `password`, and no level runs
 //! the request unasked. A level asks only a person whose session can be
 //! reached: its desktop in front and unlocked, or its terminal. `greeter`
-//! takes `alone`, which runs it while nobody is logged in. A person no line matches is answered by an
-//! administrator's password when an `admin` line stands, which `user alone`
-//! becomes while another person is logged in. With `cwd` the mechanism runs
-//! in the directory the request must send, and without it in `/`;
-//! `exclusive` lets one mechanism of its group run at a time, the group being
-//! the action's name unless one is given; `keep` keeps an answer for that
-//! many seconds for the same session, parent process, command line and
-//! directory. An action marked `medium` exists only on a boot of the install
-//! medium.
+//! takes `alone`, which runs it while nobody is logged in. A person no line
+//! matches is answered by an administrator's password when an `admin` line
+//! stands, which `user alone` becomes while another person is logged in.
+//! With `cwd` the mechanism runs in the directory the request must send, and
+//! without it in `/`; `exclusive` lets one mechanism of its group run at a
+//! time, the group being the action's name unless one is given; `keep` keeps
+//! an answer for that many seconds for the same session, parent process,
+//! command line and directory. An action marked `medium` exists only on a
+//! boot of the install medium.
 //!
 //! `uid requester` runs the mechanism as whoever asked, in their own groups
 //! and login session, which only `root`, `user` and `admin` may be, holding
-//! no more than [`REQUESTER_CEILING`](crate::REQUESTER_CEILING).
+//! no more than [`REQUESTER_CEILING`].
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -77,13 +77,10 @@ pub struct Action {
     pub destructive: bool,
     pub cwd: bool,
     pub exclusive: Option<String>,
-    /// Seconds an answer is kept for the same session, parent process,
-    /// command line and directory.
     pub keep: Option<u32>,
     pub medium: bool,
 }
 
-/// Whom a mechanism runs as.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RunsAs {
     /// uid 0 for the base's actions, an extension's first user for its own.
@@ -134,9 +131,7 @@ pub enum Level {
     /// Nothing while nobody else is logged in; otherwise as `admin`. For the
     /// greeter, nothing while nobody is logged in, and refused otherwise.
     Alone,
-    /// Click Allow.
     Confirm,
-    /// Type their password.
     Password,
 }
 
@@ -157,11 +152,12 @@ impl fmt::Display for PolicyError {
 pub enum Reach {
     /// Their session's desktop is in front and unlocked, and asks in its
     /// dialog; `theirs` when it is their own session's.
-    Screen { theirs: bool },
+    Screen {
+        theirs: bool,
+    },
     /// Their session is a terminal's, where the requester itself asks for
     /// the person's own password.
     Terminal,
-    /// No question reaches them.
     Nowhere,
 }
 
@@ -201,7 +197,6 @@ impl<'a> Requester<'a> {
         }
     }
 
-    /// The requester, asked where `reach` says.
     pub fn reached(self, reach: Reach) -> Self {
         Self { reach, ..self }
     }
@@ -222,14 +217,11 @@ impl<'a> Requester<'a> {
         }
     }
 
-    /// The person the requester is, when `people` knows them and the
-    /// requester is no paired agent.
     fn person<'p>(&self, people: &'p People) -> Option<&'p Person> {
         people.person(self.uid).filter(|_| !self.paired)
     }
 }
 
-/// A person as privd judges their requests.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Person {
     pub uid: u32,
@@ -418,12 +410,8 @@ impl Action {
         })
     }
 
-    /// What the allowing button says: one the words take, else theirs.
     pub fn verb(&self) -> &str {
-        self.verb
-            .as_deref()
-            .filter(|verb| words::verb(verb).is_ok())
-            .unwrap_or(words::VERB)
+        self.verb.as_deref().unwrap_or(words::VERB)
     }
 
     /// The group whose mechanisms run one at a time, if the action has one.
@@ -433,7 +421,6 @@ impl Action {
 }
 
 impl Shape {
-    /// An `args` line's words: fixed ones, then `*` for any further ones.
     pub fn parse(rest: &str) -> Result<Shape, &'static str> {
         let mut shape = Shape {
             words: Vec::new(),
@@ -470,48 +457,8 @@ impl Shape {
     }
 }
 
-/// How a policy is read: as privd holds its own base's, or as a requester
-/// reads whatever base is current, which may be another's than its own.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Reading {
-    /// Every setting known and what the person reads held to
-    /// [`crate::words`].
-    Held,
-    /// A setting this reader does not know passed over, and the words as
-    /// they stand.
-    Lenient,
-}
-
-const SETTINGS: [&str; 13] = [
-    "program",
-    "args",
-    "caps",
-    "uid",
-    "allow",
-    "keep",
-    "describe",
-    "detail",
-    "verb",
-    "destructive",
-    "cwd",
-    "medium",
-    "exclusive",
-];
-
 impl Policy {
-    /// `text` as privd holds its own base's policy.
     pub fn parse(text: &str) -> Result<Policy, PolicyError> {
-        Self::parse_as(text, Reading::Held)
-    }
-
-    /// `text` as a requester reads the current base's policy, which may be
-    /// another base's: a setting it does not know is passed over, and the
-    /// words are not held.
-    pub fn read(text: &str) -> Result<Policy, PolicyError> {
-        Self::parse_as(text, Reading::Lenient)
-    }
-
-    fn parse_as(text: &str, reading: Reading) -> Result<Policy, PolicyError> {
         let mut actions: Vec<Action> = Vec::new();
         let mut current: Option<(usize, Draft)> = None;
         for (index, raw) in text.lines().enumerate() {
@@ -541,10 +488,7 @@ impl Policy {
             let Some((_, draft)) = current.as_mut() else {
                 return Err(fail("a setting outside an action"));
             };
-            if reading == Reading::Lenient && !SETTINGS.contains(&keyword) {
-                continue;
-            }
-            draft.set(keyword, rest, reading).map_err(fail)?;
+            draft.set(keyword, rest).map_err(fail)?;
         }
         if let Some((start, draft)) = current {
             actions.push(draft.finish(start)?);
@@ -604,11 +548,7 @@ impl Draft {
         }
     }
 
-    fn set(&mut self, keyword: &str, rest: &str, reading: Reading) -> Result<(), &'static str> {
-        let held = |rule| match reading {
-            Reading::Held => said(rest, rule),
-            Reading::Lenient => quoted(rest),
-        };
+    fn set(&mut self, keyword: &str, rest: &str) -> Result<(), &'static str> {
         let mut words = rest.split_ascii_whitespace();
         match keyword {
             "program" => {
@@ -656,9 +596,9 @@ impl Draft {
                 Ok(())
             }
             "keep" => once(&mut self.keep, keep(rest)?),
-            "describe" => once(&mut self.describe, held(words::describe)?),
-            "detail" => once(&mut self.detail, held(words::detail)?),
-            "verb" => once(&mut self.verb, held(words::verb)?),
+            "describe" => once(&mut self.describe, said(rest, words::describe)?),
+            "detail" => once(&mut self.detail, said(rest, words::detail)?),
+            "verb" => once(&mut self.verb, said(rest, words::verb)?),
             "destructive" if rest.is_empty() => flag(&mut self.destructive),
             "cwd" if rest.is_empty() => flag(&mut self.cwd),
             "medium" if rest.is_empty() => flag(&mut self.medium),
@@ -721,7 +661,6 @@ impl Draft {
     }
 }
 
-/// An `allow` line's principal and level.
 fn allow(rest: &str) -> Result<Allow, &'static str> {
     let mut words = rest.split_ascii_whitespace();
     let principal = match words.next() {
@@ -777,7 +716,6 @@ pub fn level<'a>(
     Ok(level)
 }
 
-/// A `keep` line's seconds, 1 to [`MAX_KEEP`].
 pub fn keep(rest: &str) -> Result<u32, &'static str> {
     rest.parse::<u32>()
         .ok()
@@ -831,9 +769,7 @@ pub fn valid_name(name: &str) -> bool {
         })
 }
 
-/// One quoted line of printable ASCII, the shape `describe`, `detail` and
-/// `verb` take; [`crate::words`] holds what it says.
-pub fn quoted(rest: &str) -> Result<String, &'static str> {
+fn quoted(rest: &str) -> Result<String, &'static str> {
     let text = rest
         .strip_prefix('"')
         .and_then(|r| r.strip_suffix('"'))
@@ -847,7 +783,12 @@ pub fn quoted(rest: &str) -> Result<String, &'static str> {
     Ok(text.to_string())
 }
 
-fn said(rest: &str, rule: fn(&str) -> Result<(), &'static str>) -> Result<String, &'static str> {
+/// A setting's quoted line of printable ASCII, held to a rule of
+/// [`crate::words`].
+pub fn said(
+    rest: &str,
+    rule: fn(&str) -> Result<(), &'static str>,
+) -> Result<String, &'static str> {
     let text = quoted(rest)?;
     rule(&text)?;
     Ok(text)

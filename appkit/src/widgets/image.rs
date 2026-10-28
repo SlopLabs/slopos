@@ -1,10 +1,10 @@
+use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
+
 use crate::constraints::{BoxConstraints, ImageScale, Size};
-use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use crate::event::{EventResponse, MessageSink, WidgetEvent};
 use crate::node::ImageData;
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
-use slopos_abi::damage::DamageRect;
-use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
+use crate::traits::{MeasureCtx, Widget, WidgetCore};
 
 pub struct ImageWidget {
     core: WidgetCore,
@@ -85,39 +85,11 @@ impl Widget for ImageWidget {
             ImageScale::Cover => ImageFit::Cover,
             ImageScale::Fill => ImageFit::Stretch,
         };
-        let clip = DamageRect {
-            x0: ctx.clip.x,
-            y0: ctx.clip.y,
-            x1: ctx.clip.x + ctx.clip.width - 1,
-            y1: ctx.clip.y + ctx.clip.height - 1,
-        };
-        slopos_gfx::image::draw_image_clipped(
-            ctx.buffer,
-            bitmap,
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            fit,
-            self.sampling,
-            &clip,
-        );
+        let (x, y, w, h) = (rect.x, rect.y, rect.width, rect.height);
+        ctx.draw_image(bitmap, x, y, w, h, fit, self.sampling);
     }
 
-    fn event(
-        &mut self,
-        _event: &WidgetEvent,
-        _phase: EventPhase,
-        _sink: &mut MessageSink,
-    ) -> EventResponse {
+    fn event(&mut self, _event: &WidgetEvent, _sink: &mut MessageSink) -> EventResponse {
         EventResponse::Ignored
-    }
-
-    fn role(&self) -> Role {
-        Role::None
-    }
-
-    fn focus_policy(&self) -> FocusPolicy {
-        FocusPolicy::None
     }
 }

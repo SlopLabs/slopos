@@ -1,7 +1,7 @@
 use slopos_theme_core::{TextRole, series_of};
 
 use crate::constraints::{BoxConstraints, Size};
-use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use crate::event::{EventResponse, MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::text::ui;
 use crate::traits::{MeasureCtx, Widget, WidgetCore};
@@ -22,20 +22,14 @@ pub(crate) fn paint(
 ) {
     let theme = ctx.theme();
     let fill = theme.series(series_of(name));
-    ctx.fill_rounded_rect(x, y, diameter, diameter, diameter / 2, fill);
+    ctx.fill_circle(x, y, diameter, fill);
     let initial: String = name
         .chars()
         .next()
         .map_or_else(|| String::from("?"), |c| c.to_uppercase().collect());
-    let w = ui::role_width(&initial, role);
-    let top = y + (diameter - role.style().line_height) / 2;
-    ctx.draw_text_in(
-        x + (diameter - w) / 2,
-        top,
-        &initial,
-        role,
-        theme.text_on_accent,
-    );
+    let left = x + (diameter - ui::width(&initial, role)) / 2;
+    let top = ui::centred_top(y, diameter, role);
+    ctx.draw_text(left, top, &initial, role, theme.text_on_accent);
 }
 
 /// A person, by the initial of their name on a circle.
@@ -76,12 +70,7 @@ impl Widget for AvatarWidget {
         Some(&self.name)
     }
 
-    fn event(
-        &mut self,
-        _event: &WidgetEvent,
-        _phase: EventPhase,
-        _sink: &mut MessageSink,
-    ) -> EventResponse {
+    fn event(&mut self, _event: &WidgetEvent, _sink: &mut MessageSink) -> EventResponse {
         EventResponse::Ignored
     }
 }

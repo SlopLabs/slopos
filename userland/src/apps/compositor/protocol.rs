@@ -1,44 +1,39 @@
-//! Protocol bridge: server-side compositor protocol over AF_UNIX sockets.
-//!
-//! Listens in the session's runtime directory, accepts client connections, and
-//! translates typed protocol requests into local surface state.
+//! The compositor's end of its protocol: clients in the session's runtime
+//! directory, and the surfaces their requests make.
 
-use core::num::NonZeroU32;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
 use slopos_abi::damage::DamageRect;
+use slopos_abi::surface::WINDOW_STATE_NORMAL;
 use slopos_abi::window::{AppId, MAX_WINDOW_DAMAGE_REGIONS, WindowInfo};
 use slopos_chrome_core::placement;
 use slopos_chrome_core::positioner::{Rect, Size};
 use slopos_protocol::server::{MAX_CLIENTS, Server};
 use slopos_protocol::types::{
-    Event, MAX_STRING_LEN, OwnedFd, PROTOCOL_VERSION, ProtocolError, Request, SurfaceId,
-    ToplevelId, caps,
+    Event, OwnedFd, PROTOCOL_VERSION, ProtocolError, Request, SurfaceId, ToplevelId,
+    WINDOW_STRING_MAX,
 };
 
+use super::frame::TITLE_BAR_HEIGHT;
 use crate::ring::slopfut::sync::Notify;
 use crate::syscall::CachedShmMapping;
-use crate::syscall::tty;
-use crate::theme::TITLE_BAR_HEIGHT;
 
-/// Hard ceiling on a single clipboard payload: a hostile or runaway selection
-/// cannot exhaust memory.
+/// So a runaway selection cannot exhaust memory.
 const MAX_CLIPBOARD_BYTES: u32 = 16 * 1024 * 1024;
 
 const MAX_SURFACES: usize = 32;
 const MAX_PENDING_DAMAGE: usize = 8;
-const MAX_CHILDREN: usize = 8;
 
 const MAX_SURFACE_BUFFERS: usize = 2;
 /// Past any screen, and small enough that no frame arithmetic overflows.
 const SIZE_LIMIT_MAX: u32 = 1 << 14;
-/// `current_buffer` sentinel: no buffer has been committed yet.
+/// The least a window is resized or placed at, unless its own maximum is less.
+const MIN_WINDOW_WIDTH: i32 = 200;
+const MIN_WINDOW_HEIGHT: i32 = 150;
 const NO_BUFFER: u8 = u8::MAX;
 
-/// One client-registered buffer slot. The bridge owns `fd` for the slot's
-/// lifetime and closes it on teardown and re-registration; the renderer's
-/// surface cache only borrows a read-only mapping.
+/// The bridge owns `fd`; the surface cache only borrows a mapping of it.
 #[derive(Copy, Clone)]
 struct SurfaceBuffer {
     fd: i32,
@@ -57,23 +52,17 @@ impl SurfaceBuffer {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
-#[repr(u8)]
-#[allow(dead_code)]
 enum SurfaceRole {
-    None = 0,
-    Toplevel = 1,
-    Popup = 2,
-    Subsurface = 3,
+    None,
+    Toplevel,
 }
 
-#[allow(dead_code)]
 struct ProtocolSurface {
     active: bool,
     client_idx: usize,
     surface_id: SurfaceId,
     toplevel_id: ToplevelId,
-    /// Current buffer's fd (= `buffers[current_buffer].fd`), threaded to the
-    /// renderer via `WindowInfo.shm_token`; 0 when nothing is committed.
+    /// The committed buffer's fd; 0 before one is.
     shm_token: u32,
     width: u32,
     height: u32,
@@ -92,21 +81,12 @@ struct ProtocolSurface {
     z_order: u32,
     visible: bool,
     window_state: u8,
-    /// Monotonic incarnation id: distinguishes a recycled surface slot (same
-    /// `task_id`) from an earlier surface in it, so the renderer's buffer cache
-    /// cannot alias a stale mapping.
+    /// Tells a recycled slot from the surface that held it before.
     generation: u32,
     frame_callback_pending: bool,
-    last_present_time_ms: u64,
     role: SurfaceRole,
-    parent_surface_idx: Option<usize>,
-    children: [Option<usize>; MAX_CHILDREN],
-    child_count: u8,
-    relative_x: i32,
-    relative_y: i32,
-    acked_serial: u32,
-    title: [u8; MAX_STRING_LEN],
-    app_id: [u8; MAX_STRING_LEN],
+    title: [u8; WINDOW_STRING_MAX],
+    app_id: [u8; WINDOW_STRING_MAX],
     /// The client's `(min, max)` sizes; 0 is no limit.
     size_limits: ((u32, u32), (u32, u32)),
     /// When the window was placed, counted across windows; 0 until it is.
@@ -114,10 +94,9 @@ struct ProtocolSurface {
     cursor_shape: u8,
     last_enter_serial: u32,
     has_pointer: bool,
-    /// Serial of the most recent key event delivered to this surface, and
-    /// whether it currently holds keyboard focus. Together these are what a
-    /// clipboard request must present, so a surface the user is not typing
-    /// into cannot read or replace the selection.
+    /// With `has_keyboard_focus`, what a clipboard request must present, so
+    /// a surface the person is not typing into cannot read or replace the
+    /// selection.
     last_key_serial: u32,
     has_keyboard_focus: bool,
 }
@@ -146,19 +125,12 @@ impl ProtocolSurface {
             window_y: 0,
             z_order: 0,
             visible: false,
-            window_state: 0,
+            window_state: WINDOW_STATE_NORMAL,
             generation: 0,
             frame_callback_pending: false,
-            last_present_time_ms: 0,
             role: SurfaceRole::None,
-            parent_surface_idx: None,
-            children: [None; MAX_CHILDREN],
-            child_count: 0,
-            relative_x: 0,
-            relative_y: 0,
-            acked_serial: 0,
-            title: [0u8; MAX_STRING_LEN],
-            app_id: [0u8; MAX_STRING_LEN],
+            title: [0u8; WINDOW_STRING_MAX],
+            app_id: [0u8; WINDOW_STRING_MAX],
             size_limits: ((0, 0), (0, 0)),
             placed_at: 0,
             cursor_shape: 0,
@@ -170,9 +142,8 @@ impl ProtocolSurface {
     }
 }
 
-/// Clipboard shared across all clients: a read-only mapping of the source memfd
-/// (owns the fd; dropped when replaced) and its valid byte count. `None` source
-/// means the clipboard is empty.
+/// A read-only mapping of the source memfd, which owns it, while there is
+/// one.
 struct Clipboard {
     source: Option<CachedShmMapping>,
     len: u32,
@@ -182,7 +153,6 @@ pub struct ProtocolBridge {
     server: Server,
     surfaces: [ProtocolSurface; MAX_SURFACES],
     next_z_order: u32,
-    /// Monotonic source for `ProtocolSurface.generation` (never reused).
     next_surface_gen: u32,
     clipboard: Clipboard,
     display_width: u32,
@@ -191,15 +161,12 @@ pub struct ProtocolBridge {
     display_pitch: u32,
     /// Where windows are placed: the screen between the menu bar and the dock.
     work_area: Rect,
-    /// Source of `placed_at` values (never reused).
     placements: u64,
-    configure_serial: u32,
-    /// Per-slot connection generation. Slot indices and fd numbers are recycled
-    /// across disconnect→reconnect, so without this a stale per-client task
+    /// Slots and fds are recycled, so without this a stale per-client task
     /// could drive or tear down a successor's connection.
     client_gen: [u64; MAX_CLIENTS],
-    /// Monotonic source for `client_gen` values (never reused).
     next_gen: u64,
+    client_pid: [u32; MAX_CLIENTS],
     /// Fired when a connection is torn down, so its own task drops the armed
     /// poll that otherwise holds the socket open past the close.
     hangups: [Notify; MAX_CLIENTS],
@@ -212,9 +179,7 @@ impl ProtocolBridge {
         // directory.
         let _ = std::fs::remove_file(OsStr::from_bytes(&path));
         let server = Server::bind(&path).ok()?;
-        tty::write(b"COMPOSITOR: protocol bridge listening on ");
-        tty::write(&path);
-        tty::write(b"\n");
+        log!("protocol bridge listening on {}", printable(&path));
 
         Some(Self {
             server,
@@ -231,9 +196,9 @@ impl ProtocolBridge {
             display_pitch: 0,
             work_area: Rect::EMPTY,
             placements: 0,
-            configure_serial: 0,
             client_gen: [0u64; MAX_CLIENTS],
             next_gen: 1,
+            client_pid: [0; MAX_CLIENTS],
             hangups: core::array::from_fn(|_| Notify::new()),
         })
     }
@@ -249,7 +214,7 @@ impl ProtocolBridge {
         self.work_area = area;
     }
 
-    /// The frame of the surface at `idx`, title bar included.
+    /// Title bar included.
     fn frame_of(&self, idx: usize) -> Rect {
         let s = &self.surfaces[idx];
         let width = if s.frame_width > 0 {
@@ -270,10 +235,9 @@ impl ProtocolBridge {
         )
     }
 
-    /// Place the toplevel at `idx` as it first shows, by chrome-core's
-    /// placement rule: cascaded from the app's latest window, by app id or,
-    /// with none, by client, or centred when the app has none; shrunk to
-    /// fit, which the client hears as a configure.
+    /// Place the toplevel at `idx` as it first shows: cascaded from its app's
+    /// latest window, by app id or else by client, or centred; shrunk to fit,
+    /// which the client hears as a configure.
     fn place(&mut self, idx: usize) {
         self.placements += 1;
         if self.work_area.is_empty() {
@@ -297,11 +261,11 @@ impl ProtocolBridge {
             })
             .max_by_key(|&i| self.surfaces[i].placed_at)
             .map(|i| self.frame_of(i));
-        let ((min_w, min_h), _) = me.size_limits;
         let wanted = self.frame_of(idx);
+        let (min_w, min_h) = self.limited(idx, 0, 0);
         let min = Size {
-            w: (min_w as i32).max(1),
-            h: (min_h as i32).max(1) + TITLE_BAR_HEIGHT,
+            w: min_w,
+            h: min_h + TITLE_BAR_HEIGHT,
         };
         let frame = placement::place(
             self.work_area,
@@ -330,12 +294,11 @@ impl ProtocolBridge {
             idx,
             &Event::Hello {
                 version: PROTOCOL_VERSION,
-                capabilities: caps::TOPLEVEL | caps::CLIPBOARD | caps::INTERACTIVE_MOVE_RESIZE,
+                capabilities: 0,
             },
         );
     }
 
-    /// The first event in the version the client's `Hello` named.
     fn send_output_info(&mut self, idx: usize) {
         let _ = self.server.queue_event(
             idx,
@@ -349,17 +312,6 @@ impl ProtocolBridge {
         );
     }
 
-    pub fn accept_clients(&mut self) {
-        // Bounded per frame so a connect burst cannot stall the compositor loop.
-        for _ in 0..4 {
-            match self.server.accept() {
-                Ok(Some(idx)) => self.greet_client(idx),
-                Ok(None) => break,
-                Err(_) => break,
-            }
-        }
-    }
-
     pub fn listen_fd(&self) -> i32 {
         self.server.listen_fd()
     }
@@ -371,8 +323,7 @@ impl ProtocolBridge {
             .and_then(|slot| slot.as_ref().filter(|c| c.active).map(|c| c.conn.fd()))
     }
 
-    /// Paired with [`client_fd`] this uniquely identifies one connection: slot
-    /// indices and fd numbers are recycled, `client_gen` values never are.
+    /// With [`client_fd`], names one connection.
     pub fn client_gen(&self, idx: usize) -> Option<u64> {
         if self.server.is_connected(idx) {
             self.client_gen.get(idx).copied()
@@ -381,17 +332,12 @@ impl ProtocolBridge {
         }
     }
 
-    /// Notified once the connection in `idx` is torn down.
     pub fn hangup(&self, idx: usize) -> Option<Notify> {
         self.hangups.get(idx).cloned()
     }
 
-    /// Async accept path: greet and record every pending connection as a
-    /// `(client_idx, client_fd, client_gen)` triple in `out`, returning the
-    /// count. Unlike [`accept_clients`] it drains the full backlog, being driven
-    /// by listen-socket readiness rather than a per-frame budget. The generation
-    /// is stamped atomically with the accept, so a triple names one connection
-    /// for the lifetime of the caller's per-client task.
+    /// Greet every waiting connection and name each in `out` as
+    /// `(client_idx, client_fd, client_gen)`; how many.
     pub fn accept_and_collect(&mut self, out: &mut [(usize, i32, u64)]) -> usize {
         let mut n = 0;
         while n < out.len() {
@@ -400,11 +346,13 @@ impl ProtocolBridge {
                     self.greet_client(idx);
                     let generation = self.next_gen;
                     self.next_gen = self.next_gen.wrapping_add(1);
+                    let fd = self.client_fd(idx).unwrap_or(-1);
                     if idx < MAX_CLIENTS {
                         self.client_gen[idx] = generation;
                         self.hangups[idx] = Notify::new();
+                        self.client_pid[idx] = crate::syscall::net::peer_cred(fd)
+                            .map_or(0, |cred| cred.pid.max(0) as u32);
                     }
-                    let fd = self.client_fd(idx).unwrap_or(-1);
                     out[n] = (idx, fd, generation);
                     n += 1;
                 }
@@ -416,14 +364,12 @@ impl ProtocolBridge {
     }
 
     pub fn process_requests(&mut self) {
-        for client_idx in 0..32 {
+        for client_idx in 0..MAX_CLIENTS {
             self.process_client(client_idx);
         }
     }
 
-    /// Drain one client's pending requests. Returns `false` once the client
-    /// disconnects — teardown has already run via [`cleanup_client`], so the
-    /// caller's per-client task should exit.
+    /// `false` once the client is gone, torn down already.
     pub fn process_client(&mut self, client_idx: usize) -> bool {
         if !self.server.is_connected(client_idx) {
             return false;
@@ -441,11 +387,8 @@ impl ProtocolBridge {
                     self.cleanup_client(client_idx);
                     return false;
                 }
-                // A protocol violation is fatal to the connection, as it is
-                // in Wayland. Breaking instead left the undecodable prefix at
-                // the buffer head to be re-parsed forever: the client was
-                // never serviced again, got no error, and kept its windows on
-                // screen and its slot held.
+                // Fatal, as in Wayland: what could not be decoded would
+                // otherwise be read again forever.
                 Err(err) => {
                     self.fail_client(client_idx, err);
                     return false;
@@ -455,7 +398,6 @@ impl ProtocolBridge {
         true
     }
 
-    /// Report a protocol violation to the client, then disconnect it.
     fn fail_client(&mut self, client_idx: usize, err: ProtocolError) {
         let _ = self.server.queue_event(
             client_idx,
@@ -521,9 +463,6 @@ impl ProtocolBridge {
             Request::ToplevelDestroy { toplevel } => {
                 self.handle_toplevel_destroy(client_idx, toplevel);
             }
-            Request::AckConfigure { serial } => {
-                self.handle_ack_configure(client_idx, serial);
-            }
             Request::SetCursorShape {
                 surface,
                 serial,
@@ -545,16 +484,6 @@ impl ProtocolBridge {
                         (cap(max_width), cap(max_height)),
                     );
                 }
-            }
-            Request::InteractiveMove { toplevel, serial } => {
-                self.handle_interactive_move(client_idx, toplevel, serial);
-            }
-            Request::InteractiveResize {
-                toplevel,
-                serial,
-                edges,
-            } => {
-                self.handle_interactive_resize(client_idx, toplevel, serial, edges);
             }
             Request::ClipboardCopy {
                 len,
@@ -602,12 +531,8 @@ impl ProtocolBridge {
         Ok(())
     }
 
-    /// Register or re-select a double-buffer slot for `surface`'s next commit.
-    ///
-    /// `fd` is `Some` only the first time a slot is used (the memfd received via
-    /// SCM_RIGHTS); thereafter the client re-selects the slot by id and the
-    /// stored fd is reused. The bridge owns every stored fd; one that cannot be
-    /// parked (no such surface / bad slot) is closed here rather than leaked.
+    /// `fd` comes with a slot's first attach alone; one that has no slot to go
+    /// to is closed.
     fn handle_surface_attach(
         &mut self,
         client_idx: usize,
@@ -663,7 +588,6 @@ impl ProtocolBridge {
                 };
                 surface.pending_damage_count += 1;
             } else {
-                // Precise tracking exhausted: collapse to full-surface damage.
                 surface.pending_damage[0] = DamageRect {
                     x0: 0,
                     y0: 0,
@@ -712,10 +636,7 @@ impl ProtocolBridge {
         let surface = &self.surfaces[idx];
         if surface.visible && surface.role == SurfaceRole::Toplevel && surface.placed_at == 0 {
             self.place(idx);
-            eprintln!(
-                "COMPOSITOR: shown {}",
-                printable(&self.surfaces[idx].app_id)
-            );
+            log!("shown {}", printable(&self.surfaces[idx].app_id));
         }
 
         if let Some(prev) = release_prev {
@@ -741,9 +662,7 @@ impl ProtocolBridge {
         }
     }
 
-    /// Honored only when the request carries the surface's most recent enter
-    /// serial *and* the pointer is still inside it: no surface can influence the
-    /// cursor unless the pointer is over it.
+    /// Only for the surface the pointer is over, with its latest enter serial.
     fn handle_set_cursor_shape(
         &mut self,
         client_idx: usize,
@@ -770,7 +689,6 @@ impl ProtocolBridge {
             None => return,
         };
 
-        // A surface can only have one role (Wayland protocol requirement).
         if self.surfaces[idx].role != SurfaceRole::None {
             return;
         }
@@ -783,13 +701,13 @@ impl ProtocolBridge {
         &mut self,
         client_idx: usize,
         toplevel_id: ToplevelId,
-        title: &[u8; MAX_STRING_LEN],
+        title: &[u8; WINDOW_STRING_MAX],
         title_len: usize,
     ) {
         if let Some(idx) = self.find_surface_by_toplevel(client_idx, toplevel_id) {
-            let copy_len = title_len.min(MAX_STRING_LEN);
+            let copy_len = title_len.min(WINDOW_STRING_MAX);
             self.surfaces[idx].title[..copy_len].copy_from_slice(&title[..copy_len]);
-            if copy_len < MAX_STRING_LEN {
+            if copy_len < WINDOW_STRING_MAX {
                 self.surfaces[idx].title[copy_len..].fill(0);
             }
         }
@@ -799,13 +717,13 @@ impl ProtocolBridge {
         &mut self,
         client_idx: usize,
         toplevel_id: ToplevelId,
-        app_id: &[u8; MAX_STRING_LEN],
+        app_id: &[u8; WINDOW_STRING_MAX],
         app_id_len: usize,
     ) {
         if let Some(idx) = self.find_surface_by_toplevel(client_idx, toplevel_id) {
-            let copy_len = app_id_len.min(MAX_STRING_LEN);
+            let copy_len = app_id_len.min(WINDOW_STRING_MAX);
             self.surfaces[idx].app_id[..copy_len].copy_from_slice(&app_id[..copy_len]);
-            if copy_len < MAX_STRING_LEN {
+            if copy_len < WINDOW_STRING_MAX {
                 self.surfaces[idx].app_id[copy_len..].fill(0);
             }
         }
@@ -818,38 +736,7 @@ impl ProtocolBridge {
         }
     }
 
-    fn handle_ack_configure(&mut self, client_idx: usize, serial: u32) {
-        for s in &mut self.surfaces {
-            if s.active && s.client_idx == client_idx && s.role == SurfaceRole::Toplevel {
-                s.acked_serial = serial;
-            }
-        }
-    }
-
-    fn handle_interactive_move(
-        &mut self,
-        client_idx: usize,
-        toplevel_id: ToplevelId,
-        _serial: u32,
-    ) {
-        // No-op: the compositor drives moves itself, via title-bar drag.
-        let _ = (client_idx, toplevel_id);
-    }
-
-    fn handle_interactive_resize(
-        &mut self,
-        client_idx: usize,
-        toplevel_id: ToplevelId,
-        _serial: u32,
-        _edges: u32,
-    ) {
-        // No-op: client-initiated resize is not honored.
-        let _ = (client_idx, toplevel_id);
-    }
-
-    /// Publish a new clipboard: map the received source memfd read-only,
-    /// replacing (and so closing) any previous source. The mapping keeps the
-    /// memfd backing alive after the client closes its own copy.
+    /// The mapping keeps the memfd alive once the client closes its copy.
     fn handle_clipboard_copy(
         &mut self,
         client_idx: usize,
@@ -867,8 +754,6 @@ impl ProtocolBridge {
             self.clipboard.len = 0;
             return;
         }
-        // `into_raw` drops close-on-drop: the mapping owns the fd on success, so
-        // the failure path has to close it.
         let raw = fd.into_raw();
         match CachedShmMapping::map_readonly_fd(raw, len as usize) {
             Some(mapping) => {
@@ -883,14 +768,10 @@ impl ProtocolBridge {
         }
     }
 
-    /// Announce the current clipboard size; the client follows up with a
-    /// `ClipboardRead` carrying a destination memfd, since the server event path
-    /// cannot itself carry an fd.
+    /// The client sends a memfd to copy into next, since an event carries
+    /// none. A refusal is answered too, as an empty clipboard, or the client
+    /// would wait for ever.
     fn handle_clipboard_paste(&mut self, client_idx: usize, serial: u32) {
-        // A refusal is still an answer. A client that asked and heard nothing
-        // waits for a reply that will never come, and its own fallback — a
-        // process-local clipboard, say — is unreachable from there; a zero
-        // length is what "nothing for you" looks like on this path already.
         let len = if self.client_holds_keyboard_serial(client_idx, serial) {
             self.clipboard.len
         } else {
@@ -901,15 +782,9 @@ impl ProtocolBridge {
             .queue_event(client_idx, &Event::PasteReady { len });
     }
 
-    /// Copy the clipboard into the client-provided destination memfd and report
-    /// the valid byte count. The source mapping is retained so the clipboard
-    /// survives repeated pastes.
-    /// Whether `client_idx` owns a keyboard-focused surface whose most recent
-    /// key event carried `serial`.
-    ///
-    /// The `wl_data_device` rule: clipboard access is tied to an input event
-    /// the user actually generated, so a process that merely connected cannot
-    /// read what was last copied or substitute content into a paste.
+    /// `wl_data_device`'s rule: the clipboard is reached by an input event
+    /// the person made, so a process that merely connected can neither read
+    /// what was copied nor replace it.
     fn client_holds_keyboard_serial(&self, client_idx: usize, serial: u32) -> bool {
         serial != 0
             && self.surfaces.iter().any(|s| {
@@ -941,7 +816,6 @@ impl ProtocolBridge {
                     dst.as_mut_slice()[..n].copy_from_slice(&src.as_slice()[..n]);
                     copied = n as u32;
                 }
-                // `dst` (and its fd) is released here.
             }
             None => {
                 crate::syscall::memory::close(raw);
@@ -957,7 +831,6 @@ impl ProtocolBridge {
             let surface = &mut self.surfaces[i];
             if surface.active && surface.frame_callback_pending && surface.visible {
                 surface.frame_callback_pending = false;
-                surface.last_present_time_ms = timestamp_ms;
 
                 let _ = self.server.queue_event(
                     surface.client_idx,
@@ -976,15 +849,12 @@ impl ProtocolBridge {
             _ => return,
         };
 
-        self.configure_serial = self.configure_serial.wrapping_add(1);
-        let serial = self.configure_serial;
         let client_idx = surface.client_idx;
         let toplevel = surface.toplevel_id;
         let _ = self.server.queue_event(
             client_idx,
             &Event::Configure {
                 toplevel,
-                serial,
                 width,
                 height,
                 states,
@@ -1005,8 +875,7 @@ impl ProtocolBridge {
             .queue_event(client_idx, &Event::Close { toplevel });
     }
 
-    /// Records `serial` as the surface's enter serial and marks it as holding
-    /// the pointer, which is what a later `SetCursorShape` is gated on.
+    /// What a later `SetCursorShape` must carry.
     pub fn send_pointer_enter(&mut self, surface_idx: usize, serial: u32, x: i32, y: i32) {
         let surface = match self.surfaces.get_mut(surface_idx) {
             Some(s) if s.active => s,
@@ -1028,9 +897,7 @@ impl ProtocolBridge {
         );
     }
 
-    /// Clears the pointer-hold flag, so `SetCursorShape` from this surface is
-    /// rejected until it is re-entered.
-    pub fn send_pointer_leave(&mut self, surface_idx: usize, _serial: u32) {
+    pub fn send_pointer_leave(&mut self, surface_idx: usize) {
         let surface = match self.surfaces.get_mut(surface_idx) {
             Some(s) if s.active => s,
             _ => return,
@@ -1096,40 +963,6 @@ impl ProtocolBridge {
             .queue_event(client_idx, &Event::PointerAxis { time, axis, value });
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn send_key(
-        &mut self,
-        surface_idx: usize,
-        serial: u32,
-        time: u32,
-        scancode: u32,
-        ascii: u32,
-        keycode: u32,
-        codepoint: u32,
-        modifiers: u32,
-        state: u32,
-    ) {
-        let surface = match self.surfaces.get(surface_idx) {
-            Some(s) if s.active => s,
-            _ => return,
-        };
-
-        let client_idx = surface.client_idx;
-        let _ = self.server.queue_event(
-            client_idx,
-            &Event::Key {
-                serial,
-                time,
-                scancode,
-                ascii,
-                keycode,
-                codepoint,
-                modifiers,
-                pressed: state != 0,
-            },
-        );
-    }
-
     pub fn send_modifiers(&mut self, surface_idx: usize, mods: u32) {
         let surface = match self.surfaces.get(surface_idx) {
             Some(s) if s.active => s,
@@ -1148,9 +981,8 @@ impl ProtocolBridge {
         }
     }
 
-    /// Forward one key event to the keyboard-focus surface. Modifiers are sent
-    /// first, per the wl_keyboard rule that a client judges a key against
-    /// current modifier state, never the previous event's.
+    /// Modifiers go first: `wl_keyboard` has a client judge a key by the
+    /// modifiers as they are, not as the last event left them.
     pub fn forward_key_event(
         &mut self,
         keyboard_focus_task: u32,
@@ -1159,42 +991,34 @@ impl ProtocolBridge {
         modifier_state: u8,
         serial: &mut u32,
     ) {
-        let time = event.timestamp_ms as u32;
         let Some(idx) = self.task_id_to_surface_idx(keyboard_focus_task) else {
             if pressed {
-                // The keystroke is lost here; mirror it so input black holes
-                // stay visible on the serial log.
-                let msg = std::format!(
-                    "COMP: key 0x{:02x} dropped (no surface for focus task {})\n",
-                    event.key_ascii(),
-                    keyboard_focus_task
+                log!(
+                    "key {:#06x} dropped (no surface for focus task {keyboard_focus_task})",
+                    event.key_keycode()
                 );
-                let _ = tty::write(msg.as_bytes());
             }
             return;
         };
         *serial = serial.wrapping_add(1);
-        // Focus follows the key: this surface is the one the user is typing
-        // into, and the serial is what a clipboard request must echo back.
         for (i, s) in self.surfaces.iter_mut().enumerate() {
             s.has_keyboard_focus = i == idx && s.active;
         }
         self.surfaces[idx].last_key_serial = *serial;
         self.send_modifiers(idx, modifier_state as u32);
-        self.send_key(
-            idx,
-            *serial,
-            time,
-            event.key_scancode() as u32,
-            event.key_ascii() as u32,
-            event.key_keycode() as u32,
-            event.key_codepoint(),
-            modifier_state as u32,
-            pressed as u32,
+        let _ = self.server.queue_event(
+            self.surfaces[idx].client_idx,
+            &Event::Key {
+                serial: *serial,
+                time: event.timestamp_ms as u32,
+                keycode: event.key_keycode() as u32,
+                codepoint: slopos_chrome_core::key::text(event).map_or(0, u32::from),
+                modifiers: modifier_state as u32,
+                pressed,
+            },
         );
     }
 
-    /// `x`/`y` are global; the surface is sent surface-local coordinates.
     pub fn send_pointer_motion_for_task(&mut self, task_id: u32, time: u32, x: i32, y: i32) {
         if let Some(idx) = self.task_id_to_surface_idx(task_id) {
             let local_x = x - self.surfaces[idx].window_x;
@@ -1222,31 +1046,22 @@ impl ProtocolBridge {
         }
     }
 
-    /// `x`/`y` are global; the surface is sent surface-local coordinates.
-    pub fn send_pointer_enter_for_task(
-        &mut self,
-        task_id: u32,
-        serial: u32,
-        x: i32,
-        y: i32,
-    ) -> bool {
+    pub fn send_pointer_enter_for_task(&mut self, task_id: u32, serial: u32, x: i32, y: i32) {
         if let Some(idx) = self.task_id_to_surface_idx(task_id) {
             let local_x = x - self.surfaces[idx].window_x;
             let local_y = y - self.surfaces[idx].window_y;
             self.send_pointer_enter(idx, serial, local_x, local_y);
-            true
-        } else {
-            false
         }
     }
 
-    pub fn send_pointer_leave_for_task(&mut self, task_id: u32, serial: u32) {
+    pub fn send_pointer_leave_for_task(&mut self, task_id: u32) {
         if let Some(idx) = self.task_id_to_surface_idx(task_id) {
-            self.send_pointer_leave(idx, serial);
+            self.send_pointer_leave(idx);
         }
     }
 
-    /// Fill a WindowInfo array from local protocol surfaces, sorted by z_order.
+    /// The shown toplevels, bottom first; a window's `task_id` is its slot
+    /// and one.
     pub fn get_windows(&self, out: &mut [WindowInfo]) -> u32 {
         let mut indices = [0usize; MAX_SURFACES];
         let mut count = 0usize;
@@ -1274,8 +1089,8 @@ impl ProtocolBridge {
         for i in 0..write_count {
             let s = &self.surfaces[indices[i]];
             let mut info = WindowInfo::default();
-            // SAFETY: surface index + 1 is always > 0 (MAX_SURFACES << u32::MAX).
-            info.task_id = NonZeroU32::new(indices[i] as u32 + 1).unwrap().get();
+            info.task_id = indices[i] as u32 + 1;
+            info.pid = self.client_pid[s.client_idx];
             info.x = s.window_x;
             info.y = s.window_y;
             info.width = s.width;
@@ -1287,18 +1102,14 @@ impl ProtocolBridge {
             } else {
                 s.current_buffer
             };
-            info.buffer_generation = s.generation;
+            info.generation = s.generation;
             info.cursor_shape = s.cursor_shape;
             info.frame_width = s.frame_width;
             info.frame_height = s.frame_height;
             let ((min_w, min_h), (max_w, max_h)) = s.size_limits;
             info.fixed_size = min_w > 0 && min_h > 0 && (min_w, min_h) == (max_w, max_h);
-            let head = &s.title[..info.title.len().min(s.title.len())];
-            let fits = core::str::from_utf8(head).map_or_else(|e| e.valid_up_to(), |_| head.len());
-            info.title[..fits].copy_from_slice(&head[..fits]);
-            let mut aid = [0u8; 32];
-            aid.copy_from_slice(&s.app_id[..32]);
-            info.app_id = AppId(aid);
+            info.title = s.title;
+            info.app_id = AppId(s.app_id);
 
             if s.dirty {
                 if s.committed_damage_count == 0 {
@@ -1318,11 +1129,8 @@ impl ProtocolBridge {
         write_count as u32
     }
 
-    /// Clear dirty + committed damage only for surfaces whose content reached
-    /// the screen this frame, identified by `task_id` (= surface slot index + 1,
-    /// as minted by [`get_windows`]). A `SurfaceCommit` that landed after this
-    /// frame's snapshot keeps its dirty flag and is exported on the next frame
-    /// rather than cleared before it is shown.
+    /// Only what reached the screen: a commit after this frame's snapshot
+    /// stays dirty for the next.
     pub fn clear_presented(&mut self, presented_task_ids: &[u32]) {
         for &task_id in presented_task_ids {
             if let Some(idx) = self.task_id_to_surface_idx(task_id) {
@@ -1346,17 +1154,26 @@ impl ProtocolBridge {
         }
     }
 
-    /// `(w, h)` held to the window's own limits.
+    /// `(w, h)` held to the compositor's least window and the window's own
+    /// limits.
     pub fn clamp_window_size(&self, task_id: u32, w: i32, h: i32) -> (i32, i32) {
-        let Some(idx) = self.task_id_to_surface_idx(task_id) else {
-            return (w, h);
-        };
+        match self.task_id_to_surface_idx(task_id) {
+            Some(idx) => self.limited(idx, w, h),
+            None => (w.max(MIN_WINDOW_WIDTH), h.max(MIN_WINDOW_HEIGHT)),
+        }
+    }
+
+    fn limited(&self, idx: usize, w: i32, h: i32) -> (i32, i32) {
         let ((min_w, min_h), (max_w, max_h)) = self.surfaces[idx].size_limits;
-        let clamp = |v: i32, min: u32, max: u32| {
+        let clamp = |v: i32, floor: i32, min: u32, max: u32| {
+            let v = v.max(floor);
             let v = if max > 0 { v.min(max as i32) } else { v };
             v.max(min as i32)
         };
-        (clamp(w, min_w, max_w), clamp(h, min_h, max_h))
+        (
+            clamp(w, MIN_WINDOW_WIDTH, min_w, max_w),
+            clamp(h, MIN_WINDOW_HEIGHT, min_h, max_h),
+        )
     }
 
     pub fn set_window_state(&mut self, task_id: u32, state: u8) {
@@ -1378,19 +1195,14 @@ impl ProtocolBridge {
         }
     }
 
-    pub fn send_close_for_task(&mut self, task_id: u32) -> bool {
+    pub fn send_close_for_task(&mut self, task_id: u32) {
         if let Some(idx) = self.task_id_to_surface_idx(task_id) {
             self.send_close(idx);
-            true
-        } else {
-            false
         }
     }
 
-    /// Detect and reap client disconnections. The probe is a non-blocking recv
-    /// that catches a client which closed without sending; it consumes no framed
-    /// message, and any bytes read stay for the next `process_requests`. Clients
-    /// the Server flagged dead on a failed flush are reaped in the same pass.
+    /// Reap the clients that closed without a word, and those a write found
+    /// gone.
     pub fn cleanup_disconnected(&mut self) {
         for idx in 0..MAX_CLIENTS {
             self.server.probe_disconnected(idx);
@@ -1398,32 +1210,21 @@ impl ProtocolBridge {
         self.reap_disconnected_clients();
     }
 
-    /// Poll FDs for the listen socket plus every connected client.
-    pub fn server_poll_fds(&self, out: &mut [slopos_abi::syscall::types::UserPollFd]) -> usize {
-        self.server.build_poll_fds(out)
-    }
-
-    /// Flush all per-client write buffers (non-blocking, once per frame).
-    /// EAGAIN is absorbed and the data stays buffered; a hard error flags the
-    /// client dead, and those are reaped here so a killed client's window is
-    /// gone within the same frame.
+    /// A client a write finds gone is reaped here, so its windows go within
+    /// the frame.
     pub fn flush_all(&mut self) {
         self.server.flush_clients();
         self.reap_disconnected_clients();
     }
 
-    /// Tear down a client whose readiness stream terminated
-    /// (`POLLHUP`/`POLLERR`) with no prior `recv_request` disconnect. A no-op if
-    /// the slot is already free, so it is safe on any task exit.
     pub fn disconnect_client(&mut self, client_idx: usize) {
         if self.server.is_connected(client_idx) {
             self.cleanup_client(client_idx);
         }
     }
 
-    /// The single client-teardown funnel: surfaces first, then the connection
-    /// slot. Detection is spread across call sites, but this is the only place a
-    /// slot is freed, so an active surface always implies a live connection.
+    /// The one place a client's slot is freed, after its surfaces, so a live
+    /// surface always has a live connection.
     fn cleanup_client(&mut self, client_idx: usize) {
         for i in 0..MAX_SURFACES {
             if self.surfaces[i].active && self.surfaces[i].client_idx == client_idx {
@@ -1460,18 +1261,14 @@ impl ProtocolBridge {
             .position(|s| s.active && s.client_idx == client_idx && s.toplevel_id == toplevel_id)
     }
 
-    /// The generation of the surface `task_id` currently designates.
-    ///
-    /// A task id is a slot index, and slots are recycled, so an id held across
-    /// a destroy designates the successor. Pairing it with the generation the
-    /// holder saw is what tells the two apart.
+    /// What tells the surface `task_id` named once from the one it names now.
     pub fn surface_generation_for_task(&self, task_id: u32) -> Option<u32> {
         self.task_id_to_surface_idx(task_id)
             .map(|idx| self.surfaces[idx].generation)
     }
 
     fn task_id_to_surface_idx(&self, task_id: u32) -> Option<usize> {
-        let idx = (NonZeroU32::new(task_id)?.get() - 1) as usize;
+        let idx = (task_id as usize).checked_sub(1)?;
         if idx < MAX_SURFACES && self.surfaces[idx].active {
             Some(idx)
         } else {
@@ -1483,37 +1280,8 @@ impl ProtocolBridge {
         if idx >= MAX_SURFACES || !self.surfaces[idx].active {
             return;
         }
-
-        if let Some(parent_idx) = self.surfaces[idx].parent_surface_idx {
-            if parent_idx < MAX_SURFACES && self.surfaces[parent_idx].active {
-                let parent = &mut self.surfaces[parent_idx];
-                for j in 0..parent.child_count as usize {
-                    if parent.children[j] == Some(idx) {
-                        for k in j..parent.child_count as usize - 1 {
-                            parent.children[k] = parent.children[k + 1];
-                        }
-                        parent.children[parent.child_count as usize - 1] = None;
-                        parent.child_count -= 1;
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Snapshot and clear before recursing: a recursive destroy removes the
-        // child from this list, which would otherwise mutate it mid-iteration.
-        let children_snapshot = self.surfaces[idx].children;
-        let child_count = self.surfaces[idx].child_count as usize;
-        self.surfaces[idx].children = [None; MAX_CHILDREN];
-        self.surfaces[idx].child_count = 0;
-        for j in 0..child_count {
-            if let Some(child_idx) = children_snapshot[j] {
-                self.destroy_surface(child_idx);
-            }
-        }
-
-        // A MAP_SHARED mapping the cache may still hold stays valid after the fd
-        // is closed.
+        // A mapping the surface cache still holds stays valid once the fd is
+        // closed.
         for slot in &mut self.surfaces[idx].buffers {
             if slot.registered && slot.fd >= 0 {
                 crate::syscall::memory::close(slot.fd);
@@ -1525,8 +1293,8 @@ impl ProtocolBridge {
     }
 }
 
-/// A name a client sent, up to its NUL, with every byte that is not visible
-/// ASCII shown as `?`, so a log line carrying it stays one line of ours.
+/// Up to its NUL, every byte but visible ASCII shown as `?`, so a log line
+/// carrying it stays one line of ours.
 fn printable(name: &[u8]) -> String {
     name.iter()
         .take_while(|&&b| b != 0)

@@ -1,25 +1,20 @@
-//! The row of open-file tabs.
-//!
-//! Distinct from [`super::tab_bar::TabBarWidget`], which owns its pages and
-//! switches between them: these tabs name documents the application owns, carry
-//! a modified marker and a close affordance, and report clicks rather than
-//! deciding anything.
+//! The open documents' tabs, each with a dot for unsaved changes and a close
+//! button.
 
 use std::any::Any;
+use std::cell::Cell;
 
-use slopos_theme_core::{ColorRole, State};
+use slopos_theme_core::{ColorRole, Icon, State, TextRole, space};
 
-use crate::constraints::{BoxConstraints, Size};
-use crate::event::{EventPhase, EventResponse, MessageSink, PointerButton, WidgetEvent};
+use crate::constraints::{BoxConstraints, Rect, Size};
+use crate::event::{EventResponse, MessageSink, PointerButton, WidgetEvent};
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
+use crate::style::MIN_TARGET;
+use crate::text::ui;
+use crate::traits::{MeasureCtx, Role, Widget, WidgetCore};
 
-use super::tree_view::elide;
-use slopos_theme_core::Icon;
-
-const TAB_PAD_H: i32 = 12;
-const CLOSE_SIZE: i32 = 12;
-const CLOSE_GAP: i32 = 8;
+const LABEL: TextRole = TextRole::Body;
+const PAD: i32 = space::MD;
 const MIN_TAB_WIDTH: i32 = 90;
 const MAX_TAB_WIDTH: i32 = 220;
 
@@ -42,10 +37,8 @@ pub struct EditorTabsWidget {
     tabs: Vec<EditorTab>,
     active: usize,
     on_input: Option<InputCallback>,
-    hovered: Option<usize>,
-    /// Widths from the last paint; hit testing must agree with what was drawn.
     widths: Vec<i32>,
-    height: i32,
+    cut: Vec<Cell<bool>>,
 }
 
 impl EditorTabsWidget {
@@ -55,64 +48,57 @@ impl EditorTabsWidget {
             tabs,
             active,
             on_input,
-            hovered: None,
             widths: Vec::new(),
-            height: 34,
+            cut: Vec::new(),
         }
     }
 
-    fn compute_widths(&mut self, ctx_width: i32, text_width: impl Fn(&str) -> i32) {
-        self.widths.clear();
-        if self.tabs.is_empty() {
-            return;
-        }
-        let mut total = 0;
-        for tab in &self.tabs {
-            let natural = TAB_PAD_H * 2 + text_width(&tab.title) + CLOSE_GAP + CLOSE_SIZE;
-            let width = natural.clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH);
-            self.widths.push(width);
-            total += width;
-        }
-        // Tabs shrink together rather than scrolling, so every tab the keyboard
-        // switcher can reach is on screen. Shared out exactly rather than
-        // scaled: a floor under the scaled width overflows the row once there
-        // are enough tabs, and the ones past the edge are then unclickable.
-        if total > ctx_width && ctx_width > 0 && !self.widths.is_empty() {
-            let count = self.widths.len() as i32;
-            let each = ctx_width / count;
-            let last = ctx_width - each * (count - 1);
-            for (index, width) in self.widths.iter_mut().enumerate() {
-                *width = if index as i32 == count - 1 {
-                    last
-                } else {
-                    each
-                };
+    fn glyph() -> i32 {
+        LABEL.style().icon
+    }
+
+    fn compute_widths(&mut self, room: i32) {
+        let chrome = PAD * 2 + space::SM + Self::glyph();
+        self.widths = self
+            .tabs
+            .iter()
+            .map(|tab| (chrome + ui::width(&tab.title, LABEL)).clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH))
+            .collect();
+        self.cut = self.tabs.iter().map(|_| Cell::new(false)).collect();
+        // Shrunk alike rather than scrolled, so every tab stays on screen;
+        // shared out exactly, since a floor under a scaled width overflows.
+        let count = self.widths.len() as i32;
+        if count > 0 && room > 0 && self.widths.iter().sum::<i32>() > room {
+            let each = room / count;
+            self.widths.fill(each);
+            if let Some(last) = self.widths.last_mut() {
+                *last = room - each * (count - 1);
             }
         }
+    }
+
+    fn tab_x(&self, index: usize) -> i32 {
+        self.layout_rect().x + self.widths[..index].iter().sum::<i32>()
     }
 
     fn tab_at(&self, x: i32) -> Option<usize> {
-        let rect = self.layout_rect();
-        let mut cursor = rect.x;
-        for (index, width) in self.widths.iter().enumerate() {
-            if x >= cursor && x < cursor + width {
-                return Some(index);
-            }
-            cursor += width;
-        }
-        None
+        let mut right = self.layout_rect().x;
+        self.widths.iter().position(|&w| {
+            right += w;
+            x >= right - w && x < right
+        })
     }
 
-    fn close_rect_x(&self, index: usize) -> Option<i32> {
+    /// The close glyph's box, which the dot shares.
+    fn glyph_rect(&self, index: usize) -> Rect {
         let rect = self.layout_rect();
-        let mut cursor = rect.x;
-        for (i, width) in self.widths.iter().enumerate() {
-            if i == index {
-                return Some(cursor + width - TAB_PAD_H - CLOSE_SIZE);
-            }
-            cursor += width;
-        }
-        None
+        let glyph = Self::glyph();
+        let x = self.tab_x(index) + self.widths[index] - PAD - glyph;
+        Rect::new(x, rect.y + (rect.height - glyph) / 2, glyph, glyph)
+    }
+
+    fn label_room(&self, index: usize) -> i32 {
+        self.widths[index] - PAD * 2 - space::SM - Self::glyph()
     }
 
     fn emit(&self, input: TabInput, sink: &mut MessageSink) -> EventResponse {
@@ -122,6 +108,41 @@ impl EditorTabsWidget {
                 EventResponse::Consumed
             }
             None => EventResponse::Ignored,
+        }
+    }
+
+    fn paint_tab(&self, ctx: &mut PaintContext, index: usize, hovered: bool) {
+        let theme = ctx.theme();
+        let rect = self.layout_rect();
+        let tab = &self.tabs[index];
+        let (x, w) = (self.tab_x(index), self.widths[index]);
+        let active = index == self.active;
+        if active {
+            ctx.fill_rect(x, rect.y, w, rect.height, theme.surface);
+            ctx.fill_rect(x, rect.y, w, super::INDICATOR, theme.accent);
+        } else if hovered {
+            let hover = theme.state(ColorRole::SurfaceSunken, State::Hover);
+            ctx.fill_rect(x, rect.y, w, rect.height, hover);
+        }
+        let edge = rect.height - space::SM * 2;
+        ctx.fill_rect(x + w - 1, rect.y + space::SM, 1, edge, theme.border);
+
+        let ink = match active {
+            true => theme.text,
+            false => theme.text_secondary,
+        };
+        let top = ui::centred_top(rect.y, rect.height, LABEL);
+        let room = self.label_room(index);
+        let cut = ctx.draw_text_tail(x + PAD, top, &tab.title, LABEL, room, ink);
+        self.cut[index].set(cut);
+
+        let glyph = self.glyph_rect(index);
+        // One slot: the dot gives way to the close glyph under the pointer.
+        if tab.modified && !hovered {
+            super::modified_dot(ctx, glyph.x, glyph.y, glyph.width, theme.accent);
+        } else if hovered || active {
+            let quiet = theme.text_secondary;
+            ctx.draw_icon(Icon::X, glyph.x, glyph.y, glyph.width, quiet);
         }
     }
 }
@@ -135,19 +156,16 @@ impl Widget for EditorTabsWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        self.height = ctx.style.tab_height;
-        let width = if constraints.is_width_bounded() {
-            constraints.max_width
-        } else {
-            MAX_TAB_WIDTH * self.tabs.len() as i32
+        let width = match constraints.is_width_bounded() {
+            true => constraints.max_width,
+            false => MAX_TAB_WIDTH * self.tabs.len() as i32,
         };
-        self.compute_widths(width, |t| ctx.text_width(t));
-        constraints.constrain(Size::new(width, self.height))
+        self.compute_widths(width);
+        constraints.constrain(Size::new(width, ctx.style.tab_height))
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
-        // A tab row narrower than its tabs still draws only inside itself.
         ctx.with_clip(rect, |ctx| {
             let theme = ctx.theme();
             ctx.fill_rect(
@@ -157,79 +175,16 @@ impl Widget for EditorTabsWidget {
                 rect.height,
                 theme.surface_sunken,
             );
-
-            let text_h = ctx.text_height();
-            let mut x = rect.x;
-            // From the live pointer, not a field the last rebuild cleared: the
-            // glyph must be drawn exactly where clicking it closes the tab.
-            let (px, py) = ctx.pointer;
-            let pointer_tab = rect.contains(px, py).then(|| self.tab_at(px)).flatten();
-
-            for (index, tab) in self.tabs.iter().enumerate() {
-                let width = *self.widths.get(index).unwrap_or(&MIN_TAB_WIDTH);
-                let active = index == self.active;
-                let hovered = pointer_tab == Some(index);
-
-                if active {
-                    ctx.fill_rect(x, rect.y, width, rect.height, theme.surface);
-                    ctx.fill_rect(x, rect.y, width, 2, theme.accent);
-                } else if hovered {
-                    let hover = theme.state(ColorRole::SurfaceSunken, State::Hover);
-                    ctx.fill_rect(x, rect.y, width, rect.height, hover);
-                }
-                ctx.fill_rect(x + width - 1, rect.y + 6, 1, rect.height - 12, theme.border);
-
-                let label_color = if active {
-                    theme.text
-                } else {
-                    theme.text_secondary
-                };
-                let label_budget = width - TAB_PAD_H * 2 - CLOSE_GAP - CLOSE_SIZE;
-                let label = elide(&tab.title, label_budget, |t| ctx.text_width(t));
-                let label_y = rect.y + (rect.height - text_h) / 2;
-                ctx.draw_text_transparent(x + TAB_PAD_H, label_y, &label, label_color);
-
-                let icon_x = x + width - TAB_PAD_H - CLOSE_SIZE;
-                let icon_y = rect.y + (rect.height - CLOSE_SIZE) / 2;
-                // One slot: the dot gives way to the close affordance on hover.
-                if tab.modified && !hovered {
-                    super::modified_dot(ctx, icon_x, icon_y, CLOSE_SIZE, theme.accent);
-                } else if hovered || active {
-                    ctx.draw_icon(Icon::X, icon_x, icon_y, CLOSE_SIZE, theme.text_secondary);
-                }
-
-                x += width;
+            let lit = ctx.lit(self.id());
+            for index in 0..self.tabs.len() {
+                self.paint_tab(ctx, index, lit == Some(index));
             }
-
-            if x < rect.x + rect.width {
-                ctx.fill_rect(
-                    x,
-                    rect.y,
-                    rect.x + rect.width - x,
-                    rect.height,
-                    theme.surface_sunken,
-                );
-            }
-            ctx.fill_rect(
-                rect.x,
-                rect.y + rect.height - 1,
-                rect.width,
-                1,
-                theme.border,
-            );
+            let bottom = rect.y + rect.height - 1;
+            ctx.fill_rect(rect.x, bottom, rect.width, 1, theme.border);
         });
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        if phase != EventPhase::Target && phase != EventPhase::Bubble {
-            return EventResponse::Ignored;
-        }
-
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
         match event {
             WidgetEvent::PointerDown { x, y, button, .. } => {
                 if !self.layout_rect().contains(*x, *y) {
@@ -238,47 +193,17 @@ impl Widget for EditorTabsWidget {
                 let Some(index) = self.tab_at(*x) else {
                     return EventResponse::Ignored;
                 };
-                if *button == PointerButton::Middle {
-                    return self.emit(TabInput::Close(index), sink);
+                let glyph = self.glyph_rect(index);
+                let on_close = glyph
+                    .inflate((MIN_TARGET - glyph.width) / 2)
+                    .contains(*x, *y);
+                match button {
+                    PointerButton::Middle => self.emit(TabInput::Close(index), sink),
+                    PointerButton::Left if on_close => self.emit(TabInput::Close(index), sink),
+                    PointerButton::Left => self.emit(TabInput::Select(index), sink),
+                    PointerButton::Right => EventResponse::Ignored,
                 }
-                if *button != PointerButton::Left {
-                    return EventResponse::Ignored;
-                }
-                // `index` came from the press's own x, so the glyph is drawn.
-                // It is a box: bounding only x closes from the tab's top and
-                // bottom pixels.
-                if let Some(close_x) = self.close_rect_x(index) {
-                    let strip = self.layout_rect();
-                    let close_y = strip.y + (strip.height - CLOSE_SIZE) / 2;
-                    if *x >= close_x
-                        && *x < close_x + CLOSE_SIZE
-                        && *y >= close_y
-                        && *y < close_y + CLOSE_SIZE
-                    {
-                        return self.emit(TabInput::Close(index), sink);
-                    }
-                }
-                self.emit(TabInput::Select(index), sink)
             }
-
-            WidgetEvent::PointerMove { x, y } => {
-                let hovered = if self.layout_rect().contains(*x, *y) {
-                    self.tab_at(*x)
-                } else {
-                    None
-                };
-                if hovered != self.hovered {
-                    self.hovered = hovered;
-                    return EventResponse::Consumed;
-                }
-                EventResponse::Ignored
-            }
-
-            WidgetEvent::PointerLeave => {
-                self.hovered = None;
-                EventResponse::Ignored
-            }
-
             _ => EventResponse::Ignored,
         }
     }
@@ -287,7 +212,14 @@ impl Widget for EditorTabsWidget {
         Role::Tab
     }
 
-    fn focus_policy(&self) -> FocusPolicy {
-        FocusPolicy::None
+    fn hover_part(&self, x: i32, _y: i32) -> Option<usize> {
+        self.tab_at(x)
+    }
+
+    fn tooltip(&self, x: i32, _y: i32) -> Option<&str> {
+        let index = self.tab_at(x)?;
+        self.cut[index]
+            .get()
+            .then_some(self.tabs[index].title.as_str())
     }
 }

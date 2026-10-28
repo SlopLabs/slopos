@@ -1,8 +1,5 @@
-//! Thread-safe protocol connection for compositor communication.
-//!
-//! The protocol client is confined to the UI thread via `Rc` (`!Send + !Sync`).
-//! Background threads that need to post work or a message to the UI thread use
-//! [`UiSender`], which is `Send + Sync + Clone`.
+//! The connection to the compositor, confined to the UI thread; another thread
+//! reaches it through a [`UiSender`].
 
 use core::cell::RefCell;
 use std::any::Any;
@@ -19,11 +16,8 @@ use slopos_abi::syscall::types::UserPollFd;
 use slopos_protocol::client::Client;
 use slopos_protocol::types::{ProtocolError, SurfaceId, ToplevelId};
 
-/// Protocol connection state.
-///
-/// Confined to the UI thread by `Rc` (`!Send`, `!Sync`). `pending_destroys` is a
-/// `RefCell` separate from the client so `Surface::drop` can always queue a
-/// deferred destroy while the client is borrowed elsewhere.
+/// `pending_destroys` is apart from the client so `Surface::drop` can queue a
+/// destroy while the client is borrowed.
 pub struct Protocol {
     client: RefCell<Client>,
     pending_destroys: RefCell<PendingDestroys>,
@@ -34,20 +28,37 @@ pub struct Protocol {
     display_height: u32,
 }
 
-/// Handle to the protocol connection; `Rc` confines it to the UI thread.
 pub type ProtocolHandle = Rc<Protocol>;
 
-/// Connect to the compositor protocol socket.
-///
-/// Retries while the compositor is still starting up; a compositor that
-/// refuses this client's version refuses it every time.
-pub fn connect() -> Result<ProtocolHandle, ()> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConnectError {
+    NotRunning,
+    /// It speaks another protocol version, so this program must be rebuilt.
+    VersionMismatch,
+    WakeupPipe,
+}
+
+impl core::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            ConnectError::NotRunning => "compositor not running",
+            ConnectError::VersionMismatch => {
+                "the compositor speaks another protocol version: rebuild this program"
+            }
+            ConnectError::WakeupPipe => "no pipe for the UI thread's wakeups",
+        })
+    }
+}
+
+/// Retries while the compositor starts; one that refuses this client's
+/// version refuses it every time.
+pub fn connect() -> Result<ProtocolHandle, ConnectError> {
     for _ in 0..10 {
         let connected = Client::connect(&slopos_protocol::socket_path(slopos_cabi::geteuid()))
             .and_then(|mut client| client.ensure_output_info().map(|()| client));
         let client = match connected {
             Ok(client) => client,
-            Err(ProtocolError::VersionMismatch) => return Err(()),
+            Err(ProtocolError::VersionMismatch) => return Err(ConnectError::VersionMismatch),
             Err(_) => {
                 slopos_cabi::sleep_ms(200);
                 continue;
@@ -62,14 +73,14 @@ pub fn connect() -> Result<ProtocolHandle, ()> {
         return Ok(Rc::new(Protocol {
             client: RefCell::new(client),
             pending_destroys: RefCell::new(PendingDestroys::new()),
-            ui_queue: UiQueue::new()?,
+            ui_queue: UiQueue::new().map_err(|()| ConnectError::WakeupPipe)?,
             compositor_fd,
             display_format,
             display_width,
             display_height,
         }));
     }
-    Err(())
+    Err(ConnectError::NotRunning)
 }
 
 impl HasDisplayHandle for Protocol {
@@ -84,47 +95,37 @@ impl HasDisplayHandle for Protocol {
 }
 
 impl Protocol {
-    /// The compositor socket fd; stable for this connection's lifetime.
     #[inline]
     pub fn compositor_fd(&self) -> i32 {
         self.compositor_fd
     }
 
-    /// The read end of the self-pipe a [`UiSender`] writes.
-    ///
-    /// Exposed so an async consumer can await readiness on it directly; it
-    /// drains it with [`Protocol::drain_wakeup`], or no send writes it again.
+    /// The read end of the pipe a [`UiSender`] wakes, for a consumer that polls
+    /// it itself and drains it with [`Protocol::drain_wakeup`].
     #[inline]
     pub fn wakeup_read_fd(&self) -> i32 {
         self.ui_queue.wakeup_fd()
     }
 
-    /// Get exclusive access to the protocol client.
-    ///
-    /// Panics on reentrant borrow.
+    /// Panics on a reentrant borrow.
     #[inline]
     pub fn borrow_client(&self) -> core::cell::RefMut<'_, Client> {
         self.client.borrow_mut()
     }
 
-    /// Non-panicking variant of [`borrow_client()`].
     #[inline]
     pub fn try_borrow_client(&self) -> Option<core::cell::RefMut<'_, Client>> {
         self.client.try_borrow_mut().ok()
     }
 
-    /// Queue a deferred destroy for compositor-side objects.
-    ///
-    /// Called from `Surface::drop`, where the client `RefCell` is already borrowed.
+    /// From `Surface::drop`, where the client may be borrowed.
     pub fn queue_destroy(&self, toplevel_id: ToplevelId, surface_id: SurfaceId) {
         if let Ok(mut q) = self.pending_destroys.try_borrow_mut() {
             q.push(toplevel_id, surface_id);
         }
     }
 
-    /// Send any deferred destroy requests queued by `Surface::drop`.
-    ///
-    /// Call at the top of the event loop before any other client operations.
+    /// Sends the destroys `Surface::drop` queued; first in each loop pass.
     pub fn flush_pending_destroys(&self) {
         let snapshot = {
             let Ok(mut q) = self.pending_destroys.try_borrow_mut() else {
@@ -156,14 +157,11 @@ impl Protocol {
         }
     }
 
-    /// Create a sender handle for posting work from background threads.
     pub fn ui_sender(&self) -> UiSender {
         self.ui_queue.sender()
     }
 
-    /// Execute all closures posted by background threads via [`UiSender`].
-    ///
-    /// Call at the top of the event loop, after `flush_pending_destroys`.
+    /// Runs what [`UiSender::post`] queued; after `flush_pending_destroys`.
     pub fn drain_ui_queue(&self) {
         let mut client = match self.try_borrow_client() {
             Some(c) => c,
@@ -178,13 +176,8 @@ impl Protocol {
         self.ui_queue.take_messages()
     }
 
-    /// Sleep until the compositor sends data or `timeout_ms` elapses.
-    ///
-    /// Also woken by a [`UiSender`] from a background thread.
-    ///
-    /// * `timeout_ms > 0` — sleep up to that many milliseconds.
-    /// * `timeout_ms == 0` — non-blocking check (returns immediately).
-    /// * `timeout_ms < 0` — sleep indefinitely until an event arrives.
+    /// Sleeps until the compositor or a [`UiSender`] wakes it, or `timeout_ms`
+    /// passes: 0 returns at once, a negative one waits for good.
     pub fn wait_events(&self, timeout_ms: i64) {
         let mut fds = [
             UserPollFd {
@@ -205,7 +198,6 @@ impl Protocol {
         }
     }
 
-    /// Drain the self-pipe so a pending wakeup doesn't fire again next iteration.
     pub fn drain_wakeup(&self) {
         self.ui_queue.drain_wakeup();
     }
@@ -234,10 +226,6 @@ impl PendingDestroys {
 
     fn take(&mut self) -> Vec<(ToplevelId, SurfaceId)> {
         core::mem::take(&mut self.entries)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 }
 
@@ -333,16 +321,13 @@ impl Drop for UiQueue {
     }
 }
 
-/// Handle for posting work or a message to the UI thread from any thread.
-///
-/// Posted closures run on the next [`Protocol::drain_ui_queue`]; messages wait
-/// for [`Protocol::take_messages`].
+/// Posts work or a message to the UI thread from any thread.
 pub struct UiSender {
     queue: Arc<UiQueue>,
 }
 
 impl UiSender {
-    /// Post a closure to execute on the UI thread.
+    /// Runs `f` on the next [`Protocol::drain_ui_queue`].
     pub fn post(&self, f: impl FnOnce(&mut Client) + Send + 'static) {
         if let Ok(mut q) = self.queue.posted.lock() {
             q.push(Box::new(f));

@@ -1,23 +1,13 @@
-//! A draggable divider, for a resizable sidebar.
-//!
-//! Reports the pointer's absolute position while dragging and nothing else; how
-//! wide the pane may get, and what it does when the window is too narrow, are
-//! the application's to decide.
+//! A divider dragged to resize a pane: it reports where the pointer is, and
+//! the app decides what that makes the pane.
 
 use std::any::Any;
 
 use crate::constraints::{BoxConstraints, Orientation, Size};
-use crate::event::{EventPhase, EventResponse, MessageSink, PointerButton, WidgetEvent};
+use crate::event::{EventResponse, MessageSink, PointerButton, WidgetEvent};
 use crate::paint::PaintContext;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
+use crate::traits::{MeasureCtx, Role, Widget, WidgetCore};
 
-/// Pixels the handle spans; wider than the line it draws, because a one-pixel
-/// hit target is one no pointer finds.
-const HIT_WIDTH: i32 = 6;
-
-/// What a handle reports. A drag spans several events and the widget tree is
-/// rebuilt between them, so the application is told when one begins and ends
-/// rather than the widget remembering.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DragInput {
     Begin,
@@ -31,10 +21,10 @@ type DragCallback = Box<dyn Fn(DragInput) -> Box<dyn Any>>;
 pub struct DragHandleWidget {
     core: WidgetCore,
     orientation: Orientation,
-    /// Whether a drag is live, as the application sees it.
+    /// Given back by the app, since the tree is rebuilt between a drag's
+    /// events, and set at the press, since its release may come before that.
     active: bool,
     on_drag: Option<DragCallback>,
-    hovered: bool,
 }
 
 impl DragHandleWidget {
@@ -44,7 +34,6 @@ impl DragHandleWidget {
             orientation,
             active,
             on_drag,
-            hovered: false,
         }
     }
 
@@ -67,17 +56,18 @@ impl Widget for DragHandleWidget {
         &mut self.core
     }
 
-    fn measure(&mut self, constraints: BoxConstraints, _ctx: &mut MeasureCtx) -> Size {
+    fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
+        let across = ctx.style.divider_width;
         let size = match self.orientation {
-            Orientation::Vertical => Size::new(HIT_WIDTH, constraints.max_height),
-            Orientation::Horizontal => Size::new(constraints.max_width, HIT_WIDTH),
+            Orientation::Vertical => Size::new(across, constraints.max_height),
+            Orientation::Horizontal => Size::new(constraints.max_width, across),
         };
         constraints.constrain(size)
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
-        let color = if self.active || self.hovered {
+        let color = if self.active || ctx.lit(self.id()).is_some() {
             ctx.theme().accent
         } else {
             ctx.theme().border
@@ -92,51 +82,29 @@ impl Widget for DragHandleWidget {
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        if phase != EventPhase::Target && phase != EventPhase::Bubble {
-            return EventResponse::Ignored;
-        }
-
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
         match event {
             WidgetEvent::PointerDown { x, y, button, .. } => {
                 if !self.layout_rect().contains(*x, *y) || *button != PointerButton::Left {
                     return EventResponse::Ignored;
                 }
+                self.active = true;
                 self.emit(DragInput::Begin, sink);
-                EventResponse::CapturePointer
+                EventResponse::Consumed
             }
-            WidgetEvent::PointerMove { x, y } => {
-                if self.active {
-                    let value = match self.orientation {
-                        Orientation::Vertical => *x,
-                        Orientation::Horizontal => *y,
-                    };
-                    return self.emit(DragInput::Move(value), sink);
-                }
-                let hovered = self.layout_rect().contains(*x, *y);
-                if hovered != self.hovered {
-                    self.hovered = hovered;
-                    return EventResponse::Consumed;
-                }
-                EventResponse::Ignored
+            WidgetEvent::PointerMove { x, y } if self.active => {
+                let value = match self.orientation {
+                    Orientation::Vertical => *x,
+                    Orientation::Horizontal => *y,
+                };
+                self.emit(DragInput::Move(value), sink)
             }
-            WidgetEvent::PointerUp { .. } => {
-                // A release reaches every widget the pointer missed, and every
-                // message costs a rebuild.
-                if !self.active {
-                    return EventResponse::Ignored;
-                }
+            // A release reaches every widget the pointer missed, and every
+            // message costs a rebuild.
+            WidgetEvent::PointerUp { .. } if self.active => {
+                self.active = false;
                 self.emit(DragInput::End, sink);
-                EventResponse::ReleasePointer
-            }
-            WidgetEvent::PointerLeave => {
-                self.hovered = false;
-                EventResponse::Ignored
+                EventResponse::Consumed
             }
             _ => EventResponse::Ignored,
         }
@@ -146,7 +114,7 @@ impl Widget for DragHandleWidget {
         Role::Separator
     }
 
-    fn focus_policy(&self) -> FocusPolicy {
-        FocusPolicy::None
+    fn hover_part(&self, _x: i32, _y: i32) -> Option<usize> {
+        Some(0)
     }
 }

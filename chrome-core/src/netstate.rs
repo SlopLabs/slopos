@@ -1,28 +1,18 @@
-//! The network indicator's model: what the panel knows, and the one state the
-//! bar draws.
-//!
-//! A fixed-size snapshot the compositor refreshes on a slow timer and diffs, so
-//! an unchanged network produces no damage. Human-readable strings come from
-//! [`slopos_net_core::render`] so the bar and `ip` cannot disagree.
+//! What the network panel knows and the one state the bar draws, in
+//! [`slopos_net_core::render`]'s sentences, so the bar and `ip` agree.
 
 use slopos_abi::net::{
     NET_CONN_FULL, NET_CONN_LIMITED, NET_CONN_LOCAL, NET_CONN_NONE, NET_CONN_PORTAL,
-    NET_DHCP_DISABLED, NET_IFKIND_ETHERNET, NET_IFKIND_LOOPBACK, NET_OPER_DORMANT,
-    NET_OPER_LOWERLAYERDOWN,
+    NET_IFKIND_ETHERNET, NET_IFKIND_LOOPBACK, NET_OPER_DORMANT, NET_OPER_LOWERLAYERDOWN,
 };
 use slopos_net_core::render;
 
-/// Interfaces the model can hold; overflow drops the tail rather than growing.
+/// Overflow drops the tail rather than growing.
 pub const MAX_IFACES: usize = 6;
 
-/// Resolvers the model can hold, matching what the panel shows.
-pub const MAX_DNS: usize = 3;
-
-/// Longest interface name the model stores, matching the ABI's field width.
+/// The ABI's field width.
 pub const IFNAME_LEN: usize = 16;
 
-/// What kind of link an interface is. No wireless variant: the tree has no
-/// wireless driver, and appending one later is non-breaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IfaceKind {
     Loopback,
@@ -30,7 +20,6 @@ pub enum IfaceKind {
 }
 
 impl IfaceKind {
-    /// The `NET_IFKIND_*` value this kind serialises to.
     pub const fn abi(self) -> u8 {
         match self {
             IfaceKind::Loopback => NET_IFKIND_LOOPBACK,
@@ -38,11 +27,8 @@ impl IfaceKind {
         }
     }
 
-    /// Read a `NET_IFKIND_*` value from the ABI.
-    ///
-    /// Deliberately lossy: everything that is not loopback reads as Ethernet,
-    /// because the only distinction the indicator draws is loopback against a
-    /// link that speaks for the machine.
+    /// Lossy: the indicator tells loopback only from a link that speaks for
+    /// the machine.
     pub const fn from_abi(kind: u8) -> IfaceKind {
         match kind {
             NET_IFKIND_LOOPBACK => IfaceKind::Loopback,
@@ -103,24 +89,19 @@ pub const IFACE_OFF_LABEL: &str = "off";
 
 pub const IFACE_NO_CARRIER_LABEL: &str = "unplugged";
 
-/// What a panel row is currently doing, as one ordered decision the dot's
-/// colour and the status word both render. `carrier` on its own is not that
-/// value: a `LOWERLAYERDOWN` interface still reports one.
+/// What a panel row is doing, as one ordered decision its icon's tone and
+/// its status word both render. `carrier` alone is not it: a
+/// `LOWERLAYERDOWN` interface still reports one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IfaceState {
-    /// Administratively down: someone turned it off.
     Off,
-    /// Up, but the link is not.
     NoCarrier,
-    /// Link is up and nothing has given it an address.
     NoAddress,
-    /// Carrying traffic.
     Up,
 }
 
-/// Classify one row. The order is the order the causes mask each other in: a
-/// switched-off interface has no carrier worth reporting, and one with no
-/// carrier cannot be blamed for having no address.
+/// In the order the causes mask each other: a switched-off interface has no
+/// carrier worth reporting, and one with no carrier no address to blame.
 pub const fn iface_state(row: &IfaceRow) -> IfaceState {
     if !row.admin_up {
         IfaceState::Off
@@ -133,7 +114,6 @@ pub const fn iface_state(row: &IfaceRow) -> IfaceState {
     }
 }
 
-/// One interface, as the panel lists it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IfaceRow {
     pub name: [u8; IFNAME_LEN],
@@ -145,12 +125,9 @@ pub struct IfaceRow {
     pub oper: u8,
     pub ipv4: [u8; 4],
     pub prefix_len: u8,
-    /// `NET_DHCP_*`.
-    pub dhcp: u8,
 }
 
 impl IfaceRow {
-    /// A row with no name and nothing up — the array filler, never shown.
     pub const EMPTY: IfaceRow = IfaceRow {
         name: [0; IFNAME_LEN],
         name_len: 0,
@@ -160,11 +137,9 @@ impl IfaceRow {
         oper: 0,
         ipv4: [0; 4],
         prefix_len: 0,
-        dhcp: NET_DHCP_DISABLED,
     };
 
-    /// A named row of `kind`, with everything else at its down/unset value.
-    /// Names longer than [`IFNAME_LEN`] are truncated rather than rejected.
+    /// A name longer than [`IFNAME_LEN`] is cut short.
     pub fn named(name: &[u8], kind: IfaceKind) -> IfaceRow {
         let len = name.len().min(IFNAME_LEN);
         let mut row = IfaceRow {
@@ -185,7 +160,6 @@ impl IfaceRow {
         core::str::from_utf8(self.name_bytes()).unwrap_or("")
     }
 
-    /// Whether this interface has an IPv4 address it could send from.
     #[inline]
     pub const fn has_addr(&self) -> bool {
         let a = self.ipv4;
@@ -200,8 +174,6 @@ impl IfaceRow {
     }
 }
 
-/// Everything the network panel shows, and everything the bar's indicator is
-/// derived from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NetPanelModel {
     /// The master networking switch. Off outranks every other signal.
@@ -211,8 +183,6 @@ pub struct NetPanelModel {
     pub ifaces: [IfaceRow; MAX_IFACES],
     pub iface_count: usize,
     pub gateway: [u8; 4],
-    pub dns: [[u8; 4]; MAX_DNS],
-    pub dns_count: usize,
 }
 
 impl NetPanelModel {
@@ -224,28 +194,16 @@ impl NetPanelModel {
         ifaces: [IfaceRow::EMPTY; MAX_IFACES],
         iface_count: 0,
         gateway: [0; 4],
-        dns: [[0; 4]; MAX_DNS],
-        dns_count: 0,
     };
 
-    /// The interfaces actually populated.
     pub fn ifaces(&self) -> &[IfaceRow] {
         &self.ifaces[..self.iface_count.min(MAX_IFACES)]
     }
 
-    /// Append `row`, or drop it if the model is full.
     pub fn push_iface(&mut self, row: IfaceRow) {
         if self.iface_count < MAX_IFACES {
             self.ifaces[self.iface_count] = row;
             self.iface_count += 1;
-        }
-    }
-
-    /// Append a resolver, or drop it if the model is full.
-    pub fn push_dns(&mut self, addr: [u8; 4]) {
-        if self.dns_count < MAX_DNS {
-            self.dns[self.dns_count] = addr;
-            self.dns_count += 1;
         }
     }
 
@@ -255,20 +213,12 @@ impl NetPanelModel {
         self.ifaces().iter().find(|r| r.kind != IfaceKind::Loopback)
     }
 
-    /// The interfaces a person should be shown, which excludes loopback — not a
-    /// network anyone connects to, and per RFC 2863 its operational state is
-    /// unknowable, which reads as jargon in a status menu.
-    ///
-    /// Kept separate from [`ifaces`](Self::ifaces) rather than filtered at the
-    /// source, because the indicator still has to see loopback.
+    /// All but loopback, which no one connects to and whose operational
+    /// state RFC 2863 leaves unknowable.
     pub fn listed_ifaces(&self) -> impl Iterator<Item = &IfaceRow> {
         self.ifaces()
             .iter()
             .filter(|r| r.kind != IfaceKind::Loopback)
-    }
-
-    pub fn listed_count(&self) -> usize {
-        self.listed_ifaces().count()
     }
 }
 
@@ -278,8 +228,6 @@ impl Default for NetPanelModel {
     }
 }
 
-/// Reduce the model to the one state the bar draws.
-///
 /// Each check outranks every later one, so an unplugged cable never shows as
 /// "no internet".
 pub fn indicator_state_for(model: &NetPanelModel) -> NetIndicatorState {
@@ -312,8 +260,7 @@ pub fn indicator_state_for(model: &NetPanelModel) -> NetIndicatorState {
     }
 }
 
-/// The one-line sentence that goes with a state. A function of the state alone,
-/// not of the model, so the sentence and the glyph cannot contradict each other.
+/// Of the state alone, so the sentence and the glyph cannot disagree.
 pub const fn indicator_label(state: NetIndicatorState) -> &'static str {
     match state {
         NetIndicatorState::Connected => render::connectivity(NET_CONN_FULL),
@@ -527,12 +474,8 @@ mod tests {
         for _ in 0..MAX_IFACES + 4 {
             m.push_iface(eth(true, true, [10, 0, 2, 15]));
         }
-        for _ in 0..MAX_DNS + 4 {
-            m.push_dns([1, 1, 1, 1]);
-        }
         assert_eq!(m.iface_count, MAX_IFACES);
         assert_eq!(m.ifaces().len(), MAX_IFACES);
-        assert_eq!(m.dns_count, MAX_DNS);
     }
 
     #[test]
@@ -565,10 +508,10 @@ mod tests {
 
     #[test]
     fn the_panel_s_names_speak_plainly() {
-        use slopos_priv_core::words::label;
+        use slopos_theme_core::words::label;
         let states = ALL_INDICATOR_STATES.iter().map(|&s| indicator_label(s));
         for text in states.chain([PANEL_TITLE, NETWORKING, GATEWAY_LABEL]) {
-            assert_eq!(label(text), Ok(()), "{text}");
+            assert_eq!(label(text, &[]), Ok(()), "{text}");
         }
     }
 }

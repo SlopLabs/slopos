@@ -4,7 +4,6 @@
 //! nothing, and a test boot runs no compositor, so one that needs the person
 //! is refused for want of anyone to ask.
 
-use slopos_priv_core::Refused;
 use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -17,7 +16,7 @@ use slopos_extension_core::record::Record;
 use slopos_extension_core::sidecar::Sidecar;
 use slopos_extension_core::source::write_image;
 use slopos_extension_core::{INTERPRETER, NAMESPACE, RECORD, STORE, generation, hex};
-use slopos_priv_core::{ENV_ACTION, ENV_FD};
+use slopos_priv_core::{ENV_ACTION, ENV_FD, Refused};
 use slopos_slibc::test_harness::note;
 use slopos_tls_core::ed25519::SigningKey;
 use slopos_tls_core::sshsig::{self, KEY_TYPE, PublicKey};
@@ -373,7 +372,6 @@ fn one_past_either_ceiling_is_refused() -> bool {
         && (record("ext-past").is_none() || fail("a refused image left a record"))
 }
 
-/// Rolled back, the version left is refused to a signed install.
 fn a_rollback_refuses_the_version_it_left() -> bool {
     let back = extctl(ROOT, &["rollback", "ext-signed"]);
     if !back.ok() || !installed("ext-signed", 1) {
@@ -587,10 +585,9 @@ fn the_store_is_sealed_and_kept_where_it_is() -> bool {
         || fail(format!("the session's status: {}", status.shown()))
 }
 
-/// An image past the eighth of memory an extension once had to fit in,
-/// mostly a hole, goes in and is read at both ends through `/opt`. It is
-/// packed on the disk root, since `/tmp` is memory.
-fn one_past_the_old_memory_budget_goes_in() -> bool {
+/// Mostly a hole, read at both ends; packed on the disk root, since `/tmp` is
+/// memory.
+fn an_image_past_an_eighth_of_memory_goes_in() -> bool {
     let mut info = UserSysInfo::default();
     if sys_core::sys_info(&mut info) != 0 {
         return fail("no sys_info");
@@ -704,8 +701,8 @@ const CASES: &[(&str, fn() -> bool)] = &[
         the_store_is_sealed_and_kept_where_it_is,
     ),
     (
-        "one_past_the_old_memory_budget_goes_in",
-        one_past_the_old_memory_budget_goes_in,
+        "an_image_past_an_eighth_of_memory_goes_in",
+        an_image_past_an_eighth_of_memory_goes_in,
     ),
     ("removing_keeps_the_record", cleanup),
 ];

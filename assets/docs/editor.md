@@ -58,6 +58,7 @@ editor /src         # a folder
 | Chord | What it does |
 | --- | --- |
 | `Ctrl+Shift+P` | The command palette: every command, by name |
+| `Up` / `Down` or `Tab` / `Shift+Tab`, then `Enter` | In the palette or Go to file: choose, then run or open |
 | `Ctrl+B` | Show or hide the sidebar |
 | `Escape` | Close whatever is open |
 | `Ctrl+Backspace` | In a prompt: back one path segment, or one word |

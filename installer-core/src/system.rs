@@ -2,6 +2,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use slopos_boot_core::disk_id::Bus;
 use slopos_boot_core::gpt;
 
 use crate::{Issue, Layout};
@@ -33,14 +34,14 @@ pub struct Medium {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Disk {
     pub node: String,
-    /// What its maker calls it, as `/dev/disk/by-id` names it.
+    pub bus: Option<Bus>,
+    /// What its maker calls it; this and `bus` as `/dev/disk/by-id` names it.
     pub model: Option<String>,
     pub state: DiskState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// The disk the installer itself started from.
     Medium,
     ReadOnly,
 }
@@ -56,9 +57,7 @@ impl Refusal {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiskState {
-    /// Never offered.
     Refused(Refusal),
-    /// Offered, but it could not be read.
     Unreadable(String),
     Listed(Listing),
 }
@@ -106,11 +105,17 @@ pub struct Reinstall {
     pub fit: Fit,
 }
 
-/// What a disk holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Contents {
     /// A GUID partition table the installer reads.
     Gpt,
+    NoTable(NoTable),
+}
+
+/// What a disk holds without a table the installer reads, which only an
+/// erase installs onto.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoTable {
     Blank,
     Mbr(Vec<MbrPartition>),
     /// A GUID partition table with more entries than SlopOS reads, or damaged
@@ -128,33 +133,30 @@ pub struct MbrPartition {
     pub bytes: u64,
 }
 
-impl Contents {
-    /// What the disk holds, which erasing it loses: `None` when it is blank.
+impl NoTable {
+    /// What erasing the disk loses: `None` when it is blank.
     pub fn holds(&self) -> Option<String> {
         match self {
-            Contents::Gpt => Some("partitions".into()),
-            Contents::Blank => None,
-            Contents::Mbr(parts) => Some(match parts.len() {
+            NoTable::Blank => None,
+            NoTable::Mbr(parts) => Some(match parts.len() {
                 1 => "1 partition in an older kind of partition table".into(),
                 n => format!("{n} partitions in an older kind of partition table"),
             }),
-            Contents::UnreadableGpt => Some(format!(
+            NoTable::UnreadableGpt => Some(format!(
                 "a partition table SlopOS can't read, with over {} entries or damaged in both copies",
                 gpt::MAX_ENTRIES
             )),
-            Contents::Ext4 => Some("one ext4 filesystem across the whole disk".into()),
-            Contents::Data => Some("data in no partition table".into()),
+            NoTable::Ext4 => Some("one ext4 filesystem across the whole disk".into()),
+            NoTable::Data => Some("data in no partition table".into()),
         }
     }
 
-    /// Why only erasing the disk installs onto it, as a sentence.
     pub fn only_erase(&self) -> &'static str {
         match self {
-            Contents::Gpt => "SlopOS can only be installed by erasing this disk.",
-            Contents::Blank => "This disk is empty.",
-            Contents::Mbr(_) => "This disk has an older kind of partition table.",
-            Contents::UnreadableGpt => "SlopOS can't read this disk's partition table.",
-            Contents::Ext4 | Contents::Data => "This disk isn't divided into partitions.",
+            NoTable::Blank => "This disk is empty.",
+            NoTable::Mbr(_) => "This disk has an older kind of partition table.",
+            NoTable::UnreadableGpt => "SlopOS can't read this disk's partition table.",
+            NoTable::Ext4 | NoTable::Data => "This disk isn't divided into partitions.",
         }
     }
 }

@@ -1,30 +1,44 @@
-//! Launcher shelf (dock) — rendering, layout, magnification, and hit-testing
-//! for the bottom launcher bar.
-
-use std::path::Path;
+//! The dock: the pinned apps, then those running that no entry names, each
+//! growing as the pointer nears and named in a tooltip while it is over it.
 
 use slopos_appkit::app_icon;
 use slopos_appkit::text::ui;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
 use slopos_gfx::rounded::Rounded;
-use slopos_image::{DecodeOptions, Image};
-use slopos_theme_core::{Icon, TextRole, TextStyle};
+use slopos_image::Image;
+use slopos_theme_core::{Icon, TextRole, radius, space, stroke};
 
 use crate::app_entry::AppEntry;
 use crate::gfx::{self, DamageRect, DrawBuffer};
 use crate::syscall::UserWindowInfo;
-use crate::theme::*;
 
 const MAX_ENTRIES: usize = 16;
 
-/// Well past the size an icon is drawn at, so a huge one is refused before
-/// it is decoded.
-const ICON_PIXELS_MAX: usize = 256 * 256;
-const ICON_BYTES_MAX: u64 = 1 << 20;
+const ICON: i32 = 48;
+const ICON_GAP: i32 = space::SM;
+const PILL_PADDING_X: i32 = space::MD;
+const PILL_PADDING_Y: i32 = 6;
+const BOTTOM_MARGIN: i32 = space::XS;
+const SEPARATOR_WIDTH: i32 = 2;
+const SEPARATOR_HEIGHT: i32 = 32;
+const SEPARATOR_MARGIN: i32 = space::SM;
+const SEPARATOR_SPAN: i32 = SEPARATOR_MARGIN + SEPARATOR_WIDTH + SEPARATOR_MARGIN;
+const DOT: i32 = 4;
+const DOT_GAP: i32 = 3;
+const LABEL: TextRole = TextRole::Label;
 
-const LABEL: TextStyle = TextRole::Label.style();
+/// What the dock takes from the bottom of the screen, its dots included.
+pub const DOCK_HEIGHT: i32 = ICON + 2 * PILL_PADDING_Y + BOTTOM_MARGIN + DOT + DOT_GAP;
 
-pub struct ShelfEntry {
+const MAGNIFY_REACH_X: i32 = 120;
+const MAGNIFY_REACH_Y: i32 = 80;
+/// How much an icon under the pointer grows, out of 256.
+const MAGNIFY_256: i32 = 84;
+
+/// The smaller size an icon ships at, which the dock never draws past.
+const PICTURE_PX: u32 = app_icon::SIZES[0];
+
+pub struct DockEntry {
     pub name: String,
     pub exec: String,
     pub app_id: String,
@@ -37,10 +51,7 @@ pub struct ShelfEntry {
     has_icon: bool,
 }
 
-/// The smaller size an icon ships at, which the dock never draws past.
-const PICTURE_PX: u32 = app_icon::SIZES[0];
-
-impl ShelfEntry {
+impl DockEntry {
     pub fn has_icon(&self) -> bool {
         self.has_icon
     }
@@ -50,7 +61,7 @@ impl ShelfEntry {
     }
 
     fn pinned(entry: AppEntry) -> Self {
-        let icon = entry.icon.as_deref().and_then(decode);
+        let icon = entry.icon.as_deref().and_then(crate::app_entry::read_icon);
         Self::new(entry.name, entry.exec, entry.id, true, icon)
     }
 
@@ -80,55 +91,66 @@ impl ShelfEntry {
     }
 }
 
-/// The PNG at `path`, read as the share's files are read.
-fn decode(path: &Path) -> Option<Image> {
-    let bytes = crate::app_entry::read_bounded(path, ICON_BYTES_MAX)?;
-    let options = DecodeOptions {
-        max_pixels: ICON_PIXELS_MAX,
-        ..DecodeOptions::default()
-    };
-    slopos_image::decode(&bytes, options).ok()
-}
-
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct IconLayout {
     center_x: i32,
-    /// Top Y of this icon (icons grow upward from a common bottom line).
+    /// Icons grow upward from a common bottom line.
     top_y: i32,
-    /// Rendered size after magnification scaling.
     size: i32,
 }
 
-/// Full shelf geometry for one cursor position.  The render pass and click
-/// hit-testing compute it identically, so a click is tested against the
-/// geometry at that cursor position rather than a stale hover cache.
-struct ShelfGeometry {
-    layouts: [IconLayout; MAX_ENTRIES],
-    pill_x: i32,
-    pill_y: i32,
-    pill_w: i32,
-    pill_h: i32,
-    separator_x: i32,
+/// Where everything is for one pointer position, which drawing and a press
+/// both take from [`Dock::layout`], so a press is tested against where the
+/// pointer is rather than where it was at the last frame.
+struct Layout {
+    icons: [IconLayout; MAX_ENTRIES],
+    pill: Rounded,
+    separator_x: Option<i32>,
     icons_bottom: i32,
     hovered: Option<usize>,
 }
 
-pub struct LauncherShelf {
-    entries: Vec<ShelfEntry>,
-    hovered_index: Option<usize>,
+impl Layout {
+    /// The name over the icon under the pointer, if it has one.
+    fn label<'a>(&self, entries: &'a [DockEntry]) -> Option<(&'a str, Rounded)> {
+        let at = self.hovered?;
+        let name = entries[at].name.as_str();
+        (!name.is_empty()).then(|| {
+            (
+                name,
+                label_shape(name, self.icons[at].center_x, self.pill.y),
+            )
+        })
+    }
+
+    /// Every pixel the dock draws, its dots and its label included.
+    fn bounds(&self, entries: &[DockEntry]) -> DamageRect {
+        let pill = self.pill;
+        let dock = DamageRect {
+            x0: pill.x,
+            y0: pill.y,
+            x1: pill.x + pill.w - 1,
+            y1: pill.y + pill.h + DOT_GAP + DOT,
+        };
+        match self.label(entries) {
+            Some((_, shape)) => dock.union(&label_reach(&shape)),
+            None => dock,
+        }
+    }
+}
+
+pub struct Dock {
+    entries: Vec<DockEntry>,
     last_bounds: DamageRect,
-    /// Captured at draw time so `hit_test` can compute geometry for any cursor
-    /// position without a renderer handle.
     screen_w: u32,
     screen_h: u32,
     content_dirty: bool,
 }
 
-impl LauncherShelf {
+impl Dock {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
-            hovered_index: None,
             last_bounds: DamageRect::invalid(),
             screen_w: 0,
             screen_h: 0,
@@ -136,28 +158,24 @@ impl LauncherShelf {
         }
     }
 
-    /// Returns `true` and clears the flag if shelf content changed since last call.
     pub fn take_content_dirty(&mut self) -> bool {
-        let dirty = self.content_dirty;
-        self.content_dirty = false;
-        dirty
+        std::mem::take(&mut self.content_dirty)
     }
 
-    /// Pin the apps `entries` name, in order, as many as the shelf holds.
+    /// Pin the apps `entries` name, in order, as many as the dock holds.
     pub fn pin(&mut self, entries: Vec<AppEntry>) {
         self.entries = entries
             .into_iter()
             .take(MAX_ENTRIES)
-            .map(ShelfEntry::pinned)
+            .map(DockEntry::pinned)
             .collect();
         self.content_dirty = true;
     }
 
-    pub fn entries(&self) -> &[ShelfEntry] {
+    pub fn entries(&self) -> &[DockEntry] {
         &self.entries
     }
 
-    /// The name the dock's entry for `app_id` gives the app.
     pub fn app_name(&self, app_id: &str) -> Option<&str> {
         self.entries
             .iter()
@@ -165,17 +183,17 @@ impl LauncherShelf {
             .map(|e| e.name.as_str())
     }
 
-    /// Synchronize running state from the current window list; running apps
-    /// that match no pinned entry are appended after the pinned group.
+    /// Mark the pinned apps running, and add the running apps no entry
+    /// names after them: by app id, or by window for one without.
     pub fn sync_running_apps(&mut self, windows: &[UserWindowInfo], count: u32) {
-        let shown = |entries: &[ShelfEntry]| -> Vec<(bool, u32, String)> {
+        let shown = |entries: &[DockEntry]| -> Vec<(bool, u32, String)> {
             entries
                 .iter()
                 .map(|e| (e.running, e.task_id, e.name.clone()))
                 .collect()
         };
         let before = shown(&self.entries);
-        let (pinned, mut loose): (Vec<ShelfEntry>, Vec<ShelfEntry>) =
+        let (pinned, mut loose): (Vec<DockEntry>, Vec<DockEntry>) =
             self.entries.drain(..).partition(|entry| entry.pinned);
         self.entries = pinned;
         for entry in &mut self.entries {
@@ -184,21 +202,19 @@ impl LauncherShelf {
         }
 
         for win in &windows[..(count as usize).min(windows.len())] {
-            let title = win.title_str();
             let app_id = win.app_id.as_str();
-            let same_app = |entry: &ShelfEntry| match app_id.is_empty() {
-                true => names_match(&entry.name, title),
+            let same_app = |entry: &DockEntry| match app_id.is_empty() {
+                true => entry.app_id.is_empty() && entry.task_id == win.task_id,
                 false => entry.app_id == app_id,
             };
             if let Some(entry) = self.entries.iter_mut().find(|e| same_app(e)) {
                 entry.running = true;
                 entry.task_id = win.task_id;
             } else if self.entries.len() < MAX_ENTRIES {
+                let title = win.title_str();
                 let mut entry = match loose.iter().position(|e| same_app(e)) {
                     Some(at) => loose.swap_remove(at),
-                    None => {
-                        ShelfEntry::new(title.into(), String::new(), app_id.into(), false, None)
-                    }
+                    None => DockEntry::new(title.into(), String::new(), app_id.into(), false, None),
                 };
                 entry.name = title.into();
                 entry.running = true;
@@ -212,105 +228,72 @@ impl LauncherShelf {
         }
     }
 
-    /// Compute the full shelf geometry for one cursor position.  Used by both
-    /// `draw` and `hit_test` so the two can never disagree.
-    fn compute_geometry(
+    fn layout(
         &self,
         screen_width: u32,
         screen_height: u32,
         cursor_x: i32,
         cursor_y: i32,
-    ) -> ShelfGeometry {
-        let pinned_count = self.pinned_count();
-        let running_non_pinned = self.entries.len() - pinned_count;
-        let has_separator = running_non_pinned > 0;
+    ) -> Layout {
+        let count = self.entries.len();
+        let pinned = self.entries.iter().take_while(|e| e.pinned).count();
+        let separated = pinned < count;
+        let gap_before = |i: usize| match separated && i == pinned {
+            true => SEPARATOR_SPAN,
+            false => 0,
+        };
 
-        // Magnification scale is 8.8 fixed-point; proximity is measured against
-        // the base (un-magnified) layout.
-        let mut icon_sizes = [SHELF_ICON_SIZE; MAX_ENTRIES];
-
-        let base_total_w = self.base_content_width(pinned_count, has_separator);
-        let base_pill_w = base_total_w + 2 * SHELF_PILL_PADDING_X;
-        let base_pill_x = (screen_width as i32 - base_pill_w) / 2;
-        let pill_bottom =
-            screen_height as i32 - SHELF_BOTTOM_MARGIN - SHELF_DOT_DIAMETER - SHELF_DOT_MARGIN_Y;
-        let base_pill_y = pill_bottom - SHELF_ICON_SIZE - 2 * SHELF_PILL_PADDING_Y;
-        let shelf_top = base_pill_y;
-
-        let in_y_proximity =
-            cursor_y >= shelf_top - MAGNIFICATION_PROXIMITY_Y && cursor_y <= screen_height as i32;
-
-        if in_y_proximity {
-            let mut cx = base_pill_x + SHELF_PILL_PADDING_X;
-            for i in 0..self.entries.len() {
-                if i == pinned_count && has_separator {
-                    cx +=
-                        SHELF_SEPARATOR_MARGIN_X + SHELF_SEPARATOR_WIDTH + SHELF_SEPARATOR_MARGIN_X;
+        let mut sizes = [ICON; MAX_ENTRIES];
+        let pill_bottom = screen_height as i32 - BOTTOM_MARGIN - DOT - DOT_GAP;
+        let resting_top = pill_bottom - ICON - 2 * PILL_PADDING_Y;
+        if cursor_y >= resting_top - MAGNIFY_REACH_Y && cursor_y <= screen_height as i32 {
+            let resting_w = (0..count).map(|i| gap_before(i) + ICON).sum::<i32>()
+                + ICON_GAP * (count as i32 - 1).max(0);
+            let mut x = (screen_width as i32 - resting_w) / 2;
+            for (i, size) in sizes[..count].iter_mut().enumerate() {
+                x += gap_before(i);
+                let near = MAGNIFY_REACH_X - (cursor_x - (x + ICON / 2)).abs();
+                if near > 0 {
+                    let reach = MAGNIFY_REACH_X;
+                    *size = ICON * (256 + MAGNIFY_256 * near * near / (reach * reach)) / 256;
                 }
-                let icon_cx = cx + SHELF_ICON_SIZE / 2;
-                let dist = abs_i32(cursor_x - icon_cx);
-
-                if dist < MAGNIFICATION_PROXIMITY_X {
-                    let prox = MAGNIFICATION_PROXIMITY_X;
-                    let d = prox - dist;
-                    let scale_256 = 256 + MAGNIFICATION_AMOUNT_256 * d * d / (prox * prox);
-                    icon_sizes[i] = SHELF_ICON_SIZE * scale_256 / 256;
-                }
-                cx += SHELF_ICON_SIZE + SHELF_ICON_SPACING;
+                x += ICON + ICON_GAP;
             }
         }
 
-        let total_w = self.scaled_content_width(&icon_sizes, pinned_count, has_separator);
-        let pill_w = total_w + 2 * SHELF_PILL_PADDING_X;
-        let max_icon_size = max_in_slice(&icon_sizes, self.entries.len());
-        let pill_h = max_icon_size + 2 * SHELF_PILL_PADDING_Y;
+        let content_w = (0..count).map(|i| gap_before(i) + sizes[i]).sum::<i32>()
+            + ICON_GAP * (count as i32 - 1).max(0);
+        let pill_w = content_w + 2 * PILL_PADDING_X;
+        let pill_h = sizes[..count].iter().copied().max().unwrap_or(0) + 2 * PILL_PADDING_Y;
         let pill_x = (screen_width as i32 - pill_w) / 2;
         let pill_y = pill_bottom - pill_h;
+        let icons_bottom = pill_y + pill_h - PILL_PADDING_Y;
 
-        let icons_bottom = pill_y + pill_h - SHELF_PILL_PADDING_Y;
-
-        let mut layouts = [IconLayout {
-            center_x: 0,
-            top_y: 0,
-            size: 0,
-        }; MAX_ENTRIES];
-        let mut cx = pill_x + SHELF_PILL_PADDING_X;
-        let mut separator_x = 0i32;
-
-        for i in 0..self.entries.len() {
-            if i == pinned_count && has_separator {
-                separator_x = cx + SHELF_SEPARATOR_MARGIN_X;
-                cx += SHELF_SEPARATOR_MARGIN_X + SHELF_SEPARATOR_WIDTH + SHELF_SEPARATOR_MARGIN_X;
+        let mut icons = [IconLayout::default(); MAX_ENTRIES];
+        let mut separator_x = None;
+        let mut x = pill_x + PILL_PADDING_X;
+        for (i, icon) in icons[..count].iter_mut().enumerate() {
+            if gap_before(i) > 0 {
+                separator_x = Some(x + SEPARATOR_MARGIN);
+                x += SEPARATOR_SPAN;
             }
-            let sz = icon_sizes[i];
-            layouts[i] = IconLayout {
-                center_x: cx + sz / 2,
-                top_y: icons_bottom - sz,
-                size: sz,
+            let size = sizes[i];
+            *icon = IconLayout {
+                center_x: x + size / 2,
+                top_y: icons_bottom - size,
+                size,
             };
-            cx += sz + SHELF_ICON_SPACING;
+            x += size + ICON_GAP;
         }
 
-        let mut hovered = None;
-        for i in 0..self.entries.len() {
-            let l = &layouts[i];
+        let hovered = icons[..count].iter().position(|l| {
             let left = l.center_x - l.size / 2;
-            if cursor_x >= left
-                && cursor_x < left + l.size
-                && cursor_y >= l.top_y
-                && cursor_y < icons_bottom
-            {
-                hovered = Some(i);
-                break;
-            }
-        }
+            (left..left + l.size).contains(&cursor_x) && (l.top_y..icons_bottom).contains(&cursor_y)
+        });
 
-        ShelfGeometry {
-            layouts,
-            pill_x,
-            pill_y,
-            pill_w,
-            pill_h,
+        Layout {
+            icons,
+            pill: Rounded::new(pill_x, pill_y, pill_w, pill_h, radius::CARD),
             separator_x,
             icons_bottom,
             hovered,
@@ -324,245 +307,127 @@ impl LauncherShelf {
         screen_height: u32,
         cursor_x: i32,
         cursor_y: i32,
-        clip: Option<DamageRect>,
+        clip: &DamageRect,
     ) {
-        if self.entries.len() == 0 {
+        if self.entries.is_empty() {
             self.last_bounds = DamageRect::invalid();
             return;
         }
-
         self.screen_w = screen_width;
         self.screen_h = screen_height;
+        let theme = slopos_theme_core::current();
+        let layout = self.layout(screen_width, screen_height, cursor_x, cursor_y);
+        let pill = layout.pill;
+        pill.draw(buf, clip, theme.chrome);
 
-        let clip_rect = clip.unwrap_or_else(|| full_screen_clip(screen_width, screen_height));
-
-        let pinned_count = self.pinned_count();
-        let running_non_pinned = self.entries.len() - pinned_count;
-        let has_separator = running_non_pinned > 0;
-
-        let geo = self.compute_geometry(screen_width, screen_height, cursor_x, cursor_y);
-        let ShelfGeometry {
-            layouts,
-            pill_x,
-            pill_y,
-            pill_w,
-            pill_h,
-            separator_x,
-            icons_bottom,
-            hovered,
-        } = geo;
-        self.hovered_index = hovered;
-
-        slopos_gfx::canvas_ops::rounded_rect_filled(
-            buf,
-            pill_x,
-            pill_y,
-            pill_w,
-            pill_h,
-            SHELF_PILL_RADIUS,
-            DOCK_BG,
-        );
-
-        if has_separator {
-            let sep_centered_y = icons_bottom - (SHELF_ICON_SIZE + SHELF_SEPARATOR_HEIGHT) / 2;
+        if let Some(x) = layout.separator_x {
+            let y = layout.icons_bottom - (ICON + SEPARATOR_HEIGHT) / 2;
             gfx::fill_rect_clipped(
                 buf,
-                separator_x,
-                sep_centered_y,
-                SHELF_SEPARATOR_WIDTH,
-                SHELF_SEPARATOR_HEIGHT,
-                DIVIDER,
-                &clip_rect,
+                x,
+                y,
+                SEPARATOR_WIDTH,
+                SEPARATOR_HEIGHT,
+                theme.border,
+                clip,
             );
         }
 
-        for i in 0..self.entries.len() {
-            let l = &layouts[i];
-            let entry = &self.entries[i];
-            let icon_x = l.center_x - l.size / 2;
-            let icon_y = l.top_y;
-
+        for (entry, l) in self.entries.iter().zip(&layout.icons) {
             let icon = entry.picture();
             if let Some(bitmap) = BitmapRef::new(icon.width, icon.height, &icon.pixels) {
                 slopos_gfx::image::draw_image_clipped(
                     buf,
                     bitmap,
-                    icon_x,
-                    icon_y,
+                    l.center_x - l.size / 2,
+                    l.top_y,
                     l.size,
                     l.size,
                     ImageFit::Stretch,
                     ImageSampling::for_resize(icon.width, icon.height, l.size, l.size),
-                    &clip_rect,
+                    clip,
                 );
             }
-
             if entry.running {
-                let dot = Rounded::circle(
-                    l.center_x - SHELF_DOT_DIAMETER / 2,
-                    pill_y + pill_h + SHELF_DOT_MARGIN_Y,
-                    SHELF_DOT_DIAMETER,
-                );
-                dot.fill(buf, &dot.bounds(), &clip_rect, |_, _| TEXT_PRIMARY);
+                let y = pill.y + pill.h + DOT_GAP;
+                Rounded::circle(l.center_x - DOT / 2, y, DOT).draw(buf, clip, theme.text);
             }
         }
 
-        let mut label = None;
-        if let Some(hi) = self.hovered_index {
-            let entry = &self.entries[hi];
-            let l = &layouts[hi];
-            let name = entry.name.as_str();
-            if !name.is_empty() {
-                let lbl_w = ui::width(name, LABEL.size) + 2 * SHELF_LABEL_PADDING_X;
-                let lbl_h = ui::line_height(LABEL.size) + 2 * SHELF_LABEL_PADDING_Y;
-                let lbl_x = l.center_x - lbl_w / 2;
-                let lbl_y = pill_y - SHELF_LABEL_GAP_Y - lbl_h;
-                label = Some(bounds(lbl_x, lbl_y, lbl_w, lbl_h));
-
-                slopos_gfx::canvas_ops::rounded_rect_filled(
-                    buf,
-                    lbl_x,
-                    lbl_y,
-                    lbl_w,
-                    lbl_h,
-                    SHELF_LABEL_RADIUS,
-                    TOOLTIP_BG,
-                );
-                ui::draw_clipped(
-                    buf,
-                    lbl_x + SHELF_LABEL_PADDING_X,
-                    lbl_y + SHELF_LABEL_PADDING_Y,
-                    name,
-                    LABEL.size,
-                    LABEL.weight,
-                    TEXT_PRIMARY,
-                    TOOLTIP_BG,
-                    &clip_rect,
-                );
-            }
+        if let Some((name, shape)) = layout.label(&self.entries) {
+            draw_label(buf, name, &shape, clip);
         }
-
-        let dots = SHELF_DOT_MARGIN_Y + SHELF_DOT_DIAMETER;
-        let shelf = bounds(pill_x, pill_y, pill_w, pill_h + dots + 1);
-        self.last_bounds = label.map_or(shelf, |label| shelf.union(&label));
+        self.last_bounds = layout.bounds(&self.entries);
     }
 
-    /// Hit-test a screen coordinate against shelf icons.
-    ///
-    /// Geometry is computed at `(px, py)` rather than reused from the last draw
-    /// pass: a click processed in the same frame batch as the motion that
-    /// brought the cursor here would otherwise be tested against where the
-    /// cursor was at the previous render.
+    /// The entry at `(px, py)`, laid out for that position.
     pub fn hit_test(&self, px: i32, py: i32) -> Option<usize> {
-        if self.entries.len() == 0 || self.screen_w == 0 || self.screen_h == 0 {
+        if self.entries.is_empty() || self.screen_w == 0 || self.screen_h == 0 {
             return None;
         }
-        self.compute_geometry(self.screen_w, self.screen_h, px, py)
-            .hovered
+        self.layout(self.screen_w, self.screen_h, px, py).hovered
     }
 
-    /// Return the bounding rectangle of the most recently drawn shelf.
+    /// Where it was last drawn.
     pub fn bounds(&self) -> DamageRect {
         self.last_bounds
     }
 
-    pub fn entry(&self, index: usize) -> Option<&ShelfEntry> {
-        if index < self.entries.len() {
-            Some(&self.entries[index])
-        } else {
-            None
+    /// Where it will be drawn with the pointer at `(x, y)`.
+    pub fn reach(&self, x: i32, y: i32) -> DamageRect {
+        if self.entries.is_empty() || self.screen_w == 0 || self.screen_h == 0 {
+            return DamageRect::invalid();
         }
+        self.layout(self.screen_w, self.screen_h, x, y)
+            .bounds(&self.entries)
     }
 
-    /// Count how many entries are pinned (they are always at the front).
-    fn pinned_count(&self) -> usize {
-        let mut n = 0;
-        for i in 0..self.entries.len() {
-            if self.entries[i].pinned {
-                n += 1;
-            } else {
-                break;
-            }
-        }
-        n
-    }
-
-    /// Total content width at the base (un-magnified) icon size.
-    fn base_content_width(&self, _pinned_count: usize, has_separator: bool) -> i32 {
-        if self.entries.len() == 0 {
-            return 0;
-        }
-        let icon_total = SHELF_ICON_SIZE * self.entries.len() as i32
-            + SHELF_ICON_SPACING * (self.entries.len() as i32 - 1);
-        let sep_total = if has_separator {
-            SHELF_SEPARATOR_MARGIN_X + SHELF_SEPARATOR_WIDTH + SHELF_SEPARATOR_MARGIN_X
-                - SHELF_ICON_SPACING // separator replaces one inter-icon gap
-        } else {
-            0
-        };
-        icon_total + sep_total
-    }
-
-    fn scaled_content_width(
-        &self,
-        sizes: &[i32; MAX_ENTRIES],
-        pinned_count: usize,
-        has_separator: bool,
-    ) -> i32 {
-        if self.entries.len() == 0 {
-            return 0;
-        }
-        let mut w = 0i32;
-        for i in 0..self.entries.len() {
-            if i == pinned_count && has_separator {
-                w += SHELF_SEPARATOR_MARGIN_X + SHELF_SEPARATOR_WIDTH + SHELF_SEPARATOR_MARGIN_X;
-            }
-            w += sizes[i];
-            if i + 1 < self.entries.len() {
-                w += SHELF_ICON_SPACING;
-            }
-        }
-        w
+    pub fn entry(&self, index: usize) -> Option<&DockEntry> {
+        self.entries.get(index)
     }
 }
 
-#[inline]
-fn abs_i32(x: i32) -> i32 {
-    if x < 0 { -x } else { x }
+/// An app's name centred on `center_x` above `above`, as appkit's tooltip
+/// is drawn.
+fn label_shape(name: &str, center_x: i32, above: i32) -> Rounded {
+    let w = ui::width(name, LABEL) + 2 * space::SM;
+    let h = LABEL.style().line_height + space::SM;
+    Rounded::new(
+        center_x - w / 2,
+        above - space::SM - h,
+        w,
+        h,
+        radius::CONTROL,
+    )
 }
 
-fn max_in_slice(arr: &[i32; MAX_ENTRIES], n: usize) -> i32 {
-    let mut m = 0;
-    for i in 0..n {
-        if arr[i] > m {
-            m = arr[i];
-        }
-    }
-    m
+fn label_caster(shape: &Rounded) -> Rounded {
+    let mut caster = *shape;
+    caster.y += slopos_theme_core::current().shadow_raised.offset_y;
+    caster
 }
 
-fn bounds(x: i32, y: i32, w: i32, h: i32) -> DamageRect {
-    DamageRect {
-        x0: x,
-        y0: y,
-        x1: x + w - 1,
-        y1: y + h - 1,
-    }
+fn label_reach(shape: &Rounded) -> DamageRect {
+    let spread = slopos_theme_core::current().shadow_raised.spread;
+    shape
+        .bounds()
+        .union(&label_caster(shape).grown(spread).bounds())
 }
 
-fn full_screen_clip(w: u32, h: u32) -> DamageRect {
-    DamageRect {
-        x0: 0,
-        y0: 0,
-        x1: w as i32 - 1,
-        y1: h as i32 - 1,
-    }
-}
-
-/// Case-insensitive prefix match of a shelf entry name against a window title.
-fn names_match(name: &str, title: &str) -> bool {
-    !name.is_empty()
-        && title
-            .get(..name.len())
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
+fn draw_label(buf: &mut DrawBuffer, name: &str, shape: &Rounded, clip: &DamageRect) {
+    let theme = slopos_theme_core::current();
+    let shadow = theme.shadow_raised;
+    label_caster(shape).draw_shadow(buf, shadow.spread, clip, &shape.bands()[1], shadow.color);
+    shape.draw(buf, clip, theme.surface_raised);
+    shape.stroke(buf, stroke::EDGE, clip, theme.border);
+    ui::draw(
+        buf,
+        shape.x + space::SM,
+        ui::centred_top(shape.y, shape.h, LABEL),
+        name,
+        LABEL,
+        theme.text,
+        theme.surface_raised,
+        clip,
+    );
 }

@@ -1,15 +1,12 @@
 use slopos_theme_core::{EdgeInsets, inset, radius, space};
 
-use super::card::draw_shadow;
+use super::card::Frame;
 use super::scroll_view::ScrollViewWidget;
-use crate::constraints::{
-    BoxConstraints, MAX_EXTENT, Rect, ScrollDirection, ScrollbarVisibility, Size,
-};
+use crate::constraints::{BoxConstraints, MAX_EXTENT, Rect, Size};
 use crate::event::{
-    EventPhase, EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent,
-    route,
+    EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent, route,
 };
-use crate::focus::RING_ROOM;
+use crate::focus::RING_REACH;
 use crate::layout::PaddingWidget;
 use crate::paint::PaintContext;
 use crate::traits::{MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget};
@@ -17,10 +14,8 @@ use crate::traits::{MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_
 const MAX_WIDTH: i32 = 480;
 const MARGIN: i32 = space::XL;
 
-/// A card over a scrim, holding a title, its content and the buttons that
-/// answer it. It covers the page for the pointer and the keyboard: a click
-/// outside it dismisses it, and Tab moves only among its controls. Content
-/// taller than the window scrolls.
+/// A card over a scrim holding a title, content that scrolls in a short
+/// window, and the buttons that answer it; a click outside it dismisses it.
 pub struct DialogWidget {
     core: WidgetCore,
     /// The title, the content in a scroll view, and the footer.
@@ -39,11 +34,10 @@ impl DialogWidget {
         footer: Box<dyn Widget>,
         on_dismiss: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
     ) -> Self {
-        let content = ScrollViewWidget::new(
-            Box::new(PaddingWidget::new(EdgeInsets::all(RING_ROOM), content)),
-            ScrollDirection::Vertical,
-            ScrollbarVisibility::WhenNeeded,
-        );
+        let content = ScrollViewWidget::new(Box::new(PaddingWidget::new(
+            EdgeInsets::all(RING_REACH),
+            content,
+        )));
         Self {
             core: WidgetCore::new(),
             parts: vec![title, Box::new(content), footer],
@@ -100,10 +94,7 @@ impl DialogWidget {
         let rect = self.layout_rect();
         let card = self.card_rect;
         ctx.fill_rect_blended(rect.x, rect.y, rect.width, rect.height, theme.scrim);
-        draw_shadow(ctx, card);
-        let (x, y, w, h) = (card.x, card.y, card.width, card.height);
-        ctx.fill_rounded_rect(x, y, w, h, radius::CARD, theme.surface_raised);
-        ctx.draw_rounded_rect(x, y, w, h, radius::CARD, theme.border);
+        Frame::raised(radius::CARD).paint(ctx, card);
         ctx.with_clip(card, |ctx| {
             for part in &self.parts {
                 part.paint(ctx);
@@ -132,14 +123,14 @@ impl Widget for DialogWidget {
         measure_widget(self.parts[2].as_mut(), each, ctx);
         let room = (constraints.max_height - MARGIN * 2 - self.frame_height()).max(0);
         let outset = BoxConstraints {
-            min_width: inner + RING_ROOM * 2,
-            max_width: inner + RING_ROOM * 2,
+            min_width: inner + RING_REACH * 2,
+            max_width: inner + RING_REACH * 2,
             min_height: 0,
-            max_height: room + RING_ROOM * 2,
+            max_height: room + RING_REACH * 2,
         };
         let content = &mut self.parts[1];
         measure_widget(content.as_mut(), outset, ctx);
-        let scrolled = content.children()[0].measured_size().height - RING_ROOM * 2;
+        let scrolled = content.children()[0].measured_size().height - RING_REACH * 2;
         self.content_height = scrolled.min(room);
         constraints.constrain(constraints.max_size())
     }
@@ -167,7 +158,7 @@ impl Widget for DialogWidget {
         for (i, part) in self.parts.iter_mut().enumerate() {
             let at = Rect::new(x, y, inner_w, heights[i]);
             let at = match i {
-                1 => at.inflate(RING_ROOM),
+                1 => at.inflate(RING_REACH),
                 _ => at,
             };
             place_widget(part.as_mut(), at);
@@ -179,15 +170,7 @@ impl Widget for DialogWidget {
         ctx.with_layer(self.id(), |ctx| self.paint_card(ctx));
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        if phase != EventPhase::Target && phase != EventPhase::Bubble {
-            return EventResponse::Ignored;
-        }
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
         match event {
             WidgetEvent::PointerDown {
                 x,
@@ -199,7 +182,7 @@ impl Widget for DialogWidget {
                 EventResponse::Consumed
             }
             WidgetEvent::FocusGained | WidgetEvent::FocusLost => EventResponse::Ignored,
-            _ => match route(&mut self.parts, event, phase, sink) {
+            _ => match route(&mut self.parts, event, sink) {
                 EventResponse::Ignored => EventResponse::Blocked,
                 taken => taken,
             },

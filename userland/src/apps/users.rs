@@ -13,12 +13,12 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, lchown};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use slopos_abi::fs::{ADMIN_GROUP, OWNERS_RECORD, PERSON_UIDS, SESSION_HOME};
+use slopos_abi::fs::{ADMIN_GROUP, OWNERS_RECORD, SESSION_HOME};
 use slopos_accounts_core::{Accounts, Person};
 use slopos_priv_core::{ENV_ACTION, ENV_UID};
-use slopos_slibc_core::passwd::{BASE_GROUP, BASE_PASSWD, Group, Passwd, lines};
+use slopos_slibc_core::passwd::{BASE_GROUP, Group, lines};
 
-use crate::accounts::Store;
+use crate::accounts::{self, Store};
 use crate::privd::{self, Input};
 use crate::root_layout::{self, LOCAL, Owners};
 use crate::secret;
@@ -495,18 +495,15 @@ fn list() -> Result<String, String> {
             .collect::<Vec<_>>()
             .join("\n"));
     }
-    let passwd = database("/etc/passwd", BASE_PASSWD);
-    let group = database("/etc/group", BASE_GROUP);
+    let group = accounts::database("/etc/group", BASE_GROUP);
     let admins = lines(&group)
         .filter_map(Group::parse)
         .find(|g| g.name == ADMIN_GROUP.as_bytes());
-    Ok(lines(&passwd)
-        .filter_map(Passwd::parse)
-        .filter(|p| PERSON_UIDS.contains(&p.uid))
+    Ok(accounts::people()
+        .iter()
         .map(|p| {
-            let name = String::from_utf8_lossy(p.name);
-            let admin = admins.as_ref().is_some_and(|g| g.lists(p.name));
-            row(&name, p.uid, admin, &String::from_utf8_lossy(p.dir))
+            let admin = admins.as_ref().is_some_and(|g| g.lists(p.name.as_bytes()));
+            row(&p.name, p.uid, admin, &p.home)
         })
         .collect::<Vec<_>>()
         .join("\n"))
@@ -515,15 +512,6 @@ fn list() -> Result<String, String> {
 fn row(name: &str, uid: u32, admin: bool, home: &str) -> String {
     let role = if admin { "admin" } else { "-" };
     format!("{name:<16} {uid:>5}  {role:<5}  {home}")
-}
-
-/// A database's bytes while it is sealed, as the C library believes it, and
-/// its stand-in otherwise.
-fn database(path: &str, base: &str) -> Vec<u8> {
-    crate::sealed::read_sealed(Path::new(path), crate::sealed::SMALL_MAX)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| base.as_bytes().to_vec())
 }
 
 fn run(args: &[String]) -> Result<String, String> {

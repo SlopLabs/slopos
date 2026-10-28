@@ -7,8 +7,6 @@ pub struct EdgeInsets {
 }
 
 impl EdgeInsets {
-    pub const ZERO: Self = Self::all(0);
-
     pub const fn all(v: i32) -> Self {
         Self::new(v, v, v, v)
     }

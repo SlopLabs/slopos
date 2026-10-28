@@ -12,14 +12,19 @@ use slopos_abi::fs::O_RDONLY;
 use slopos_abi::syscall::O_CLOEXEC;
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 
+use slopos_boot_core::disk_id::{self, Bus};
 use slopos_boot_core::gpt::{self, Geometry, Header, Location, Partition, Piece};
 use slopos_boot_core::install::Region;
 use slopos_boot_core::layout;
 use slopos_boot_core::{Guid, install};
-use slopos_installer_core::{Contents, Layout, MbrPartition, disk_size, name_of, type_name};
+use slopos_installer_core::{
+    Contents, Layout, MbrPartition, NoTable, Refusal, disk_size, name_of, short, type_name,
+};
 
 use super::engine::Events;
-use crate::boot_disk::{BlockFile, Table, geometry_of, partition_node, table_of};
+use crate::boot_disk::{
+    BlockFile, Table, disk_guid_of, geometry_of, partition_node, table_of, write_protected,
+};
 use crate::syscall::error::SyscallError;
 use crate::syscall::fs::{open_cstr, pipe2, read_slice, reread_partitions};
 use crate::syscall::process::{self, Endowment, WaitStatus};
@@ -44,30 +49,69 @@ const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
 const FAT_LABEL_AT: usize = 71;
 /// How much of a disk's start must read zero for it to count as blank.
 const BLANK_PROBE_BYTES: usize = 1 << 20;
+const BY_ID: &str = "/dev/disk/by-id";
+
+/// Why the whole disk `node` is never offered: it refuses writes, or it is
+/// the medium whose GPT disk GUID is `medium`.
+pub fn not_offered(node: &str, medium: Option<Guid>) -> Option<Refusal> {
+    if write_protected(node) {
+        return Some(Refusal::ReadOnly);
+    }
+    (medium.is_some() && disk_guid_of(node) == medium).then_some(Refusal::Medium)
+}
+
+/// What `/dev/disk/by-id` says of the whole disk `node`: its bus and what
+/// its maker calls it.
+pub fn by_id(node: &str) -> (Option<Bus>, Option<String>) {
+    let target = format!("../../{}", short(node));
+    let names: Vec<String> = std::fs::read_dir(BY_ID)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            std::fs::read_link(entry.path()).is_ok_and(|link| link.as_os_str() == target.as_str())
+        })
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    let Some(described) = disk_id::describe(names.iter().map(String::as_str)) else {
+        return (None, None);
+    };
+    let words: Vec<&str> = described.model().collect();
+    (
+        Some(described.bus),
+        (!words.is_empty()).then(|| words.join(" ")),
+    )
+}
 
 #[derive(Clone, PartialEq)]
 pub struct Disk {
     pub node: String,
     pub geometry: Geometry,
-    pub table: Option<Table>,
-    pub contents: Contents,
+    /// Its GPT, or what it holds without one.
+    pub table: Result<Table, NoTable>,
 }
 
 impl Disk {
     pub fn open(node: &str) -> Result<Disk, String> {
         let file = File::open(node).map_err(|e| format!("{node}: {e}"))?;
         let geometry = geometry_of(&file).ok_or_else(|| format!("{node}: not a disk"))?;
-        let (table, contents) = match (table_of(node), unprotected_gpt(&file, geometry)) {
-            (Some(_), Some(entries)) => (None, Contents::Mbr(entries)),
-            (Some(table), None) => (Some(table), Contents::Gpt),
-            (None, _) => (None, contents_of(node, &file, geometry)?),
+        let table = match (table_of(node), unprotected_gpt(&file, geometry)) {
+            (Some(_), Some(entries)) => Err(NoTable::Mbr(entries)),
+            (Some(table), None) => Ok(table),
+            (None, _) => Err(no_table(node, &file, geometry)?),
         };
         Ok(Disk {
             node: node.to_owned(),
             geometry,
             table,
-            contents,
         })
+    }
+
+    pub fn contents(&self) -> Contents {
+        match &self.table {
+            Ok(_) => Contents::Gpt,
+            Err(held) => Contents::NoTable(held.clone()),
+        }
     }
 
     pub fn partitions(&self) -> Vec<Partition> {
@@ -86,15 +130,14 @@ impl Disk {
 
     /// The region a free-space install takes when none is named.
     pub fn largest_region(&self) -> Option<usize> {
-        let table = self.table.as_ref()?;
+        let table = self.table.as_ref().ok()?;
         install::largest_region(&table.header.grown(), &table.array)
     }
 
-    /// The disk's table as a driver sees it.
     pub fn layout(&self) -> Layout {
         match &self.table {
-            Some(t) => Layout::of(&self.node, &t.header.grown(), &t.array),
-            None => Layout::empty(self.geometry.capacity()),
+            Ok(t) => Layout::of(&self.node, &t.header.grown(), &t.array),
+            Err(_) => Layout::empty(self.geometry.capacity()),
         }
     }
 
@@ -107,12 +150,12 @@ impl Disk {
             None => format!("{} — {size}", self.node),
         };
         match &self.table {
-            None => {
+            Err(held) => {
                 out.push_str(&format!(
                     ", {}\n",
-                    self.contents.holds().unwrap_or_else(|| "empty".to_owned())
+                    held.holds().unwrap_or_else(|| "empty".to_owned())
                 ));
-                if let Contents::Mbr(parts) = &self.contents {
+                if let NoTable::Mbr(parts) = held {
                     for part in parts {
                         out.push_str(&format!(
                             "  MBR partition {}: type {:#04x}, {}\n",
@@ -123,9 +166,12 @@ impl Disk {
                     }
                 }
             }
-            Some(_) => {
+            Ok(_) => {
                 out.push('\n');
                 for p in self.partitions() {
+                    let slopos = install::ROLES
+                        .iter()
+                        .any(|role| role.type_guid() == p.entry.type_guid);
                     out.push_str(&format!(
                         "  partition {}: {}, {} at {}{}\n",
                         p.entry.number,
@@ -133,7 +179,7 @@ impl Disk {
                         disk_size(p.len),
                         disk_size(p.start),
                         match name_of(&p) {
-                            name if name.is_empty() => String::new(),
+                            name if slopos || name.is_empty() => String::new(),
                             name => format!(", “{name}”"),
                         }
                     ));
@@ -364,7 +410,7 @@ fn unprotected_gpt(file: &File, geometry: Geometry) -> Option<Vec<MbrPartition>>
     })
 }
 
-fn contents_of(node: &str, file: &File, geometry: Geometry) -> Result<Contents, String> {
+fn no_table(node: &str, file: &File, geometry: Geometry) -> Result<NoTable, String> {
     let read = |offset: u64, len: usize| -> Result<Vec<u8>, String> {
         let mut bytes = vec![0u8; len];
         file.read_exact_at(&mut bytes, offset)
@@ -376,23 +422,23 @@ fn contents_of(node: &str, file: &File, geometry: Geometry) -> Result<Contents, 
         Ok(read(lba * geometry.block(), block)?.starts_with(GPT_SIGNATURE))
     };
     if gpt_at(gpt::PRIMARY_LBA)? || gpt_at(geometry.backup_lba())? {
-        return Ok(Contents::UnreadableGpt);
+        return Ok(NoTable::UnreadableGpt);
     }
     match mbr_entries(&read(0, block)?, geometry) {
         Some(entries) if entries.iter().any(|e| e.kind == MBR_PROTECTIVE_TYPE) => {
-            return Ok(Contents::UnreadableGpt);
+            return Ok(NoTable::UnreadableGpt);
         }
-        Some(entries) if !entries.is_empty() => return Ok(Contents::Mbr(entries)),
+        Some(entries) if !entries.is_empty() => return Ok(NoTable::Mbr(entries)),
         _ => {}
     }
     if holds_ext4(node) {
-        return Ok(Contents::Ext4);
+        return Ok(NoTable::Ext4);
     }
     let probe = BLANK_PROBE_BYTES.min(geometry.capacity() as usize);
     if read(0, probe)?.iter().any(|&b| b != 0) {
-        return Ok(Contents::Data);
+        return Ok(NoTable::Data);
     }
-    Ok(Contents::Blank)
+    Ok(NoTable::Blank)
 }
 
 /// Hands `on_line` each line of `bytes`, keeping a line's start until its end

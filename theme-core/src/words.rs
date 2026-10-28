@@ -1,6 +1,5 @@
-//! The desktop's voice, where its words are data: what a screen a person
-//! must act on never says, and the shapes a label and a sentence take. Each
-//! surface adds the words of its own trade it keeps to its details.
+//! The desktop's voice, where its words are data: what a screen a person must
+//! act on never says, and the shapes a label, a sentence and a size take.
 
 /// Why `plain` refused a word of `jargon`.
 pub const TRADE: &str = "the words use a term of the trade, which belongs in the details";
@@ -101,6 +100,35 @@ pub fn plain(text: &str, jargon: &[&str]) -> Result<(), &'static str> {
         previous = word;
     }
     Ok(())
+}
+
+/// A size in binary units as a person reads one: `1 byte`, `512 bytes`,
+/// `1.5 KiB`, `8 MiB`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Bytes(pub u64);
+
+impl core::fmt::Display for Bytes {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        const UNITS: [&str; 4] = ["KiB", "MiB", "GiB", "TiB"];
+        match self.0 {
+            1 => return f.write_str("1 byte"),
+            n if n < 1024 => return write!(f, "{n} bytes"),
+            _ => {}
+        }
+        let bytes = u128::from(self.0);
+        let tenths = |per: u128| (bytes * 10 + per / 2) / per;
+        let (mut per, mut unit) = (1024, 0);
+        // Up a unit where one decimal would round to 1024.
+        while tenths(per) >= 10240 && unit + 1 < UNITS.len() {
+            per *= 1024;
+            unit += 1;
+        }
+        let (whole, tenth) = (tenths(per) / 10, tenths(per) % 10);
+        match tenth {
+            0 => write!(f, "{whole} {}", UNITS[unit]),
+            _ => write!(f, "{whole}.{tenth} {}", UNITS[unit]),
+        }
+    }
 }
 
 #[cfg(test)]

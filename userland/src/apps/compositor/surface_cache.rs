@@ -1,12 +1,5 @@
-//! Client surface buffers mapped read-only, so compositing does not re-map
-//! every frame.
-//!
-//! Keyed by `(task_id, generation, buffer_id)`: `buffer_id` is the
-//! double-buffer slot rather than the recyclable fd, and `generation` is what
-//! stops a recycled `task_id` slot from matching a prior surface's entry.
-//!
-//! The mapping only borrows the fd — the protocol bridge is its sole closer —
-//! and a `MAP_SHARED` mapping stays valid after its fd is closed.
+//! The clients' buffers, mapped once rather than every frame, by surface
+//! incarnation and buffer slot; the mapping outlives the fd it borrows.
 
 use crate::syscall::{CachedShmMapping, UserWindowInfo};
 
@@ -15,8 +8,7 @@ use super::MAX_WINDOWS;
 const BUFFERS_PER_TASK: usize = 2;
 const CACHE_SLOTS: usize = MAX_WINDOWS * BUFFERS_PER_TASK;
 
-/// `token` is the fd the mapping currently covers, which detects a slot
-/// re-registered with a new fd within the same incarnation (e.g. on resize).
+/// `token` is the fd mapped, which a slot registered again changes.
 struct ClientSurfaceEntry {
     task_id: u32,
     generation: u32,
@@ -59,8 +51,7 @@ impl ClientSurfaceCache {
         }
     }
 
-    /// `None` when the token is zero, no slot is free, or the mapping fails.
-    /// A slot whose fd changed is re-mapped in place.
+    /// A slot whose fd changed is mapped again in place.
     pub fn get_or_create_index(
         &mut self,
         task_id: u32,
@@ -107,18 +98,15 @@ impl ClientSurfaceCache {
             .map(|m| m.as_slice())
     }
 
-    /// Drop mappings for surface incarnations absent from the window list.
-    /// Matching on `(task_id, generation)` rather than `task_id` alone evicts a
-    /// recycled slot's prior incarnation. Deliberately not `buffer_id`-scoped:
-    /// a window exports only its current buffer, and the idle slot must survive.
+    /// Drop the mappings of surfaces no longer shown, both of a surface's
+    /// buffers kept, though it shows only one.
     pub fn cleanup_stale(&mut self, windows: &[UserWindowInfo; MAX_WINDOWS], window_count: u32) {
         for entry in &mut self.entries {
             if entry.is_empty() {
                 continue;
             }
             let still_present = (0..window_count as usize).any(|i| {
-                windows[i].task_id == entry.task_id
-                    && windows[i].buffer_generation == entry.generation
+                windows[i].task_id == entry.task_id && windows[i].generation == entry.generation
             });
             if !still_present {
                 *entry = ClientSurfaceEntry::empty();

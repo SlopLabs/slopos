@@ -5,38 +5,11 @@ use alloc::format;
 use alloc::string::String;
 
 use slopos_slibc_core::calendar::{Tm, utc_from_epoch};
+use slopos_slibc_core::strftime::{DAY, MON};
 
-/// What the clock's panel says under the date.
 pub const ZONE: &str = "The clock shows UTC";
-/// What the clock's panel says before the wall clock is known.
 pub const DATE_UNKNOWN: &str = "The date isn't known yet";
 
-const WEEKDAYS: [&str; 7] = [
-    "Sunday",
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-];
-
-const MONTHS: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
-
-/// A second on the wall clock.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct WallTime {
     tm: Tm,
@@ -44,7 +17,7 @@ pub struct WallTime {
 }
 
 impl WallTime {
-    /// `secs` since the epoch; `None` for a time no calendar year holds.
+    /// `None` for a time no calendar year holds.
     pub fn from_unix(secs: i64) -> Option<WallTime> {
         Some(WallTime {
             tm: utc_from_epoch(secs)?,
@@ -61,7 +34,7 @@ impl WallTime {
     pub fn day(&self) -> String {
         format!(
             "{} {} {}",
-            WEEKDAYS[self.tm.wday as usize], self.tm.mday, MONTHS[self.tm.mon as usize]
+            DAY[self.tm.wday as usize], self.tm.mday, MON[self.tm.mon as usize]
         )
     }
 
@@ -131,9 +104,9 @@ mod tests {
 
     #[test]
     fn the_panel_s_words_speak_plainly() {
-        use slopos_priv_core::words::label;
+        use slopos_theme_core::words::label;
         for text in [ZONE, DATE_UNKNOWN] {
-            assert_eq!(label(text), Ok(()), "{text}");
+            assert_eq!(label(text, &[]), Ok(()), "{text}");
         }
     }
 }

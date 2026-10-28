@@ -1,16 +1,5 @@
-//! Editor — the SlopOS text editor.
-//!
-//! A tab per open file, a file tree beside them, a menu bar above and a status
-//! bar below: the shape every editor has had since the nineties, drawn with
-//! appkit's code surface and tree, and backed by `editor-core` for everything
-//! that is not pixels.
-//!
-//! The division of labour is deliberate and total. `editor-core` owns the
-//! buffer, the cursor, the undo history, the search and the lexer, and is
-//! tested on the host. `appkit` owns the rendering and the hit testing. This
-//! module owns the filesystem, the clipboard, the keymap and the state machine
-//! that ties them together — which is why it is the only part of the editor that
-//! cannot be tested without a machine to run on.
+//! Editor: the filesystem, the clipboard, the keymap and the state machine
+//! over `editor-core`'s documents, which hold everything that is not pixels.
 
 mod commands;
 mod files;
@@ -19,17 +8,13 @@ pub mod said;
 mod syntax;
 mod view;
 
-/// Rows the palette and the file finder draw at once, for a test that has to
-/// step past the window edge.
-pub use view::PALETTE_MAX_ROWS;
-
 use slopos_appkit::widgets::code_view::CodeInput;
 use slopos_appkit::widgets::drag_handle::DragInput;
 use slopos_appkit::widgets::editor_tabs::TabInput;
 use slopos_appkit::widgets::line_edit::LineEditInput;
 use slopos_appkit::widgets::menu_bar::MenuBarInput;
 use slopos_appkit::widgets::tree_view::TreeInput;
-use slopos_appkit::{Action, App, Key, LineInput, Modifiers, NamedKey, Node};
+use slopos_appkit::{Action, App, Key, LineInput, Modifiers, NamedKey, Node, StyleSheet, Tone};
 
 use slopos_editor_core::buffer::Position;
 use slopos_editor_core::cursor::Motion;
@@ -40,10 +25,10 @@ use slopos_editor_core::search::{self, SearchOptions};
 pub use commands::Command;
 use commands::{PALETTE_COMMANDS, menu_command};
 use prompt::Prompt;
+pub use view::MIN_CODE_WIDTH;
 
-/// Rows of context kept between the caret and the edge of the viewport.
 const SCROLL_MARGIN: usize = 3;
-/// Finder rows kept after scoring. Beyond this nobody scrolls; they retype.
+/// Past this many matches nobody scrolls; they type more.
 const FINDER_RESULTS: usize = 200;
 const MIN_SIDEBAR_WIDTH: i32 = 140;
 const MAX_SIDEBAR_WIDTH: i32 = 520;
@@ -58,13 +43,11 @@ pub enum Focus {
 
 #[derive(Clone, Debug)]
 pub enum Dialog {
-    /// A tab with unsaved changes is being closed.
     ConfirmClose {
         index: usize,
     },
-    /// The application is being closed with unsaved changes somewhere.
     ConfirmQuit,
-    /// The file a save is about to land on is not the one this tab read.
+    /// The file a save would land on is not the one this tab read.
     ConfirmOverwrite {
         index: usize,
         path: String,
@@ -73,15 +56,19 @@ pub enum Dialog {
     About,
 }
 
-/// What a save would write over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overwrite {
-    /// The file changed on disk since the tab read it.
     Changed,
-    /// The file the tab read is gone.
     Gone,
     /// Another file has the name a Save as chose.
     Exists,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    Save,
+    Discard,
+    Cancel,
 }
 
 #[derive(Clone, Debug)]
@@ -92,16 +79,14 @@ pub enum EditorMsg {
     MenuBar(MenuBarInput),
     MenuItem(usize),
     DismissMenu,
-    /// A click outside the file finder or the command palette.
     DismissPrompt,
     Prompt(LineEditInput),
-    /// The find bar's replacement field.
     PromptReplace(LineEditInput),
     SidebarDrag(DragInput),
     Run(Command),
-    /// A row clicked in the file finder or the palette.
+    /// A row of the finder or the palette, counted from the first shown.
     Pick(usize),
-    Dialog(usize),
+    Dialog(Answer),
 }
 
 pub struct EditorApp {
@@ -112,23 +97,15 @@ pub struct EditorApp {
     tree_scroll: usize,
     focus: Focus,
     prompt: Prompt,
-    /// First visible row of the palette/finder list; see `overlay_first_row`.
     overlay_scroll: usize,
-    /// The last thing searched for, which outlives the find bar; see
-    /// `find_query`.
     last_query: String,
-    /// The last query and replacement, as a pair. Kept apart, a Replace All
-    /// reached from the palette pairs one search's query with another's
-    /// replacement — or with none, which deletes every occurrence.
+    /// Kept as a pair: apart, a Replace all from the palette could pair one
+    /// search's query with another's replacement, or with none.
     last_replace: Option<(String, String)>,
-    /// Every file in the tree, snapshotted when the finder opens and scored in
-    /// place from then on.
     finder_paths: Vec<String>,
-    /// What the find readout was last counted against. Every message ends with
-    /// a `refresh_find`, and a full scan per pointer move during a selection
-    /// drag is not free on a large file; this is what makes the repeat cheap.
+    /// Every message ends in `refresh_find`, which this spares a rescan when
+    /// nothing it counts changed.
     find_stamp: Option<FindStamp>,
-    /// `(menu index, anchor x, anchor y)` while a menu is open.
     menu_open: Option<(usize, i32, i32)>,
     dialog: Option<Dialog>,
     sidebar_width: i32,
@@ -137,27 +114,21 @@ pub struct EditorApp {
     window_width: i32,
     window_height: i32,
     status: String,
-    /// Used when the compositor has no selection to give — a copy still has to
-    /// come back on paste.
+    status_tone: Tone,
+    /// What a paste gives when the compositor has no selection to give.
     local_clipboard: String,
     untitled_count: usize,
     search_options: SearchOptions,
-    /// Rows the code surface can show, from the last layout.
     visible_lines: usize,
     visible_cols: usize,
-    /// A selection drag is live in the code surface. Held here because the
-    /// widget tree is rebuilt between the press and the moves that follow it.
+    // Drags live here, not in a widget: the tree is rebuilt between a press
+    // and the moves that follow it.
     selecting: bool,
-    /// The sidebar splitter is being dragged, for the same reason.
     sidebar_dragging: bool,
-    /// A scrollbar thumb is being dragged, in the code surface and in the tree.
-    /// Held here for the same reason: the widget that saw the press is gone by
-    /// the time the first move arrives.
     code_scroll_dragging: bool,
     tree_scroll_dragging: bool,
-    /// `(document id, line, column, clicks)`, so the second and third click
-    /// select a word and a line. The id rather than the tab position, because
-    /// opening a file over the scratch buffer reuses the index.
+    /// `(document id, line, column, clicks)`; the id, because opening a file
+    /// over the scratch buffer reuses its tab's index.
     click_run: Option<(u64, usize, usize, u8)>,
 }
 
@@ -187,6 +158,7 @@ impl EditorApp {
             window_width: view::DEFAULT_WIDTH,
             window_height: view::DEFAULT_HEIGHT,
             status: String::new(),
+            status_tone: Tone::Secondary,
             local_clipboard: String::new(),
             untitled_count: 0,
             search_options: SearchOptions::default(),
@@ -200,8 +172,7 @@ impl EditorApp {
         };
         app.sync_tree();
 
-        // Only the first argument chose the root, so the rest may sit outside
-        // the tree; a tab is not a tree node.
+        // Only the first argument chose the root; the rest may sit outside it.
         for path in args {
             if files::is_dir(path) {
                 continue;
@@ -233,41 +204,31 @@ impl EditorApp {
         self.search_options
     }
 
-    /// The find query, when the find bar is open and non-empty — what the code
-    /// surface highlights.
+    /// What the code surface highlights: the open find bar's query alone, as
+    /// `find_query`'s fallback would light every tab with no way to turn it off.
     pub(super) fn active_search_query(&self) -> Option<String> {
-        // The live bar only: `find_query`'s fallback would leave every
-        // occurrence lit in every tab with no way to turn it off.
         match &self.prompt {
             Prompt::Find { query, .. } if !query.text.is_empty() => Some(query.text.clone()),
             _ => None,
         }
     }
 
-    /// First result row the overlay list shows.
-    ///
-    /// A remembered origin rather than one derived from the selection: deriving
-    /// it pins the selection to the *last* drawn row, so nothing after it is
-    /// ever visible and every step down scrolls the whole list by one.
+    /// Remembered rather than derived from the selection, which would pin the
+    /// selection to the last row drawn.
     pub fn overlay_first_row(&self) -> usize {
         self.overlay_scroll
     }
 
-    /// Scrolls the overlay window the least that brings `selected` inside it.
+    pub fn overlay_rows(&self) -> usize {
+        view::overlay_rows(self.window_height)
+    }
+
     fn sync_overlay_scroll(&mut self) {
-        let (selected, total) = match &self.prompt {
-            Prompt::Palette {
-                selected, results, ..
-            } => (*selected, results.len()),
-            Prompt::FileFinder {
-                selected, results, ..
-            } => (*selected, results.len()),
-            _ => {
-                self.overlay_scroll = 0;
-                return;
-            }
+        let rows = self.overlay_rows();
+        let Some((selected, total)) = self.prompt.overlay_mut().map(|(s, n)| (*s, n)) else {
+            self.overlay_scroll = 0;
+            return;
         };
-        let rows = view::PALETTE_MAX_ROWS.max(1);
         let max_first = total.saturating_sub(rows);
         let mut first = self.overlay_scroll.min(max_first);
         if selected < first {
@@ -278,32 +239,28 @@ impl EditorApp {
         self.overlay_scroll = first;
     }
 
-    /// A result row the overlay clicked, in the result list's own indexing.
     fn overlay_pick(&mut self, row: usize) {
         let index = self.overlay_first_row() + row;
-        match &mut self.prompt {
-            Prompt::FileFinder {
-                results, selected, ..
-            } => {
-                if index < results.len() {
-                    *selected = index;
-                }
-            }
-            Prompt::Palette {
-                results, selected, ..
-            } => {
-                if index < results.len() {
-                    *selected = index;
-                }
-            }
-            _ => {}
+        match self.prompt.overlay_mut() {
+            Some((selected, total)) if index < total => *selected = index,
+            // Clicked on rows the results have since shrunk from under.
+            _ => return,
         }
         self.accept_prompt();
     }
 
-    /// The status bar's current message, if any.
     pub fn status(&self) -> &str {
         &self.status
+    }
+
+    fn note(&mut self, text: impl Into<String>) {
+        self.status = text.into();
+        self.status_tone = Tone::Secondary;
+    }
+
+    fn fail(&mut self, text: impl Into<String>) {
+        self.status = text.into();
+        self.status_tone = Tone::Danger;
     }
 
     pub fn sidebar_visible(&self) -> bool {
@@ -314,7 +271,7 @@ impl EditorApp {
         self.dialog.as_ref()
     }
 
-    /// `(total matches, index of the current one)` while the find bar is open.
+    /// `(matches, the current one)` while the find bar is open.
     pub fn find_progress(&self) -> Option<(usize, usize)> {
         match &self.prompt {
             Prompt::Find { total, current, .. } => Some((*total, *current)),
@@ -322,13 +279,10 @@ impl EditorApp {
         }
     }
 
-    /// Opens `path` as if the tree or the open prompt had asked for it.
     pub fn open(&mut self, path: &str) {
         self.open_path(path);
     }
 
-    /// The text in whichever prompt is open, for a test that has to see what a
-    /// keystroke actually reached.
     pub fn prompt_text(&self) -> String {
         self.prompt
             .input_text()
@@ -336,8 +290,6 @@ impl EditorApp {
             .unwrap_or_default()
     }
 
-    /// The file finder's current result paths, for a test that has to see what
-    /// the tree actually offered.
     pub fn finder_results(&self) -> Vec<String> {
         match &self.prompt {
             Prompt::FileFinder { results, .. } => results.clone(),
@@ -345,32 +297,25 @@ impl EditorApp {
         }
     }
 
-    /// Whether any prompt is open.
     pub fn prompt_is_open(&self) -> bool {
         self.prompt.is_open()
     }
 
-    /// Empties the status line, so a test can tell "nothing happened" from
-    /// "whatever was already there".
     pub fn clear_status(&mut self) {
         self.status.clear();
     }
 
-    /// Whether the open prompt is one of the two overlays (the palette, the
-    /// file finder) rather than the one-line bar.
     pub fn prompt_is_overlay(&self) -> bool {
         self.prompt.is_overlay()
     }
 
-    /// Empties whichever prompt is open, as Ctrl+U does.
     pub fn clear_prompt(&mut self) {
         if let Some(input) = self.prompt.input_mut() {
             input.clear();
         }
     }
 
-    /// Types `text` into whichever prompt is open, one character at a time —
-    /// the same path a keystroke takes.
+    /// Types `text` into the open prompt as keystrokes would.
     pub fn type_in_prompt(&mut self, text: &str) {
         for character in text.chars() {
             self.handle_prompt_input(LineEditInput::Text { character }, false);
@@ -381,11 +326,8 @@ impl EditorApp {
         self.tree.rows().len()
     }
 
-    /// Clamps the sidebar's selected row against a tree that may have shrunk.
-    ///
-    /// The selection is a *row* index and a refresh rebuilds the rows, so a
-    /// stale one silently designates a different file — or nothing, which makes
-    /// Enter look like a dead key.
+    /// A refresh rebuilds the rows, so a stale row index names another file,
+    /// or none, and Enter looks dead.
     fn clamp_tree_selection(&mut self) {
         let rows = self.tree.rows().len();
         self.tree_selected = match self.tree_selected {
@@ -396,7 +338,7 @@ impl EditorApp {
         self.tree_scroll = self.tree_scroll.min(rows.saturating_sub(1));
     }
 
-    /// `count` visible tree rows from `first`, as the sidebar draws them.
+    /// `(name, depth, is_dir, expanded, path)` of `count` rows from `first`.
     pub fn tree_rows(
         &self,
         first: usize,
@@ -420,10 +362,7 @@ impl EditorApp {
             .collect()
     }
 
-    /// The active document. `EditorApp` keeps at least one at all times —
-    /// `close_tab` opens a scratch buffer rather than leaving none — and the
-    /// one path that can transiently hold zero is a refused open during
-    /// construction, which `sync_viewport` returns early from.
+    /// There is always one: closing the last tab opens a scratch buffer.
     fn doc(&self) -> &Document {
         &self.docs[self.active]
     }
@@ -441,7 +380,6 @@ impl EditorApp {
         self.focus = Focus::Editor;
     }
 
-    /// Opens `path`, or switches to it when it is already open.
     fn open_path(&mut self, path: &str) {
         if let Some(index) = self
             .docs
@@ -450,22 +388,20 @@ impl EditorApp {
         {
             self.active = index;
             self.focus = Focus::Editor;
-            self.status = format!("{path}");
+            self.note(said::opened(path));
+            self.sync_viewport();
             return;
         }
 
         match files::read_file(path) {
             Ok(text) => match Document::from_text(Some(path.to_string()), &text) {
                 Ok(doc) => {
-                    // An untouched, unnamed, empty buffer is scaffolding, not
-                    // work.
                     let replace_scratch = self.docs.len() == 1
                         && self.docs[0].path().is_none()
                         && !self.docs[0].is_modified()
                         && self.docs[0].buffer.is_empty();
                     if replace_scratch {
-                        // The prompt names an index, and the buffer it named
-                        // is about to be replaced by this file.
+                        // Its index is about to name this file instead.
                         if matches!(self.prompt, Prompt::SaveAs { .. }) {
                             self.prompt = Prompt::None;
                             self.focus = Focus::Editor;
@@ -477,19 +413,19 @@ impl EditorApp {
                     self.docs.push(doc);
                     self.active = self.docs.len() - 1;
                     self.focus = Focus::Editor;
-                    self.status = format!("Opened {path}");
+                    self.note(said::opened(path));
                     self.reveal_in_tree(path);
                 }
-                Err(_) => self.status = said::too_many_lines(path),
+                Err(_) => self.fail(said::too_many_lines(path)),
             },
-            Err(message) => self.status = message,
+            Err(message) => self.fail(message),
         }
         self.sync_viewport();
     }
 
     fn save_document(&mut self, index: usize, path: Option<String>) {
         let Some(doc) = self.docs.get(index) else {
-            self.status = said::TAB_GONE.into();
+            self.fail(said::TAB_GONE);
             return;
         };
         let target = match path.or_else(|| doc.path().map(str::to_string)) {
@@ -506,19 +442,16 @@ impl EditorApp {
                 return;
             }
         };
-        // One tab per path, the rule `open_path` already keeps: two tabs on
-        // one file means whichever saves last wins.
+        // Two tabs on one file: whichever saved last would win.
         if self
             .docs
             .iter()
             .enumerate()
             .any(|(i, d)| i != index && d.path().is_some_and(|p| p == target))
         {
-            self.status = said::open_elsewhere(&target);
+            self.fail(said::open_elsewhere(&target));
             return;
         }
-        // Writing over what this tab did not read takes somebody's work with
-        // it.
         let on_disk = files::disk_stamp(&target);
         let found = if doc.path() == Some(target.as_str()) {
             match (doc.disk_stamp(), on_disk) {
@@ -540,10 +473,9 @@ impl EditorApp {
         self.write_document(index, target);
     }
 
-    /// The write itself, past every question `save_document` asks.
     fn write_document(&mut self, index: usize, target: String) {
         let Some(doc) = self.docs.get(index) else {
-            self.status = said::TAB_GONE.into();
+            self.fail(said::TAB_GONE);
             return;
         };
         let text = doc.text();
@@ -552,21 +484,18 @@ impl EditorApp {
                 let named = self.docs[index].path() != Some(target.as_str());
                 self.docs[index].mark_saved(Some(target.clone()));
                 self.docs[index].set_disk_stamp(files::disk_stamp(&target));
-                self.status = format!("Saved {target}");
+                self.note(said::saved(&target));
                 if named {
                     self.refresh_tree_dir(parent_dir(&target));
                     self.reveal_in_tree(&target);
                 }
             }
-            Err(message) => self.status = message,
+            Err(message) => self.fail(message),
         }
     }
 
-    /// Where `index`'s Save As prompt starts: the document's own directory
-    /// when it has one, else the tree's root, and that document's title.
-    ///
-    /// Its own directory: proposing the tree root turns Ctrl+Shift+S on a file
-    /// from elsewhere into a copy beside the tree, original left behind.
+    /// In the document's own folder: the tree's root would turn a Save as of a
+    /// file from elsewhere into a copy beside the tree.
     fn default_save_path(&self, index: usize) -> String {
         let own = self
             .docs
@@ -588,7 +517,6 @@ impl EditorApp {
         path
     }
 
-    /// Closes tab `index`, asking first when it holds unsaved changes.
     fn close_tab(&mut self, index: usize, force: bool) {
         let Some(doc) = self.docs.get(index) else {
             return;
@@ -609,18 +537,15 @@ impl EditorApp {
         self.sync_viewport();
     }
 
-    /// Follows the document a pending Save As prompt or close dialog names
-    /// across the removal of tab `closed`. A tab position is not a stable
-    /// identity: Ctrl+W reaches `close_tab` while the Save As field has focus,
-    /// and without this the prompt would go on to write a different document's
-    /// text to the path the user typed for this one.
+    /// Ctrl+W reaches `close_tab` while a Save as is open, which would
+    /// otherwise write another tab's text to the path typed for this one.
     fn retarget_document_index(&mut self, closed: usize) {
         if let Prompt::SaveAs { index, .. } = &mut self.prompt {
             match (*index).cmp(&closed) {
                 core::cmp::Ordering::Equal => {
                     self.prompt = Prompt::None;
                     self.focus = Focus::Editor;
-                    self.status = said::TAB_GONE.into();
+                    self.fail(said::TAB_GONE);
                 }
                 core::cmp::Ordering::Greater => *index -= 1,
                 core::cmp::Ordering::Less => {}
@@ -639,7 +564,6 @@ impl EditorApp {
         self.docs.iter().any(Document::is_modified)
     }
 
-    /// Reads whatever directories the tree is waiting on.
     fn sync_tree(&mut self) {
         self.sync_tree_inner();
         self.clamp_tree_selection();
@@ -659,24 +583,19 @@ impl EditorApp {
                 let complete = match files::read_dir(&path) {
                     Ok(entries) => self.tree.populate(index, entries),
                     Err(message) => {
-                        // An unreadable directory is an empty one, so the
-                        // sidebar still draws.
-                        self.status = message;
+                        self.fail(message);
                         self.tree.populate(index, Vec::new())
                     }
                 };
                 if !complete {
-                    self.status = said::tree_full(slopos_editor_core::filetree::MAX_NODES);
+                    self.fail(said::tree_full(slopos_editor_core::filetree::MAX_NODES));
                 }
             }
         }
     }
 
-    /// Reads every directory under the root, bounded, so the finder offers
-    /// what is in the tree rather than what the sidebar happens to have open.
-    ///
-    /// Not on the open path: opening a folder stays the cost of one directory,
-    /// and the finder is the only caller that needs the whole set.
+    /// Reads every folder under the root, bounded, so the finder offers more
+    /// than the sidebar has open.
     fn index_tree(&mut self) {
         const MAX_DIRS: usize = 4_000;
         let mut read = 0usize;
@@ -687,20 +606,20 @@ impl EditorApp {
             }
             for index in unread {
                 if read >= MAX_DIRS {
-                    self.status = said::index_full(MAX_DIRS);
+                    self.fail(said::index_full(MAX_DIRS));
                     return;
                 }
                 let Some(path) = self.tree.node(index).map(|n| n.path.clone()) else {
                     continue;
                 };
                 read += 1;
+                // Populated even when unreadable, or the walk would retry it.
                 let complete = match files::read_dir(&path) {
                     Ok(entries) => self.tree.populate(index, entries),
-                    // Marking it loaded is what stops the walk retrying it.
                     Err(_) => self.tree.populate(index, Vec::new()),
                 };
                 if !complete {
-                    self.status = said::tree_full(slopos_editor_core::filetree::MAX_NODES);
+                    self.fail(said::tree_full(slopos_editor_core::filetree::MAX_NODES));
                     return;
                 }
             }
@@ -714,7 +633,6 @@ impl EditorApp {
         }
     }
 
-    /// Expands the tree down to `path` and selects it, when it is under the root.
     fn reveal_in_tree(&mut self, path: &str) {
         let root = self.tree.root_path().to_string();
         let Some(relative) =
@@ -722,8 +640,7 @@ impl EditorApp {
         else {
             return;
         };
-        // Read each ancestor as we go: a path deeper than what has been read
-        // is not in the tree yet.
+        // Each ancestor is read as it is reached: below it is not in the tree yet.
         let mut current = root;
         for part in relative.split('/') {
             if part.is_empty() {
@@ -749,14 +666,14 @@ impl EditorApp {
 
     fn open_folder(&mut self, path: &str) {
         if !files::is_dir(path) {
-            self.status = said::not_a_folder(path);
+            self.fail(said::not_a_folder(path));
             return;
         }
         self.tree = FileTree::new(path);
         self.tree_selected = None;
         self.tree_scroll = 0;
         self.sync_tree();
-        self.status = format!("Folder: {path}");
+        self.note(said::opened(path));
     }
 
     fn tree_rows_visible(&self) -> usize {
@@ -772,8 +689,7 @@ impl EditorApp {
         }
     }
 
-    /// Recomputes how much of a document is on screen, then keeps the caret in
-    /// it. Called after anything that can move the caret or resize the window.
+    /// After anything that can move the caret or resize the window.
     fn sync_viewport(&mut self) {
         let (lines, cols) = view::code_viewport(
             self.window_width,
@@ -786,8 +702,7 @@ impl EditorApp {
         );
         self.visible_lines = lines;
         self.visible_cols = cols;
-        // A refused open leaves `docs` empty inside `EditorApp::new`, and
-        // indexing it there kills the process before the window exists.
+        // A refused first open leaves none inside `EditorApp::new`.
         if self.docs.is_empty() {
             return;
         }
@@ -801,10 +716,15 @@ impl EditorApp {
         self.prompt.is_open() && !self.prompt.is_overlay()
     }
 
-    /// Copies the selection, and with `cut` removes it.
-    ///
-    /// Syncs the viewport itself: cutting shortens the buffer, and a viewport
-    /// left pointing past the new end draws nothing at all.
+    fn sidebar_ceiling(&self) -> i32 {
+        let divider = StyleSheet::current().divider_width;
+        (self.window_width - divider - view::MIN_CODE_WIDTH).max(MIN_SIDEBAR_WIDTH)
+    }
+
+    fn find_bar_open(&self) -> bool {
+        matches!(self.prompt, Prompt::Find { .. })
+    }
+
     fn copy_selection(&mut self, cut: bool) {
         let Some(text) = self.doc().selected_text() else {
             return;
@@ -815,12 +735,11 @@ impl EditorApp {
             self.doc_mut().delete_selection();
             self.sync_viewport();
         }
-        self.status = String::from(if cut { "Cut" } else { "Copied" });
+        self.note(if cut { said::CUT } else { said::COPIED });
     }
 
     fn paste(&mut self) {
-        // The answer arrives at `on_paste`, empty when nothing owns the
-        // selection.
+        // Answered at `on_paste`, empty when nothing owns the selection.
         if !slopos_appkit::clipboard::request_paste() {
             self.paste_local();
         }
@@ -828,7 +747,7 @@ impl EditorApp {
 
     fn paste_local(&mut self) {
         if self.local_clipboard.is_empty() {
-            self.status = String::from("The clipboard is empty");
+            self.note(said::EMPTY_CLIPBOARD);
             return;
         }
         let text = self.local_clipboard.clone();
@@ -837,17 +756,13 @@ impl EditorApp {
 
     fn insert_text(&mut self, text: &str) {
         if !self.doc_mut().insert_text(text) && !text.is_empty() {
-            self.status = said::line_limit();
+            self.fail(said::line_limit());
         }
         self.sync_viewport();
     }
 
-    /// What to search for: the open find bar's field, or — when it is closed —
-    /// the last thing that was searched for.
-    ///
-    /// The fallback is what makes F3 work with the bar closed, and the
-    /// palette's Find Next work at all: accepting an entry clears the prompt
-    /// before running the command it names.
+    /// The open find bar's query, else the last one, so F3 and the palette's
+    /// Find next work with the bar closed.
     fn find_query(&self) -> Option<String> {
         match &self.prompt {
             Prompt::Find { query, .. } if !query.text.is_empty() => Some(query.text.clone()),
@@ -856,7 +771,6 @@ impl EditorApp {
         }
     }
 
-    /// Remembers the open find bar's query, so closing the bar does not lose it.
     fn remember_query(&mut self) {
         if let Prompt::Find { query, .. } = &self.prompt {
             if !query.text.is_empty() {
@@ -865,11 +779,7 @@ impl EditorApp {
         }
     }
 
-    /// Re-counts the find bar's matches against the active document.
-    ///
-    /// Cheap with the bar closed, which is what lets every message end with a
-    /// call to it: the readout it maintains lives in `Prompt::Find`, so with no
-    /// bar open there is nothing to count and nothing to scan for.
+    /// Recounts the find bar's matches; free with the bar closed.
     fn refresh_find(&mut self) {
         self.remember_query();
         self.remember_replacement();
@@ -885,8 +795,8 @@ impl EditorApp {
             return;
         };
         let options = self.search_options;
-        // The selection's start: `find_step` parks the caret at a match's
-        // end, so the caret alone names the match after it.
+        // `find_step` parks the caret at a match's end, so the caret alone
+        // names the match after it.
         let doc = &self.docs[self.active];
         let anchor = doc
             .cursor
@@ -923,12 +833,12 @@ impl EditorApp {
 
     fn find_step(&mut self, forward: bool) {
         if self.find_query().is_none() {
-            self.status = String::from("Nothing to find");
+            self.note(said::nothing_to_find(self.find_bar_open()));
             return;
         }
         let doc = &self.docs[self.active];
-        // Both directions start from the current match's start: forward one
-        // past it so Enter advances, backward at it so it does not re-find.
+        // From the current match's start: forward one past it so Enter
+        // advances, backward at it so it does not find it again.
         let anchor = doc
             .cursor
             .selection()
@@ -942,10 +852,9 @@ impl EditorApp {
         self.find_from(forward, from);
     }
 
-    /// Selects the first match at or after (or, backward, at or before) `from`.
     fn find_from(&mut self, forward: bool, from: Position) {
         let Some(query) = self.find_query() else {
-            self.status = String::from("Nothing to find");
+            self.note(said::nothing_to_find(self.find_bar_open()));
             return;
         };
         let options = self.search_options;
@@ -964,7 +873,7 @@ impl EditorApp {
                 self.sync_viewport();
                 self.refresh_find();
             }
-            None => self.status = format!("No match for “{query}”"),
+            None => self.note(said::no_match(&query)),
         }
     }
 
@@ -987,8 +896,7 @@ impl EditorApp {
         if matches_selection {
             if let Some(range) = self.doc().cursor.selection() {
                 self.doc_mut().replace_range(range, &replacement);
-                // Exactly the end, not one past: the replacement is not a
-                // match, so advancing would skip what follows it.
+                // At the end, not one past: advancing would skip what follows.
                 let from = self.doc().cursor.position;
                 self.find_from(true, from);
                 return;
@@ -999,22 +907,30 @@ impl EditorApp {
 
     fn replace_all(&mut self) {
         let Some(query) = self.find_query() else {
-            self.status = String::from("Open Replace first (Ctrl+H)");
+            let bar_open = matches!(
+                self.prompt,
+                Prompt::Find {
+                    replace: Some(_),
+                    ..
+                }
+            );
+            self.note(said::nothing_to_replace(bar_open));
             return;
         };
         let Some(replacement) = self.replace_text(&query) else {
-            self.status = String::from("Open Replace first (Ctrl+H)");
+            self.note(said::no_replacement());
             return;
         };
         let options = self.search_options;
-        let count = self.doc_mut().replace_all(&query, &replacement, options);
-        self.status = format!("Replaced {count}");
+        match self.doc_mut().replace_all(&query, &replacement, options) {
+            0 => self.note(said::no_match(&query)),
+            count => self.note(said::replaced(count)),
+        }
         self.refresh_find();
         self.sync_viewport();
     }
 
-    /// The replacement to use for `query`, or `None` when the user has not
-    /// given one *for that query*.
+    /// `None` unless a replacement was given for this very query.
     fn replace_text(&self, query: &str) -> Option<String> {
         match &self.prompt {
             Prompt::Find { replace, .. } => replace.as_ref().map(|r| r.text.clone()),
@@ -1026,8 +942,6 @@ impl EditorApp {
         }
     }
 
-    /// Remembers the replace bar's query and replacement together, so a Replace
-    /// All reached from the palette has both or neither.
     fn remember_replacement(&mut self) {
         if let Prompt::Find {
             query,
@@ -1042,7 +956,6 @@ impl EditorApp {
     }
 
     fn open_prompt(&mut self, prompt: Prompt) {
-        // A new `Prompt::Find` carries a zeroed readout.
         self.find_stamp = None;
         self.prompt = prompt;
         self.overlay_scroll = 0;
@@ -1078,8 +991,7 @@ impl EditorApp {
     }
 
     fn refresh_finder(&mut self) {
-        // By reference, cloned only where it survives: this runs on every
-        // keystroke over up to `MAX_NODES` paths.
+        // Cloned only where it survives: this runs per keystroke over every path.
         let paths = &self.finder_paths;
         if let Prompt::FileFinder {
             input,
@@ -1100,13 +1012,11 @@ impl EditorApp {
         self.sync_overlay_scroll();
     }
 
-    /// Enter in whichever prompt is open.
     fn accept_prompt(&mut self) {
         let prompt = std::mem::replace(&mut self.prompt, Prompt::None);
         match prompt {
             Prompt::None => {}
             Prompt::Find { .. } => {
-                // Find stays open: Enter walks matches.
                 self.prompt = prompt;
                 self.find_step(true);
                 return;
@@ -1119,7 +1029,7 @@ impl EditorApp {
                     }
                     _ => {
                         let lines = self.doc().buffer.line_count();
-                        self.status = said::not_a_line(input.text.trim(), lines);
+                        self.fail(said::not_a_line(input.text.trim(), lines));
                     }
                 }
                 self.focus = Focus::Editor;
@@ -1165,34 +1075,17 @@ impl EditorApp {
     }
 
     fn move_prompt_selection(&mut self, delta: isize) {
-        match &mut self.prompt {
-            Prompt::FileFinder {
-                results, selected, ..
-            } => {
-                if results.is_empty() {
-                    return;
-                }
-                let last = results.len() - 1;
-                *selected = (*selected as isize + delta).clamp(0, last as isize) as usize;
-            }
-            Prompt::Palette {
-                results, selected, ..
-            } => {
-                if results.is_empty() {
-                    return;
-                }
-                let last = results.len() - 1;
-                *selected = (*selected as isize + delta).clamp(0, last as isize) as usize;
-            }
-            _ => {}
+        if let Some((selected, total)) = self.prompt.overlay_mut()
+            && total > 0
+        {
+            *selected = selected.saturating_add_signed(delta).min(total - 1);
         }
         self.sync_overlay_scroll();
     }
 
     fn run(&mut self, command: Command) {
         self.menu_open = None;
-        // Running another command abandons a question; the find bar is not
-        // one, so it stays.
+        // Another command abandons a question; the find bar is none.
         if !command.reads_prompt() && !matches!(self.prompt, Prompt::None | Prompt::Find { .. }) {
             self.close_prompt();
         }
@@ -1232,13 +1125,13 @@ impl EditorApp {
 
             Command::Undo => {
                 if !self.doc_mut().undo() {
-                    self.status = String::from("Nothing to undo");
+                    self.note(said::NOTHING_TO_UNDO);
                 }
                 self.sync_viewport();
             }
             Command::Redo => {
                 if !self.doc_mut().redo() {
-                    self.status = String::from("Nothing to redo");
+                    self.note(said::NOTHING_TO_REDO);
                 }
                 self.sync_viewport();
             }
@@ -1273,8 +1166,7 @@ impl EditorApp {
             Command::ToggleComment => {
                 let language = self.doc().language();
                 if language.line_comment().is_none() {
-                    // Otherwise the key reads as broken, not inapplicable.
-                    self.status = format!("{} has no line comment", language.label());
+                    self.note(said::no_comments(language.label()));
                     return;
                 }
                 self.doc_mut().toggle_comment();
@@ -1311,8 +1203,6 @@ impl EditorApp {
                         _ => None,
                     }
                 };
-                // Both land in the query field: what you reach for first is
-                // what you are searching for.
                 self.open_prompt(Prompt::Find {
                     query: LineInput::with_text(seed),
                     replace,
@@ -1381,7 +1271,7 @@ impl EditorApp {
                     self.reveal_in_tree(&path);
                     self.sync_viewport();
                 } else {
-                    self.status = said::NOT_SAVED_YET.into();
+                    self.fail(said::NOT_SAVED_YET);
                 }
             }
             Command::KeyboardShortcuts => {
@@ -1389,17 +1279,15 @@ impl EditorApp {
                 if files::is_file(&path) {
                     self.open_path(&path);
                 } else {
-                    self.status = said::no_manual();
+                    self.fail(said::no_manual());
                 }
             }
             Command::About => self.dialog = Some(Dialog::About),
         }
     }
 
-    /// Chords that work wherever the focus is.
     fn global_command(&self, key: Key, mods: Modifiers) -> Option<Command> {
-        // Shift upper-cases a chord's letter in the keymap, so a lower-case
-        // table would miss every shifted chord.
+        // Shift upper-cases a chord's letter.
         let key = normalize_chord(key);
         if !mods.ctrl {
             return match key {
@@ -1429,7 +1317,6 @@ impl EditorApp {
         Some(command)
     }
 
-    /// Chords that edit, which only apply while the code surface has focus.
     fn editor_command(&self, key: Key, mods: Modifiers) -> Option<Command> {
         let key = normalize_chord(key);
         if mods.ctrl {
@@ -1488,8 +1375,7 @@ impl EditorApp {
         }
 
         match key {
-            // Space is a named key so a focused button can be pressed with
-            // it; in the code surface it is a character.
+            // Named so a focused button takes it; here it is a character.
             Key::Named(NamedKey::Space) if !mods.ctrl && !mods.plain_alt() => {
                 self.insert_text(" ");
             }
@@ -1515,9 +1401,8 @@ impl EditorApp {
             }
             Key::Named(NamedKey::Tab) if mods.shift => self.run(Command::Outdent),
             Key::Named(NamedKey::Tab) => self.run(Command::Indent),
+            // A click into the code leaves a bar open without focus.
             Key::Named(NamedKey::Escape) => {
-                // Clicking into the code leaves a bar open without focus, and
-                // Escape is the key documented to dismiss it.
                 if self.prompt.is_open() {
                     self.close_prompt();
                 } else {
@@ -1571,7 +1456,6 @@ impl EditorApp {
                 self.activate_tree_row(selected)
             }
             Key::Named(NamedKey::Escape) => {
-                // As in the code surface: Escape closes before it moves focus.
                 if self.prompt.is_open() {
                     self.close_prompt();
                 } else {
@@ -1646,7 +1530,6 @@ impl EditorApp {
                 if mods.ctrl && matches!(self.prompt, Prompt::Find { .. }) {
                     self.replace_all();
                 } else if on_replace {
-                    // What makes a replace walk.
                     self.replace_current();
                 } else {
                     self.accept_prompt();
@@ -1656,70 +1539,60 @@ impl EditorApp {
             Key::Named(NamedKey::Down) => self.move_prompt_selection(1),
             Key::Named(NamedKey::Tab) => match &mut self.prompt {
                 Prompt::Find {
-                    replace,
+                    replace: Some(_),
                     on_replace,
                     ..
-                } => {
-                    if replace.is_some() {
-                        *on_replace = !*on_replace;
-                    }
-                }
+                } => *on_replace = !*on_replace,
+                _ if mods.shift => self.move_prompt_selection(-1),
                 _ => self.move_prompt_selection(1),
             },
             _ => {}
         }
     }
 
-    fn dialog_action(&mut self, index: usize) {
+    fn answer(&mut self, answer: Answer) {
         let Some(dialog) = self.dialog.take() else {
             return;
         };
-        match dialog {
-            Dialog::About => {}
-            Dialog::ConfirmClose { index: tab } => match index {
-                0 => {
-                    self.save_document(tab, None);
-                    // Saving can open a Save As prompt instead of writing.
-                    if self.docs.get(tab).is_some_and(|d| !d.is_modified()) {
-                        self.close_tab(tab, true);
+        match (dialog, answer) {
+            (_, Answer::Cancel)
+            | (Dialog::About, _)
+            | (Dialog::ConfirmOverwrite { .. }, Answer::Discard) => {}
+            (Dialog::ConfirmClose { index }, Answer::Save) => {
+                self.save_document(index, None);
+                // Saving can ask about overwriting, or open a Save as, instead.
+                if self.docs.get(index).is_some_and(|d| !d.is_modified()) {
+                    self.close_tab(index, true);
+                }
+            }
+            (Dialog::ConfirmClose { index }, Answer::Discard) => self.close_tab(index, true),
+            (Dialog::ConfirmOverwrite { index, path, .. }, Answer::Save) => {
+                self.write_document(index, path)
+            }
+            (Dialog::ConfirmQuit, Answer::Save) => {
+                for i in 0..self.docs.len() {
+                    if self.docs[i].is_modified() && self.docs[i].path().is_some() {
+                        self.save_document(i, None);
                     }
                 }
-                1 => self.close_tab(tab, true),
-                _ => {}
-            },
-            Dialog::ConfirmOverwrite {
-                index: tab, path, ..
-            } => match index {
-                0 => self.write_document(tab, path),
-                _ => self.status = String::from("Save cancelled"),
-            },
-            Dialog::ConfirmQuit => match index {
-                0 => {
-                    for i in 0..self.docs.len() {
-                        if self.docs[i].is_modified() && self.docs[i].path().is_some() {
-                            self.save_document(i, None);
-                        }
-                    }
-                    if !self.any_modified() {
-                        std::process::exit(0);
-                    }
-                    let unsaved_named = self
-                        .docs
-                        .iter()
-                        .any(|d| d.is_modified() && d.path().is_some());
-                    if !unsaved_named && self.dialog.is_none() {
-                        self.status = said::unnamed_left();
-                    }
+                if !self.any_modified() {
+                    std::process::exit(0);
                 }
-                1 => std::process::exit(0),
-                _ => {}
-            },
+                let unsaved_named = self
+                    .docs
+                    .iter()
+                    .any(|d| d.is_modified() && d.path().is_some());
+                if !unsaved_named && self.dialog.is_none() {
+                    self.fail(said::unnamed_left());
+                }
+            }
+            (Dialog::ConfirmQuit, Answer::Discard) => std::process::exit(0),
         }
     }
 
     fn handle_code_input(&mut self, input: CodeInput) {
-        // Any interaction supersedes the status bar — but a release reaches
-        // every widget, so it would wipe the message its own press produced.
+        // Not on a release, which reaches every widget and would wipe what its
+        // own press said.
         if !matches!(
             input,
             CodeInput::Scroll { .. } | CodeInput::ScrollTo { .. } | CodeInput::Release
@@ -1731,8 +1604,7 @@ impl EditorApp {
                 self.focus = Focus::Editor;
                 self.menu_open = None;
                 self.selecting = true;
-                // No timer: a slow double click is still two clicks on one
-                // cell, and reading it that way costs a word selected.
+                // No timer: a slow double click on one cell costs a word selected.
                 let id = self.doc().id();
                 let clicks = match self.click_run {
                     Some((d, l, c, n)) if d == id && l == line && c == col => (n % 3) + 1,
@@ -1748,8 +1620,6 @@ impl EditorApp {
                 self.sync_viewport();
             }
             CodeInput::Drag { line, col } => {
-                // Moving the caret with the anchor held is what collapses the
-                // click run above.
                 self.click_run = None;
                 self.doc_mut().place_cursor(Position::new(line, col), true);
                 self.sync_viewport();
@@ -1762,8 +1632,6 @@ impl EditorApp {
                 self.doc_mut().scroll_by(delta_lines as isize);
             }
             CodeInput::ScrollTo { first_line } => {
-                // The press opens the drag and every move continues it; the
-                // release above is what ends it.
                 self.code_scroll_dragging = true;
                 let max = self.doc().buffer.line_count().saturating_sub(1);
                 self.doc_mut().viewport.first_line = first_line.min(max);
@@ -1797,8 +1665,6 @@ impl EditorApp {
                 self.focus = Focus::Tree;
                 self.menu_open = None;
                 self.tree_selected = Some(row);
-                // A file opens on the first click: a tree is a list of things
-                // to open.
                 self.activate_tree_row(row);
             }
             TreeInput::Toggle { row } => {
@@ -1881,8 +1747,6 @@ impl App for EditorApp {
 
     fn update(&mut self, msg: EditorMsg) -> Action {
         let action = self.dispatch(msg);
-        // Any message may have edited, closed or switched away from the
-        // document the readout counts.
         self.refresh_find();
         action
     }
@@ -1900,8 +1764,6 @@ impl App for EditorApp {
     }
 
     fn on_close_request(&mut self) -> (bool, Action) {
-        // The close button is Ctrl+Q by another name and asks the same
-        // question.
         if self.any_modified() {
             self.dialog = Some(Dialog::ConfirmQuit);
             return (false, Action::Rebuild);
@@ -1912,10 +1774,9 @@ impl App for EditorApp {
     fn on_resize(&mut self, width: u32, height: u32) -> Action {
         self.window_width = width as i32;
         self.window_height = height as i32;
-        self.sidebar_width = self
-            .sidebar_width
-            .min((self.window_width - view::MIN_CODE_WIDTH).max(MIN_SIDEBAR_WIDTH));
+        self.sidebar_width = self.sidebar_width.min(self.sidebar_ceiling());
         self.sync_viewport();
+        self.sync_overlay_scroll();
         Action::Rebuild
     }
 
@@ -1932,8 +1793,6 @@ impl App for EditorApp {
     }
 }
 
-/// The bodies the three `App` entry points above wrap, so the refresh they all
-/// owe is written once instead of at every `return` inside them.
 impl EditorApp {
     fn dispatch(&mut self, msg: EditorMsg) -> Action {
         match msg {
@@ -1971,20 +1830,21 @@ impl EditorApp {
             EditorMsg::PromptReplace(input) => self.handle_prompt_input(input, true),
             EditorMsg::SidebarDrag(DragInput::Begin) => self.sidebar_dragging = true,
             EditorMsg::SidebarDrag(DragInput::Move(x)) => {
-                let ceiling = (self.window_width - view::MIN_CODE_WIDTH).max(MIN_SIDEBAR_WIDTH);
-                self.sidebar_width = x.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH.min(ceiling));
+                // So the divider's line, its middle, stays under the pointer.
+                let width = x - StyleSheet::current().divider_width / 2;
+                let ceiling = MAX_SIDEBAR_WIDTH.min(self.sidebar_ceiling());
+                self.sidebar_width = width.clamp(MIN_SIDEBAR_WIDTH, ceiling);
                 self.sync_viewport();
             }
             EditorMsg::SidebarDrag(DragInput::End) => self.sidebar_dragging = false,
             EditorMsg::Run(command) => self.run(command),
             EditorMsg::Pick(row) => self.overlay_pick(row),
-            EditorMsg::Dialog(index) => self.dialog_action(index),
+            EditorMsg::Dialog(answer) => self.answer(answer),
         }
         Action::Rebuild
     }
 
     fn dispatch_key(&mut self, key: Key, mods: Modifiers) -> Action {
-        // Reached only when no widget claimed the key.
         if self.dialog.is_some() {
             return Action::None;
         }
@@ -2027,7 +1887,6 @@ pub fn editor_main() -> ! {
     slopos_appkit::run_app(app)
 }
 
-/// What a find readout was counted against; see `EditorApp::find_stamp`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct FindStamp {
     document: u64,
@@ -2037,7 +1896,6 @@ struct FindStamp {
     options: SearchOptions,
 }
 
-/// A chord's key with its letter folded to lower case.
 fn normalize_chord(key: Key) -> Key {
     match key {
         Key::Char(c) => Key::Char(c.to_ascii_lowercase()),

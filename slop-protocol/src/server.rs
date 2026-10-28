@@ -1,24 +1,16 @@
-//! Server-side multi-client protocol manager: listens on a Unix domain socket,
-//! accepts client connections, and dispatches typed requests.
-//!
-//! Events are written into a per-client [`WriteBuf`]; [`Server::flush_clients`]
-//! drains them once per frame with non-blocking `send()`. `EAGAIN` leaves the
-//! data buffered for the next frame; only a buffer overflow disconnects.
+//! The compositor's end: a listening socket and its clients, whose events wait
+//! for [`Server::flush_clients`] past `EAGAIN`; only an overflow disconnects.
 
 use crate::codec::Encode;
 use crate::connection::Connection;
-use crate::types::{Event, PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, ProtocolError, Request};
+use crate::types::{Event, PROTOCOL_VERSION, ProtocolError, Request};
 use slopos_abi::errno::Errno;
 use slopos_abi::net::{AF_UNIX, SOCK_STREAM};
 use slopos_abi::syscall::MSG_NOSIGNAL;
 
-/// Maximum number of simultaneous client connections the server tracks.
-/// Exposed so owners can size the index array passed to
-/// [`Server::take_disconnected`].
 pub const MAX_CLIENTS: usize = 32;
 
-/// Outgoing event buffer size per client. 4 KB holds ~200+ typical events —
-/// roughly 3 seconds of backlog at 60 fps before disconnection.
+/// Some 200 events, three seconds of them at 60 fps.
 const WRITE_BUF_SIZE: usize = 4096;
 
 struct WriteBuf {
@@ -34,8 +26,7 @@ impl WriteBuf {
         }
     }
 
-    /// Append a length-prefixed message. Returns `false` if there is not
-    /// enough room (caller should flush or disconnect).
+    /// `false` when there is no room.
     fn put(&mut self, payload: &[u8]) -> bool {
         let framed_len = 4 + payload.len();
         if self.len + framed_len > WRITE_BUF_SIZE {
@@ -48,10 +39,7 @@ impl WriteBuf {
         true
     }
 
-    /// Non-blocking flush to socket. Returns:
-    /// - `Ok(true)`  — buffer fully drained.
-    /// - `Ok(false)` — partial send or EAGAIN, data remains for retry.
-    /// - `Err(…)`    — hard error (disconnected / IO).
+    /// Whether it drained; an error is a dead connection.
     fn flush(&mut self, fd: i32) -> Result<bool, ProtocolError> {
         while self.len > 0 {
             match slopos_cabi::send(fd, &self.data[..self.len], MSG_NOSIGNAL as i32) {
@@ -80,35 +68,17 @@ pub struct ClientConn {
     pub conn: Connection,
     pub active: bool,
     write_buf: WriteBuf,
-    hello_version: Option<u32>,
+    greeted: bool,
 }
 
 pub struct Server {
     listen_fd: i32,
-    // Each client is boxed so `Option<Box<ClientConn>>` has one canonical niche
-    // (None == null). Inline, `Option<ClientConn>` had two competing niches —
-    // the inner `read_buf: Box` and `active: bool` — and rustc const-initialised
-    // `[None; N]` through one while reading the discriminant through the other,
-    // so a fresh slot read back as `Some(garbage)`.
+    // Boxed for one niche: inline, `[None; N]` was const-initialised through
+    // one niche and read through another, as `Some(garbage)`.
     pub clients: alloc::boxed::Box<[Option<alloc::boxed::Box<ClientConn>>; MAX_CLIENTS]>,
-    pub client_count: usize,
 }
 
 impl Server {
-    /// Create a Server from an inherited (socket-activated) listen FD, which
-    /// must already be bound and listening.
-    pub fn from_fd(listen_fd: i32) -> Result<Self, ProtocolError> {
-        crate::connection::set_nonblock(listen_fd);
-
-        const NONE: Option<alloc::boxed::Box<ClientConn>> = None;
-        Ok(Self {
-            listen_fd,
-            clients: alloc::boxed::Box::new([NONE; MAX_CLIENTS]),
-            client_count: 0,
-        })
-    }
-
-    /// Create a listening Unix domain socket at the given path.
     pub fn bind(path: &[u8]) -> Result<Self, ProtocolError> {
         let fd = slopos_cabi::socket(AF_UNIX as i32, SOCK_STREAM as i32, 0)
             .map_err(|_| ProtocolError::Io)?;
@@ -120,12 +90,10 @@ impl Server {
         Ok(Self {
             listen_fd: fd,
             clients: alloc::boxed::Box::new([NONE; MAX_CLIENTS]),
-            client_count: 0,
         })
     }
 
-    /// Non-blocking accept. Returns the client index if a connection was
-    /// accepted, `Ok(None)` on EAGAIN/EWOULDBLOCK, `Err` on a real error.
+    /// The new client's index, or `None` with none waiting.
     pub fn accept(&mut self) -> Result<Option<usize>, ProtocolError> {
         let client_fd = match slopos_cabi::accept(self.listen_fd) {
             Ok(fd) => fd,
@@ -146,47 +114,38 @@ impl Server {
             conn,
             active: true,
             write_buf: WriteBuf::new(),
-            hello_version: None,
+            greeted: false,
         }));
-        self.client_count += 1;
         Ok(Some(idx))
     }
 
-    /// Read one request from a client (non-blocking).
-    ///
-    /// The first request must be a `Hello` naming a version this server
-    /// serves, and only the first may be one; anything else is an error the
-    /// caller ends the connection on.
+    /// The first request must be a `Hello` naming [`PROTOCOL_VERSION`], and
+    /// only the first may be one; anything else is an error the caller ends
+    /// the connection on.
     pub fn recv_request(&mut self, client: usize) -> Result<Option<Request>, ProtocolError> {
         let c = match self.clients.get_mut(client) {
             Some(Some(c)) if c.active => c,
             _ => return Ok(None),
         };
         let request = c.conn.recv::<Request>()?;
-        match (c.hello_version, request) {
-            (None, Some(Request::Hello { version })) => {
-                if !(PROTOCOL_VERSION_MIN..=PROTOCOL_VERSION).contains(&version) {
+        match (c.greeted, request) {
+            (false, Some(Request::Hello { version })) => {
+                if version != PROTOCOL_VERSION {
                     return Err(ProtocolError::VersionMismatch);
                 }
-                c.hello_version = Some(version);
+                c.greeted = true;
                 Ok(Some(Request::Hello { version }))
             }
-            (None, Some(_)) | (Some(_), Some(Request::Hello { .. })) => {
+            (false, Some(_)) | (true, Some(Request::Hello { .. })) => {
                 Err(ProtocolError::MalformedMessage)
             }
             (_, request) => Ok(request),
         }
     }
 
-    /// Queue an event into the client's write buffer (never blocks); socket I/O
-    /// happens in [`flush_clients`].
-    ///
-    /// If the buffer is full an emergency non-blocking flush is attempted; if
-    /// that still leaves no room the client is *flagged* disconnected and
-    /// `Err(Disconnected)` returned. The slot is **not** freed here — teardown
-    /// runs through [`take_disconnected`].
+    /// A full buffer is flushed once; a client whose buffer stays full is
+    /// flagged disconnected, its slot left for [`take_disconnected`].
     pub fn queue_event(&mut self, client: usize, event: &Event) -> Result<(), ProtocolError> {
-        // No length header here — `WriteBuf::put` adds the framing.
         let mut scratch = [0u8; 8192];
         let payload_len = event.encode(&mut scratch)?;
         let payload = &scratch[..payload_len];
@@ -220,11 +179,7 @@ impl Server {
         Err(ProtocolError::Disconnected)
     }
 
-    /// Non-blocking flush of all clients' write buffers; call once per frame.
-    ///
-    /// A hard error (broken pipe, EOF) *flags* the client disconnected for the
-    /// owner to reclaim via [`take_disconnected`]; `EAGAIN` is benign and
-    /// leaves the data buffered for the next frame.
+    /// A client that cannot be written is flagged for [`take_disconnected`].
     pub fn flush_clients(&mut self) {
         for i in 0..MAX_CLIENTS {
             let died = match self.clients.get_mut(i) {
@@ -243,9 +198,8 @@ impl Server {
         matches!(self.clients.get(client), Some(Some(c)) if c.active)
     }
 
-    /// Probe a client for disconnection without consuming any messages: a
-    /// non-blocking `recv()` whose data stays buffered for the next
-    /// `recv_request`. EOF flags the client disconnected and returns `true`.
+    /// What a probe reads stays for the next `recv_request`; end of file flags
+    /// the client disconnected.
     pub fn probe_disconnected(&mut self, client: usize) -> bool {
         match self.clients.get_mut(client) {
             Some(Some(c)) if c.active => {
@@ -260,23 +214,16 @@ impl Server {
         }
     }
 
-    /// Flag a client as disconnected without freeing its slot.
-    ///
-    /// Every path that observes a dead peer routes here; the owner reclaims the
-    /// slot — and tears down any state keyed on the client index — through
-    /// [`take_disconnected`].
+    /// The slot stays until its owner, which keys state on it, takes it
+    /// through [`take_disconnected`].
     fn mark_disconnected(&mut self, client: usize) {
         if let Some(Some(c)) = self.clients.get_mut(client) {
             c.active = false;
         }
     }
 
-    /// Collect the indices of every client flagged disconnected but not yet
-    /// reclaimed, writing them into `out` and returning the count.
-    ///
-    /// The slots stay allocated: the caller runs per-client teardown and then
-    /// calls [`disconnect`] for each returned index, so owner-side state can
-    /// never be orphaned by an internally-detected disconnect.
+    /// The clients flagged disconnected, whose slots stay until the caller has
+    /// torn its own state down and called [`disconnect`] on each.
     pub fn take_disconnected(&mut self, out: &mut [usize]) -> usize {
         let mut n = 0;
         for (i, slot) in self.clients.iter().enumerate() {
@@ -293,61 +240,19 @@ impl Server {
         n
     }
 
-    /// Disconnect and clean up a client slot.
     pub fn disconnect(&mut self, client: usize) {
         if let Some(slot) = self.clients.get_mut(client) {
-            if slot.take().is_some() {
-                self.client_count = self.client_count.saturating_sub(1);
-            }
+            *slot = None;
         }
     }
 
     pub fn listen_fd(&self) -> i32 {
         self.listen_fd
     }
-
-    pub fn client_count(&self) -> usize {
-        self.client_count
-    }
-
-    /// Build an array of poll FDs: the listen socket at index 0, then every
-    /// connected client. Returns the number of valid entries.
-    pub fn build_poll_fds(&self, out: &mut [slopos_abi::syscall::types::UserPollFd]) -> usize {
-        use slopos_abi::syscall::posix::POLLIN;
-        use slopos_abi::syscall::types::UserPollFd;
-
-        let max = out.len();
-        if max == 0 {
-            return 0;
-        }
-
-        out[0] = UserPollFd {
-            fd: self.listen_fd,
-            events: POLLIN,
-            revents: 0,
-        };
-        let mut count = 1;
-
-        for client in self.clients.iter() {
-            if let Some(c) = client {
-                if c.active && count < max {
-                    out[count] = UserPollFd {
-                        fd: c.conn.fd(),
-                        events: POLLIN,
-                        revents: 0,
-                    };
-                    count += 1;
-                }
-            }
-        }
-
-        count
-    }
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
-        // Client FDs close via `Connection::drop`; the listen FD is owned here.
         let _ = slopos_cabi::close(self.listen_fd);
     }
 }

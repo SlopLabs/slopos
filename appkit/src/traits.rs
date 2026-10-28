@@ -1,9 +1,8 @@
 use super::audit::Arrangement;
 use super::constraints::{BoxConstraints, Rect, Size};
-use super::event::{EventPhase, EventResponse, Key, MessageSink, Modifiers, WidgetEvent};
+use super::event::{EventResponse, Key, MessageSink, Modifiers, WidgetEvent};
 use super::paint::PaintContext;
 use super::style::StyleSheet;
-use super::text::BODY;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct WidgetId(pub u32);
@@ -22,30 +21,8 @@ pub struct MeasureCtx<'a> {
     pub style: &'a StyleSheet,
 }
 
-impl MeasureCtx<'_> {
-    /// Advance of `text` as [`PaintContext::draw_text`](super::paint::PaintContext::draw_text)
-    /// will lay it out — measure and paint must agree or a label is clipped by
-    /// its own box.
-    pub fn text_width(&self, text: &str) -> i32 {
-        super::text::ui::width(text, BODY.size)
-    }
-
-    pub fn text_height(&self) -> i32 {
-        super::text::ui::line_height(BODY.size)
-    }
-
-    /// Baseline of body text in a box `height` tall, from the box's top: its
-    /// line centred in the box. A one-line text widget's box is one line box,
-    /// [`BODY`]'s, so every label puts its text on the same row.
-    pub fn baseline_in(&self, height: i32) -> i32 {
-        super::text::ui::baseline_in(height, BODY.size)
-    }
-}
-
-/// Identity and geometry every widget carries, owned by the framework.
-///
-/// `measured` is written only by [`measure_widget`], `rect` only by
-/// [`place_widget`].
+/// What every widget carries: `measured` written by [`measure_widget`] alone,
+/// `rect` by [`place_widget`].
 #[derive(Debug)]
 pub struct WidgetCore {
     id: WidgetId,
@@ -81,10 +58,8 @@ impl Default for WidgetCore {
     }
 }
 
-/// Measure `widget` under `constraints` and record the result.
-///
-/// Containers must call this rather than `Widget::measure` directly, so that
-/// [`Widget::measured_size`] is populated before layout runs.
+/// What a container measures a child with, so [`Widget::measured_size`] is
+/// known before layout.
 pub fn measure_widget(
     widget: &mut dyn Widget,
     constraints: BoxConstraints,
@@ -96,10 +71,7 @@ pub fn measure_widget(
     size
 }
 
-/// Assign `widget` its final on-screen rect.
-///
-/// `rect` must be a real destination — to probe a size, use [`measure_widget`]
-/// and [`Widget::measured_size`] instead.
+/// Gives `widget` its final rect; a size is probed with [`measure_widget`].
 pub fn place_widget(widget: &mut dyn Widget, rect: Rect) {
     widget.core_mut().rect = rect;
     widget.layout(rect);
@@ -111,32 +83,21 @@ pub fn place_widget(widget: &mut dyn Widget, rect: Rect) {
 /// one consumes: a widget that answers `KeyDown` without gating on its own
 /// focus takes the key from whatever the user was aiming at.
 pub trait Widget {
-    /// Implemented by storing a [`WidgetCore`] and returning references to it.
     fn core(&self) -> &WidgetCore;
     fn core_mut(&mut self) -> &mut WidgetCore;
 
-    /// Compute this widget's desired size given parent constraints.
-    ///
-    /// May be called more than once per frame with different constraints, so it
-    /// must stay free of side effects beyond caching.
+    /// May run more than once a frame under other constraints, so it keeps no
+    /// state but caches.
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size;
 
-    /// Position children within `rect`, the widget's final on-screen area.
-    ///
-    /// `rect` is already recorded by [`place_widget`]; a leaf widget needs no
-    /// implementation at all.
+    /// Places the children within `rect`, which [`place_widget`] has recorded.
     fn layout(&mut self, rect: Rect) {
         let _ = rect;
     }
 
     fn paint(&self, ctx: &mut PaintContext);
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse;
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse;
 
     fn role(&self) -> Role {
         Role::None
@@ -150,11 +111,8 @@ pub trait Widget {
         FocusPolicy::None
     }
 
-    /// Whether the *application* says this widget holds the keyboard focus.
-    ///
-    /// A widget built focused and one the `FocusManager` points at can
-    /// disagree; keys go to every widget until one consumes, so the
-    /// application's answer has to win.
+    /// Whether the app built this widget focused, which wins over where the
+    /// [`FocusManager`](crate::focus::FocusManager) thinks focus is.
     fn declares_focus(&self) -> bool {
         false
     }
@@ -185,15 +143,13 @@ pub trait Widget {
         rect
     }
 
-    /// Distance from the top of the box [`measure`](Widget::measure) returned
-    /// to the baseline of the widget's first line of text, for a row that
-    /// aligns its children by baseline. `None` for a widget without text,
-    /// which such a row stands on its bottom edge.
+    /// From the top of the measured box to the first line's baseline; `None`
+    /// for a widget without text, which a baseline row stands on its bottom.
     fn baseline(&self) -> Option<i32> {
         None
     }
 
-    /// Proportional share of leftover stack space; 0 means non-flexible.
+    /// Its share of the room a stack has left; 0 takes none.
     fn flex_weight(&self) -> u16 {
         0
     }
@@ -230,20 +186,21 @@ pub trait Widget {
         self.layout_rect()
     }
 
-    /// Which of its parts the pointer at `(x, y)` lights up, for a widget
-    /// that lights up one part at a time, as a list does a row.
+    /// Which of its parts the pointer at `(x, y)` lights, as a list does a
+    /// row, `0` for a control that lights whole; `None` leaves the point to
+    /// its children. It paints what [`PaintContext::lit`] says.
     fn hover_part(&self, _x: i32, _y: i32) -> Option<usize> {
         None
     }
 
-    /// Where this widget has scrolled to, when the app does not keep it, so a
-    /// rebuild can hand it to the widget built in its place to show the same.
-    fn kept_scroll(&self) -> Option<Scrolled> {
+    /// Where this widget is, when the app does not keep it, so a rebuild can
+    /// hand it to the widget built in its place to show the same.
+    fn kept(&self) -> Option<Kept> {
         None
     }
 
-    fn keep_scroll(&mut self, offset: (i32, i32)) {
-        let _ = offset;
+    fn keep(&mut self, at: KeptAt) {
+        let _ = at;
     }
 
     /// Whether this widget covers what is beneath it for the pointer: nothing
@@ -257,19 +214,21 @@ pub trait Widget {
     fn is_modal(&self) -> bool {
         false
     }
-
-    fn is_dirty(&self) -> bool {
-        true
-    }
-
-    fn mark_dirty(&mut self) {}
 }
 
-/// Where a widget has scrolled to, and what it shows there.
+/// Where a widget is, and what it shows there.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct Scrolled {
+pub struct Kept {
     pub shows: u64,
-    pub offset: (i32, i32),
+    pub at: KeptAt,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum KeptAt {
+    /// How far down a view has scrolled.
+    Scroll(i32),
+    /// The item the keyboard is on.
+    Cursor(Option<usize>),
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -278,34 +237,25 @@ pub enum Role {
     Button,
     TextField,
     Checkbox,
-    RadioGroup,
     Slider,
     Label,
     List,
-    ListItem,
     ScrollArea,
     Tab,
-    TabPanel,
     Menu,
-    MenuItem,
     Separator,
     Group,
-    /// Buttons in a row the arrow keys move along, as Tab does: a
-    /// `ButtonRow`.
+    /// Buttons the arrow keys move along, as Tab does.
     Toolbar,
-    Window,
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum FocusPolicy {
-    /// Never focusable.
     #[default]
     None,
-    /// Focusable via Tab key.
     TabFocus,
-    /// Focusable via mouse click only.
     ClickFocus,
-    /// Focusable via both Tab and click.
+    /// By Tab and by click.
     StrongFocus,
 }
 
@@ -316,5 +266,9 @@ impl FocusPolicy {
 
     pub fn is_tab_focusable(&self) -> bool {
         matches!(self, FocusPolicy::TabFocus | FocusPolicy::StrongFocus)
+    }
+
+    pub fn is_click_focusable(&self) -> bool {
+        matches!(self, FocusPolicy::ClickFocus | FocusPolicy::StrongFocus)
     }
 }

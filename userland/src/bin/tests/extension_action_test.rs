@@ -20,7 +20,6 @@
 #[path = "support/asking.rs"]
 mod asking;
 
-use slopos_priv_core::Refused;
 use std::ffi::CString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
@@ -42,8 +41,7 @@ use slopos_extension_core::record::Record;
 use slopos_extension_core::sidecar::Sidecar;
 use slopos_extension_core::{NAMESPACE, RECORD, STORE, generation, hex, sha256};
 use slopos_priv_core::wire::{Exit, Reply, Request};
-use slopos_priv_core::words;
-use slopos_priv_core::{DELEGABLE, ENV_FD};
+use slopos_priv_core::{DELEGABLE, ENV_FD, Refused, consent, words};
 use slopos_slibc::test_harness::note;
 use slopos_tls_core::ed25519::SigningKey;
 use slopos_tls_core::sshsig::{self, KEY_TYPE, PublicKey};
@@ -304,7 +302,6 @@ fn record(name: &str) -> Option<Record> {
     record_at("", name)
 }
 
-/// How a request to privd went.
 #[derive(Debug)]
 enum Outcome {
     Ran(i32, String),
@@ -895,11 +892,8 @@ fn removing_takes_its_actions_and_command_away() -> bool {
     }) || fail(format!("greet once removed: {said:?}"))
 }
 
-/// A kept answer runs the same command from the same directory unasked in
-/// the session that gave it, and nothing wider: from another directory, or
-/// with another argument, the person is asked again. The dialog names the
-/// base program that asks by its file name, having no app entry for it, and
-/// the extension's own program as its extension.
+/// The dialog names the asking base program by its file name and the
+/// extension's own program by its extension.
 fn a_kept_answer_covers_its_command_and_directory_alone() -> bool {
     let calls = caps_drop();
     if let Err(why) = init_control::ask(init_control::Command::RestartSession) {
@@ -944,7 +938,7 @@ fn a_kept_answer_covers_its_command_and_directory_alone() -> bool {
             "elsewhere, or with another argument: {moved}, {changed}"
         ));
     }
-    if its_own.as_deref() != Some(format!("The {NAME} extension").as_str()) {
+    if its_own.as_deref() != Some(consent::named_extension(NAME).as_str()) {
         return fail(format!(
             "the dialog named the extension's client {its_own:?}"
         ));

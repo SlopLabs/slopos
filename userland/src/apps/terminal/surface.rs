@@ -104,10 +104,8 @@ pub fn draw<R, F: FnOnce(&mut DrawBuffer) -> R>(f: F) -> Option<R> {
     })?
 }
 
-/// Age of the buffer the next [`draw`] will paint into, per the
-/// `EGL_EXT_buffer_age` convention (`0` = contents undefined). The renderer's
-/// slot choice is deterministic between presents, so reading this before the
-/// draw gives the same answer as reading it after.
+/// The next [`draw`]'s buffer age as `EGL_EXT_buffer_age` counts it, `0` for
+/// undefined contents; the same before the draw as after.
 pub fn buffer_age() -> u32 {
     with_renderer(|renderer| renderer.buffer_age()).unwrap_or(0)
 }

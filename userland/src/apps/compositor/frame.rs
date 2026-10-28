@@ -1,23 +1,31 @@
 //! A window's frame: its title bar above the content, all four corners
-//! rounded at the window radius unless it is maximized, and the shadow it
-//! casts, which reaches as far whether or not the window has focus.
+//! rounded at the window radius unless it is maximized, and its shadow.
 
 use slopos_abi::draw::{Canvas, Color32, EncodedPixel};
 use slopos_abi::surface::{WINDOW_STATE_MAXIMIZED, WINDOW_STATE_MINIMIZED};
 use slopos_gfx::rounded::Rounded;
+use slopos_theme_core::{Shadow, radius, with_alpha};
 
 use super::region::Region;
 use crate::gfx::{self, DamageRect, DrawBuffer};
 use crate::syscall::UserWindowInfo;
-use crate::theme::{
-    SHADOW_MAX_ALPHA, SHADOW_OFFSET_Y, SHADOW_SPREAD, TITLE_BAR_HEIGHT, WINDOW_CORNER_RADIUS,
-};
 
-/// The whole frame, title bar and content.
+pub const TITLE_BAR_HEIGHT: i32 = 28;
+
+fn shadow_token() -> Shadow {
+    slopos_theme_core::current().shadow_window
+}
+
+/// How far past a frame a press takes its edge for a resize: as far as its
+/// shadow reaches.
+pub fn resize_reach() -> i32 {
+    shadow_token().spread
+}
+
 pub fn outline(w: &UserWindowInfo) -> Rounded {
     let radius = match w.state == WINDOW_STATE_MAXIMIZED {
         true => 0,
-        false => WINDOW_CORNER_RADIUS,
+        false => radius::WINDOW,
     };
     Rounded::new(
         w.x,
@@ -30,21 +38,22 @@ pub fn outline(w: &UserWindowInfo) -> Rounded {
 
 fn caster(w: &UserWindowInfo) -> Rounded {
     let mut caster = outline(w);
-    caster.y += SHADOW_OFFSET_Y;
+    caster.y += shadow_token().offset_y;
     caster
 }
 
-/// What casts the window's shadow and how dark it is at its darkest; a
-/// maximized window casts none.
-pub fn shadow(w: &UserWindowInfo, focused: bool) -> Option<(Rounded, u8)> {
+/// What casts the window's shadow and its colour at its darkest, which is
+/// half as dark without focus; a maximized window casts none.
+pub fn shadow(w: &UserWindowInfo, focused: bool) -> Option<(Rounded, Color32)> {
     if w.state == WINDOW_STATE_MAXIMIZED {
         return None;
     }
-    let darkest = match focused {
-        true => SHADOW_MAX_ALPHA,
-        false => SHADOW_MAX_ALPHA / 2,
+    let color = shadow_token().color;
+    let color = match focused {
+        true => color,
+        false => with_alpha(color, color.alpha() / 2),
     };
-    Some((caster(w), darkest))
+    Some((caster(w), color))
 }
 
 pub fn frame_box(w: &UserWindowInfo) -> DamageRect {
@@ -53,14 +62,7 @@ pub fn frame_box(w: &UserWindowInfo) -> DamageRect {
 
 /// Every pixel the frame or its shadow may touch.
 pub fn bounds(w: &UserWindowInfo) -> DamageRect {
-    let frame = frame_box(w);
-    let shade = caster(w).grown(SHADOW_SPREAD).bounds();
-    DamageRect {
-        x0: frame.x0.min(shade.x0),
-        y0: frame.y0.min(shade.y0),
-        x1: frame.x1.max(shade.x1),
-        y1: frame.y1.max(shade.y1),
-    }
+    frame_box(w).union(&caster(w).grown(shadow_token().spread).bounds())
 }
 
 /// What of a window, once changed, repaints all its frame and shadow touch.
@@ -91,7 +93,7 @@ impl WindowBounds {
         }
     }
 
-    /// Every pixel the window may touch; none while it is minimized.
+    /// An invalid rect while the window is minimized.
     pub fn rect(&self) -> DamageRect {
         self.rect
     }
@@ -103,7 +105,6 @@ pub fn opaque(w: &UserWindowInfo) -> [DamageRect; 3] {
     outline(w).bands()
 }
 
-/// `area` less `outline`'s corners.
 pub fn uncornered(outline: &Rounded, area: &DamageRect) -> Region {
     let mut whole = Region::from_rect(*area);
     for corner in outline.corners() {
@@ -135,33 +136,41 @@ pub fn paint_in_outline(
     }
 }
 
-/// `pixel` with every channel scaled by `(255 - alpha) / 255`, two to a
-/// word.
-fn darkened(pixel: u32, alpha: u32) -> u32 {
+/// `pixel` and `over`, both encoded, mixed at `alpha` out of 255 of `over`,
+/// two channels to a word.
+fn blended(pixel: u32, over: u32, alpha: u32) -> u32 {
     let inv = 255 - alpha;
-    let rb = (pixel & 0x00FF00FF) * inv + 0x00800080;
-    let ag = ((pixel >> 8) & 0x00FF00FF) * inv + 0x00800080;
+    let rb = (pixel & 0x00FF00FF) * inv + (over & 0x00FF00FF) * alpha + 0x00800080;
+    let ag = ((pixel >> 8) & 0x00FF00FF) * inv + ((over >> 8) & 0x00FF00FF) * alpha + 0x00800080;
     (rb >> 8 & 0x00FF00FF) | (ag >> 8 & 0x00FF00FF) << 8
 }
 
-/// The shadow `caster` throws over what is already in `clip`, at most
-/// `darkest` out of 255 of black.
-pub fn draw_window_shadow(buf: &mut DrawBuffer, caster: &Rounded, darkest: u8, clip: &DamageRect) {
+/// The shadow `caster` throws over what is already in `clip`, `color` at
+/// its darkest.
+pub fn draw_window_shadow(
+    buf: &mut DrawBuffer,
+    caster: &Rounded,
+    color: Color32,
+    clip: &DamageRect,
+) {
     let clip = clip.clip(buf.width() as i32, buf.height() as i32);
     if !clip.is_valid() {
         return;
     }
+    let spread = shadow_token().spread;
+    let over = buf.pixel_format().encode(with_alpha(color, 0xff)).0;
+    let darkest = u32::from(color.alpha());
     let bpp = buf.bytes_per_pixel() as usize;
     let pitch = buf.pitch_bytes();
     for y in clip.y0..=clip.y1 {
         let base = y as usize * pitch;
         for x in clip.x0..=clip.x1 {
-            let alpha = u32::from(caster.shadow(SHADOW_SPREAD, x, y)) * u32::from(darkest) / 255;
+            let alpha = u32::from(caster.shadow(spread, x, y)) * darkest / 255;
             if alpha == 0 {
                 continue;
             }
             let off = base + x as usize * bpp;
-            let pixel = darkened(buf.read_encoded_at(off), alpha);
+            let pixel = blended(buf.read_encoded_at(off), over, alpha);
             buf.write_encoded_at(off, EncodedPixel(pixel));
         }
     }

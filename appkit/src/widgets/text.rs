@@ -1,10 +1,11 @@
 use std::borrow::Cow;
+use std::cell::Cell;
 
 use slopos_theme_core::{TextRole, Tone};
 
 use crate::components::{Text, Wrap};
 use crate::constraints::{BoxConstraints, Rect, Size, TextAlignment};
-use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use crate::event::{EventResponse, MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::text::ui;
 use crate::traits::{MeasureCtx, Role, Widget, WidgetCore};
@@ -22,8 +23,8 @@ pub struct TextWidget {
     /// Byte ranges of `text`, one per line drawn, as laid out for the width
     /// last given.
     lines: Vec<(usize, usize)>,
-    /// Some of the text is not drawn, which a tooltip shows whole.
-    cut: bool,
+    /// The last paint left some of the text out, which a tooltip shows whole.
+    cut: Cell<bool>,
     /// Lines after the last are left out, so it ends in an ellipsis.
     truncated: bool,
 }
@@ -39,17 +40,13 @@ impl TextWidget {
             wrap: spec.wrap,
             max_lines: spec.max_lines,
             lines: Vec::new(),
-            cut: false,
+            cut: Cell::new(false),
             truncated: false,
         }
     }
 
     fn line_height(&self) -> i32 {
         self.role.style().line_height
-    }
-
-    fn width_of(&self, range: (usize, usize)) -> i32 {
-        ui::role_width(&self.text[range.0..range.1], self.role)
     }
 
     /// Lays the text out for `width`, keeping at most `keep` lines.
@@ -62,8 +59,6 @@ impl TextWidget {
             .map(|k| k.max(1));
         self.truncated = keep.is_some_and(|k| lines.len() > k);
         lines.truncate(keep.unwrap_or(lines.len()));
-        let wide = width.is_some_and(|w| lines.iter().any(|&l| self.width_of(l) > w));
-        self.cut = self.truncated || wide;
         self.lines = lines;
     }
 
@@ -102,7 +97,7 @@ impl Widget for TextWidget {
         let wraps = self.wrap != Wrap::None;
         self.lay_out(if wraps { bound } else { None }, None);
         let widest = (0..self.lines.len())
-            .map(|i| ui::role_width(&self.shown(i), self.role))
+            .map(|i| ui::width(&self.shown(i), self.role))
             .max()
             .unwrap_or(0);
         constraints.constrain(Size::new(widest, self.block_height()))
@@ -112,36 +107,29 @@ impl Widget for TextWidget {
         let wraps = self.wrap != Wrap::None;
         let room = (rect.height / self.line_height()) as usize;
         self.lay_out(Some(rect.width).filter(|_| wraps), Some(room));
-        if !wraps {
-            self.cut |= self.lines.iter().any(|&l| self.width_of(l) > rect.width);
-        }
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
         let fg = ctx.theme().ink(self.tone);
         let lh = self.line_height();
-        let glyph_top = (lh - ui::role_line_height(self.role)) / 2;
         let top = self.top(rect);
+        let mut cut = self.truncated;
         for i in 0..self.lines.len() {
             let line = self.shown(i);
-            let w = ui::role_width(&line, self.role).min(rect.width);
+            let w = ui::width(&line, self.role).min(rect.width);
             let x = match self.align {
                 TextAlignment::Start => rect.x,
                 TextAlignment::Center => rect.x + (rect.width - w) / 2,
                 TextAlignment::End => rect.x + rect.width - w,
             };
-            let y = top + i as i32 * lh + glyph_top;
-            ctx.draw_text_fitted(x, y, &line, self.role, rect.width, fg);
+            let y = ui::centred_top(top + i as i32 * lh, lh, self.role);
+            cut |= ctx.draw_text_fitted(x, y, &line, self.role, rect.width, fg);
         }
+        self.cut.set(cut);
     }
 
-    fn event(
-        &mut self,
-        _event: &WidgetEvent,
-        _phase: EventPhase,
-        _sink: &mut MessageSink,
-    ) -> EventResponse {
+    fn event(&mut self, _event: &WidgetEvent, _sink: &mut MessageSink) -> EventResponse {
         EventResponse::Ignored
     }
 
@@ -153,16 +141,14 @@ impl Widget for TextWidget {
         Some(&self.text)
     }
 
-    /// The first line's, in the box `measure` answered, which `paint` centres
-    /// the lines in.
+    /// In the box `measure` answered, which `paint` centres the lines in.
     fn baseline(&self) -> Option<i32> {
-        let lh = self.line_height();
         let above = (self.measured_size().height - self.block_height()).max(0) / 2;
-        Some(above + (lh - ui::role_line_height(self.role)) / 2 + ui::role_ascent(self.role))
+        Some(above + ui::baseline_in(self.line_height(), self.role))
     }
 
     fn tooltip(&self, _x: i32, _y: i32) -> Option<&str> {
-        self.cut.then_some(self.text.as_str())
+        self.cut.get().then_some(self.text.as_str())
     }
 }
 
@@ -196,7 +182,7 @@ fn break_words(
     width: i32,
     out: &mut Vec<(usize, usize)>,
 ) {
-    let fits = |(s, e): (usize, usize)| ui::role_width(&text[s..e], role) <= width;
+    let fits = |(s, e): (usize, usize)| ui::width(&text[s..e], role) <= width;
     let line = &text[start..end];
     let mut words = line
         .split_whitespace()
@@ -238,7 +224,7 @@ fn break_chars(
     let mut at = start;
     loop {
         let rest = &text[at..end];
-        let take = match ui::role_prefix_fitting(rest, role, width) {
+        let take = match ui::prefix_fitting(rest, role, width) {
             0 => rest.chars().next().map_or(0, char::len_utf8),
             fits => fits,
         };

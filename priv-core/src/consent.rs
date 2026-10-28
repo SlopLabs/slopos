@@ -1,14 +1,5 @@
-//! The consent channel between privd and the compositor: its messages, the
-//! questions privd keeps for it, and the dialog the compositor draws.
-//!
-//! An agent's `READY` names the version it speaks, none for the first. A
-//! question to one of the first version asks only for a click, in the first
-//! version's words; from the second on a question says what answers it, the
-//! agent says when it is on screen, and an answer may carry a password; from
-//! the third on it names the app that asks and its icon, what follows from
-//! allowing it, the allowing button's verb, whether it destroys, and the
-//! extension whose action it is, which an earlier question tells by its
-//! `describe` instead.
+//! The consent channel between privd and the compositor. An agent's `READY`
+//! names the [`VERSION`] it speaks, and privd asks one of any other nothing.
 
 mod dialog;
 mod queue;
@@ -27,47 +18,28 @@ use slopos_remote_core::{Fields, frame};
 pub use slopos_tls_core::ct::wipe;
 
 use crate::policy::valid_name;
-use crate::wire::{MAX_ARGS, Malformed, known, number};
+use crate::wire::{MAX_ARGS, Malformed, known, number, optional};
 
-/// How long a question on screen waits for the person before it is a refusal.
+/// How long a question waits for its answer, from when privd sends it, before
+/// it is a refusal.
 pub const EXPIRY_MS: u64 = 120_000;
 /// The longest command line, and the longest directory, a question may carry:
 /// the person sees all of it or is not asked.
 pub const MAX_SHOWN: usize = 320;
-/// The version of the channel this side speaks.
 pub const VERSION: u32 = 3;
-/// What the dialog calls a program the kernel attests as none of the
-/// system's.
-pub const UNIDENTIFIED: &str = "An unidentified program";
-/// The longest app name a question carries.
+/// What the dialog calls a program the kernel attests as none of the system's.
+pub const UNIDENTIFIED: &str = "An unidentified app";
 pub const APP_MAX: usize = 64;
 const ICON_PATH_MAX: usize = 255;
 
-/// What the dialog calls a program of the extension `name`.
 pub fn named_extension(name: &str) -> String {
     format!("The {name} extension")
 }
 
-/// Whether an agent of `version` is asked for more than a click.
-pub fn asks_more(version: u32) -> bool {
-    version >= 2
+pub fn password_for(name: &str) -> String {
+    format!("Password for {name}")
 }
 
-/// Whether an agent of `version` says when a question is on screen.
-pub fn says_shown(version: u32) -> bool {
-    version >= 2
-}
-
-/// Whether an agent of `version` names the app that asks.
-pub fn names_app(version: u32) -> bool {
-    version >= 3
-}
-
-/// The base interface from which privd reads a version in `READY`, at least
-/// the second. A privd from before ends an agent whose `READY` names any
-/// version, so a compositor names one only to a privd of such a base.
-pub const SINCE_INTERFACE: u32 = 8;
-/// The most administrators a question lists.
 pub const MAX_ADMINS: usize = 32;
 
 pub mod kind {
@@ -83,7 +55,7 @@ pub mod kind {
 /// What answers a question.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
-    /// The person asking clicks Allow.
+    /// The person asking clicks the allowing button.
     Confirm,
     /// The person asking types their password.
     Password,
@@ -124,8 +96,8 @@ impl Secret {
         self.0.is_empty()
     }
 
-    /// `ch` typed at the end, refused past [`SECRET_MAX`] bytes. The room
-    /// for all of them is taken at once, so nothing typed is ever copied.
+    /// Refused past [`SECRET_MAX`] bytes. The room for all of them is taken
+    /// at once, so no reallocation leaves a copy of what was typed.
     pub fn push(&mut self, ch: char) -> bool {
         let mut buf = [0u8; 4];
         let bytes = ch.encode_utf8(&mut buf).as_bytes();
@@ -155,8 +127,6 @@ impl Secret {
         self.0.clear();
     }
 
-    /// A secret as the channel carries one: no NUL, no newline, at most
-    /// [`SECRET_MAX`] bytes of UTF-8.
     fn from_wire(bytes: &[u8]) -> Result<Secret, Malformed> {
         if bytes.is_empty() {
             return Err(Malformed);
@@ -164,8 +134,7 @@ impl Secret {
         Secret::typed(bytes)
     }
 
-    /// What was typed, as [`from_wire`](Self::from_wire) holds it but empty
-    /// too, which is how a person without a password answers.
+    /// Empty too, which is how a person without a password answers a prompt.
     pub(crate) fn typed(bytes: &[u8]) -> Result<Secret, Malformed> {
         let fits = bytes.len() <= SECRET_MAX
             && !bytes.iter().any(|&b| b == 0 || b == b'\n')
@@ -225,7 +194,6 @@ impl Link {
         }
     }
 
-    /// What a new instance sends before anything else.
     pub fn hello(&self) -> Vec<u8> {
         reset_frame(self.epoch)
     }
@@ -253,8 +221,8 @@ impl Link {
     }
 }
 
-/// A `RESET` for `epoch`. Init sends one on behalf of a side that has exited,
-/// so the other drops what it was waiting on at once.
+/// Init sends one on behalf of a side that has exited, so the other drops
+/// what it was waiting on at once.
 pub fn reset_frame(epoch: u64) -> Vec<u8> {
     frame(kind::RESET, &epoch_fields(epoch).encode())
 }
@@ -267,9 +235,10 @@ fn decode_epoch(payload: &[u8]) -> Result<u64, Malformed> {
     number(&known(payload, &["epoch"])?, "epoch")
 }
 
-/// One question: everything in it comes from the sealed policy, an
-/// extension's sealed declaration, or the kernel's account of the requester,
-/// bar the argv the policy matched.
+/// One question. Of what is in it, the requester sent only the argv the policy
+/// matched and its directory; the rest comes from the sealed base, an
+/// extension's sealed declaration, the kernel's account of the requester and
+/// the accounts record.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Ask {
     pub id: u64,
@@ -295,27 +264,18 @@ pub struct Ask {
     /// That entry's icon, a PNG of the same share.
     pub icon: Option<String>,
     pub detail: Option<String>,
-    /// What the allowing button says, which every question from the third
-    /// version on names: one without is from a privd before it, whose words
-    /// the dialog keeps.
-    pub verb: Option<String>,
+    /// What the allowing button says, one of [`crate::words::VERBS`].
+    pub verb: String,
     pub destructive: bool,
-    /// The extension whose action it is.
     pub extension: Option<String>,
 }
 
 impl Ask {
-    /// The question as an agent of `version` reads it; one of the first
-    /// version is asked nothing but to confirm.
-    pub fn frame(&self, version: u32) -> Vec<u8> {
-        let describe = match (&self.extension, names_app(version)) {
-            (Some(extension), false) => format!("{} (extension {extension})", self.describe),
-            _ => self.describe.clone(),
-        };
+    pub fn frame(&self) -> Vec<u8> {
         let mut fields = Fields::new()
             .with("id", self.id.to_string())
             .with("action", &self.action)
-            .with("describe", describe)
+            .with("describe", &self.describe)
             .with("uid", self.uid.to_string())
             .with("pid", self.pid.to_string())
             .with("cwd", &self.cwd);
@@ -325,31 +285,27 @@ impl Ask {
         for word in &self.command {
             fields.push("arg", word);
         }
-        if asks_more(version) {
-            fields.push("kind", self.kind.word());
-            if let Some(person) = &self.person {
-                fields.push("person", person);
-            }
-            for admin in &self.admins {
-                fields.push("admin", admin);
+        fields.push("kind", self.kind.word());
+        if let Some(person) = &self.person {
+            fields.push("person", person);
+        }
+        for admin in &self.admins {
+            fields.push("admin", admin);
+        }
+        let optional = [
+            ("app", &self.app),
+            ("icon", &self.icon),
+            ("detail", &self.detail),
+            ("extension", &self.extension),
+        ];
+        for (key, value) in optional {
+            if let Some(value) = value {
+                fields.push(key, value);
             }
         }
-        if names_app(version) {
-            let optional = [
-                ("app", &self.app),
-                ("icon", &self.icon),
-                ("detail", &self.detail),
-                ("extension", &self.extension),
-            ];
-            for (key, value) in optional {
-                if let Some(value) = value {
-                    fields.push(key, value);
-                }
-            }
-            fields.push("verb", self.verb.as_deref().unwrap_or(crate::words::VERB));
-            if self.destructive {
-                fields.push("destructive", "1");
-            }
+        fields.push("verb", &self.verb);
+        if self.destructive {
+            fields.push("destructive", "1");
         }
         frame(kind::ASK, &fields.encode())
     }
@@ -385,26 +341,16 @@ impl Ask {
         if !valid_name(&action) {
             return Err(Malformed);
         }
-        let program = match fields.all("program").count() {
-            0 => None,
-            _ => Some(text("program")?),
-        };
+        let program = optional(&fields, "program", |_| true)?;
         let command: Vec<Vec<u8>> = fields.all("arg").map(<[u8]>::to_vec).collect();
         if command.is_empty() || command.len() > MAX_ARGS + 1 {
             return Err(Malformed);
         }
         let kind = match fields.all("kind").count() {
-            0 => Kind::Confirm,
             1 => fields.get("kind").and_then(Kind::parse).ok_or(Malformed)?,
             _ => return Err(Malformed),
         };
-        let person = match fields.all("person").count() {
-            0 => None,
-            _ => Some(text("person")?),
-        };
-        if person.as_deref().is_some_and(|p| !valid_person(p)) {
-            return Err(Malformed);
-        }
+        let person = optional(&fields, "person", valid_person)?;
         let admins: Vec<String> = fields
             .all("admin")
             .map(|name| {
@@ -422,18 +368,20 @@ impl Ask {
         if !listed || (kind == Kind::Password && person.is_none()) {
             return Err(Malformed);
         }
-        let shown = |key, valid: fn(&str) -> bool| match fields.all(key).count() {
-            0 => Ok(None),
-            _ => Some(text(key)?)
-                .filter(|t| valid(t))
-                .map(Some)
-                .ok_or(Malformed),
-        };
-        let app = shown("app", valid_app)?;
-        let icon = shown("icon", icon_path)?;
-        let detail = shown("detail", |t| printable(t, crate::words::DETAIL_MAX))?;
-        let verb = shown("verb", |t| printable(t, crate::words::VERB_MAX))?;
-        let extension = shown("extension", |t| {
+        let app = optional(&fields, "app", valid_app)?;
+        let icon = optional(&fields, "icon", icon_path)?;
+        let detail = optional(&fields, "detail", |t| {
+            printable(t, crate::words::DETAIL_MAX)
+        })?;
+        let verb = text("verb")?;
+        if crate::words::verb(&verb).is_err() {
+            return Err(Malformed);
+        }
+        let describe = text("describe")?;
+        if !printable(&describe, crate::words::DESCRIBE_MAX) {
+            return Err(Malformed);
+        }
+        let extension = optional(&fields, "extension", |t| {
             slopos_abi::extension::valid_name(t.as_bytes())
         })?;
         let destructive = match (fields.get("destructive"), fields.all("destructive").count()) {
@@ -444,7 +392,7 @@ impl Ask {
         let ask = Ask {
             id: number(&fields, "id")?,
             action,
-            describe: text("describe")?,
+            describe,
             program,
             uid: number(&fields, "uid")?,
             pid: number(&fields, "pid")?,
@@ -466,6 +414,15 @@ impl Ask {
         Ok(ask)
     }
 
+    pub fn app_name(&self) -> &str {
+        self.app.as_deref().unwrap_or(UNIDENTIFIED)
+    }
+
+    /// "{App} wants to {describe}."
+    pub fn headline(&self) -> String {
+        format!("{} wants to {}.", self.app_name(), self.describe)
+    }
+
     /// Whether the dialog can show all of the question.
     pub fn fits(&self) -> bool {
         self.command_line().len() <= MAX_SHOWN && self.directory().len() <= MAX_SHOWN
@@ -484,7 +441,6 @@ impl Ask {
         out
     }
 
-    /// Where it runs, escaped as the command line is.
     pub fn directory(&self) -> String {
         let mut out = String::new();
         quote(self.cwd.as_bytes(), &mut out);
@@ -617,7 +573,6 @@ impl Answer {
         })
     }
 
-    /// Whether it answers `ask` in the form `ask` takes.
     pub fn fits(&self, ask_kind: Kind, admins: &[String]) -> bool {
         if !self.allow {
             return self.secret.is_none() && self.admin.is_none();
@@ -632,31 +587,22 @@ impl Answer {
     }
 }
 
-/// The agent can draw a question, in `version`, which a `READY` of the
-/// first version does not name.
-pub fn ready_frame(version: u32) -> Vec<u8> {
-    match version {
-        0 | 1 => frame(kind::READY, &[]),
-        _ => frame(
-            kind::READY,
-            &Fields::new().with("version", version.to_string()).encode(),
-        ),
-    }
+pub fn ready_frame() -> Vec<u8> {
+    frame(
+        kind::READY,
+        &Fields::new().with("version", VERSION.to_string()).encode(),
+    )
 }
 
-/// The version a `READY` names, the first for none.
+/// The version a `READY` names; one naming none is 0, which no version is.
 pub fn decode_ready(payload: &[u8]) -> Result<u32, Malformed> {
-    if payload.is_empty() {
-        return Ok(1);
+    let fields = known(payload, &["version"])?;
+    match fields.all("version").count() {
+        0 => Ok(0),
+        _ => number(&fields, "version"),
     }
-    let version: u32 = number(&known(payload, &["version"])?, "version")?;
-    if version < 2 {
-        return Err(Malformed);
-    }
-    Ok(version)
 }
 
-/// Question `id` is on screen.
 pub fn shown_frame(id: u64) -> Vec<u8> {
     frame(
         kind::SHOWN,
@@ -679,14 +625,13 @@ pub fn decode_cancel(payload: &[u8]) -> Result<u64, Malformed> {
     number(&known(payload, &["id"])?, "id")
 }
 
-/// What privd answers a request whose password was typed wrong.
 pub const WRONG_PASSWORD: &str = "Wrong password.";
 
 /// Why a question has no allowing answer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Refusal {
     NoAgent,
-    /// The agent speaks a version that cannot take what the question needs.
+    /// The agent speaks another version of the channel.
     Outdated,
     Busy,
     Declined,

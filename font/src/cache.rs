@@ -1,4 +1,4 @@
-//! LRU glyph cache for avoiding re-rasterization of frequently used glyphs.
+//! Rasterized glyphs, kept so a redrawn frame rasterizes nothing.
 
 use slopos_ostd::KVec;
 
@@ -45,7 +45,7 @@ impl GlyphCache {
         Some(&entry.glyph)
     }
 
-    /// Insert a rasterized glyph into the cache, evicting the LRU entry if full.
+    /// Evicts the least recently used glyph when full.
     pub fn insert(&mut self, key: CacheKey, glyph: RasterizedGlyph) {
         self.clock += 1;
         let mut at = match self.find(key) {

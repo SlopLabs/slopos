@@ -1,17 +1,14 @@
-//! The editor on the machine it was written for.
-//!
-//! Two halves: every `editor-core` case, run here against the target's
-//! allocator rather than only on the host, and the application's own state
-//! machine — open, edit, save, search, close — driven through the same messages
-//! the widgets emit, with no compositor in the path.
+//! `editor-core`'s cases on the target's allocator, then the editor driven by
+//! the messages its widgets emit, with no compositor in the path.
 
 use slopos_userland as _;
 
+use slopos_appkit::traits::Role;
 use slopos_appkit::widgets::code_view::CodeInput;
 use slopos_appkit::widgets::editor_tabs::TabInput;
 use slopos_appkit::widgets::tree_view::TreeInput;
-use slopos_appkit::{App, Key, Modifiers, NamedKey};
-use slopos_apps::editor::{Command, EditorApp, EditorMsg, said};
+use slopos_appkit::{App, DragInput, Key, LineEditInput, Modifiers, NamedKey};
+use slopos_apps::editor::{Answer, Command, EditorApp, EditorMsg, MIN_CODE_WIDTH, said};
 
 const DIR: &str = "/home/editor_test";
 
@@ -54,14 +51,12 @@ fn type_text(app: &mut EditorApp, text: &str) {
     }
 }
 
-/// Opening a file names the tab after it and leaves the buffer clean.
 fn opens_a_file_argument() -> bool {
     let app = app_with(&format!("{DIR}/sample.rs"));
     let doc = &app.documents()[app.active_index()];
     doc.title() == "sample.rs" && !doc.is_modified() && doc.buffer.line_count() == 4
 }
 
-/// The sidebar is rooted at the file's folder and lists what is in it.
 fn populates_the_sidebar() -> bool {
     let app = app_with(&format!("{DIR}/sample.rs"));
     let rows = app.tree_rows(0, 32);
@@ -69,7 +64,6 @@ fn populates_the_sidebar() -> bool {
     names.contains(&"sample.rs") && names.contains(&"notes.md")
 }
 
-/// Typing marks the buffer dirty; saving writes it and marks it clean.
 fn types_and_saves() -> bool {
     let path = format!("{DIR}/typed.txt");
     let _ = std::fs::remove_file(&path);
@@ -78,16 +72,7 @@ fn types_and_saves() -> bool {
     if !app.documents()[app.active_index()].is_modified() {
         return false;
     }
-    // Save As, through the prompt the Ctrl+Shift+S chord opens.
-    key(
-        &mut app,
-        Key::Char('s'),
-        Modifiers {
-            ctrl: true,
-            shift: true,
-            ..Modifiers::default()
-        },
-    );
+    key(&mut app, Key::Char('s'), ctrl_shift());
     app.clear_prompt();
     app.type_in_prompt(&path);
     key(&mut app, Key::Named(NamedKey::Enter), Modifiers::default());
@@ -96,7 +81,6 @@ fn types_and_saves() -> bool {
     written == "hello\n" && !app.documents()[app.active_index()].is_modified()
 }
 
-/// A second open of the same path switches to the tab that already holds it.
 fn reopening_switches_rather_than_duplicating() -> bool {
     let mut app = app_with(&format!("{DIR}/sample.rs"));
     let before = app.documents().len();
@@ -106,7 +90,6 @@ fn reopening_switches_rather_than_duplicating() -> bool {
     before == 1 && with_scratch == 2 && app.documents().len() == 2 && app.active_index() == 0
 }
 
-/// Find counts every match and walks them.
 fn finds_and_counts() -> bool {
     let mut app = app_with(&format!("{DIR}/sample.rs"));
     key(&mut app, Key::Char('f'), ctrl());
@@ -122,41 +105,148 @@ fn finds_and_counts() -> bool {
     first == 1 && second == 2
 }
 
-/// The command palette filters by name and runs what it lands on.
 fn palette_filters_and_runs() -> bool {
     let mut app = app_with(&format!("{DIR}/sample.rs"));
-    key(
-        &mut app,
-        Key::Char('p'),
-        Modifiers {
-            ctrl: true,
-            shift: true,
-            ..Modifiers::default()
-        },
-    );
+    key(&mut app, Key::Char('p'), ctrl_shift());
     app.type_in_prompt("toggle sideb");
     let visible_before = app.sidebar_visible();
     key(&mut app, Key::Named(NamedKey::Enter), Modifiers::default());
     app.sidebar_visible() != visible_before
 }
 
-/// Closing a modified tab asks first, and cancelling keeps it open.
+fn a_picked_palette_row_runs() -> bool {
+    let mut app = app_with(&format!("{DIR}/sample.rs"));
+    key(&mut app, Key::Char('p'), ctrl_shift());
+    app.type_in_prompt("toggle sideb");
+    let visible_before = app.sidebar_visible();
+    app.update(EditorMsg::Pick(0));
+    !app.prompt_is_open() && app.sidebar_visible() != visible_before
+}
+
+/// More files than the finder shows at once, in a folder of their own.
+fn many_files() -> Option<String> {
+    let many = format!("{DIR}/many");
+    let _ = std::fs::create_dir(&many);
+    (0..20)
+        .all(|i| std::fs::write(format!("{many}/file{i:02}.txt"), "x\n").is_ok())
+        .then_some(many)
+}
+
+/// The finder scrolled past its first row: what row 1 shows, and the app.
+fn finder_scrolled() -> Option<(EditorApp, String)> {
+    let mut app = app_with(&many_files()?);
+    key(&mut app, Key::Char('p'), ctrl());
+    for _ in 0..app.overlay_rows() {
+        key(&mut app, Key::Named(NamedKey::Down), Modifiers::default());
+    }
+    let first = app.overlay_first_row();
+    let second = app.finder_results().get(first + 1).cloned()?;
+    (first > 0).then_some((app, second))
+}
+
+fn active_path(app: &EditorApp) -> Option<&str> {
+    app.documents()[app.active_index()].path()
+}
+
+fn a_picked_row_counts_from_the_first_shown() -> bool {
+    let Some((mut app, second)) = finder_scrolled() else {
+        return false;
+    };
+    app.update(EditorMsg::Pick(1));
+    !app.prompt_is_open() && active_path(&app) == Some(second.as_str())
+}
+
+fn a_click_opens_the_row_under_it() -> bool {
+    let Some((mut app, second)) = finder_scrolled() else {
+        return false;
+    };
+    let shown = app
+        .finder_results()
+        .len()
+        .saturating_sub(app.overlay_first_row())
+        .min(app.overlay_rows());
+    let Some(list) = dispatch::overlay_list(&app, dispatch::WINDOW) else {
+        return false;
+    };
+    let row = list.height / shown.max(1) as i32;
+    dispatch::click(&mut app, list.x + list.width / 2, list.y + row + row / 2);
+    !app.prompt_is_open() && active_path(&app) == Some(second.as_str())
+}
+
+fn a_row_past_the_results_opens_nothing() -> bool {
+    let Some(many) = many_files() else {
+        return false;
+    };
+    let mut app = app_with(&many);
+    key(&mut app, Key::Char('p'), ctrl());
+    app.type_in_prompt("file00");
+    let shown = app.finder_results().len();
+    app.update(EditorMsg::Pick(shown));
+    app.prompt_is_overlay() && active_path(&app).is_none()
+}
+
+fn the_overlays_fit_the_least_window() -> bool {
+    let Some(many) = many_files() else {
+        return false;
+    };
+    let mut app = app_with(&many);
+    let least = app.window().min_size;
+    app.on_resize(least.width as u32, least.height as u32);
+    for chord in [ctrl(), ctrl_shift()] {
+        key(&mut app, Key::Char('p'), chord);
+        // A card too tall for the window would be moved up to fit it.
+        let (Some(fitted), Some(roomy)) = (
+            dispatch::overlay_list(&app, least),
+            dispatch::overlay_list(&app, dispatch::WINDOW),
+        ) else {
+            return false;
+        };
+        if fitted.y != roomy.y || fitted.y + fitted.height > least.height {
+            eprintln!("editor_test: the list is at {fitted:?}, not below {roomy:?}");
+            return false;
+        }
+        key(&mut app, Key::Named(NamedKey::Escape), Modifiers::default());
+    }
+    true
+}
+
+fn tab_moves_the_finder_s_choice() -> bool {
+    let Some(many) = many_files() else {
+        return false;
+    };
+    let mut app = app_with(&many);
+    key(&mut app, Key::Char('p'), ctrl());
+    let rows = app.overlay_rows();
+    for _ in 0..rows {
+        dispatch::press(&mut app, Key::Named(NamedKey::Tab), Modifiers::default());
+    }
+    if app.overlay_first_row() != 1 {
+        return false;
+    }
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    for _ in 0..rows {
+        dispatch::press(&mut app, Key::Named(NamedKey::Tab), shift);
+    }
+    dispatch::text(&mut app, 'f');
+    app.overlay_first_row() == 0 && app.prompt_text() == "f"
+}
+
 fn close_asks_before_discarding() -> bool {
     let mut app = app_with(&format!("{DIR}/sample.rs"));
     type_text(&mut app, "x");
     app.update(EditorMsg::Tab(TabInput::Close(0)));
-    if !app.dialog().is_some() {
+    if app.dialog().is_none() {
         return false;
     }
-    // Action 2 is Cancel.
-    app.update(EditorMsg::Dialog(2));
-    !app.dialog().is_some() && app.documents().len() == 1
+    app.update(EditorMsg::Dialog(Answer::Cancel));
+    app.dialog().is_none() && app.documents().len() == 1
 }
 
-/// A directory row in the tree expands rather than opening a buffer.
 fn tree_expands_a_directory() -> bool {
-    // A fixture of our own, so the case does not rest on which entry of some
-    // other directory the filesystem happens to hand back first.
+    // Its own fixture, not whichever entry another folder happens to list first.
     let nested = format!("{DIR}/nested");
     let _ = std::fs::create_dir(&nested);
     if std::fs::write(format!("{nested}/inner.txt"), "x\n").is_err() {
@@ -173,16 +263,12 @@ fn tree_expands_a_directory() -> bool {
     after.len() > before && after.iter().any(|r| r.0 == "inner.txt") && app.documents().len() == 1
 }
 
-/// An argument the editor cannot open leaves a window, not a corpse.
 fn an_unopenable_argument_still_starts() -> bool {
-    // The refusal messages in `files.rs` are only worth writing if the process
-    // survives long enough to draw one.
     let missing = format!("{DIR}/does-not-exist.txt");
     let app = EditorApp::new(&[missing.clone()]);
     if app.documents().len() != 1 || !app.status().contains("does-not-exist") {
         return false;
     }
-    // And the window it does start is usable.
     let _ = app.view();
 
     let binary = format!("{DIR}/blob.bin");
@@ -193,7 +279,6 @@ fn an_unopenable_argument_still_starts() -> bool {
     app.documents().len() == 1 && app.status() == said::not_text(&binary)
 }
 
-/// F3 finds with the bar closed, which is what the documentation promises.
 fn find_next_works_with_the_bar_closed() -> bool {
     let mut app = app_with(&format!("{DIR}/sample.rs"));
     key(&mut app, Key::Char('f'), ctrl());
@@ -201,7 +286,7 @@ fn find_next_works_with_the_bar_closed() -> bool {
     key(&mut app, Key::Named(NamedKey::Escape), Modifiers::default());
     app.clear_status();
     key(&mut app, Key::Named(NamedKey::F3), Modifiers::default());
-    if app.status().contains("Nothing to find") {
+    if app.status() == said::nothing_to_find(false) {
         return false;
     }
     if app.documents()[0].selected_text().as_deref() != Some("answer") {
@@ -212,7 +297,6 @@ fn find_next_works_with_the_bar_closed() -> bool {
     app.prompt_text() == "answer"
 }
 
-/// Opening a file over the scratch buffer cancels a Save As that named it.
 fn opening_over_the_scratch_buffer_cancels_save_as() -> bool {
     let mut app = EditorApp::new(&[String::from(DIR)]);
     if app.documents().len() != 1 || app.documents()[0].path().is_some() {
@@ -227,7 +311,6 @@ fn opening_over_the_scratch_buffer_cancels_save_as() -> bool {
     !app.prompt_is_open() && app.documents()[0].path().is_some()
 }
 
-/// The finder offers files from directories the sidebar never expanded.
 fn finder_reaches_unexpanded_directories() -> bool {
     let deep = format!("{DIR}/deep/deeper");
     let _ = std::fs::create_dir(format!("{DIR}/deep"));
@@ -236,7 +319,6 @@ fn finder_reaches_unexpanded_directories() -> bool {
         return false;
     }
     let mut app = app_with(DIR);
-    // Nothing has expanded `deep`, so the sidebar cannot see `buried.rs`.
     if app.tree_rows(0, 64).iter().any(|r| r.0 == "buried.rs") {
         return false;
     }
@@ -247,10 +329,8 @@ fn finder_reaches_unexpanded_directories() -> bool {
         .any(|p| p.ends_with("buried.rs"))
 }
 
-/// A binary file is refused rather than opened as replacement characters.
 fn refuses_a_binary_file() -> bool {
-    // A fixture, not `/usr/local/bin/editor`: that would be refused for its
-    // size once it outgrows `MAX_FILE_BYTES`, and pass for the wrong reason.
+    // A fixture: a program could be refused for its size instead.
     let path = format!("{DIR}/blob.bin");
     if std::fs::write(&path, [0x7f, b'E', b'L', b'F', 0x00, 0x01, 0x02, 0x00]).is_err() {
         return false;
@@ -261,7 +341,6 @@ fn refuses_a_binary_file() -> bool {
     app.documents().len() == before && app.status() == said::not_text(&path)
 }
 
-/// The window is titled by the document in front, then the app's one name.
 fn the_title_names_the_document() -> bool {
     let mut app = app_with(&format!("{DIR}/sample.rs"));
     let first = app.title() == format!("sample.rs — {}", said::NAME);
@@ -269,7 +348,6 @@ fn the_title_names_the_document() -> bool {
     first && app.title() == format!("notes.md — {}", said::NAME)
 }
 
-/// Every error says what happened, then what to do, in the desktop's voice.
 fn every_error_says_what_to_do_next() -> bool {
     use std::io::ErrorKind;
     let path = "/home/user/notes.txt";
@@ -280,7 +358,7 @@ fn every_error_says_what_to_do_next() -> bool {
         said::unlisted(path, ErrorKind::PermissionDenied),
         said::unlisted(path, ErrorKind::Other),
         said::folder(path),
-        said::too_large(path, 9 << 20),
+        said::too_large(path),
         said::not_text(path),
         said::too_many_lines(path),
         said::unsaved(path, ErrorKind::PermissionDenied),
@@ -297,6 +375,11 @@ fn every_error_says_what_to_do_next() -> bool {
         said::tree_full(64),
         said::TAB_GONE.into(),
         said::NOT_SAVED_YET.into(),
+        said::nothing_to_find(false),
+        said::nothing_to_find(true),
+        said::nothing_to_replace(false),
+        said::nothing_to_replace(true),
+        said::no_replacement(),
     ];
     errors.iter().all(|said| {
         let sentences = said.split(". ").count();
@@ -308,12 +391,134 @@ fn every_error_says_what_to_do_next() -> bool {
     })
 }
 
-/// The view builds against the real font metrics, for every pane the editor has.
+fn every_passing_status_is_a_label() -> bool {
+    let path = "/home/user/notes.txt";
+    let notes = [
+        said::opened(path),
+        said::saved(path),
+        said::CUT.into(),
+        said::COPIED.into(),
+        said::EMPTY_CLIPBOARD.into(),
+        said::NOTHING_TO_UNDO.into(),
+        said::NOTHING_TO_REDO.into(),
+        said::no_comments("Markdown"),
+        said::no_match("answer"),
+        said::replaced(1),
+        said::replaced(2),
+    ];
+    notes.iter().all(|note| {
+        let kept = slopos_theme_core::words::label(note, &[]).is_ok();
+        if !kept {
+            eprintln!("editor_test: {note:?}");
+        }
+        kept
+    })
+}
+
+fn replace_all_says_what_it_needs() -> bool {
+    let mut app = app_with(&format!("{DIR}/sample.rs"));
+    app.update(EditorMsg::Run(Command::ReplaceAll));
+    if app.status() != said::nothing_to_replace(false) {
+        return false;
+    }
+    key(&mut app, Key::Char('h'), ctrl());
+    app.update(EditorMsg::Run(Command::ReplaceAll));
+    if app.status() != said::nothing_to_replace(true) {
+        return false;
+    }
+    key(&mut app, Key::Named(NamedKey::Escape), Modifiers::default());
+    key(&mut app, Key::Char('f'), ctrl());
+    app.type_in_prompt("answer");
+    app.update(EditorMsg::Run(Command::ReplaceAll));
+    if app.status() != said::no_replacement() {
+        return false;
+    }
+    key(&mut app, Key::Char('h'), ctrl());
+    for character in "reply".chars() {
+        app.update(EditorMsg::PromptReplace(LineEditInput::Text { character }));
+    }
+    app.update(EditorMsg::Run(Command::ReplaceAll));
+    if app.status() != said::replaced(2) {
+        return false;
+    }
+    app.update(EditorMsg::Run(Command::ReplaceAll));
+    app.status() == said::no_match("answer")
+}
+
+fn an_empty_find_bar_asks_only_for_typing() -> bool {
+    let mut app = app_with(&format!("{DIR}/sample.rs"));
+    key(&mut app, Key::Char('f'), ctrl());
+    app.update(EditorMsg::Run(Command::FindNext));
+    if app.status() != said::nothing_to_find(true) {
+        return false;
+    }
+    app.clear_status();
+    dispatch::press(&mut app, Key::Named(NamedKey::Enter), Modifiers::default());
+    if app.status() != said::nothing_to_find(true) {
+        return false;
+    }
+    key(&mut app, Key::Named(NamedKey::Escape), Modifiers::default());
+    app.update(EditorMsg::Run(Command::FindNext));
+    app.status() == said::nothing_to_find(false)
+}
+
+fn switching_to_an_open_file_fits_the_window() -> bool {
+    let sample = format!("{DIR}/sample.rs");
+    let mut app = app_with(&sample);
+    app.open(&format!("{DIR}/notes.md"));
+    let least = app.window().min_size;
+    app.on_resize(least.width as u32, least.height as u32);
+    let fitted = app.documents()[app.active_index()].viewport.visible_lines;
+    app.open(&sample);
+    let doc = &app.documents()[app.active_index()];
+    doc.path() == Some(sample.as_str()) && doc.viewport.visible_lines == fitted
+}
+
+fn the_divider_stays_under_the_pointer() -> bool {
+    let mut app = app_with(&format!("{DIR}/sample.rs"));
+    let least = app.window().min_size;
+    app.on_resize(least.width as u32, least.height as u32);
+    for x in [200, least.width] {
+        app.update(EditorMsg::SidebarDrag(DragInput::Begin));
+        app.update(EditorMsg::SidebarDrag(DragInput::Move(x)));
+        app.update(EditorMsg::SidebarDrag(DragInput::End));
+        let (Some(divider), Some(code)) = (
+            dispatch::first(&app, least, Role::Separator),
+            dispatch::first(&app, least, Role::TextField),
+        ) else {
+            return false;
+        };
+        let under = divider.x + divider.width / 2 == x;
+        if (x == 200 && !under) || code.width < MIN_CODE_WIDTH {
+            eprintln!(
+                "editor_test: dragged to {x}, the divider is at {divider:?}, the code at {code:?}"
+            );
+            return false;
+        }
+    }
+    true
+}
+
+fn the_choice_stays_shown_through_a_resize() -> bool {
+    let Some(many) = many_files() else {
+        return false;
+    };
+    let mut app = app_with(&many);
+    key(&mut app, Key::Char('p'), ctrl());
+    let chosen = app.overlay_rows() - 1;
+    for _ in 0..chosen {
+        key(&mut app, Key::Named(NamedKey::Down), Modifiers::default());
+    }
+    let least = app.window().min_size;
+    app.on_resize(least.width as u32, least.height as u32);
+    let (first, rows) = (app.overlay_first_row(), app.overlay_rows());
+    rows <= chosen && first <= chosen && chosen < first + rows
+}
+
 fn builds_a_view() -> bool {
     let mut app = app_with(&format!("{DIR}/sample.rs"));
     let mut panes = 0;
-    // Counting loop turns proves nothing: a chord that did not open its prompt
-    // lays out the same window as the turn before it.
+    // A chord that opened no prompt would lay out the same window again.
     for (open, prompt_expected) in [
         (None, false),
         (Some((Key::Char('f'), ctrl())), true),
@@ -330,16 +535,13 @@ fn builds_a_view() -> bool {
         if app.prompt_is_open() != prompt_expected {
             return false;
         }
-        // A pane that cannot be laid out panics rather than returning, so
-        // reaching here at all is the assertion.
+        // A pane that cannot be laid out panics.
         let tree = dispatch::layout(&app);
         if tree.layout_rect().width <= 0 {
             return false;
         }
         panes += 1;
         key(&mut app, Key::Named(NamedKey::Escape), Modifiers::default());
-        // And Escape has to have closed it again, or the next turn measures a
-        // prompt this one left behind.
         if app.prompt_is_open() {
             return false;
         }
@@ -347,10 +549,7 @@ fn builds_a_view() -> bool {
     panes == 7
 }
 
-/// A command that acts somewhere else closes the prompt it was reached past.
-///
-/// Save As then Ctrl+N used to leave the Save As field on screen over a new,
-/// unrelated buffer, with a caret nobody was driving.
+/// Save as then Ctrl+N once left the field over a new, unrelated buffer.
 fn a_command_closes_the_prompt_it_leaves() -> bool {
     let mut app = app_with(&format!("{DIR}/sample.rs"));
     key(&mut app, Key::Char('s'), ctrl_shift());
@@ -362,7 +561,6 @@ fn a_command_closes_the_prompt_it_leaves() -> bool {
     !app.prompt_is_open() && app.documents().len() == tabs_before + 1
 }
 
-/// The find readout counts the document that is showing, not the one that was.
 fn the_find_readout_follows_the_tab() -> bool {
     let mut app = app_with(&format!("{DIR}/sample.rs"));
     app.open(&format!("{DIR}/notes.md"));
@@ -381,7 +579,6 @@ fn the_find_readout_follows_the_tab() -> bool {
     app.find_progress().map(|(total, _)| total) == Some(2)
 }
 
-/// An edit that is not a typed character moves the readout too.
 fn the_find_readout_follows_an_undo() -> bool {
     let mut app = app_with(&format!("{DIR}/sample.rs"));
     key(&mut app, Key::Char('f'), ctrl());
@@ -398,36 +595,21 @@ fn the_find_readout_follows_an_undo() -> bool {
     app.find_progress().map(|(total, _)| total) == Some(2)
 }
 
-/// Every file argument opens, not just the first.
 fn opens_every_file_argument() -> bool {
     let app = EditorApp::new(&[format!("{DIR}/sample.rs"), format!("{DIR}/notes.md")]);
     let titles: Vec<&str> = app.documents().iter().map(|d| d.title()).collect();
     titles == ["sample.rs", "notes.md"] && app.active_index() == 0
 }
 
-/// A save whose target changed under it asks before writing.
 fn a_changed_file_is_not_silently_overwritten() -> bool {
     let path = format!("{DIR}/contended.txt");
-    if std::fs::write(
-        &path,
-        "original
-",
-    )
-    .is_err()
-    {
+    if std::fs::write(&path, "original\n").is_err() {
         return false;
     }
     let mut app = app_with(&path);
     type_text(&mut app, "X");
-    // Somebody else writes it, with a length this editor's buffer does not
-    // have, so the stamp differs whatever the clock says.
-    if std::fs::write(
-        &path,
-        "somebody else was here
-",
-    )
-    .is_err()
-    {
+    // Another length, so the stamp differs whatever the clock says.
+    if std::fs::write(&path, "somebody else was here\n").is_err() {
         return false;
     }
     key(&mut app, Key::Char('s'), ctrl());
@@ -441,20 +623,25 @@ fn a_changed_file_is_not_silently_overwritten() -> bool {
         return false;
     }
     dispatch::press(&mut app, Key::Named(NamedKey::Escape), Modifiers::default());
-    untouched() && app.documents()[app.active_index()].is_modified() && app.dialog().is_none()
+    if !untouched() || !app.documents()[app.active_index()].is_modified() || app.dialog().is_some()
+    {
+        return false;
+    }
+    key(&mut app, Key::Char('s'), ctrl());
+    app.update(EditorMsg::Dialog(Answer::Save));
+    std::fs::read_to_string(&path).unwrap_or_default() == "Xoriginal\n"
+        && !app.documents()[app.active_index()].is_modified()
 }
 
-/// Driving the real widget tree, not `App::on_key`.
-///
-/// `run_app` offers a key to the widget tree first and only calls `on_key`
-/// with what nothing consumed, so a case calling `on_key` directly tests the
-/// fallback and never sees a widget steal the key on the way.
+/// Keys through the widget tree, as `run_app` sends them: `on_key` alone
+/// never sees a widget take a key first.
 mod dispatch {
+    use slopos_appkit::constraints::{Rect, Size};
     use slopos_appkit::event::{
-        EventPhase, EventResponse, Key, MessageSink, Modifiers, WidgetEvent,
+        EventResponse, Key, MessageSink, Modifiers, PointerButton, WidgetEvent,
     };
-    use slopos_appkit::traits::Widget;
-    use slopos_appkit::{App, StyleSheet, constraints::Size, tree};
+    use slopos_appkit::traits::{Role, Widget};
+    use slopos_appkit::{App, StyleSheet, tree};
     use slopos_apps::editor::{EditorApp, EditorMsg};
 
     pub const WINDOW: Size = Size {
@@ -463,24 +650,61 @@ mod dispatch {
     };
 
     pub fn layout(app: &EditorApp) -> Box<dyn Widget> {
+        layout_at(app, WINDOW)
+    }
+
+    pub fn layout_at(app: &EditorApp, window: Size) -> Box<dyn Widget> {
         let node = app.view();
         let mut root = tree::build_widget_tree(&node);
-        tree::layout_tree(root.as_mut(), WINDOW, &StyleSheet::dark());
+        tree::layout_tree(root.as_mut(), window, &StyleSheet::current());
         root
     }
 
-    /// Sends `key` the way `run_app` does and applies whatever came back:
-    /// to the widget tree, then to a page's or dialog's buttons, then, unless
-    /// a dialog covers the page, to the app. Answers whether a widget took it.
+    /// The first widget in `role`, in tree order, in a `window` of that size.
+    pub fn first(app: &EditorApp, window: Size, role: Role) -> Option<Rect> {
+        fn find(widget: &dyn Widget, role: Role) -> Option<Rect> {
+            if widget.role() == role {
+                return Some(widget.layout_rect());
+            }
+            widget
+                .children()
+                .iter()
+                .find_map(|c| find(c.as_ref(), role))
+        }
+        find(layout_at(app, window).as_ref(), role)
+    }
+
+    /// Where the finder's or the palette's list lies in a `window` of that size.
+    pub fn overlay_list(app: &EditorApp, window: Size) -> Option<Rect> {
+        fn topmost(widget: &dyn Widget) -> Option<Rect> {
+            let above = widget
+                .children()
+                .iter()
+                .rev()
+                .find_map(|c| topmost(c.as_ref()));
+            above.or_else(|| (widget.role() == Role::List).then(|| widget.layout_rect()))
+        }
+        topmost(layout_at(app, window).as_ref())
+    }
+
+    pub fn click(app: &mut EditorApp, x: i32, y: i32) -> bool {
+        send(
+            app,
+            WidgetEvent::PointerDown {
+                x,
+                y,
+                button: PointerButton::Left,
+                modifiers: Modifiers::default(),
+            },
+        )
+    }
+
+    /// Answers whether a widget took it.
     pub fn press(app: &mut EditorApp, key: Key, modifiers: Modifiers) -> bool {
         let mut root = layout(app);
         let mut sink = MessageSink::new();
-        let event = WidgetEvent::KeyDown {
-            key,
-            modifiers,
-            repeat: false,
-        };
-        let response = root.event(&event, EventPhase::Target, &mut sink);
+        let event = WidgetEvent::KeyDown { key, modifiers };
+        let response = root.event(&event, &mut sink);
         let blocked = response == EventResponse::Blocked;
         let taken = (response.is_consumed() && !blocked)
             || tree::offer_unhandled(root.as_mut(), key, modifiers, &mut sink);
@@ -493,9 +717,8 @@ mod dispatch {
         taken
     }
 
-    /// An ordinary printable character. `translate_event` turns one into
-    /// `TextInput` rather than `KeyDown` — which is exactly why Space, being a
-    /// *named* key, takes the other path and can be stolen on the way.
+    /// A printable character arrives as `TextInput`; Space, a named key, as
+    /// `KeyDown`, which a widget may take.
     pub fn text(app: &mut EditorApp, character: char) -> bool {
         send(app, WidgetEvent::TextInput { character })
     }
@@ -503,9 +726,7 @@ mod dispatch {
     fn send(app: &mut EditorApp, event: WidgetEvent) -> bool {
         let mut root = layout(app);
         let mut sink = MessageSink::new();
-        let consumed = root
-            .event(&event, EventPhase::Target, &mut sink)
-            .is_consumed();
+        let consumed = root.event(&event, &mut sink).is_consumed();
         for msg in sink.drain_typed::<EditorMsg>() {
             app.update(msg);
         }
@@ -513,8 +734,6 @@ mod dispatch {
     }
 }
 
-/// A space typed into the find field is a space, not whatever button the
-/// stack happened to offer the key to first.
 fn find_field_accepts_a_space() -> bool {
     let mut app = app_with(&format!("{DIR}/sample.rs"));
     key(&mut app, Key::Char('f'), ctrl());
@@ -529,8 +748,6 @@ fn find_field_accepts_a_space() -> bool {
     app.prompt_text() == "let answer" && app.find_progress().map(|(_, t)| t) == Some(1)
 }
 
-/// An arrow in the palette moves the selection; it does not run the command
-/// the selection lands on.
 fn palette_arrows_move_rather_than_run() -> bool {
     let mut app = app_with(&format!("{DIR}/sample.rs"));
     key(&mut app, Key::Char('p'), ctrl_shift());
@@ -538,37 +755,30 @@ fn palette_arrows_move_rather_than_run() -> bool {
     for _ in 0..3 {
         dispatch::press(&mut app, Key::Named(NamedKey::Down), Modifiers::default());
     }
-    // Still open, nothing ran: a palette that executed on the way down would
-    // have closed itself and, for most of its commands, changed the tabs.
+    // A command run on the way down would have closed it, and most change tabs.
     app.prompt_is_overlay() && app.documents().len() == before
 }
 
-/// The palette window scrolls only when the selection leaves it, so the
-/// selected row is not permanently pinned to the bottom of the list.
 fn palette_window_follows_rather_than_pins() -> bool {
     let mut app = app_with(&format!("{DIR}/sample.rs"));
     key(&mut app, Key::Char('p'), ctrl_shift());
-    // Everything inside the first window keeps the window where it is.
     for _ in 0..3 {
         dispatch::press(&mut app, Key::Named(NamedKey::Down), Modifiers::default());
     }
     if app.overlay_first_row() != 0 {
         return false;
     }
-    // Stepping past the last drawn row scrolls by exactly one.
-    let rows = slopos_apps::editor::PALETTE_MAX_ROWS;
+    let rows = app.overlay_rows();
     for _ in 3..rows {
         dispatch::press(&mut app, Key::Named(NamedKey::Down), Modifiers::default());
     }
     if app.overlay_first_row() != 1 {
         return false;
     }
-    // And stepping back up does not throw the window to the top.
     dispatch::press(&mut app, Key::Named(NamedKey::Up), Modifiers::default());
     app.overlay_first_row() == 1
 }
 
-/// Space reaches the document rather than a button in the find bar.
 fn space_reaches_the_document() -> bool {
     let mut app = app_with(&format!("{DIR}/sample.rs"));
     key(&mut app, Key::Char('f'), ctrl());
@@ -603,6 +813,27 @@ fn main() {
         ),
         ("finds_and_counts", finds_and_counts),
         ("palette_filters_and_runs", palette_filters_and_runs),
+        ("a_picked_palette_row_runs", a_picked_palette_row_runs),
+        (
+            "a_picked_row_counts_from_the_first_shown",
+            a_picked_row_counts_from_the_first_shown,
+        ),
+        (
+            "a_click_opens_the_row_under_it",
+            a_click_opens_the_row_under_it,
+        ),
+        (
+            "a_row_past_the_results_opens_nothing",
+            a_row_past_the_results_opens_nothing,
+        ),
+        (
+            "the_overlays_fit_the_least_window",
+            the_overlays_fit_the_least_window,
+        ),
+        (
+            "tab_moves_the_finder_s_choice",
+            tab_moves_the_finder_s_choice,
+        ),
         ("close_asks_before_discarding", close_asks_before_discarding),
         ("tree_expands_a_directory", tree_expands_a_directory),
         ("refuses_a_binary_file", refuses_a_binary_file),
@@ -654,6 +885,30 @@ fn main() {
         (
             "every_error_says_what_to_do_next",
             every_error_says_what_to_do_next,
+        ),
+        (
+            "every_passing_status_is_a_label",
+            every_passing_status_is_a_label,
+        ),
+        (
+            "replace_all_says_what_it_needs",
+            replace_all_says_what_it_needs,
+        ),
+        (
+            "the_choice_stays_shown_through_a_resize",
+            the_choice_stays_shown_through_a_resize,
+        ),
+        (
+            "an_empty_find_bar_asks_only_for_typing",
+            an_empty_find_bar_asks_only_for_typing,
+        ),
+        (
+            "switching_to_an_open_file_fits_the_window",
+            switching_to_an_open_file_fits_the_window,
+        ),
+        (
+            "the_divider_stays_under_the_pointer",
+            the_divider_stays_under_the_pointer,
         ),
     ]);
 

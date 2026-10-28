@@ -1,20 +1,13 @@
-//! The window's pages over the engine: which page shows, what each answer is,
-//! when the primary button acts and what Back restores, decided from the
-//! person's input and the engine's replies alone, never from widget state.
-//!
-//! Welcome → Disk → How → Review → Install → Done or Error. Every change on
-//! How proposes again, one proposal in flight at a time; Back keeps every
-//! answer; Error's *Try again* probes, opens the disk and proposes the same
-//! choices again, landing on How when the disk no longer takes them.
+//! The window's pages over the engine, decided from the person's input and
+//! the engine's replies alone, never from widget state.
 
 use alloc::collections::VecDeque;
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::protocol::{Reply, Request, VERSION};
 use crate::{
-    Choices, Event, Failure, Fit, Issue, Mode, Opened, Proposal, STEPS, Summary, System, Tag,
+    Choices, Event, Failure, Fit, Issue, Mode, Opened, Proposal, Step, Summary, System, Tag,
     capitalised,
 };
 
@@ -29,13 +22,11 @@ pub enum Page {
     Error,
 }
 
-/// How's tiles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Erase,
     Free,
     Reuse,
-    /// The SlopOS root the disk holds, installed over again.
     Reinstall,
 }
 
@@ -45,7 +36,6 @@ pub enum Input {
     Started,
     /// privd would not start it, or the window could not ask, and why.
     Refused(String),
-    /// The engine's output ended.
     Ended,
     Reply(Reply),
     Disk(String),
@@ -62,7 +52,6 @@ pub enum Input {
     /// The primary button.
     Next,
     Back,
-    /// *Restart*, beside *Try again* on the Error page.
     Restart,
     /// *Try SlopOS* or *Keep trying SlopOS*, or the window's close.
     Close,
@@ -111,8 +100,7 @@ pub struct Proposed {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Progress {
-    /// The step under way, from 1; 0 before the first.
-    pub step: u32,
+    pub step: Option<Step>,
     /// The copy under way: its bytes so far and its total.
     pub bytes: Option<(u64, u64)>,
     pub log: Vec<String>,
@@ -143,7 +131,6 @@ pub struct Wizard {
     progress: Progress,
     summary: Option<Summary>,
     failure: Option<Failure>,
-    /// Error's *Try again* under way.
     resume: bool,
 }
 
@@ -281,22 +268,20 @@ impl Wizard {
         self.asked.clear();
         match self.page {
             Page::Install => {
-                self.failure = Some(Failure {
+                self.failure = Some(Failure::Stopped {
                     step: self.progress.step,
-                    message: STOPPED.into(),
+                    why: say::STOPPED.into(),
                 });
                 self.page = Page::Error;
             }
             Page::Error if self.resume => {
                 self.resume = false;
-                self.note = Some("The installer stopped before the review. Try again.".into());
+                self.note = Some(say::STOPPED_BEFORE_REVIEW.into());
             }
             Page::Done | Page::Error => {}
             _ => {
                 self.page = Page::Welcome;
-                self.note.get_or_insert_with(|| {
-                    "The installer stopped. Choose Install SlopOS to start it again.".into()
-                });
+                self.note.get_or_insert_with(words::ended);
             }
         }
     }
@@ -352,8 +337,8 @@ impl Wizard {
         if let Reply::Event(event) = reply {
             if self.page == Page::Install {
                 match event {
-                    Event::Step { index, .. } => {
-                        self.progress.step = index;
+                    Event::Step(step) => {
+                        self.progress.step = Some(step);
                         self.progress.bytes = None;
                     }
                     Event::Progress { done, total } => self.progress.bytes = Some((done, total)),
@@ -367,7 +352,7 @@ impl Wizard {
         };
         match (asked, reply) {
             (Asked::Hello, Reply::Hello { version }) if version != VERSION => {
-                self.note = Some(MISMATCHED.into());
+                self.note = Some(say::MISMATCHED.into());
                 self.asked.clear();
                 self.page = Page::Welcome;
                 Vec::new()
@@ -402,15 +387,15 @@ impl Wizard {
                 Vec::new()
             }
             (Asked::Install, _) => {
-                self.failure = Some(Failure {
+                self.failure = Some(Failure::Stopped {
                     step: self.progress.step,
-                    message: "the installer answered the install out of turn".into(),
+                    why: say::INSTALL_OUT_OF_TURN.into(),
                 });
                 self.page = Page::Error;
                 Vec::new()
             }
             _ => {
-                self.note = Some("The installer answered out of turn. Try again.".into());
+                self.note = Some(say::OUT_OF_TURN.into());
                 Vec::new()
             }
         }
@@ -574,7 +559,6 @@ impl Wizard {
         Some(choices)
     }
 
-    /// The proposal the current choices were answered with.
     fn current(&self) -> Option<(&Choices, u64, &Proposal)> {
         let proposed = self.proposed.as_ref()?;
         let (id, proposal) = proposed.answer.as_ref().ok()?;
@@ -595,12 +579,10 @@ impl Wizard {
         self.note.as_deref()
     }
 
-    /// Whether the window waits on privd or the engine.
     pub fn waiting(&self) -> bool {
         !self.idle()
     }
 
-    /// Whether the engine has been asked for and has not yet started.
     pub fn starting(&self) -> bool {
         self.starting
     }
@@ -621,9 +603,7 @@ impl Wizard {
         tile_of(self.opened()?, kind)
     }
 
-    /// How's tiles, each with whether it may be chosen or why not; the
-    /// reinstall only where the disk holds SlopOS's root.
-    pub fn tiles(&self) -> Vec<(Kind, &Fit)> {
+    fn tiles(&self) -> Vec<(Kind, &Fit)> {
         [Kind::Erase, Kind::Free, Kind::Reuse, Kind::Reinstall]
             .into_iter()
             .filter_map(|kind| Some((kind, self.tile(kind)?)))
@@ -646,9 +626,8 @@ impl Wizard {
             .flatten()
     }
 
-    /// The free regions a free-space install may choose between, when there
-    /// are two or more.
-    pub fn regions(&self) -> Vec<usize> {
+    /// Only when there are two or more to choose between.
+    fn regions(&self) -> Vec<usize> {
         let regions = self.fitting_regions();
         match regions.len() {
             0 | 1 => Vec::new(),
@@ -656,9 +635,7 @@ impl Wizard {
         }
     }
 
-    /// The partitions a reuse may take as the root, each with whether it
-    /// fits.
-    pub fn roots(&self) -> &[(u32, Fit)] {
+    fn roots(&self) -> &[(u32, Fit)] {
         self.opened().map_or(&[], |o| o.roots.as_slice())
     }
 
@@ -673,8 +650,8 @@ impl Wizard {
         self.proposed.as_ref()
     }
 
-    /// What stops the page in front: the engine's refusal of the disk, or of
-    /// the current choices.
+    /// What stops the page in front: the engine's refusal of the disk, of
+    /// the current choices or of the install.
     pub fn issue(&self) -> Option<&Issue> {
         match self.page {
             Page::Disk => self.refused.as_ref(),
@@ -684,6 +661,10 @@ impl Wizard {
                     .then(|| proposed.answer.as_ref().err())
                     .flatten()
             }
+            Page::Error => match self.failure.as_ref()? {
+                Failure::Refused(issue) => Some(issue),
+                Failure::Stopped { .. } => None,
+            },
             _ => None,
         }
     }
@@ -699,25 +680,20 @@ impl Wizard {
     /// Each step with how far it went, as the Install page lists them.
     pub fn steps(&self) -> Vec<(String, StepState)> {
         let at = self.progress.step;
-        let failed = self.failure.as_ref().map(|f| f.step);
-        STEPS
-            .iter()
-            .zip(1u32..)
-            .map(|(&step, index)| {
+        let failed = self.failure.as_ref().and_then(Failure::step);
+        Step::ALL
+            .into_iter()
+            .map(|step| {
                 let state = match self.page {
                     Page::Done => StepState::Done,
-                    _ if failed == Some(index) => StepState::Failed,
-                    _ if index < at => StepState::Done,
-                    Page::Install if index == at => StepState::Running,
+                    _ if failed == Some(step) => StepState::Failed,
+                    _ if at.is_some_and(|at| step < at) => StepState::Done,
+                    Page::Install if at == Some(step) => StepState::Running,
                     _ => StepState::Pending,
                 };
-                (capitalised(step), state)
+                (capitalised(step.doing()), state)
             })
             .collect()
-    }
-
-    pub fn summary(&self) -> Option<&Summary> {
-        self.summary.as_ref()
     }
 
     pub fn failure(&self) -> Option<&Failure> {
@@ -756,23 +732,10 @@ impl Wizard {
         self.page != Page::Install
     }
 
-    pub fn primary_label(&self) -> String {
-        match self.page {
-            Page::Welcome => "Install SlopOS".into(),
-            Page::Disk => "Next".into(),
-            Page::How => "Review".into(),
-            Page::Review => self.scenario(),
-            Page::Install => String::new(),
-            Page::Done => "Restart".into(),
-            Page::Error => "Try again".into(),
-        }
-    }
-
     fn kind(&self) -> Option<Kind> {
         self.answers.as_ref().map(|a| a.kind)
     }
 
-    /// Whether the install formats a partition the disk holds.
     fn formats(&self) -> bool {
         self.proposal()
             .is_some_and(|p| p.actions.iter().any(|a| a.tag == Tag::Format))
@@ -780,38 +743,6 @@ impl Wizard {
 
     fn keeps_root(&self) -> bool {
         self.proposal().is_some_and(Proposal::keeps_root)
-    }
-
-    /// The Review page's primary button, named by what it does.
-    fn scenario(&self) -> String {
-        match self.kind() {
-            Some(Kind::Erase) | None => Kind::Erase.title().into(),
-            Some(Kind::Free) => match self.proposal().and_then(|p| p.setup.beside.first()) {
-                Some(other) => format!("Install beside {other}"),
-                None => "Install".into(),
-            },
-            Some(Kind::Reuse) => "Erase partition and install".into(),
-            Some(Kind::Reinstall) if self.keeps_root() => Kind::Reinstall.title().into(),
-            Some(Kind::Reinstall) => "Erase and reinstall SlopOS".into(),
-        }
-    }
-
-    /// The Review page's checkbox, worded by the damage the install does.
-    pub fn confirmation(&self) -> String {
-        let said = match self.kind() {
-            Some(Kind::Erase) | None => "everything on this disk will be deleted",
-            Some(Kind::Free) if self.formats() => {
-                "new partitions will be made in free space, and the partitions marked Formatted will be erased"
-            }
-            Some(Kind::Free) => {
-                "new partitions will be made in free space, and nothing else on the disk changes"
-            }
-            Some(Kind::Reinstall) if self.keeps_root() => {
-                "SlopOS will be replaced, and its accounts and their files kept"
-            }
-            Some(Kind::Reuse | Kind::Reinstall) => "what's marked Formatted will be erased",
-        };
-        format!("I understand that {said}")
     }
 }
 
@@ -847,13 +778,9 @@ fn fitting_roots(opened: &Opened) -> Vec<u32> {
         .collect()
 }
 
-/// What an install that ended before it said how fails with.
-const STOPPED: &str = "the installer stopped before it said how the install ended";
-const MISMATCHED: &str = "This window doesn't match the installer. Restart the computer from the installer, then try again.";
-
 mod words;
 
-pub use words::{Heading, Note, Row, Severity, holding, say};
+pub use words::{Heading, Note, Row, holding, say};
 
 #[cfg(test)]
 mod tests;

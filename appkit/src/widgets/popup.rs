@@ -1,16 +1,15 @@
 use std::any::Any;
 
+use crate::audit::Arrangement;
 use crate::constraints::{BoxConstraints, Rect, Size};
-use crate::event::{EventPhase, EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
+use crate::event::{EventResponse, Key, MessageSink, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::traits::{
     FocusPolicy, MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget,
 };
 
-/// A child floated at an absolute position over its parent's area.
-///
-/// Occupies the parent's whole rect so a click outside the child still lands
-/// here and can dismiss it.
+/// A child floated at a point over its parent, taking the parent's whole rect
+/// so that a click outside the child dismisses it.
 pub struct PopupWidget {
     core: WidgetCore,
     anchor: (i32, i32),
@@ -40,28 +39,21 @@ impl PopupWidget {
         EventResponse::Consumed
     }
 
-    /// Position the child at the anchor, flipped/clamped to stay inside `rect`.
-    /// Flip before clamp, so an edge-anchored menu does not cover the pointer.
+    /// At the anchor, flipped where it does not fit and then kept inside;
+    /// flipped first, so a menu at an edge does not cover the pointer.
     fn child_rect(&self) -> Rect {
         let rect = self.layout_rect();
         let size = self.child.measured_size();
-        let (w, h) = (size.width, size.height);
-        let (ax, ay) = self.anchor;
-
-        let x = if ax + w > rect.x + rect.width && ax - w >= rect.x {
-            ax - w
-        } else {
-            ax
+        let place = |at: i32, len: i32, lo: i32, room: i32| {
+            let flipped = match at + len > lo + room && at - len >= lo {
+                true => at - len,
+                false => at,
+            };
+            flipped.clamp(lo, (lo + room - len).max(lo))
         };
-        let y = if ay + h > rect.y + rect.height && ay - h >= rect.y {
-            ay - h
-        } else {
-            ay
-        };
-
-        let max_x = (rect.x + rect.width - w).max(rect.x);
-        let max_y = (rect.y + rect.height - h).max(rect.y);
-        Rect::new(x.clamp(rect.x, max_x), y.clamp(rect.y, max_y), w, h)
+        let x = place(self.anchor.0, size.width, rect.x, rect.width);
+        let y = place(self.anchor.1, size.height, rect.y, rect.height);
+        Rect::new(x, y, size.width, size.height)
     }
 }
 
@@ -87,65 +79,22 @@ impl Widget for PopupWidget {
         ctx.with_layer(self.id(), |ctx| self.child.paint(ctx));
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        if phase != EventPhase::Target && phase != EventPhase::Bubble {
-            return EventResponse::Ignored;
-        }
-
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
         match event {
             WidgetEvent::KeyDown {
                 key: Key::Named(NamedKey::Escape),
                 ..
             } => self.dismiss(sink),
-
-            WidgetEvent::PointerDown { x, y, .. } => {
-                if !self.child.layout_rect().contains(*x, *y) {
-                    return self.dismiss(sink);
-                }
-                // A press inside the popup that the child ignored — a
-                // separator, the padding round a list — is still the popup's.
-                self.child.event(event, EventPhase::Target, sink);
-                EventResponse::Consumed
+            WidgetEvent::PointerDown { x, y, .. } if !self.child.layout_rect().contains(*x, *y) => {
+                self.dismiss(sink)
             }
-
-            // A popup holds the keyboard while it is open, so Tab must not
-            // reach the document behind it.
-            WidgetEvent::KeyDown {
-                key: Key::Named(NamedKey::Tab),
-                ..
-            } => {
-                self.child.event(event, EventPhase::Target, sink);
-                EventResponse::Consumed
-            }
-
-            // Modal against acting, not against knowing where the pointer is:
-            // the menu bar underneath still switches menus as it slides.
-            WidgetEvent::PointerMove { .. } => {
-                // A menu's highlight changing is a repaint, and nothing else
-                // redraws it.
-                let resp = self.child.event(event, EventPhase::Target, sink);
-                if resp.is_consumed() {
-                    EventResponse::Consumed
-                } else {
-                    EventResponse::Ignored
-                }
-            }
-
-            // Modal otherwise: swallow what the child ignores so the tree
-            // underneath cannot act while the popup is open.
-            _ => {
-                let resp = self.child.event(event, phase, sink);
-                if resp.is_consumed() {
-                    resp
-                } else {
-                    EventResponse::Consumed
-                }
-            }
+            // A menu bar beneath still switches menus as the pointer slides.
+            WidgetEvent::PointerMove { .. } => self.child.event(event, sink),
+            // Modal otherwise: nothing beneath takes what the child leaves.
+            _ => match self.child.event(event, sink) {
+                EventResponse::Ignored => EventResponse::Consumed,
+                taken => taken,
+            },
         }
     }
 
@@ -157,17 +106,14 @@ impl Widget for PopupWidget {
         FocusPolicy::StrongFocus
     }
 
-    /// A popup is modal, so while it is open it holds the keyboard.
-    ///
-    /// A menu opens by mouse and the widget that opened it is not focusable,
-    /// so nothing else would. A declarer inside the popup still wins: the
-    /// search takes the last in depth-first order.
+    /// Holds the keyboard while open, which nothing would for a menu opened
+    /// by the pointer; a declarer inside it still wins, coming later.
     fn declares_focus(&self) -> bool {
         true
     }
 
-    fn arrangement(&self) -> crate::audit::Arrangement {
-        crate::audit::Arrangement::Layers
+    fn arrangement(&self) -> Arrangement {
+        Arrangement::Layers
     }
 
     fn covers(&self) -> bool {

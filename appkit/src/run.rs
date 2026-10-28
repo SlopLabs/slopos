@@ -6,40 +6,38 @@ use slopos_windowing::Event;
 use slopos_windowing::connection;
 use slopos_windowing::{EVENT_BUF_LEN, Window};
 
-use super::event::{self, EventResponse, HitTestResult, MessageSink, PointerButton, WidgetEvent};
+use super::constraints::Size;
+use super::event::{
+    EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent, control_at,
+    lit_at,
+};
 use super::focus::FocusManager;
 use super::input::translate_event;
 use super::node::{Action, App};
-use super::overlay::OverlayManager;
 use super::paint::PaintContext;
 use super::sender::AppSender;
 use super::style::StyleSheet;
-use super::traits::{FocusPolicy, Widget};
+use super::traits::{Widget, WidgetId};
 use super::tree;
 
-/// Run a widget-framework-driven application in a window as
-/// [`App::window`] describes it.
+/// Runs `app` in a window as [`App::window`] describes it.
 pub fn run_app<A: App>(mut app: A) -> ! {
     let spec = app.window();
     let (width, height) = (
         spec.size.width.max(1) as u32,
         spec.size.height.max(1) as u32,
     );
-    let handle = connection::connect().expect("compositor not running");
-    let mut win = Window::new(handle.clone(), width, height).expect("failed to create window");
+    let handle = connection::connect().unwrap_or_else(|e| panic!("{e}"));
+    let mut win = Window::new(handle.clone(), width, height).unwrap_or_else(|e| panic!("{e}"));
     let mut title = app.title();
     win.set_title(&title);
     let (min, max) = spec.limits();
-    let pair = |s: super::constraints::Size| (s.width.max(0) as u32, s.height.max(0) as u32);
+    let pair = |s: Size| (s.width.max(0) as u32, s.height.max(0) as u32);
     win.set_size_limits(pair(min), max.map_or((0, 0), pair));
-    let id = app.app_id();
-    if !id.is_empty() {
-        win.set_app_id(id);
-    }
+    win.set_app_id(app.app_id());
     super::clipboard::install(handle.clone());
-    let style = StyleSheet::with_theme(slopos_theme_core::current());
+    let style = StyleSheet::current();
     let mut focus = FocusManager::new();
-    let mut overlays = OverlayManager::new();
 
     let mut needs_rebuild = false;
     let mut needs_repaint = true;
@@ -51,7 +49,7 @@ pub fn run_app<A: App>(mut app: A) -> ! {
     let mut root = tree::build_widget_tree(&node);
     let mut page_key = app.page_key();
 
-    let mut window_size = super::constraints::Size::new(width as i32, height as i32);
+    let mut window_size = Size::new(width as i32, height as i32);
     tree::layout_tree(root.as_mut(), window_size, &style);
     let _ = focus.rebuild_tab_chain(root.as_ref());
 
@@ -61,10 +59,10 @@ pub fn run_app<A: App>(mut app: A) -> ! {
             timestamp_ms: 0,
         });
     let mut last_tick_ms: u64 = slopos_windowing::get_time_ms();
-    // The compositor reports modifiers only with key events; a pointer press
-    // takes the most recent snapshot, which is what shift-click is.
-    let mut modifiers = super::event::Modifiers::default();
+    let mut modifiers = Modifiers::default();
     let mut tip = Tip::default();
+    let mut inside = false;
+    let mut hovered: Option<(WidgetId, usize)> = None;
 
     loop {
         let mut key_taken = false;
@@ -72,8 +70,7 @@ pub fn run_app<A: App>(mut app: A) -> ! {
         handle.drain_ui_queue();
 
         let count = win.poll_protocol_events(&mut proto_events);
-        // A poll returns a batch, so this is a vector and not an `Option`.
-        let mut unhandled_keys: Vec<(super::event::Key, super::event::Modifiers)> = Vec::new();
+        let mut unhandled_keys: Vec<(Key, Modifiers)> = Vec::new();
         let mut sink = MessageSink::new();
 
         for i in 0..count {
@@ -84,6 +81,12 @@ pub fn run_app<A: App>(mut app: A) -> ! {
             win.track_pointer(&ev);
 
             match &ev {
+                Event::PointerLeave => {
+                    inside = false;
+                    needs_repaint |= tip.clear() | hovered.take().is_some();
+                    continue;
+                }
+                Event::PointerMotion { .. } => inside = true,
                 Event::CloseRequest => {
                     let (accept, action) = app.on_close_request();
                     if accept {
@@ -113,7 +116,7 @@ pub fn run_app<A: App>(mut app: A) -> ! {
                     height: h,
                 } => {
                     let _ = win.resize(*w, *h);
-                    window_size = super::constraints::Size::new(*w as i32, *h as i32);
+                    window_size = Size::new(*w as i32, *h as i32);
                     let action = app.on_resize(*w, *h);
                     process_action(action, &mut needs_rebuild, &mut needs_repaint);
                     needs_rebuild = true;
@@ -143,34 +146,28 @@ pub fn run_app<A: App>(mut app: A) -> ! {
 
             gesture.note(&widget_event, slopos_windowing::get_time_ms());
             match &widget_event {
-                WidgetEvent::PointerDown { .. } => focus.note_pointer_input(),
+                WidgetEvent::PointerDown { .. } => {
+                    focus.note_pointer_input();
+                    let control = control_at(root.as_ref(), px, py);
+                    let clicked = control.filter(|w| w.focus_policy().is_click_focusable());
+                    if let Some(clicked) = clicked.map(|w| w.id()) {
+                        let previous = focus.focused();
+                        focus.set_focused(Some(clicked));
+                        move_focus_events(root.as_mut(), previous, Some(clicked), &mut sink);
+                    }
+                }
                 WidgetEvent::KeyDown { .. } | WidgetEvent::TextInput { .. } => {
                     focus.note_keyboard_input()
                 }
                 _ => {}
             }
 
-            let (px, py) = win.pointer();
-            let resp = if let Some(hit) = event::hit_test(root.as_ref(), px, py) {
-                if matches!(widget_event, WidgetEvent::PointerDown { .. }) {
-                    let target_policy = find_focus_policy(root.as_ref(), hit.target);
-                    if target_policy.is_focusable() {
-                        let previous = focus.focused();
-                        focus.set_focused(Some(hit.target));
-                        move_focus_events(root.as_mut(), previous, Some(hit.target), &mut sink);
-                    }
-                    if overlays.hit_test(px, py).is_none() && !overlays.is_empty() {
-                        overlays.dismiss_light(&mut focus);
-                    }
-                }
-                event::dispatch_event(root.as_mut(), &hit, &widget_event, &mut sink)
-            } else {
-                let dummy_hit = HitTestResult {
-                    target: focus.focused().unwrap_or(super::traits::WidgetId::NONE),
-                    chain: Vec::new(),
-                };
-                event::dispatch_event(root.as_mut(), &dummy_hit, &widget_event, &mut sink)
-            };
+            let resp = root.event(&widget_event, &mut sink);
+            if let WidgetEvent::PointerMove { .. } = widget_event {
+                let lit = lit_at(root.as_ref(), px, py);
+                needs_repaint |= lit != hovered;
+                hovered = lit;
+            }
 
             let blocked = resp == EventResponse::Blocked;
             if resp.is_consumed() {
@@ -186,9 +183,8 @@ pub fn run_app<A: App>(mut app: A) -> ! {
                 },
             ) = (!resp.is_consumed() || blocked, &widget_event)
             {
-                // An editor indents with Tab, so focus only gets what nothing
-                // claimed.
-                if matches!(key, super::event::Key::Named(super::event::NamedKey::Tab)) {
+                // Only a Tab nothing took moves focus: an editor indents with it.
+                if matches!(key, Key::Named(NamedKey::Tab)) {
                     let previous = focus.focused();
                     if m.shift {
                         focus.move_focus_prev();
@@ -256,15 +252,13 @@ pub fn run_app<A: App>(mut app: A) -> ! {
                 page_key = app.page_key();
                 focus.leave_page();
             } else {
-                tree::kept_scrolls(root.as_ref(), &mut scrolled);
+                tree::kept(root.as_ref(), &mut scrolled);
             }
             root = tree::build_widget_tree(&node);
-            tree::restore_scrolls(root.as_mut(), &scrolled);
+            tree::restore_kept(root.as_mut(), &scrolled);
             tree::layout_tree(root.as_mut(), window_size, &style);
-            // A rebuild replaces every widget, so whoever holds focus has to
-            // be told again. The application's answer comes first: a widget it
-            // built focused *is* the focused one, and only when it names none
-            // does the remembered chain position apply.
+            // Every widget is new, so whoever holds focus is told again; one
+            // the app built focused wins over the remembered place.
             let declared = find_declared_focus(super::focus::modal_layer(root.as_ref()));
             let restored = focus.rebuild_tab_chain(root.as_ref());
             let target = match declared {
@@ -300,16 +294,16 @@ pub fn run_app<A: App>(mut app: A) -> ! {
         }
 
         if needs_repaint {
-            // Read before the renderer is borrowed mutably for the frame.
-            let pointer = win.pointer();
+            // Again, since a rebuild or a scroll may have moved what is there.
+            let (px, py) = win.pointer();
+            hovered = lit_at(root.as_ref(), px, py).filter(|_| inside);
             if let Some(mut fb) = win.renderer_mut().frame() {
                 let fmt = fb.pixel_format();
                 fb.clear_canvas(fmt.encode(style.theme.surface));
                 let mut ctx = PaintContext::new(&mut fb, &style);
                 ctx.focus_visible = focus.is_focus_visible();
-                ctx.pointer = pointer;
-                tree::paint_tree(root.as_ref(), &mut ctx);
-                overlays.paint(&mut ctx);
+                ctx.hovered = hovered;
+                root.paint(&mut ctx);
                 if let Some(text) = &tip.shown {
                     super::tooltip::paint(&mut ctx, text, tip.at, window_size);
                 }
@@ -422,12 +416,7 @@ fn process_action(action: Action, needs_rebuild: &mut bool, needs_repaint: &mut 
     }
 }
 
-fn fill_pointer_state(
-    mut event: WidgetEvent,
-    px: i32,
-    py: i32,
-    mods: super::event::Modifiers,
-) -> WidgetEvent {
+fn fill_pointer_state(mut event: WidgetEvent, px: i32, py: i32, mods: Modifiers) -> WidgetEvent {
     match &mut event {
         WidgetEvent::PointerDown {
             x, y, modifiers, ..
@@ -445,14 +434,10 @@ fn fill_pointer_state(
     event
 }
 
-/// Tells the widget losing focus and the one gaining it.
-///
-/// Without them every widget's `focused` flag stays false, and the gate each
-/// one puts on its keys never opens.
 fn move_focus_events(
     root: &mut dyn Widget,
-    previous: Option<super::traits::WidgetId>,
-    next: Option<super::traits::WidgetId>,
+    previous: Option<WidgetId>,
+    next: Option<WidgetId>,
     sink: &mut MessageSink,
 ) {
     if previous == next {
@@ -466,11 +451,9 @@ fn move_focus_events(
     }
 }
 
-/// The last widget in depth-first order that the application built as focused.
-///
-/// Last rather than first: a popup is appended over the layer beneath it, so
-/// an open menu's own claim outranks the field it is covering.
-fn find_declared_focus(widget: &dyn Widget) -> Option<super::traits::WidgetId> {
+/// The last widget in depth-first order the app built focused: a popup comes
+/// after the layer it covers, so an open menu's claim outranks the field's.
+fn find_declared_focus(widget: &dyn Widget) -> Option<WidgetId> {
     let mut found = widget.declares_focus().then(|| widget.id());
     for child in widget.children() {
         if let Some(id) = find_declared_focus(child.as_ref()) {
@@ -480,26 +463,12 @@ fn find_declared_focus(widget: &dyn Widget) -> Option<super::traits::WidgetId> {
     found
 }
 
-fn find_focus_policy(widget: &dyn Widget, id: super::traits::WidgetId) -> FocusPolicy {
-    if widget.id() == id {
-        return widget.focus_policy();
-    }
-    for child in widget.children() {
-        let result = find_focus_policy(child.as_ref(), id);
-        if result.is_focusable() {
-            return result;
-        }
-    }
-    FocusPolicy::None
-}
-
 fn arrow_along_toolbar(
     root: &dyn Widget,
     focus: &FocusManager,
-    key: super::event::Key,
-    modifiers: super::event::Modifiers,
-) -> Option<super::traits::WidgetId> {
-    use super::event::{Key, NamedKey};
+    key: Key,
+    modifiers: Modifiers,
+) -> Option<WidgetId> {
     if modifiers.ctrl || modifiers.alt || modifiers.shift {
         return None;
     }
@@ -513,24 +482,22 @@ fn arrow_along_toolbar(
 
 /// Where the pointer rests, since when, and the tooltip shown there.
 #[derive(Default)]
-struct Tip {
+pub(crate) struct Tip {
     at: (i32, i32),
     since_ms: u64,
-    /// Waiting for the pointer to rest; a press or a key ends the wait until
-    /// it moves again.
+    /// Waiting for the pointer to rest, until a press or a key.
     armed: bool,
     shown: Option<String>,
 }
 
 impl Tip {
     /// Answers whether a shown tooltip went away.
-    fn note(&mut self, event: &WidgetEvent, at: (i32, i32), now_ms: u64) -> bool {
+    pub(crate) fn note(&mut self, event: &WidgetEvent, at: (i32, i32), now_ms: u64) -> bool {
         let rest = match event {
             WidgetEvent::PointerMove { .. } if at != self.at => true,
             WidgetEvent::PointerDown { .. }
             | WidgetEvent::KeyDown { .. }
-            | WidgetEvent::Scroll { .. }
-            | WidgetEvent::PointerLeave => false,
+            | WidgetEvent::Scroll { .. } => false,
             _ => return false,
         };
         self.at = at;
@@ -539,7 +506,13 @@ impl Tip {
         self.shown.take().is_some()
     }
 
-    fn ripe(&mut self, now_ms: u64) -> bool {
+    /// The pointer left: answers whether a shown tooltip went away.
+    pub(crate) fn clear(&mut self) -> bool {
+        self.armed = false;
+        self.shown.take().is_some()
+    }
+
+    pub(crate) fn ripe(&mut self, now_ms: u64) -> bool {
         if self.armed && now_ms.saturating_sub(self.since_ms) >= super::tooltip::DELAY_MS {
             self.armed = false;
             return true;

@@ -22,16 +22,17 @@ use crate::volume_id::{self, LABEL_MAX, Unreadable, VolumeId};
 use slopos_kernel_services::driver_runtime::{current_task_holds, current_task_is_kernel};
 
 pub(super) const DISK_DIR: InodeId = 8;
-pub(super) const BY_PARTUUID_DIR: InodeId = 9;
-pub(super) const BY_UUID_DIR: InodeId = 10;
-pub(super) const BY_LABEL_DIR: InodeId = 11;
-pub(super) const BY_ID_DIR: InodeId = 13;
+const BY_PARTUUID_DIR: InodeId = 9;
+const BY_UUID_DIR: InodeId = 10;
+const BY_LABEL_DIR: InodeId = 11;
+const BY_ID_DIR: InodeId = super::crash::CRASH_DIR + 1;
 
-const LINK_DIRS: [(&[u8], InodeId); 4] = [
-    (b"by-id", BY_ID_DIR),
-    (b"by-label", BY_LABEL_DIR),
-    (b"by-partuuid", BY_PARTUUID_DIR),
-    (b"by-uuid", BY_UUID_DIR),
+/// Each directory of `/dev/disk`: its name, its inode and the links it lists.
+const LINK_DIRS: [(&[u8], InodeId, &[LinkKind]); 4] = [
+    (b"by-id", BY_ID_DIR, &[LinkKind::Id, LinkKind::IdAlias]),
+    (b"by-label", BY_LABEL_DIR, &[LinkKind::Label]),
+    (b"by-partuuid", BY_PARTUUID_DIR, &[LinkKind::PartUuid]),
+    (b"by-uuid", BY_UUID_DIR, &[LinkKind::Uuid]),
 ];
 
 /// Node inodes count up from here, clear of every fixed devfs inode.
@@ -44,17 +45,14 @@ const MAX_BLOCK_NODES: usize = 128;
 /// dynamic minors; the minor here is the node's registration ordinal.
 const BLOCK_MAJOR: u32 = 259;
 
-/// What `mount` spells a device's node with.
 const DEV_PATH_PREFIX: &[u8] = b"/dev/";
 
-/// `../../` then the node name.
 const LINK_TARGET_PREFIX: &[u8] = b"../../";
 
 /// `NAME_MAX`: a longer escaped name is no directory entry.
 const LINK_NAME_MAX: usize = 255;
 
-const IDENTITY_MAX: usize = DISK_ID_MAX;
-const _: () = assert!(IDENTITY_MAX >= LABEL_MAX && IDENTITY_MAX >= PARTUUID_TEXT_MAX);
+const _: () = assert!(DISK_ID_MAX >= LABEL_MAX && DISK_ID_MAX >= PARTUUID_TEXT_MAX);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockNodeKind {
@@ -231,7 +229,6 @@ pub fn devfs_unregister_block_node(name: &[u8]) -> VfsResult<()> {
     Ok(())
 }
 
-/// Record whether a disk now carries a partition table.
 pub fn devfs_set_block_partitioned(name: &[u8], partitioned: bool) -> VfsResult<()> {
     let mut table = BLOCK_NODES.write();
     let node = table
@@ -316,24 +313,19 @@ enum LinkKind {
 
 impl LinkKind {
     fn of_dir(dir: InodeId) -> Option<&'static [Self]> {
-        match dir {
-            BY_PARTUUID_DIR => Some(&[Self::PartUuid]),
-            BY_UUID_DIR => Some(&[Self::Uuid]),
-            BY_LABEL_DIR => Some(&[Self::Label]),
-            BY_ID_DIR => Some(&[Self::Id, Self::IdAlias]),
-            _ => None,
-        }
+        LINK_DIRS
+            .iter()
+            .find(|&&(_, inode, _)| inode == dir)
+            .map(|&(_, _, kinds)| kinds)
     }
 
     fn of_link(inode: InodeId) -> Option<(Self, InodeId)> {
-        let kind = match inode >> LINK_KIND_SHIFT {
-            1 => Self::PartUuid,
-            2 => Self::Uuid,
-            3 => Self::Label,
-            4 => Self::Id,
-            5 => Self::IdAlias,
-            _ => return None,
-        };
+        let tag = inode >> LINK_KIND_SHIFT;
+        let kind = LINK_DIRS
+            .iter()
+            .flat_map(|&(_, _, kinds)| kinds)
+            .copied()
+            .find(|&kind| kind as InodeId == tag)?;
         Some((kind, inode & ((1 << LINK_KIND_SHIFT) - 1)))
     }
 
@@ -444,7 +436,7 @@ impl LinkName {
 
 /// The raw identity value `kind` names `node` by, without escaping.
 #[inline(never)]
-fn identity_of(kind: LinkKind, node: &BlockNode, out: &mut [u8; IDENTITY_MAX]) -> Option<usize> {
+fn identity_of(kind: LinkKind, node: &BlockNode, out: &mut [u8; DISK_ID_MAX]) -> Option<usize> {
     match kind {
         LinkKind::Id | LinkKind::IdAlias => {
             let partition = match node.kind {
@@ -499,31 +491,33 @@ fn matches_identity(value: &[u8], wanted: &[u8], how: Match) -> bool {
     }
 }
 
-/// The first node, in registration order, `kind` names `wanted`.
+/// The first node, in registration order, that one of `kinds` names
+/// `wanted`, so a name two nodes share is the first's whichever of its names
+/// it is.
 #[inline(never)]
-fn find_by_identity(kind: LinkKind, wanted: &[u8], how: Match) -> Option<BlockNode> {
+fn find_by_identity(
+    kinds: &[LinkKind],
+    wanted: &[u8],
+    how: Match,
+) -> Option<(LinkKind, BlockNode)> {
     let mut from = NODE_INODE_BASE;
     while let Some(node) = node_from(from) {
         from = node.inode + 1;
-        let mut value = [0u8; IDENTITY_MAX];
-        if let Some(len) = identity_of(kind, &node, &mut value)
-            && matches_identity(&value[..len], wanted, how)
-        {
-            return Some(node);
+        for &kind in kinds {
+            let mut value = [0u8; DISK_ID_MAX];
+            if let Some(len) = identity_of(kind, &node, &mut value)
+                && matches_identity(&value[..len], wanted, how)
+            {
+                return Some((kind, node));
+            }
         }
     }
     None
 }
 
-fn find_by_any(kinds: &[LinkKind], wanted: &[u8], how: Match) -> Option<(LinkKind, BlockNode)> {
-    kinds
-        .iter()
-        .find_map(|&kind| Some((kind, find_by_identity(kind, wanted, how)?)))
-}
-
 pub(super) fn lookup_link(dir: InodeId, name: &[u8]) -> VfsResult<InodeId> {
     let kinds = LinkKind::of_dir(dir).ok_or(VfsError::NotDirectory)?;
-    find_by_any(kinds, name, Match::Escaped)
+    find_by_identity(kinds, name, Match::Escaped)
         .map(|(kind, node)| kind.link_inode(node.inode))
         .ok_or(VfsError::NotFound)
 }
@@ -571,19 +565,19 @@ pub(super) fn walk_links(dir: InodeId, cookie: u64, callback: Emit<'_>) -> VfsRe
 /// resolves that name to it: two volumes can share a label, two disks a name.
 #[inline(never)]
 fn link_name(kinds: &[LinkKind], kind: LinkKind, node: &BlockNode, name: &mut LinkName) -> bool {
-    let mut value = [0u8; IDENTITY_MAX];
+    let mut value = [0u8; DISK_ID_MAX];
     let Some(len) = identity_of(kind, node, &mut value) else {
         return false;
     };
     name.escape(&value[..len])
-        && find_by_any(kinds, name.as_bytes(), Match::Escaped)
+        && find_by_identity(kinds, name.as_bytes(), Match::Escaped)
             .is_some_and(|(owner, first)| owner == kind && first.inode == node.inode)
 }
 
 pub(super) fn walk_disk_dir(cookie: u64, callback: Emit<'_>) -> u64 {
     let entries = [(&b"."[..], DISK_DIR), (&b".."[..], super::ROOT_INODE)]
         .into_iter()
-        .chain(LINK_DIRS)
+        .chain(LINK_DIRS.map(|(name, inode, _)| (name, inode)))
         .map(|(name, inode)| (name, inode, FileType::Directory));
     super::walk_fixed(entries, cookie, callback).0
 }
@@ -594,17 +588,14 @@ pub(super) fn lookup_disk_dir(name: &[u8]) -> VfsResult<InodeId> {
         b".." => Ok(super::ROOT_INODE),
         _ => LINK_DIRS
             .iter()
-            .find(|(n, _)| *n == name)
-            .map(|&(_, inode)| inode)
+            .find(|(n, ..)| *n == name)
+            .map(|&(_, inode, _)| inode)
             .ok_or(VfsError::NotFound),
     }
 }
 
 pub(super) fn is_dir(inode: InodeId) -> bool {
-    matches!(
-        inode,
-        DISK_DIR | BY_ID_DIR | BY_PARTUUID_DIR | BY_UUID_DIR | BY_LABEL_DIR
-    )
+    inode == DISK_DIR || LinkKind::of_dir(inode).is_some()
 }
 
 /// The node a live link points at: one that still carries an identity of
@@ -612,7 +603,7 @@ pub(super) fn is_dir(inode: InodeId) -> bool {
 fn link_node(inode: InodeId) -> Option<BlockNode> {
     let (kind, node) = LinkKind::of_link(inode)?;
     let node = node_by_inode(node)?;
-    identity_of(kind, &node, &mut [0; IDENTITY_MAX])?;
+    identity_of(kind, &node, &mut [0; DISK_ID_MAX])?;
     Some(node)
 }
 
@@ -652,30 +643,26 @@ pub(crate) fn devfs_resolve_block_node(
     spec: &[u8],
     out: &mut [u8; DEV_NAME_MAX],
 ) -> VfsResult<(usize, InodeId)> {
-    const LINKS: [(&[u8], &[LinkKind]); 4] = [
-        (b"/dev/disk/by-id/", &[LinkKind::Id, LinkKind::IdAlias]),
-        (b"/dev/disk/by-partuuid/", &[LinkKind::PartUuid]),
-        (b"/dev/disk/by-uuid/", &[LinkKind::Uuid]),
-        (b"/dev/disk/by-label/", &[LinkKind::Label]),
-    ];
-    const TAGS: [(&[u8], LinkKind, Match); 3] = [
+    static TAGS: [(&[u8], LinkKind, Match); 3] = [
         (b"PARTUUID=", LinkKind::PartUuid, Match::IgnoreCase),
         (b"UUID=", LinkKind::Uuid, Match::IgnoreCase),
         (b"LABEL=", LinkKind::Label, Match::Exact),
     ];
-    let found = if let Some((rest, kinds)) = LINKS
-        .iter()
-        .find_map(|&(prefix, kinds)| Some((spec.strip_prefix(prefix)?, kinds)))
-    {
-        find_by_any(kinds, rest, Match::Escaped).map(|(_, node)| node)
+    let link = spec.strip_prefix(b"/dev/disk/").and_then(|path| {
+        LINK_DIRS
+            .iter()
+            .find_map(|&(dir, _, kinds)| Some((path.strip_prefix(dir)?.strip_prefix(b"/")?, kinds)))
+    });
+    let (kinds, wanted, how) = if let Some((rest, kinds)) = link {
+        (kinds, rest, Match::Escaped)
     } else if let Some((value, kind, how)) = TAGS
         .iter()
-        .find_map(|&(tag, kind, how)| Some((spec.strip_prefix(tag)?, kind, how)))
+        .find_map(|(tag, kind, how)| Some((spec.strip_prefix(*tag)?, kind, *how)))
     {
         if value.is_empty() {
             return Err(VfsError::InvalidArgument);
         }
-        find_by_identity(kind, value, how)
+        (core::slice::from_ref(kind), value, how)
     } else {
         let name = spec.strip_prefix(DEV_PATH_PREFIX).unwrap_or(spec);
         if !valid_node_name(name) {
@@ -685,12 +672,11 @@ pub(crate) fn devfs_resolve_block_node(
         out[..name.len()].copy_from_slice(name);
         return Ok((name.len(), inode));
     };
-    let node = found.ok_or(VfsError::NotFound)?;
+    let (_, node) = find_by_identity(kinds, wanted, how).ok_or(VfsError::NotFound)?;
     out[..node.name_len].copy_from_slice(node.name());
     Ok((node.name_len, node.inode))
 }
 
-/// Whether `/dev/<name>` is still the node `inode`.
 pub(crate) fn devfs_block_node_is(name: &[u8], inode: InodeId) -> bool {
     node_inode_for(name) == Some(inode)
 }

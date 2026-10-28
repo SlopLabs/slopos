@@ -1,13 +1,10 @@
-//! A rounded rectangle measured per pixel: how much of a pixel it covers,
-//! sampled at the pixel's centre, and how dark the shadow it casts is there.
-//!
-//! Distances are measured to the rounded outline, so a shadow follows the
-//! corners round and an edge on a pixel boundary covers whole pixels.
+//! A rounded rectangle measured per pixel at the pixel's centre, so an edge on
+//! a pixel boundary covers whole pixels and a shadow follows the corners.
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 
-use crate::blend::put_pixel_coverage;
+use crate::blend::{fill_rect_blended_clipped, put_pixel_coverage};
 
 /// The `w` by `h` rectangle at `(x, y)` whose corners are quarter circles
 /// of `radius`, as round as its shorter side allows.
@@ -164,6 +161,84 @@ impl Rounded {
             }
         }
     }
+
+    /// The shape in `color` within `clip`.
+    pub fn draw<C: Canvas>(&self, canvas: &mut C, clip: &DamageRect, color: Color32) {
+        for band in self.bands() {
+            let (w, h) = (band.x1 - band.x0 + 1, band.y1 - band.y0 + 1);
+            fill_rect_blended_clipped(canvas, band.x0, band.y0, w, h, color, clip);
+        }
+        for corner in self.corners() {
+            self.fill(canvas, &corner, clip, |_, _| color);
+        }
+    }
+
+    /// The band `width` px wide just inside the outline, in `color` within
+    /// `clip`.
+    pub fn stroke<C: Canvas>(&self, canvas: &mut C, width: i32, clip: &DamageRect, color: Color32) {
+        let inner = Rounded::new(
+            self.x + width,
+            self.y + width,
+            self.w - 2 * width,
+            self.h - 2 * width,
+            (self.radius - width).max(0),
+        );
+        let reach = self.corner_side().max(width);
+        let b = self.bounds();
+        let (top, bottom) = (
+            (b.y0 + reach - 1).min(b.y1),
+            (b.y1 - reach + 1).max(b.y0 + reach),
+        );
+        let (left, right) = (
+            (b.x0 + reach - 1).min(b.x1),
+            (b.x1 - reach + 1).max(b.x0 + reach),
+        );
+        let rim = [
+            DamageRect { y1: top, ..b },
+            DamageRect { y0: bottom, ..b },
+            DamageRect {
+                y0: top + 1,
+                y1: bottom - 1,
+                x1: left,
+                ..b
+            },
+            DamageRect {
+                y0: top + 1,
+                y1: bottom - 1,
+                x0: right,
+                ..b
+            },
+        ];
+        for part in rim {
+            for y in part.y0.max(clip.y0)..=part.y1.min(clip.y1) {
+                for x in part.x0.max(clip.x0)..=part.x1.min(clip.x1) {
+                    let covered = self.coverage(x, y).saturating_sub(inner.coverage(x, y));
+                    put_pixel_coverage(canvas, x, y, color, covered);
+                }
+            }
+        }
+    }
+
+    /// The shadow the shape casts `spread` px past its outline, `color` at
+    /// its darkest, within `clip` less `under`, which something opaque is
+    /// drawn over next.
+    pub fn draw_shadow<C: Canvas>(
+        &self,
+        canvas: &mut C,
+        spread: i32,
+        clip: &DamageRect,
+        under: &DamageRect,
+        color: Color32,
+    ) {
+        let area = self.grown(spread).bounds();
+        for y in area.y0.max(clip.y0)..=area.y1.min(clip.y1) {
+            for x in area.x0.max(clip.x0)..=area.x1.min(clip.x1) {
+                if !under.contains(x, y) {
+                    put_pixel_coverage(canvas, x, y, color, self.shadow(spread, x, y));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -313,6 +388,84 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn canvas<R>(
+        bytes: &mut [u8],
+        side: u32,
+        paint: impl FnOnce(&mut crate::DrawBuffer<'_>) -> R,
+    ) -> R {
+        let mut buf = crate::DrawBuffer::new(bytes, side, side, side as usize * 4, 4).unwrap();
+        buf.set_pixel_format(slopos_abi::pixel::PixelFormat::Argb8888);
+        paint(&mut buf)
+    }
+
+    fn pixel(bytes: &[u8], side: usize, x: usize, y: usize) -> Color32 {
+        let at = (y * side + x) * 4;
+        let raw = u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+        slopos_abi::pixel::PixelFormat::Argb8888.decode(raw)
+    }
+
+    const WHOLE: DamageRect = DamageRect {
+        x0: 0,
+        y0: 0,
+        x1: 63,
+        y1: 63,
+    };
+
+    #[test]
+    fn a_drawn_shape_matches_its_coverage_everywhere() {
+        let mut bytes = [0u8; 64 * 64 * 4];
+        let shape = Rounded::new(5, 7, 41, 30, 9);
+        canvas(&mut bytes, 64, |b| shape.draw(b, &WHOLE, Color32::WHITE));
+        for y in 0..64 {
+            for x in 0..64 {
+                let red = pixel(&bytes, 64, x, y).red();
+                assert_eq!(red, shape.coverage(x as i32, y as i32), "({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_stroke_is_the_shape_less_the_one_inside_it() {
+        for (r, width) in [(9, 1), (6, 2), (0, 1), (2, 3)] {
+            let mut bytes = [0u8; 64 * 64 * 4];
+            let shape = Rounded::new(5, 7, 41, 30, r);
+            let inner = Rounded::new(
+                5 + width,
+                7 + width,
+                41 - 2 * width,
+                30 - 2 * width,
+                r - width,
+            );
+            canvas(&mut bytes, 64, |b| {
+                shape.stroke(b, width, &WHOLE, Color32::WHITE)
+            });
+            for y in 0..64 {
+                for x in 0..64 {
+                    let (x, y) = (x as i32, y as i32);
+                    let want = shape.coverage(x, y).saturating_sub(inner.coverage(x, y));
+                    let red = pixel(&bytes, 64, x as usize, y as usize).red();
+                    assert!(
+                        red.abs_diff(want) <= 1,
+                        "r{r} w{width} ({x}, {y}): {red} vs {want}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_shadow_leaves_what_lies_under_the_shape_alone() {
+        let mut bytes = [0u8; 64 * 64 * 4];
+        let shape = Rounded::new(16, 16, 32, 24, 6);
+        let ink = Color32::new(255, 255, 255, 255);
+        canvas(&mut bytes, 64, |b| {
+            shape.draw_shadow(b, 8, &WHOLE, &shape.bounds(), ink)
+        });
+        assert_eq!(pixel(&bytes, 64, 30, 30).red(), 0);
+        assert_eq!(pixel(&bytes, 64, 30, 15).red(), shape.shadow(8, 30, 15));
+        assert_eq!(pixel(&bytes, 64, 30, 63).red(), 0);
     }
 
     #[test]

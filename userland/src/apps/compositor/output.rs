@@ -1,4 +1,4 @@
-//! Compositor output buffer and frame metrics.
+//! The buffer the compositor draws into, and what its frames cost.
 
 use crate::gfx::{DamageRect, DrawBuffer};
 use crate::syscall::{DisplayInfo, ShmBuffer, window};
@@ -59,12 +59,10 @@ pub struct FrameMetrics {
     frame_times: [u64; FRAME_METRICS_WINDOW],
     frame_times_count: usize,
     frame_times_cursor: usize,
-    /// Counters as of the last report, so [`FrameMetrics::take_window`] can
-    /// answer in deltas.
     reported_frames: u64,
     reported_bytes: u64,
-    /// Gates only whether [`take_window`](FrameMetrics::take_window) answers;
-    /// recording stays on either way, so a quiet run accounts identically.
+    /// Whether [`take_window`](FrameMetrics::take_window) answers; frames are
+    /// counted either way.
     reporting: bool,
     reported_at_ms: u64,
 }
@@ -117,10 +115,9 @@ impl FrameMetrics {
         }
     }
 
-    /// Frames drawn and bytes copied since the previous report, once per
-    /// `interval_ms`. Deltas rather than totals, because cumulative counters
-    /// are dominated by the full redraws of the first second. A frame that
-    /// painted nothing never reaches `record`, so `frames=0` means idle.
+    /// Frames drawn and bytes copied since the last report, once per
+    /// `interval_ms`: not totals, which the first second's full redraws
+    /// would swamp. A frame that painted nothing is no frame here.
     pub fn take_window(&mut self, now_ms: u64, interval_ms: u64) -> Option<(u64, u64)> {
         if !self.reporting {
             return None;

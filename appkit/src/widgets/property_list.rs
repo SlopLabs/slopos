@@ -1,13 +1,12 @@
 use slopos_theme_core::space;
 
 use crate::constraints::{BoxConstraints, MAX_EXTENT, Rect, Size};
-use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent, route};
+use crate::event::{EventResponse, MessageSink, WidgetEvent, route};
 use crate::paint::PaintContext;
 use crate::traits::{MeasureCtx, Widget, WidgetCore, measure_widget, place_widget};
 
-/// Rows of a name and its value: the names in a column as wide as the widest,
-/// up to a third of the list, each value beside its name on its first line's
-/// baseline.
+/// Names and their values: the names in a column as wide as the widest, up to
+/// a third, each value on its name's first baseline.
 pub struct PropertyListWidget {
     core: WidgetCore,
     /// Name then value, row after row.
@@ -107,13 +106,8 @@ impl Widget for PropertyListWidget {
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        route(&mut self.cells, event, phase, sink)
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
+        route(&mut self.cells, event, sink)
     }
 
     fn baseline(&self) -> Option<i32> {

@@ -1,8 +1,5 @@
-//! Scan-line coverage rasterizer for glyph outlines.
-//!
-//! Non-zero winding rule with analytical horizontal coverage (fractional
-//! x-intercepts) and 8× vertical supersampling, so boundary pixels get
-//! sub-pixel coverage instead of binary in/out.
+//! A scan-line coverage rasterizer: the non-zero winding rule, analytical
+//! horizontal coverage and 8× vertical supersampling.
 
 use slopos_ostd::KVec;
 
@@ -10,30 +7,22 @@ use crate::outline::Edge;
 
 #[derive(Clone, Debug)]
 pub struct RasterizedGlyph {
-    /// Width of the coverage bitmap in pixels.
     pub width: u16,
-    /// Height of the coverage bitmap in pixels.
     pub height: u16,
-    /// Horizontal bearing (distance from origin to left edge).
+    /// From the origin to the left edge.
     pub bearing_x: i16,
-    /// Vertical bearing (distance from baseline to top edge).
+    /// From the baseline to the top edge.
     pub bearing_y: i16,
-    /// Horizontal advance (distance to next glyph origin).
     pub advance: u16,
-    /// Coverage values, row-major, `width * height` bytes.
-    /// Each byte is 0 (transparent) to 255 (fully covered).
+    /// Row-major, `width * height` bytes.
     pub coverage: KVec<u8>,
 }
 
-/// Number of vertical sub-scanlines per pixel row.
+/// Sub-scanlines per pixel row.
 const SUPERSAMPLE: usize = 8;
 
-/// Rasterize a list of edges into a coverage bitmap.
-///
-/// `None` when the buffers it needs cannot be allocated. The glyph's bounding
-/// box comes out of the font file, so an absurd one asks for an absurd
-/// allocation — and every other step of loading a font degrades to a fallback
-/// rather than taking the process down.
+/// `None` when its buffers cannot be allocated: the box comes from the font
+/// file, and an absurd one must degrade like any other bad font.
 pub fn rasterize(edges: &[Edge], width: usize, height: usize) -> Option<KVec<u8>> {
     if width == 0 || height == 0 || edges.is_empty() {
         return KVec::<u8>::zeroed(width * height).ok();

@@ -5,7 +5,9 @@
 //! Strings: `[u8 len][utf8 bytes]` (max 128 bytes).
 //! Clipboard: `[u32 len]`, bytes out-of-band in a memfd via SCM_RIGHTS.
 
-use crate::types::{Event, MAX_STRING_LEN, OwnedFd, ProtocolError, Request, SurfaceId, ToplevelId};
+use crate::types::{
+    Event, OwnedFd, ProtocolError, Request, SurfaceId, ToplevelId, WINDOW_STRING_MAX,
+};
 
 /// Serialize into a byte buffer. Returns number of bytes written.
 pub trait Encode {
@@ -146,17 +148,15 @@ const REQ_GET_TOPLEVEL: u8 = 7;
 const REQ_TOPLEVEL_SET_TITLE: u8 = 8;
 const REQ_TOPLEVEL_SET_APP_ID: u8 = 9;
 const REQ_TOPLEVEL_DESTROY: u8 = 10;
-const REQ_ACK_CONFIGURE: u8 = 11;
+// 11, 15 and 16 were requests version 5 retired.
 const REQ_SET_CURSOR_SHAPE: u8 = 12;
 const REQ_CLIPBOARD_COPY: u8 = 13;
 const REQ_CLIPBOARD_PASTE: u8 = 14;
-const REQ_INTERACTIVE_MOVE: u8 = 15;
-const REQ_INTERACTIVE_RESIZE: u8 = 16;
 const REQ_CLIPBOARD_READ: u8 = 17;
 const REQ_TOPLEVEL_SET_SIZE_LIMITS: u8 = 18;
 
 const EVT_HELLO: u8 = 0;
-const EVT_OBJECT_DESTROYED: u8 = 1;
+// 1, 11 and 12 were events version 5 retired.
 const EVT_OUTPUT_INFO: u8 = 2;
 const EVT_FRAME_DONE: u8 = 3;
 const EVT_CONFIGURE: u8 = 4;
@@ -166,8 +166,6 @@ const EVT_POINTER_LEAVE: u8 = 7;
 const EVT_POINTER_MOTION: u8 = 8;
 const EVT_POINTER_BUTTON: u8 = 9;
 const EVT_POINTER_AXIS: u8 = 10;
-const EVT_KEYBOARD_ENTER: u8 = 11;
-const EVT_KEYBOARD_LEAVE: u8 = 12;
 const EVT_KEY: u8 = 13;
 const EVT_MODIFIERS: u8 = 14;
 const EVT_PASTE_RESULT: u8 = 15;
@@ -237,7 +235,7 @@ impl Encode for Request {
                 title,
                 len,
             } => {
-                let actual = (*len as usize).min(MAX_STRING_LEN);
+                let actual = (*len as usize).min(WINDOW_STRING_MAX);
                 let p = put_u8(buf, 0, REQ_TOPLEVEL_SET_TITLE)?;
                 let p = put_u32(buf, p, toplevel.raw())?;
                 let p = put_u8(buf, p, actual as u8)?;
@@ -248,7 +246,7 @@ impl Encode for Request {
                 app_id,
                 len,
             } => {
-                let actual = (*len as usize).min(MAX_STRING_LEN);
+                let actual = (*len as usize).min(WINDOW_STRING_MAX);
                 let p = put_u8(buf, 0, REQ_TOPLEVEL_SET_APP_ID)?;
                 let p = put_u32(buf, p, toplevel.raw())?;
                 let p = put_u8(buf, p, actual as u8)?;
@@ -257,10 +255,6 @@ impl Encode for Request {
             Request::ToplevelDestroy { toplevel } => {
                 let p = put_u8(buf, 0, REQ_TOPLEVEL_DESTROY)?;
                 put_u32(buf, p, toplevel.raw())
-            }
-            Request::AckConfigure { serial } => {
-                let p = put_u8(buf, 0, REQ_ACK_CONFIGURE)?;
-                put_u32(buf, p, *serial)
             }
             Request::SetCursorShape {
                 surface,
@@ -285,21 +279,6 @@ impl Encode for Request {
                 let p = put_u8(buf, 0, REQ_CLIPBOARD_READ)?;
                 let p = put_u32(buf, p, *len)?;
                 put_u32(buf, p, *serial)
-            }
-            Request::InteractiveMove { toplevel, serial } => {
-                let p = put_u8(buf, 0, REQ_INTERACTIVE_MOVE)?;
-                let p = put_u32(buf, p, toplevel.raw())?;
-                put_u32(buf, p, *serial)
-            }
-            Request::InteractiveResize {
-                toplevel,
-                serial,
-                edges,
-            } => {
-                let p = put_u8(buf, 0, REQ_INTERACTIVE_RESIZE)?;
-                let p = put_u32(buf, p, toplevel.raw())?;
-                let p = put_u32(buf, p, *serial)?;
-                put_u32(buf, p, *edges)
             }
             Request::ToplevelSetSizeLimits {
                 toplevel,
@@ -413,8 +392,8 @@ impl Decode for Request {
             REQ_TOPLEVEL_SET_TITLE => {
                 let (toplevel, p) = get_u32(buf, p)?;
                 let (raw_len, p) = get_u8(buf, p)?;
-                let len = (raw_len as usize).min(MAX_STRING_LEN);
-                let mut title = [0u8; MAX_STRING_LEN];
+                let len = (raw_len as usize).min(WINDOW_STRING_MAX);
+                let mut title = [0u8; WINDOW_STRING_MAX];
                 if p + len > buf.len() {
                     return Err(ProtocolError::MalformedMessage);
                 }
@@ -431,8 +410,8 @@ impl Decode for Request {
             REQ_TOPLEVEL_SET_APP_ID => {
                 let (toplevel, p) = get_u32(buf, p)?;
                 let (raw_len, p) = get_u8(buf, p)?;
-                let len = (raw_len as usize).min(MAX_STRING_LEN);
-                let mut app_id = [0u8; MAX_STRING_LEN];
+                let len = (raw_len as usize).min(WINDOW_STRING_MAX);
+                let mut app_id = [0u8; WINDOW_STRING_MAX];
                 if p + len > buf.len() {
                     return Err(ProtocolError::MalformedMessage);
                 }
@@ -454,10 +433,6 @@ impl Decode for Request {
                     },
                     p,
                 ))
-            }
-            REQ_ACK_CONFIGURE => {
-                let (serial, p) = get_u32(buf, p)?;
-                Ok((Request::AckConfigure { serial }, p))
             }
             REQ_SET_CURSOR_SHAPE => {
                 let (surface, p) = get_u32(buf, p)?;
@@ -502,30 +477,6 @@ impl Decode for Request {
                     p,
                 ))
             }
-            REQ_INTERACTIVE_MOVE => {
-                let (toplevel, p) = get_u32(buf, p)?;
-                let (serial, p) = get_u32(buf, p)?;
-                Ok((
-                    Request::InteractiveMove {
-                        toplevel: ToplevelId::from_raw(toplevel),
-                        serial,
-                    },
-                    p,
-                ))
-            }
-            REQ_INTERACTIVE_RESIZE => {
-                let (toplevel, p) = get_u32(buf, p)?;
-                let (serial, p) = get_u32(buf, p)?;
-                let (edges, p) = get_u32(buf, p)?;
-                Ok((
-                    Request::InteractiveResize {
-                        toplevel: ToplevelId::from_raw(toplevel),
-                        serial,
-                        edges,
-                    },
-                    p,
-                ))
-            }
             REQ_TOPLEVEL_SET_SIZE_LIMITS => {
                 let (toplevel, p) = get_u32(buf, p)?;
                 let (min_width, p) = get_u32(buf, p)?;
@@ -559,10 +510,6 @@ impl Encode for Event {
                 let p = put_u32(buf, p, *version)?;
                 put_u64(buf, p, *capabilities)
             }
-            Event::ObjectDestroyed { id } => {
-                let p = put_u8(buf, 0, EVT_OBJECT_DESTROYED)?;
-                put_u32(buf, p, *id)
-            }
             Event::OutputInfo {
                 width,
                 height,
@@ -587,14 +534,12 @@ impl Encode for Event {
             }
             Event::Configure {
                 toplevel,
-                serial,
                 width,
                 height,
                 states,
             } => {
                 let p = put_u8(buf, 0, EVT_CONFIGURE)?;
                 let p = put_u32(buf, p, toplevel.raw())?;
-                let p = put_u32(buf, p, *serial)?;
                 let p = put_u32(buf, p, *width)?;
                 let p = put_u32(buf, p, *height)?;
                 put_u32(buf, p, *states)
@@ -643,19 +588,9 @@ impl Encode for Event {
                 let p = put_u32(buf, p, *axis)?;
                 put_i32(buf, p, *value)
             }
-            Event::KeyboardEnter { surface } => {
-                let p = put_u8(buf, 0, EVT_KEYBOARD_ENTER)?;
-                put_u32(buf, p, surface.raw())
-            }
-            Event::KeyboardLeave { surface } => {
-                let p = put_u8(buf, 0, EVT_KEYBOARD_LEAVE)?;
-                put_u32(buf, p, surface.raw())
-            }
             Event::Key {
                 serial,
                 time,
-                scancode,
-                ascii,
                 keycode,
                 codepoint,
                 modifiers,
@@ -664,8 +599,6 @@ impl Encode for Event {
                 let p = put_u8(buf, 0, EVT_KEY)?;
                 let p = put_u32(buf, p, *serial)?;
                 let p = put_u32(buf, p, *time)?;
-                let p = put_u32(buf, p, *scancode)?;
-                let p = put_u32(buf, p, *ascii)?;
                 let p = put_u32(buf, p, *keycode)?;
                 let p = put_u32(buf, p, *codepoint)?;
                 let p = put_u32(buf, p, *modifiers)?;
@@ -712,10 +645,6 @@ impl Decode for Event {
                     p,
                 ))
             }
-            EVT_OBJECT_DESTROYED => {
-                let (id, p) = get_u32(buf, p)?;
-                Ok((Event::ObjectDestroyed { id }, p))
-            }
             EVT_OUTPUT_INFO => {
                 let (width, p) = get_u32(buf, p)?;
                 let (height, p) = get_u32(buf, p)?;
@@ -746,14 +675,12 @@ impl Decode for Event {
             }
             EVT_CONFIGURE => {
                 let (toplevel, p) = get_u32(buf, p)?;
-                let (serial, p) = get_u32(buf, p)?;
                 let (width, p) = get_u32(buf, p)?;
                 let (height, p) = get_u32(buf, p)?;
                 let (states, p) = get_u32(buf, p)?;
                 Ok((
                     Event::Configure {
                         toplevel: ToplevelId::from_raw(toplevel),
-                        serial,
                         width,
                         height,
                         states,
@@ -821,29 +748,9 @@ impl Decode for Event {
                 let (value, p) = get_i32(buf, p)?;
                 Ok((Event::PointerAxis { time, axis, value }, p))
             }
-            EVT_KEYBOARD_ENTER => {
-                let (surface, p) = get_u32(buf, p)?;
-                Ok((
-                    Event::KeyboardEnter {
-                        surface: SurfaceId::from_raw(surface),
-                    },
-                    p,
-                ))
-            }
-            EVT_KEYBOARD_LEAVE => {
-                let (surface, p) = get_u32(buf, p)?;
-                Ok((
-                    Event::KeyboardLeave {
-                        surface: SurfaceId::from_raw(surface),
-                    },
-                    p,
-                ))
-            }
             EVT_KEY => {
                 let (serial, p) = get_u32(buf, p)?;
                 let (time, p) = get_u32(buf, p)?;
-                let (scancode, p) = get_u32(buf, p)?;
-                let (ascii, p) = get_u32(buf, p)?;
                 let (keycode, p) = get_u32(buf, p)?;
                 let (codepoint, p) = get_u32(buf, p)?;
                 let (modifiers, p) = get_u32(buf, p)?;
@@ -852,8 +759,6 @@ impl Decode for Event {
                     Event::Key {
                         serial,
                         time,
-                        scancode,
-                        ascii,
                         keycode,
                         codepoint,
                         modifiers,

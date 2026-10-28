@@ -473,10 +473,6 @@ impl BlockDevice for FailingReads {
     }
 }
 
-/// `/dev/disk/by-id` lists each node's name and then its shorter one, both
-/// links to the node, resumed between the two; a partition takes its disk's
-/// with `-part<N>`; a lookup and a mount source find either; a name two
-/// nodes share is the first's, listed once.
 pub fn test_devfs_by_id_links() -> TestResult {
     let names: [&[u8]; 4] = [b"volidbyid0", b"volidbyid1", b"volidbyid2", b"volidbyid3"];
     let (Some(first), Some(clash), Some(other), Some(part)) =
@@ -587,6 +583,69 @@ fn by_id_body(names: [&[u8]; 4]) -> TestResult {
     }
 }
 
+pub fn test_devfs_by_id_name_shared_across_kinds() -> TestResult {
+    let names: [&[u8]; 2] = [b"volidbyid4", b"volidbyid5"];
+    let (Some(first), Some(later)) = (node(|_| {}), node(|_| {})) else {
+        return fail!("no memory for the fixture");
+    };
+    let id =
+        |serial: &[u8]| DiskId::nvme(b"Test Disk", serial, 1).and_then(|id| KArc::try_new(id).ok());
+    let whole = BlockNodeKind::Disk { partitioned: true };
+    let registered = [
+        devfs_register_block_node(names[0], first, whole, id(b"byid-c_1")),
+        devfs_register_block_node(names[1], later, whole, id(b"byid-c")),
+    ];
+    let verdict = if registered.iter().all(Result::is_ok) {
+        shared_name_body(names)
+    } else {
+        fail!("registration failed: {:?}", registered)
+    };
+    for name in names {
+        let _ = devfs_unregister_block_node(name);
+    }
+    verdict
+}
+
+/// `nvme-Test_Disk_byid-c_1` is the first node's shorter name and the later
+/// node's longer one.
+#[inline(never)]
+fn shared_name_body(names: [&[u8]; 2]) -> TestResult {
+    const SHARED: &[u8] = b"nvme-Test_Disk_byid-c_1";
+    let mut out = [0u8; DEV_NAME_MAX];
+    match devfs_resolve_block_source(b"/dev/disk/by-id/nvme-Test_Disk_byid-c_1", &mut out) {
+        Ok(len) if out[..len] == *names[0] => {}
+        other => return fail!("the shared name resolved to {:?}", other),
+    }
+    match devfs_resolve_block_source(b"/dev/disk/by-id/nvme-Test_Disk_byid-c", &mut out) {
+        Ok(len) if out[..len] == *names[1] => {}
+        other => return fail!("the later node's shorter name resolved to {:?}", other),
+    }
+    let fs = DevFs::new();
+    let Ok(disk) = fs.lookup(fs.root_inode(), b"disk") else {
+        return fail!("/dev/disk missing");
+    };
+    let Ok(by_id) = fs.lookup(disk, b"by-id") else {
+        return fail!("/dev/disk/by-id missing");
+    };
+    let Ok(link) = fs.lookup(by_id, SHARED) else {
+        return fail!("the shared name is missing");
+    };
+    let mut target = [0u8; 32];
+    match fs.readlink(link, &mut target) {
+        Ok(len) if target[..len] == *b"../../volidbyid4" => {}
+        other => return fail!("the shared name points at {:?}", other),
+    }
+    let mut listed = 0usize;
+    let walked = fs.readdir(by_id, 0, &mut |name, _, _| {
+        listed += usize::from(name == SHARED);
+        true
+    });
+    match walked {
+        Ok(_) if listed == 1 => TestResult::Pass,
+        other => fail!("the shared name was listed {} times: {:?}", listed, other),
+    }
+}
+
 slopos_testing::stest!(name = test_volume_id_ext, suite = fs);
 slopos_testing::stest!(name = test_volume_id_vfat, suite = fs);
 slopos_testing::stest!(name = test_volume_id_vfat_root_past_the_end, suite = fs);
@@ -596,3 +655,4 @@ slopos_testing::stest!(name = test_devfs_link_names_follow_udev, suite = fs);
 slopos_testing::stest!(name = test_devfs_identity_of_an_unreadable_disk, suite = fs);
 slopos_testing::stest!(name = test_devfs_identity_read_once_per_change, suite = fs);
 slopos_testing::stest!(name = test_devfs_by_id_links, suite = fs);
+slopos_testing::stest!(name = test_devfs_by_id_name_shared_across_kinds, suite = fs);

@@ -145,7 +145,7 @@ pub fn run() -> Result<(), String> {
     let mut system: Option<System> = None;
     let mut last: Option<Last> = None;
     let mut made = 0u64;
-    let unprobed = || Reply::Issue(Issue::Probe("the machine has not been probed".into()));
+    let unprobed = || Reply::Issue(Issue::Unprobed);
     while let Some(request) = requests.next()? {
         let reply = match request {
             Request::Hello { .. } => return Err("the driver said Hello twice".into()),
@@ -185,20 +185,18 @@ pub fn run() -> Result<(), String> {
             },
             Request::Install { choices, proposal } => {
                 let result = match (system.take(), last.take()) {
-                    (Some(system), Some(last)) if last.id == proposal && last.choices == choices => {
-                        let held = RELAYED_SIGNALS.map(|signal| {
-                            (signal, process::ignore_signal_saving(signal))
-                        });
+                    (Some(system), Some(last))
+                        if last.id == proposal && last.choices == choices =>
+                    {
+                        let held = RELAYED_SIGNALS
+                            .map(|signal| (signal, process::ignore_signal_saving(signal)));
                         let result = system.install(&choices, &last.settled, &mut replies);
                         for (signal, action) in &held {
                             process::restore_signal(*signal, action);
                         }
                         result
                     }
-                    _ => Err(Failure {
-                        step: 0,
-                        message: "that is not the proposal last made for these choices; nothing was written".into(),
-                    }),
+                    _ => Err(Failure::Refused(Issue::Unproposed)),
                 };
                 match result {
                     Ok(summary) => {

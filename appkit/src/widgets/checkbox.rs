@@ -1,30 +1,33 @@
-use slopos_abi::draw::Color32;
-use slopos_theme_core::{TextRole, radius};
+use std::any::Any;
+use std::cell::Cell;
 
-use crate::constraints::{BoxConstraints, Size};
-use crate::event::{
-    EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
-};
+use slopos_theme_core::{ColorRole, Icon, State, TextRole, radius, stroke};
+
+use super::button::Press;
+use crate::constraints::{BoxConstraints, Rect, Size};
+use crate::event::{EventResponse, MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
+use crate::style::MIN_TARGET;
+use crate::text::ui;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
 pub struct CheckboxWidget {
     core: WidgetCore,
     checked: bool,
     label: String,
-    on_toggle: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
+    on_toggle: Option<Box<dyn Fn() -> Box<dyn Any>>>,
     enabled: bool,
-    hovered: bool,
-    focused: bool,
+    press: Press,
     /// From the box's left edge to the label.
     indent: i32,
+    cut: Cell<bool>,
 }
 
 impl CheckboxWidget {
     pub fn new(
         checked: bool,
         label: String,
-        on_toggle: Option<Box<dyn Fn() -> Box<dyn std::any::Any>>>,
+        on_toggle: Option<Box<dyn Fn() -> Box<dyn Any>>>,
         enabled: bool,
     ) -> Self {
         Self {
@@ -33,15 +36,9 @@ impl CheckboxWidget {
             label,
             on_toggle,
             enabled,
-            hovered: false,
-            focused: false,
+            press: Press::toggle(),
             indent: 0,
-        }
-    }
-
-    fn toggle(&mut self) {
-        if self.enabled {
-            self.checked = !self.checked;
+            cut: Cell::new(false),
         }
     }
 }
@@ -55,132 +52,70 @@ impl Widget for CheckboxWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let cb_size = ctx.style.checkbox_size;
-        let gap = ctx.style.checkbox_gap;
-        self.indent = cb_size + gap;
-        let text_w = ctx.text_width(&self.label);
-        let text_h = ctx.text_height();
-
-        let width = self.indent + text_w;
-        let height = cb_size.max(text_h).max(ctx.style.min_target);
+        let side = ctx.style.checkbox_size;
+        self.indent = side + ctx.style.checkbox_gap;
+        let width = self.indent + ui::width(&self.label, TextRole::Body);
+        let height = side.max(ui::font_height(TextRole::Body)).max(MIN_TARGET);
         constraints.constrain(Size::new(width, height))
     }
 
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
-        let style = ctx.style;
         let theme = ctx.theme();
-        let cb_size = style.checkbox_size;
-        let text_h = ctx.text_height();
-
-        let box_y = rect.y + (rect.height - cb_size) / 2;
-        let box_x = rect.x;
+        let side = ctx.style.checkbox_size;
+        let boxed = Rect::new(rect.x, rect.y + (rect.height - side) / 2, side, side);
+        let r = radius::CONTROL.min(side / 4);
+        let state = match self.enabled {
+            true => self.press.state(self.id(), ctx),
+            false => State::Normal,
+        };
 
         if self.checked {
-            ctx.fill_rounded_rect(
-                box_x,
-                box_y,
-                cb_size,
-                cb_size,
-                radius::CONTROL.min(cb_size / 4),
-                if self.enabled {
-                    theme.accent
-                } else {
-                    theme.text_disabled
-                },
-            );
-            draw_checkmark(ctx, box_x, box_y, cb_size, theme.text_on_accent);
-        } else {
-            let border_color = if self.enabled {
-                theme.border_strong
-            } else {
-                theme.text_disabled
+            let fill = match self.enabled {
+                true => theme.state(ColorRole::Accent, state),
+                false => theme.text_disabled,
             };
-            ctx.draw_rounded_rect(
-                box_x,
-                box_y,
-                cb_size,
-                cb_size,
-                radius::CONTROL.min(cb_size / 4),
-                border_color,
-            );
+            ctx.fill_rounded_rect(boxed, r, fill);
+            ctx.draw_icon(Icon::Check, boxed.x, boxed.y, side, theme.text_on_accent);
+        } else {
+            if state != State::Normal {
+                ctx.fill_rounded_rect(boxed, r, theme.overlay(state));
+            }
+            let edge = match self.enabled {
+                true => theme.border_strong,
+                false => theme.text_disabled,
+            };
+            ctx.draw_rounded_rect(boxed, r, stroke::EDGE, edge);
         }
 
         let text_x = rect.x + self.indent;
-        let text_y = rect.y + (rect.height - text_h) / 2;
-        let fg = if self.enabled {
-            theme.text
-        } else {
-            theme.text_disabled
+        let text_y = ui::centred_top(rect.y, rect.height, TextRole::Body);
+        let ink = match self.enabled {
+            true => theme.text,
+            false => theme.text_disabled,
         };
         let room = rect.x + rect.width - text_x;
-        ctx.draw_text_fitted(text_x, text_y, &self.label, TextRole::Body, room, fg);
+        let cut = ctx.draw_text_fitted(text_x, text_y, &self.label, TextRole::Body, room, ink);
+        self.cut.set(cut);
 
-        // `focus_visible` only means the keyboard is in use, so it rings every
-        // checkbox in the window on its own.
-        if self.focused {
+        if self.press.focused {
             ctx.draw_focus_ring(rect);
         }
     }
 
     fn tooltip(&self, _x: i32, _y: i32) -> Option<&str> {
-        let room = self.layout_rect().width - self.indent;
-        (crate::text::ui::role_width(&self.label, TextRole::Body) > room).then_some(&self.label)
+        self.cut.get().then_some(&self.label)
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        if phase != EventPhase::Target || !self.enabled {
-            return EventResponse::Ignored;
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
+        let (response, pressed) = self.press.event(self.layout_rect(), self.enabled, event);
+        if pressed {
+            self.checked = !self.checked;
+            if let Some(f) = &self.on_toggle {
+                sink.emit_raw(f());
+            }
         }
-        match event {
-            WidgetEvent::PointerDown {
-                x,
-                y,
-                button: PointerButton::Left,
-                ..
-            } => {
-                if !self.layout_rect().contains(*x, *y) {
-                    return EventResponse::Ignored;
-                }
-                self.toggle();
-                if let Some(f) = &self.on_toggle {
-                    sink.emit_raw(f());
-                }
-                EventResponse::Consumed
-            }
-            WidgetEvent::PointerEnter => {
-                self.hovered = true;
-                EventResponse::Ignored
-            }
-            WidgetEvent::PointerLeave => {
-                self.hovered = false;
-                EventResponse::Ignored
-            }
-            WidgetEvent::FocusGained => {
-                self.focused = true;
-                EventResponse::Ignored
-            }
-            WidgetEvent::FocusLost => {
-                self.focused = false;
-                EventResponse::Ignored
-            }
-            WidgetEvent::KeyDown {
-                key: Key::Named(NamedKey::Space),
-                ..
-            } if self.focused => {
-                self.toggle();
-                if let Some(f) = &self.on_toggle {
-                    sink.emit_raw(f());
-                }
-                EventResponse::Consumed
-            }
-            _ => EventResponse::Ignored,
-        }
+        response
     }
 
     fn role(&self) -> Role {
@@ -191,28 +126,11 @@ impl Widget for CheckboxWidget {
         Some(&self.label)
     }
 
-    /// A disabled control is not a tab stop: it answers nothing, draws no ring,
-    /// and leaving it in the chain makes Tab appear to skip two.
     fn focus_policy(&self) -> FocusPolicy {
-        if self.enabled {
-            FocusPolicy::StrongFocus
-        } else {
-            FocusPolicy::None
-        }
+        Press::focus_policy(self.enabled)
     }
-}
 
-/// Checkmark path in 16x16 reference space, scaled to `size`: short leg
-/// (3,8)->(7,12), long leg (7,12)->(13,4).
-fn draw_checkmark(ctx: &mut PaintContext, bx: i32, by: i32, size: i32, color: Color32) {
-    let sx = |v: i32| -> i32 { bx + v * size / 16 };
-    let sy = |v: i32| -> i32 { by + v * size / 16 };
-    let t = (size / 8).max(1); // stroke thickness
-
-    for i in 0..5 {
-        ctx.fill_rect(sx(3 + i), sy(8 + i), t, t, color);
-    }
-    for i in 0..7 {
-        ctx.fill_rect(sx(7 + i), sy(12 - i), t, t, color);
+    fn hover_part(&self, x: i32, y: i32) -> Option<usize> {
+        Press::hover_part(self.enabled, self.layout_rect(), x, y)
     }
 }

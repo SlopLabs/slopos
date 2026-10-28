@@ -1,19 +1,15 @@
-//! Input translation: windowing events → widget events.
-//!
-//! The kernel is the single keyboard-layout authority, so text comes from the
-//! codepoint the event already carries; only layout-independent action keys go
-//! through `keymap-core`.
+//! Windowing events as widget events. The kernel is the one keyboard-layout
+//! authority, so text is the codepoint an event carries.
+
+use slopos_abi::input::POINTER_AXIS_HORIZONTAL;
 
 use super::event::{Key, Modifiers, WidgetEvent};
 use slopos_keymap_core::{UiKey, mods_locks_from_raw, ui_classify};
 use slopos_windowing::Event;
 
-/// Classify a windowing key event into an appkit [`Key`].
-///
-/// A freshly-pressed dead key carries `codepoint == 0` and yields
-/// [`Key::Unknown`]. Ctrl+letter control codes (0x01..=0x1A) are inverted back
-/// to the letter so shortcuts follow the active layout — on QWERTZ, Ctrl on the
-/// key labelled Z is Ctrl+Z.
+/// A dead key just pressed carries no codepoint and is [`Key::Unknown`].
+/// Ctrl+letter's control code goes back to its letter, so a shortcut follows
+/// the layout: on QWERTZ, Ctrl on the key labelled Z is Ctrl+Z.
 fn classify_key(keycode: u16, codepoint: u32, modifiers: u8) -> Key {
     let (mods, locks) = mods_locks_from_raw(modifiers);
 
@@ -44,40 +40,35 @@ fn classify_key(keycode: u16, codepoint: u32, modifiers: u8) -> Key {
 pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
     match event {
         Event::PointerMotion { x, y } => Some(WidgetEvent::PointerMove { x: *x, y: *y }),
-        Event::PointerPress { button } => {
-            let btn = pointer_button(*button);
-            // Position and modifiers are filled in by the framework from the
-            // pointer and keyboard state it tracks.
-            Some(WidgetEvent::PointerDown {
-                x: 0,
-                y: 0,
-                button: btn,
-                modifiers: Modifiers::default(),
-            })
-        }
-        Event::PointerRelease { button } => {
-            let btn = pointer_button(*button);
-            Some(WidgetEvent::PointerUp {
-                x: 0,
-                y: 0,
-                button: btn,
-            })
-        }
-        Event::PointerAxis { value_v120, .. } => {
+        // The run loop fills in where the pointer is, and the modifiers.
+        Event::PointerPress { button } => Some(WidgetEvent::PointerDown {
+            x: 0,
+            y: 0,
+            button: pointer_button(*button),
+            modifiers: Modifiers::default(),
+        }),
+        Event::PointerRelease { button } => Some(WidgetEvent::PointerUp {
+            x: 0,
+            y: 0,
+            button: pointer_button(*button),
+        }),
+        Event::PointerAxis { axis, value_v120 } => {
+            let px = wheel_px(*value_v120);
+            let (delta_x, delta_y) = match *axis {
+                POINTER_AXIS_HORIZONTAL => (px, 0),
+                _ => (0, px),
+            };
             Some(WidgetEvent::Scroll {
-                // Filled in by `fill_pointer_state`, which is the only place
-                // that knows where the pointer is.
                 x: 0,
                 y: 0,
-                delta_x: 0,
-                delta_y: wheel_px(*value_v120),
+                delta_x,
+                delta_y,
             })
         }
         Event::KeyPress {
             keycode,
             codepoint,
             modifiers,
-            ..
         } => {
             let mods = Modifiers::from_raw(*modifiers);
             let key = classify_key(*keycode, *codepoint, *modifiers);
@@ -89,7 +80,6 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
                 _ => Some(WidgetEvent::KeyDown {
                     key,
                     modifiers: mods,
-                    repeat: false,
                 }),
             }
         }
@@ -97,7 +87,6 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
             keycode,
             codepoint,
             modifiers,
-            ..
         } => {
             let mods = Modifiers::from_raw(*modifiers);
             let key = classify_key(*keycode, *codepoint, *modifiers);
@@ -106,19 +95,15 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
                 modifiers: mods,
             })
         }
-        Event::Configure { width, height } => Some(WidgetEvent::Configure {
-            width: *width,
-            height: *height,
-        }),
-        // Handled at the appkit level, before translation.
-        Event::CloseRequest | Event::ClipboardOffer { .. } | Event::ClipboardData { .. } => None,
-        Event::Other => None,
+        Event::PointerLeave
+        | Event::Configure { .. }
+        | Event::CloseRequest
+        | Event::ClipboardOffer { .. }
+        | Event::ClipboardData { .. } => None,
     }
 }
 
-/// The wire carries the PS/2 button **mask** (left 0x01, right 0x02, middle
-/// 0x04), not an index into them, so middle arrived as left and nothing ever
-/// decoded as middle.
+/// The wire carries the PS/2 button mask: left 0x01, right 0x02, middle 0x04.
 fn pointer_button(button: u8) -> super::event::PointerButton {
     match button {
         0x02 => super::event::PointerButton::Right,
@@ -130,5 +115,5 @@ fn pointer_button(button: u8) -> super::event::PointerButton {
 /// How far a turn of the wheel, in 120ths of a notch, scrolls: a line a
 /// notch.
 pub(crate) fn wheel_px(value_v120: i32) -> i32 {
-    value_v120 / 120 * slopos_theme_core::TextRole::Body.style().line_height
+    value_v120 * slopos_theme_core::TextRole::Body.style().line_height / 120
 }

@@ -58,16 +58,19 @@ use slopos_boot_core::install::Role;
 use slopos_boot_core::layout::{self, ESP_TYPE, ROOT_TYPE};
 use slopos_boot_core::{base, bli, device_path, load_option, variables};
 use slopos_installer_core::protocol::{self, Reply as EngineReply, Request as EngineRequest};
-use slopos_installer_core::{Choices, Event, Issue, Mode, Part, STEPS, Tag, root_min};
+use slopos_installer_core::{
+    Choices, Event, Failure, Issue, Mode, Part, Step, Tag, root_min, short,
+};
 use slopos_priv_core::wire::{Exit, Reply as PrivdReply, Request as PrivdRequest};
 use slopos_remote_core::Deframer;
 use slopos_slibc::test_harness::note;
 use slopos_userland::accounts::Store;
 use slopos_userland::app_entry;
+use slopos_userland::apps::installer::not_offered;
 use slopos_userland::base_image::retagged;
 use slopos_userland::boot_disk::{
-    BootDisk, boot_current, boot_order, firmware_entry, medium_disk_guid, not_installable,
-    open_fat, partition_node, set_loader_var, table_of, whole_disks,
+    BootDisk, boot_current, boot_order, firmware_entry, medium_disk_guid, open_fat, partition_node,
+    set_loader_var, table_of, whole_disks,
 };
 use slopos_userland::init_control::{self, Command as InitCommand};
 use slopos_userland::privd::{Connection, request_id};
@@ -188,7 +191,7 @@ fn target() -> Result<(String, Kind, Vec<Partition>), String> {
     let medium = medium_disk_guid()?;
     let mut disks = Vec::new();
     for node in whole_disks()? {
-        match not_installable(&node, medium) {
+        match not_offered(&node, medium) {
             Some(why) => println!("INSTALLER-NOT-OFFERED {node}: {why:?}"),
             None => disks.push(node),
         }
@@ -581,8 +584,8 @@ fn refused_once_changed(disk: &str, args: &[String]) -> Result<(), String> {
     changed.and(answered).and(restored)?;
     let out = out?;
     let said = String::from_utf8_lossy(&out.stderr);
-    if out.status.success() || !said.contains("changed since it was reviewed; nothing was written")
-    {
+    let refused = Failure::Refused(Issue::Changed(disk.to_owned())).to_string();
+    if out.status.success() || !said.contains(&refused) {
         return Err(format!(
             "the installer, confirmed over a changed disk, exited {:?}: {said}",
             out.status
@@ -785,7 +788,8 @@ fn served_install(disk: &str, root: u32) -> Result<(), String> {
     };
     match engine.ask(stale)? {
         EngineReply::Failed(failure)
-            if failure.step == 0 && table_of(disk).map(|t| t.array) == before => {}
+            if failure == Failure::Refused(Issue::Unproposed)
+                && table_of(disk).map(|t| t.array) == before => {}
         other => return Err(format!("a stale install was answered {other:?}, or wrote")),
     }
     engine.open(disk)?;
@@ -798,11 +802,7 @@ fn served_install(disk: &str, root: u32) -> Result<(), String> {
     })?;
     loop {
         match engine.reply()? {
-            EngineReply::Event(Event::Step {
-                index,
-                total,
-                title,
-            }) => println!("installer: [{index}/{total}] {title}"),
+            EngineReply::Event(Event::Step(step)) => println!("installer: {step}"),
             EngineReply::Event(Event::Log { line }) => println!("installer:   {line}"),
             EngineReply::Event(Event::Progress { .. }) => {}
             EngineReply::Done(summary) => {
@@ -967,7 +967,7 @@ fn install() -> bool {
             answers.push_str(&format!(
                 "{TYPED_PERSON}\n{TYPED_PASSWORD}\n{TYPED_PASSWORD}\n"
             ));
-            answers.push_str(disk.rsplit('/').next().unwrap_or(&disk));
+            answers.push_str(short(&disk));
             answers.push('\n');
             typed = Some(answers);
             if !set_var(PERSON, TYPED_PERSON.as_bytes()) {
@@ -1001,7 +1001,7 @@ fn install() -> bool {
             println!("INSTALLER-ROOT-SIZE {size}");
             args.extend(flagged);
             args.extend(["--mode", "free", "--first"].map(str::to_owned));
-            args.extend(["--root-size".to_owned(), size.to_string()]);
+            args.extend(["--root-size".to_owned(), format!("{size} bytes")]);
             args.extend(["--person", "user", "--no-password"].map(str::to_owned));
             if !set_var(PERSON, b"user") {
                 return false;
@@ -1163,7 +1163,7 @@ fn install_log(disk: &str, kept: bool) -> Result<(), String> {
         } else {
             "the first administrator".to_owned()
         },
-        format!("[7/{}] {}", STEPS.len(), STEPS[6]),
+        Step::Default.to_string(),
         "  LoaderEntryDefault is slopos-a".to_owned(),
     ];
     match wanted.iter().find(|line| !log.contains(line.as_str())) {

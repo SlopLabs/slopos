@@ -22,10 +22,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib
 from qmp import Qmp, axis, button, key  # noqa: E402
 
 SCENES = ("installer", "chrome", "apps", "gallery")
-GALLERY = (
-    "text", "buttons", "fields", "choices", "lists", "structure", "feedback", "empty", "icons",
-    "dialog",
-)
 APPS = (
     ("terminal", "terminal", "org.slopos.terminal"),
     ("system-monitor", "sysmon", "org.slopos.sysmon"),
@@ -38,8 +34,20 @@ QCODES = {" ": "spc", "\n": "ret", "-": "minus", "/": "slash", ".": "dot"}
 BLANK_BYTES = 16 << 30
 
 
-# chrome-core's `BAR_HEIGHT`.
-BAR_HEIGHT = 24
+def stated(source, pattern, name):
+    """`name`'s value, read from the source that states it."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, source)
+    with open(path, encoding="utf-8") as f:
+        found = re.search(pattern, f.read(), re.S)
+    if not found:
+        sys.exit(f"ui_shots: no {name} in {path}")
+    return found.group(1)
+
+
+BAR_HEIGHT = int(stated("chrome-core/src/status.rs", r"pub const BAR_HEIGHT: i32 = (\d+);", "BAR_HEIGHT"))
+GALLERY = tuple(re.findall(r'"([^"]+)"', stated(
+    "appkit/src/catalogue.rs", r"pub const PAGES: \[&str; \d+\] = \[(.*?)\];", "PAGES")))
 
 
 def below_bar(path):

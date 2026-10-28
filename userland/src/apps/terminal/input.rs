@@ -1,7 +1,5 @@
-//! Userland glue over the host-testable `slopos-terminal-core` input model.
-//!
-//! `classify` is the sole protocol-coupled function; everything else lives in
-//! the core crate.
+//! `slopos-terminal-core`'s input model, and `classify`, which maps the
+//! compositor's events onto it.
 
 pub use slopos_terminal_core::input::*;
 
@@ -11,7 +9,6 @@ use slopos_protocol::types::Event as ProtocolEvent;
 pub fn classify(evt: &ProtocolEvent) -> CompositorEvent {
     match evt {
         ProtocolEvent::Key {
-            ascii,
             keycode,
             codepoint,
             modifiers,
@@ -20,7 +17,6 @@ pub fn classify(evt: &ProtocolEvent) -> CompositorEvent {
         } => {
             if *pressed {
                 CompositorEvent::Key(KeyPress {
-                    ascii: *ascii as u8,
                     keycode: *keycode as u16,
                     codepoint: *codepoint,
                     mods: *modifiers as u8,

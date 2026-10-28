@@ -1,16 +1,27 @@
 //! Every component in each of its states, a page per family: what an app is
 //! built from, and what the layout audit holds to its rules.
 
+use slopos_theme_core::words::Bytes;
 use slopos_theme_core::{Icon, TextRole, Tone, space};
 
 use crate::components::{
-    Button, ButtonRow, Disclosure, EmptyState, IconButton, List, ListRow, Notice, Page,
-    PropertyList, SearchField, Section, Sidebar, Tag, Text, Toolbar, WindowSpec,
+    Button, ButtonRow, Dialog, Disclosure, EmptyState, IconButton, List, ListRow, Notice, Page,
+    PropertyList, SearchField, Section, Sidebar, StatusBar, Tag, Text, Toolbar, WindowSpec, column,
+    row,
 };
-use crate::constraints::{CrossAxisAlignment, TextAlignment};
-use crate::node::{Action, App, BarSegment, Node, RadioOption, SegmentFill};
+use crate::constraints::{CrossAxisAlignment, Length, Orientation, TextAlignment};
+use crate::node::{
+    Action, App, BarSegment, MenuItem, MenuItemKind, Node, SegmentFill, SortIndicator, TableColumn,
+    TableColumnWidth,
+};
+use crate::style::StyleSheet;
+use crate::widgets::code_view::{CodeInput, CodeLine};
+use crate::widgets::drag_handle::DragInput;
+use crate::widgets::editor_tabs::{EditorTab, TabInput};
 use crate::widgets::line_edit::{LineEditInput, LineInput};
+use crate::widgets::menu_bar::MenuBarInput;
 use crate::widgets::slider::{SliderGrab, SliderInput};
+use crate::widgets::tree_view::{TreeInput, TreeRow};
 
 #[derive(Clone, Debug)]
 pub enum Msg {
@@ -23,60 +34,129 @@ pub enum Msg {
     Toggle(usize),
     Choose(usize),
     Slide(SliderInput),
-    Name(String),
-    Note(String),
+    Name(LineEditInput),
+    Note(LineEditInput),
     Search(LineEditInput),
     Size(LineEditInput),
     Select(usize),
     Place(usize),
     Person(usize),
+    Found(usize),
+    File(usize),
+    Sort(usize),
+    Tree(TreeInput),
     /// Which disclosure.
     Expand(usize),
+    Tab(usize),
+    MenuBar(MenuBarInput),
+    Document(TabInput),
+    Code(CodeInput),
+    Drag(DragInput),
     OpenDialog,
     CloseDialog,
 }
 
 /// The pages, by the name `--page` takes.
-pub const PAGES: [&str; 10] = [
+pub const PAGES: [&str; 13] = [
     "text",
     "buttons",
     "fields",
     "choices",
     "lists",
+    "tables",
     "structure",
+    "navigation",
+    "code",
     "feedback",
     "empty",
     "icons",
     "dialog",
 ];
 
-const STRUCTURE: usize = 5;
-const DIALOG: usize = 9;
+const STRUCTURE: usize = 6;
+const FEEDBACK: usize = 9;
+const DIALOG: usize = 12;
 
-const TITLES: [&str; 10] = [
+const TITLES: [&str; 13] = [
     "Text",
     "Buttons",
     "Fields",
     "Choices",
     "Lists",
+    "Tables and trees",
     "Structure",
+    "Tabs and menus",
+    "Code",
     "Feedback",
     "Empty states",
     "Icons",
     "Dialogs",
 ];
 
-const ABOUT: [&str; 10] = [
+const ABOUT: [&str; 13] = [
     "Text takes a role for its size and a tone for its ink, and wraps or ends in an ellipsis.",
     "A row of buttons ends a page: going back on the left, finishing on the right.",
     "Fields share one frame, which thickens and takes the focus colour while typed into.",
     "Choose one of several, turn one thing on, or pick an amount.",
     "Rows that may be chosen, one tab stop for the whole list.",
+    "Rows in columns, and a tree of folders, each one tab stop the arrows move along.",
     "A page is made of sections, property lists and details that open, and ends in a row of buttons.",
+    "Tabs that switch what a view shows, a menu bar and its menu, and the documents an app has open.",
+    "Lines of code beside a pane whose edge can be dragged.",
     "Notices, tags and progress tell the person what happened and what is happening.",
     "What a view says when it has nothing to show.",
     "Every glyph of the icon font that has a name here.",
     "A question over the page, answered by the row of buttons at its foot.",
+];
+
+const FILES: [(&str, u64, &str); 5] = [
+    ("installer.log", 12_288, "Text"),
+    (
+        "Screenshot from the installer's review page.png",
+        1_468_006,
+        "Image",
+    ),
+    ("ext2-persist.img", 512 << 20, "Disk image"),
+    ("notes.txt", 2_048, "Text"),
+    ("slop.iso", 740 << 20, "Disc image"),
+];
+
+const MENUS: [(&str, &[(&str, Option<&str>)]); 3] = [
+    (
+        "File",
+        &[
+            ("New", Some("Ctrl+N")),
+            ("Open…", Some("Ctrl+O")),
+            ("Save", Some("Ctrl+S")),
+        ],
+    ),
+    (
+        "Edit",
+        &[
+            ("Undo", Some("Ctrl+Z")),
+            ("Redo", None),
+            ("Find…", Some("Ctrl+F")),
+        ],
+    ),
+    (
+        "View",
+        &[("Show the sidebar", None), ("Zoom in", Some("Ctrl++"))],
+    ),
+];
+
+const DOCUMENTS: [(&str, bool); 3] = [
+    ("main.rs", false),
+    ("lib.rs", true),
+    ("a-module-with-a-name-longer-than-its-tab.rs", false),
+];
+
+const CODE: [&str; 6] = [
+    "fn main() {",
+    "\tlet name = \"SlopOS\";",
+    "\tprintln!(\"Hello from {name}\");",
+    "}",
+    "",
+    "// Found: name",
 ];
 
 /// The catalogue as an app: its pages down a sidebar.
@@ -87,16 +167,31 @@ pub struct Catalogue {
     choice: Option<usize>,
     amount: u64,
     grab: Option<SliderGrab>,
-    name: String,
-    note: String,
     /// Each line and whether it has focus.
+    name: (LineInput, bool),
+    note: (LineInput, bool),
     search: (LineInput, bool),
     size: (LineInput, bool),
     filter: (LineInput, bool),
     row: Option<usize>,
     place: Option<usize>,
     person: Option<usize>,
+    found: Option<usize>,
+    file: Option<usize>,
+    descending: bool,
+    folder_open: bool,
+    tree_row: Option<usize>,
+    tree_first: usize,
+    tree_dragging: bool,
     expanded: [bool; 2],
+    tab: usize,
+    menu: Option<usize>,
+    document: usize,
+    caret: (usize, usize),
+    pane: i32,
+    dragging: bool,
+    /// Where the pointer and the pane's edge were at a drag's first move.
+    drag_from: Option<(i32, i32)>,
     dialog: bool,
 }
 
@@ -109,15 +204,29 @@ impl Catalogue {
             choice: Some(0),
             amount: 40,
             grab: None,
-            name: String::from("Ada Lovelace"),
-            note: String::new(),
+            name: (LineInput::with_text(String::from("Ada Lovelace")), false),
+            note: (LineInput::new(), false),
             search: (LineInput::with_text(String::from("disk")), false),
             size: (LineInput::with_text(String::from("12 TB")), false),
             filter: (LineInput::new(), false),
             row: Some(0),
             place: Some(1),
             person: Some(0),
+            found: Some(0),
+            file: Some(1),
+            descending: false,
+            folder_open: true,
+            tree_row: Some(1),
+            tree_first: 0,
+            tree_dragging: false,
             expanded: [true, false],
+            tab: 0,
+            menu: Some(0),
+            document: 0,
+            caret: (2, 1),
+            pane: PANE_WIDTH,
+            dragging: false,
+            drag_from: None,
             dialog: true,
         }
     }
@@ -134,10 +243,13 @@ impl Catalogue {
             2 => self.fields(),
             3 => self.choices(),
             4 => self.lists(),
-            5 => self.structure(),
-            6 => self.feedback(),
-            7 => self.empty(),
-            8 => self.icons(),
+            5 => self.tables(),
+            6 => self.structure(),
+            7 => self.navigation(),
+            8 => self.code(),
+            9 => self.feedback(),
+            10 => self.empty(),
+            11 => self.icons(),
             _ => self.dialogs(),
         };
         let mut page = Page::new(TITLES[index])
@@ -154,26 +266,15 @@ impl Catalogue {
     }
 
     fn sections(sections: Vec<Node<Msg>>) -> Node<Msg> {
-        Node::VStack {
-            children: sections,
-            spacing: space::XL,
-            align: CrossAxisAlignment::Stretch,
-        }
+        column(space::XL, sections)
     }
 
-    fn column(children: Vec<Node<Msg>>) -> Node<Msg> {
-        Node::VStack {
-            children,
-            spacing: space::SM,
-            align: CrossAxisAlignment::Stretch,
-        }
-    }
-
-    fn row(children: Vec<Node<Msg>>) -> Node<Msg> {
-        Node::HStack {
-            children,
-            spacing: space::SM,
-            align: CrossAxisAlignment::Center,
+    /// `child` at `height`, which a view that takes all it is given needs.
+    fn tall(height: i32, child: Node<Msg>) -> Node<Msg> {
+        Node::SizedBox {
+            width: None,
+            height: Some(Length::Px(height)),
+            child: Box::new(child),
         }
     }
 
@@ -201,7 +302,8 @@ impl Catalogue {
         Self::sections(vec![
             Section::new(
                 "Roles",
-                Self::column(
+                column(
+                    space::SM,
                     roles
                         .iter()
                         .map(|&(role, words)| Text::new(words).role(role).into())
@@ -211,7 +313,8 @@ impl Catalogue {
             .into(),
             Section::new(
                 "Tones",
-                Self::column(
+                column(
+                    space::SM,
                     tones
                         .iter()
                         .map(|&(tone, word)| Text::new(word).tone(tone).into())
@@ -221,32 +324,35 @@ impl Catalogue {
             .into(),
             Section::new(
                 "Long text",
-                Self::column(vec![
-                    Text::new(
-                        "Prose wraps at spaces, so a sentence that is longer than its \
-                         box goes on to the next line rather than off its edge.",
-                    )
-                    .wrap()
-                    .into(),
-                    Text::new(
-                        "/usr/local/lib/rustlib/x86_64-unknown-slopos/lib/libstd-a1b2c3d4e5f6a7b8.so --serve --root /media/payload",
-                    )
-                    .role(TextRole::Mono)
-                    .wrap_anywhere()
-                    .into(),
-                    Text::new(
-                        "One line that does not fit its box ends in an ellipsis, and the whole of it shows in a tooltip.",
-                    )
-                    .into(),
-                    Text::new(
-                        "At most two lines: a paragraph cut short keeps its first two lines and \
-                         ends the second in an ellipsis, however much more there was to say.",
-                    )
-                    .wrap()
-                    .max_lines(2)
-                    .into(),
-                    Text::new("Centred").align(TextAlignment::Center).into(),
-                ]),
+                column(
+                    space::SM,
+                    vec![
+                        Text::new(
+                            "Prose wraps at spaces, so a sentence that is longer than its \
+                             box goes on to the next line rather than off its edge.",
+                        )
+                        .wrap()
+                        .into(),
+                        Text::new(
+                            "/usr/local/lib/rustlib/x86_64-unknown-slopos/lib/libstd-a1b2c3d4e5f6a7b8.so --serve --root /media/payload",
+                        )
+                        .role(TextRole::Mono)
+                        .wrap_anywhere()
+                        .into(),
+                        Text::new(
+                            "One line that does not fit its box ends in an ellipsis, and the whole of it shows in a tooltip.",
+                        )
+                        .into(),
+                        Text::new(
+                            "At most two lines: a paragraph cut short keeps its first two lines and \
+                             ends the second in an ellipsis, however much more there was to say.",
+                        )
+                        .wrap()
+                        .max_lines(2)
+                        .into(),
+                        Text::new("Centred").align(TextAlignment::Center).into(),
+                    ],
+                ),
             )
             .into(),
         ])
@@ -254,65 +360,77 @@ impl Catalogue {
 
     fn buttons(&self) -> Node<Msg> {
         let styles = |enabled: bool| {
-            Self::row(vec![
-                Button::new("Install")
-                    .primary()
-                    .on_press(Msg::Press)
-                    .enabled(enabled)
-                    .into(),
-                Button::new("Cancel")
-                    .on_press(Msg::Press)
-                    .enabled(enabled)
-                    .into(),
-                Button::new("Erase")
-                    .destructive()
-                    .on_press(Msg::Press)
-                    .enabled(enabled)
-                    .into(),
-            ])
+            row(
+                space::SM,
+                vec![
+                    Button::new("Install")
+                        .primary()
+                        .on_press(Msg::Press)
+                        .enabled(enabled)
+                        .into(),
+                    Button::new("Cancel")
+                        .on_press(Msg::Press)
+                        .enabled(enabled)
+                        .into(),
+                    Button::new("Erase")
+                        .destructive()
+                        .on_press(Msg::Press)
+                        .enabled(enabled)
+                        .into(),
+                ],
+            )
         };
-        let tools = Self::row(vec![
-            IconButton::new(Icon::FolderPlus, "New folder")
-                .on_press(Msg::Press)
-                .into(),
-            IconButton::new(Icon::LayoutGrid, "Show as grid")
-                .on_press(Msg::Press)
-                .active(true)
-                .into(),
-            IconButton::new(Icon::Trash, "Move to trash")
-                .on_press(Msg::Press)
-                .enabled(false)
-                .into(),
-        ]);
+        let tools = row(
+            space::SM,
+            vec![
+                IconButton::new(Icon::FolderPlus, "New folder")
+                    .on_press(Msg::Press)
+                    .into(),
+                IconButton::new(Icon::LayoutGrid, "Show as grid")
+                    .on_press(Msg::Press)
+                    .active(true)
+                    .into(),
+                IconButton::new(Icon::Trash, "Move to trash")
+                    .on_press(Msg::Press)
+                    .enabled(false)
+                    .into(),
+            ],
+        );
         Self::sections(vec![
             Section::new(
                 "Styles",
-                Self::column(vec![
-                    styles(true),
-                    styles(false),
-                    Text::new(format!("Pressed {} times", self.presses))
-                        .tone(Tone::Secondary)
-                        .into(),
-                ]),
+                column(
+                    space::SM,
+                    vec![
+                        styles(true),
+                        styles(false),
+                        Text::new(format!("Pressed {} times", self.presses))
+                            .tone(Tone::Secondary)
+                            .into(),
+                    ],
+                ),
             )
             .into(),
             Section::new(
                 "A row that ends a page",
-                Self::column(vec![
-                    ButtonRow::new()
-                        .back(Button::new("Back").on_press(Msg::Press))
-                        .confirm(Button::new("Continue").on_press(Msg::Press))
-                        .into(),
-                    ButtonRow::new()
-                        .cancel(Button::new("Cancel").on_press(Msg::Press))
-                        .destructive(Button::new("Erase disk").on_press(Msg::Press))
-                        .into(),
-                    ButtonRow::new()
-                        .aside(Button::new("Show log").on_press(Msg::Press))
-                        .cancel(Button::new("Cancel").on_press(Msg::Press))
-                        .confirm(Button::new("Install").on_press(Msg::Press).enabled(false))
-                        .into(),
-                ]),
+                column(
+                    space::SM,
+                    vec![
+                        ButtonRow::new()
+                            .back(Button::new("Back").on_press(Msg::Press))
+                            .confirm(Button::new("Continue").on_press(Msg::Press))
+                            .into(),
+                        ButtonRow::new()
+                            .cancel(Button::new("Cancel").on_press(Msg::Press))
+                            .destructive(Button::new("Erase disk").on_press(Msg::Press))
+                            .into(),
+                        ButtonRow::new()
+                            .aside(Button::new("Show log").on_press(Msg::Press))
+                            .cancel(Button::new("Cancel").on_press(Msg::Press))
+                            .confirm(Button::new("Install").on_press(Msg::Press).enabled(false))
+                            .into(),
+                    ],
+                ),
             )
             .into(),
             Section::new("Icon buttons", tools).into(),
@@ -322,31 +440,34 @@ impl Catalogue {
     fn fields(&self) -> Node<Msg> {
         Self::sections(vec![
             Section::new(
-                "Text field",
-                Self::column(vec![
-                    Node::TextField {
-                        text: self.name.clone(),
-                        placeholder: String::from("Name"),
-                        on_change: Some(Msg::Name),
-                        max_length: None,
-                        read_only: false,
-                    },
-                    Node::TextField {
-                        text: self.note.clone(),
-                        placeholder: String::from("Placeholder"),
-                        on_change: Some(Msg::Note),
-                        max_length: None,
-                        read_only: false,
-                    },
-                ]),
+                "A line of text",
+                column(
+                    space::SM,
+                    vec![
+                        Self::line(&self.name, "Name", Msg::Name),
+                        Self::line(&self.note, "Placeholder", Msg::Note),
+                    ],
+                ),
             )
             .into(),
             Section::new(
                 "Search",
-                SearchField::new(self.search.0.text.clone(), self.search.0.caret)
-                    .focused(self.search.1)
-                    .count("3 found")
-                    .on_input(Msg::Search),
+                column(
+                    space::SM,
+                    vec![
+                        SearchField::new(self.search.0.text.clone(), self.search.0.caret)
+                            .focused(self.search.1)
+                            .placeholder("Disk name")
+                            .count("3 found")
+                            .on_input(Msg::Search)
+                            .into(),
+                        SearchField::new("zzz", 3)
+                            .count("No results")
+                            .invalid(true)
+                            .tab_stop(false)
+                            .into(),
+                    ],
+                ),
             )
             .into(),
             Section::new(
@@ -367,77 +488,82 @@ impl Catalogue {
         ])
     }
 
+    fn line(
+        (line, focused): &(LineInput, bool),
+        placeholder: &str,
+        on_input: fn(LineEditInput) -> Msg,
+    ) -> Node<Msg> {
+        Node::LineEdit {
+            text: line.text.clone(),
+            placeholder: String::from(placeholder),
+            caret: line.caret,
+            focused: *focused,
+            icon: None,
+            suffix: String::new(),
+            invalid: false,
+            tab_stop: true,
+            on_input: Some(on_input),
+        }
+    }
+
     fn choices(&self) -> Node<Msg> {
-        let option = |label: &str, detail: &str, enabled| RadioOption {
+        let options = vec![
+            ListRow::new("Erase disk and install"),
+            ListRow::new("Install beside what is there").disabled("This disk has no free space."),
+            ListRow::new("Reinstall SlopOS").detail("Keeps your files."),
+        ];
+        let checkbox = |checked: bool, label: &str, on_toggle: Option<Msg>| Node::Checkbox {
+            checked,
             label: String::from(label),
-            detail: String::from(detail),
-            enabled,
+            enabled: on_toggle.is_some(),
+            on_toggle,
         };
         Self::sections(vec![
             Section::new(
                 "One of several",
-                Node::RadioGroup {
-                    options: vec![
-                        option("Erase disk and install", "", true),
-                        option(
-                            "Install beside what is there",
-                            "This disk has no free space.",
-                            false,
-                        ),
-                        option("Reinstall SlopOS", "Keeps your files.", true),
-                    ],
-                    selected: self.choice,
-                    on_select: Some(Msg::Choose),
-                },
+                List::new(options)
+                    .selected(self.choice)
+                    .on_select(Msg::Choose),
             )
             .into(),
             Section::new(
                 "On or off",
-                Self::column(vec![
-                    Node::Checkbox {
-                        checked: self.checked[0],
-                        label: String::from("Start automatically"),
-                        on_toggle: Some(Msg::Toggle(0)),
-                        enabled: true,
-                    },
-                    Node::Checkbox {
-                        checked: self.checked[1],
-                        label: String::from("Show hidden files"),
-                        on_toggle: Some(Msg::Toggle(1)),
-                        enabled: true,
-                    },
-                    Node::Checkbox {
-                        checked: true,
-                        label: String::from("Set by your administrator"),
-                        on_toggle: None,
-                        enabled: false,
-                    },
-                ]),
+                column(
+                    space::SM,
+                    vec![
+                        checkbox(self.checked[0], "Start automatically", Some(Msg::Toggle(0))),
+                        checkbox(self.checked[1], "Show hidden files", Some(Msg::Toggle(1))),
+                        checkbox(true, "Set by your administrator", None),
+                    ],
+                ),
             )
             .into(),
             Section::new(
                 "An amount",
-                Self::column(vec![
-                    Text::new(format!("{} GB", self.amount)).into(),
-                    Node::Slider {
-                        value: self.amount,
-                        min: 8,
-                        max: 120,
-                        step: 1,
-                        enabled: true,
-                        grab: self.grab,
-                        on_input: Some(Msg::Slide),
-                    },
-                    Node::Slider {
-                        value: 64,
-                        min: 8,
-                        max: 120,
-                        step: 1,
-                        enabled: false,
-                        grab: None,
-                        on_input: None,
-                    },
-                ]),
+                column(
+                    space::SM,
+                    vec![
+                        Text::new(format!("{} GB", self.amount)).into(),
+                        Node::Slider {
+                            value: self.amount,
+                            min: 8,
+                            max: 120,
+                            step: 1,
+                            enabled: true,
+                            grab: self.grab,
+                            on_input: Some(Msg::Slide),
+                        },
+                        Node::Slider {
+                            value: 64,
+                            min: 8,
+                            max: 120,
+                            step: 1,
+                            enabled: false,
+                            grab: None,
+                            on_input: None,
+                        },
+                    ],
+                ),
             )
             .into(),
         ])
@@ -474,6 +600,12 @@ impl Catalogue {
         let people = ["ada", "grace", "Édouard"]
             .map(|name| ListRow::new(name).avatar())
             .to_vec();
+        let found = [
+            ("view.rs", "apps/src/editor"),
+            ("disks.rs", "userland/src/apps/installer/engine/probe"),
+        ]
+        .map(|(name, folder)| ListRow::new(name).detail_tail(folder))
+        .to_vec();
         Self::sections(vec![
             Section::new(
                 "Rows with details",
@@ -488,19 +620,115 @@ impl Catalogue {
             )
             .into(),
             Section::new(
+                "Cut at the start",
+                List::new(found).selected(self.found).on_select(Msg::Found),
+            )
+            .into(),
+            Section::new(
                 "People",
-                Self::column(vec![
-                    Node::Avatar {
-                        name: String::from("Ada"),
-                    },
-                    List::new(people)
-                        .selected(self.person)
-                        .on_select(Msg::Person)
-                        .into(),
-                ]),
+                column(
+                    space::SM,
+                    vec![
+                        Node::Avatar {
+                            name: String::from("Ada"),
+                        },
+                        List::new(people)
+                            .selected(self.person)
+                            .on_select(Msg::Person)
+                            .into(),
+                    ],
+                ),
             )
             .into(),
         ])
+    }
+
+    fn tables(&self) -> Node<Msg> {
+        let sort = match self.descending {
+            true => SortIndicator::Descending,
+            false => SortIndicator::Ascending,
+        };
+        let heading = |label: &str, width, sorted: bool| TableColumn {
+            label: String::from(label),
+            width,
+            sort_indicator: sorted.then_some(sort),
+        };
+        let cell = |text: &str| -> Node<Msg> { Text::new(text).into() };
+        let mut files = FILES.to_vec();
+        if self.descending {
+            files.reverse();
+        }
+        let table = Node::Table {
+            columns: vec![
+                heading("Name", TableColumnWidth::Flex(2), true),
+                heading("Size", TableColumnWidth::Fixed(SIZE_COLUMN), false),
+                heading("Kind", TableColumnWidth::Flex(1), false),
+            ],
+            rows: files
+                .iter()
+                .map(|&(name, size, kind)| {
+                    vec![cell(name), cell(&Bytes(size).to_string()), cell(kind)]
+                })
+                .collect(),
+            selected: self.file,
+            on_select: Some(Msg::File),
+            on_activate: None,
+            on_header_click: Some(Msg::Sort),
+            on_context_menu: None,
+            shows: 0,
+        };
+        let rows = self.tree_rows();
+        let total_rows = rows.len();
+        let tree = Node::TreeView {
+            rows: rows
+                .into_iter()
+                .skip(self.tree_first)
+                .take(TREE_ROWS as usize)
+                .collect(),
+            total_rows,
+            first_row: self.tree_first,
+            selected: self.tree_row,
+            focused: false,
+            scroll_dragging: self.tree_dragging,
+            on_input: Some(Msg::Tree),
+        };
+        let row = StyleSheet::current().row_height;
+        Self::sections(vec![
+            Section::new("A table", Self::tall(row * (TABLE_ROWS + 1), table)).into(),
+            Section::new("A tree", Self::tall(row * TREE_ROWS, tree)).into(),
+        ])
+    }
+
+    fn tree_rows(&self) -> Vec<TreeRow> {
+        let entry = |label: &str, depth, is_dir| TreeRow {
+            label: String::from(label),
+            depth,
+            is_dir,
+            expanded: false,
+            active: false,
+            modified: false,
+        };
+        let mut rows = vec![TreeRow {
+            expanded: self.folder_open,
+            ..entry("src", 0, true)
+        }];
+        if self.folder_open {
+            rows.push(TreeRow {
+                active: true,
+                ..entry("main.rs", 1, false)
+            });
+            rows.push(TreeRow {
+                modified: true,
+                ..entry("lib.rs", 1, false)
+            });
+            rows.push(entry(
+                "a-module-with-a-name-longer-than-the-tree.rs",
+                1,
+                false,
+            ));
+        }
+        rows.push(entry("Cargo.toml", 0, false));
+        rows
     }
 
     fn structure(&self) -> Node<Msg> {
@@ -521,19 +749,134 @@ impl Catalogue {
             Section::new("A property list", properties).into(),
             Section::new(
                 "Details",
-                Self::column(vec![
-                    Disclosure::new("Show details", log)
-                        .expanded(self.expanded[0])
-                        .on_toggle(Msg::Expand(0))
-                        .into(),
-                    Disclosure::new("Advanced", Text::new("Nothing more to set."))
-                        .expanded(self.expanded[1])
-                        .on_toggle(Msg::Expand(1))
-                        .into(),
-                ]),
+                column(
+                    space::SM,
+                    vec![
+                        Disclosure::new("Show details", log)
+                            .expanded(self.expanded[0])
+                            .on_toggle(Msg::Expand(0))
+                            .into(),
+                        Disclosure::new("Advanced", Text::new("Nothing more to set."))
+                            .expanded(self.expanded[1])
+                            .on_toggle(Msg::Expand(1))
+                            .into(),
+                    ],
+                ),
             )
             .into(),
         ])
+    }
+
+    fn navigation(&self) -> Node<Msg> {
+        let panel = |words: &str| -> Node<Msg> { Text::new(words).wrap().into() };
+        let tabs = Node::TabBar {
+            tabs: ["General", "Advanced", "About"].map(String::from).to_vec(),
+            active: self.tab,
+            on_change: Some(Msg::Tab),
+            content: vec![
+                panel("What most people change."),
+                panel("What few people need."),
+                panel("SlopOS, from the source in /src/slopos."),
+            ],
+        };
+        let shown = self.menu.unwrap_or(0);
+        let items = MENUS[shown]
+            .1
+            .iter()
+            .map(|&(label, shortcut)| MenuItem {
+                label,
+                shortcut,
+                enabled: label != "Redo",
+                kind: MenuItemKind::Action,
+            })
+            .collect();
+        let menus = column(
+            space::SM,
+            vec![
+                Node::MenuBar {
+                    titles: MENUS
+                        .iter()
+                        .map(|(title, _)| String::from(*title))
+                        .collect(),
+                    open: self.menu,
+                    on_input: Some(Msg::MenuBar),
+                },
+                row(
+                    0,
+                    vec![Node::Menu {
+                        items,
+                        on_action: Some(|_| Msg::Press),
+                    }],
+                ),
+            ],
+        );
+        let documents = Node::EditorTabs {
+            tabs: DOCUMENTS
+                .iter()
+                .map(|&(title, modified)| EditorTab {
+                    title: String::from(title),
+                    modified,
+                })
+                .collect(),
+            active: self.document,
+            on_input: Some(Msg::Document),
+        };
+        Self::sections(vec![
+            Section::new("Tabs", tabs).into(),
+            Section::new("A menu bar and its menu", menus).into(),
+            Section::new("Open documents", documents).into(),
+        ])
+    }
+
+    fn code(&self) -> Node<Msg> {
+        let hit = CODE[5].find("name").map(|at| (at, at + "name".len()));
+        let lines = CODE
+            .iter()
+            .enumerate()
+            .map(|(number, text)| CodeLine {
+                number,
+                text: String::from(*text),
+                spans: Vec::new(),
+                highlights: hit.filter(|_| number == 5).into_iter().collect(),
+            })
+            .collect();
+        let code = Node::CodeView {
+            lines,
+            first_line: 0,
+            total_lines: CODE.len(),
+            first_col: 0,
+            tab_width: 4,
+            cursor: Some(self.caret),
+            selection: Some(((1, 5), (1, 9))),
+            show_line_numbers: true,
+            focused: false,
+            selecting: false,
+            scroll_dragging: false,
+            on_input: Some(Msg::Code),
+        };
+        let pane = Node::SizedBox {
+            width: Some(Length::Px(self.pane)),
+            height: None,
+            child: Box::new(Sidebar::empty("A pane as wide as its edge is dragged.").into()),
+        };
+        let split = Node::HStack {
+            children: vec![
+                pane,
+                Node::DragHandle {
+                    orientation: Orientation::Vertical,
+                    active: self.dragging,
+                    on_drag: Some(Msg::Drag),
+                },
+                Node::Expand {
+                    weight: 1,
+                    child: Box::new(code),
+                },
+            ],
+            spacing: 0,
+            align: CrossAxisAlignment::Stretch,
+        };
+        let height = crate::text::cell_height() * (CODE.len() as i32 + 1);
+        Section::new("A pane and the code beside it", Self::tall(height, split)).into()
     }
 
     fn feedback(&self) -> Node<Msg> {
@@ -548,76 +891,97 @@ impl Catalogue {
         Self::sections(vec![
             Section::new(
                 "Notices",
-                Self::column(vec![
-                    notice(
-                        Tone::Info,
-                        "Developer tools aren't on this installer",
-                        "They won't be installed.",
-                    ),
-                    notice(
-                        Tone::Success,
-                        "SlopOS is installed",
-                        "Remove the USB stick, then restart.",
-                    ),
-                    notice(
-                        Tone::Warning,
-                        "The battery is low",
-                        "Plug in the computer soon.",
-                    ),
-                    Notice::new(Tone::Danger, "SlopOS couldn't be installed")
-                        .body("The installer stopped while copying the system.")
-                        .action(Button::new("Try again").on_press(Msg::Press))
-                        .into(),
-                ]),
+                column(
+                    space::SM,
+                    vec![
+                        notice(
+                            Tone::Info,
+                            "Developer tools aren't on this installer",
+                            "They won't be installed.",
+                        ),
+                        notice(
+                            Tone::Success,
+                            "SlopOS is installed",
+                            "Remove the USB stick, then restart.",
+                        ),
+                        notice(
+                            Tone::Warning,
+                            "The battery is low",
+                            "Plug in the computer soon.",
+                        ),
+                        Notice::new(Tone::Danger, "SlopOS couldn't be installed")
+                            .body("The installer stopped while copying the system.")
+                            .action(Button::new("Try again").on_press(Msg::Press))
+                            .into(),
+                    ],
+                ),
             )
             .into(),
             Section::new(
                 "Tags",
-                Self::row(vec![
-                    Tag::new("Erased", Tone::Danger).into(),
-                    Tag::new("New", Tone::Success).into(),
-                    Tag::new("Kept", Tone::Secondary).into(),
-                ]),
+                row(
+                    space::SM,
+                    vec![
+                        Tag::new("Erased", Tone::Danger).into(),
+                        Tag::new("New", Tone::Success).into(),
+                        Tag::new("Kept", Tone::Secondary).into(),
+                    ],
+                ),
+            )
+            .into(),
+            Section::new(
+                "Status",
+                column(
+                    space::SM,
+                    vec![
+                        StatusBar::new("12 files and 3 folders")
+                            .end("Ln 4, Col 18")
+                            .into(),
+                        StatusBar::new("Couldn't save notes.txt. Try again.")
+                            .tone(Tone::Danger)
+                            .into(),
+                    ],
+                ),
             )
             .into(),
             Section::new(
                 "Progress",
-                Self::column(vec![
-                    Node::ProgressBar {
-                        value: Some(62),
-                        label: String::from("62%"),
-                        tone: Tone::Accent,
-                    },
-                    Node::ProgressBar {
-                        value: None,
-                        label: String::new(),
-                        tone: Tone::Accent,
-                    },
-                    Node::PartitionBar {
-                        segments: vec![
-                            segment("EFI", 1, SegmentFill::Series(1)),
-                            segment("SlopOS", 60, SegmentFill::Series(0)),
-                            segment("free", 30, SegmentFill::Hatched),
-                        ],
-                        highlight: Some(1),
-                    },
-                ]),
+                column(
+                    space::SM,
+                    vec![
+                        Node::ProgressBar {
+                            value: Some(62),
+                            label: String::from("62%"),
+                            tone: Tone::Accent,
+                        },
+                        Node::ProgressBar {
+                            value: None,
+                            label: String::new(),
+                            tone: Tone::Accent,
+                        },
+                        Node::PartitionBar {
+                            segments: vec![
+                                segment("EFI", 1, SegmentFill::Series(1)),
+                                segment("SlopOS", 60, SegmentFill::Series(0)),
+                                segment("free", 30, SegmentFill::Hatched),
+                            ],
+                            highlight: Some(1),
+                        },
+                    ],
+                ),
             )
             .into(),
         ])
     }
 
     fn empty(&self) -> Node<Msg> {
-        Node::SizedBox {
-            width: None,
-            height: Some(crate::constraints::Length::Px(EMPTY_HEIGHT)),
-            child: Box::new(
-                EmptyState::new(Icon::FolderOpen, "This folder is empty")
-                    .body("Files you add here will show up in this list.")
-                    .action(Button::new("New folder").on_press(Msg::Press))
-                    .into(),
-            ),
-        }
+        Self::tall(
+            EMPTY_HEIGHT,
+            EmptyState::new(Icon::FolderOpen, "This folder is empty")
+                .body("Files you add here will show up in this list.")
+                .action(Button::new("New folder").on_press(Msg::Press))
+                .into(),
+        )
     }
 
     fn icons(&self) -> Node<Msg> {
@@ -631,33 +995,34 @@ impl Catalogue {
     }
 
     fn dialogs(&self) -> Node<Msg> {
-        Self::column(vec![
-            Text::new("A dialog covers the page until it is answered.")
-                .wrap()
-                .into(),
-            Self::row(vec![
-                Button::new("Show the dialog")
-                    .on_press(Msg::OpenDialog)
+        column(
+            space::SM,
+            vec![
+                Text::new("A dialog covers the page until it is answered.")
+                    .wrap()
                     .into(),
-            ]),
-        ])
+                row(
+                    space::SM,
+                    vec![
+                        Button::new("Show the dialog")
+                            .on_press(Msg::OpenDialog)
+                            .into(),
+                    ],
+                ),
+            ],
+        )
     }
 
     fn dialog_node(&self) -> Node<Msg> {
-        Node::Dialog {
-            title: String::from("Erase this disk?"),
-            icon: None,
-            content: Box::new(
-                Text::new("Everything on KINGSTON SNV3S1000G will be deleted.")
-                    .wrap()
-                    .into(),
-            ),
-            footer: ButtonRow::new()
-                .cancel(Button::new("Cancel").on_press(Msg::CloseDialog))
-                .destructive(Button::new("Erase").on_press(Msg::CloseDialog)),
-            on_dismiss: Some(Msg::CloseDialog),
-            anchor: None,
-        }
+        Dialog::new("Erase this disk?")
+            .content(Text::new("Everything on KINGSTON SNV3S1000G will be deleted.").wrap())
+            .footer(
+                ButtonRow::new()
+                    .cancel(Button::new("Cancel").on_press(Msg::CloseDialog))
+                    .destructive(Button::new("Erase").on_press(Msg::CloseDialog)),
+            )
+            .on_dismiss(Msg::CloseDialog)
+            .into()
     }
 
     fn toolbar(&self) -> Node<Msg> {
@@ -678,11 +1043,12 @@ impl Catalogue {
                     .on_press(Msg::Step(true)),
             )
             .end(Node::SizedBox {
-                width: Some(crate::constraints::Length::Px(SEARCH_WIDTH)),
+                width: Some(Length::Px(SEARCH_WIDTH)),
                 height: None,
                 child: Box::new(
                     SearchField::new(self.filter.0.text.clone(), self.filter.0.caret)
                         .focused(self.filter.1)
+                        .placeholder("Find a page")
                         .count(count)
                         .on_input(Msg::Filter)
                         .into(),
@@ -713,6 +1079,31 @@ impl Catalogue {
         self.page = page.min(PAGES.len() - 1);
         self.dialog = self.page == DIALOG;
     }
+
+    fn tree(&mut self, input: TreeInput) {
+        match input {
+            TreeInput::Toggle { row: 0 } => self.folder_open = !self.folder_open,
+            TreeInput::Activate { row } => self.tree_row = Some(row),
+            TreeInput::Scroll { delta_rows } => {
+                self.tree_first = self.tree_first.saturating_add_signed(delta_rows as isize);
+            }
+            TreeInput::ScrollTo { first_row } => {
+                self.tree_first = first_row;
+                self.tree_dragging = true;
+            }
+            TreeInput::Release => self.tree_dragging = false,
+            _ => {}
+        }
+        let last = self.tree_rows().len().saturating_sub(TREE_ROWS as usize);
+        self.tree_first = self.tree_first.min(last);
+    }
+
+    fn menu_bar(&mut self, input: MenuBarInput) {
+        self.menu = match input {
+            MenuBarInput::Open { index, .. } | MenuBarInput::Hover { index, .. } => Some(index),
+            MenuBarInput::Close => None,
+        };
+    }
 }
 
 /// Applies `input` to a line and whether it has focus.
@@ -730,32 +1121,38 @@ fn edit((line, focused): &mut (LineInput, bool), input: LineEditInput) {
 
 const EMPTY_HEIGHT: i32 = 360;
 const SEARCH_WIDTH: i32 = 220;
+const SIZE_COLUMN: i32 = 96;
+const PANE_WIDTH: i32 = 160;
+
+// Fewer rows than there are, so the table and the tree scroll.
+const TABLE_ROWS: i32 = 3;
+const TREE_ROWS: i32 = 3;
 
 impl App for Catalogue {
     type Message = Msg;
 
     fn view(&self) -> Node<Msg> {
-        let window = Node::VStack {
+        let body = Node::HStack {
             children: vec![
-                self.toolbar(),
+                self.sidebar(),
                 Node::Expand {
                     weight: 1,
-                    child: Box::new(Node::HStack {
-                        children: vec![
-                            self.sidebar(),
-                            Node::Expand {
-                                weight: 1,
-                                child: Box::new(self.page(self.page)),
-                            },
-                        ],
-                        spacing: 0,
-                        align: CrossAxisAlignment::Stretch,
-                    }),
+                    child: Box::new(self.page(self.page)),
                 },
             ],
             spacing: 0,
             align: CrossAxisAlignment::Stretch,
         };
+        let window = column(
+            0,
+            vec![
+                self.toolbar(),
+                Node::Expand {
+                    weight: 1,
+                    child: Box::new(body),
+                },
+            ],
+        );
         if self.page == DIALOG && self.dialog {
             return Node::ZStack {
                 children: vec![window, self.dialog_node()],
@@ -785,24 +1182,45 @@ impl App for Catalogue {
             }
             Msg::Slide(SliderInput::Change(v)) => self.amount = v,
             Msg::Slide(SliderInput::End) => self.grab = None,
-            Msg::Name(text) => self.name = text,
-            Msg::Note(text) => self.note = text,
+            Msg::Name(input) => edit(&mut self.name, input),
+            Msg::Note(input) => edit(&mut self.note, input),
             Msg::Search(input) => edit(&mut self.search, input),
             Msg::Size(input) => edit(&mut self.size, input),
             Msg::Select(row) => self.row = Some(row),
             Msg::Place(row) => self.place = Some(row),
             Msg::Person(row) => self.person = Some(row),
+            Msg::Found(row) => self.found = Some(row),
+            Msg::File(row) => self.file = Some(row),
+            Msg::Sort(_) => {
+                self.descending = !self.descending;
+                self.file = self.file.map(|row| FILES.len() - 1 - row);
+            }
+            Msg::Tree(input) => self.tree(input),
             Msg::Expand(i) => self.expanded[i] = !self.expanded[i],
+            Msg::Tab(tab) => self.tab = tab,
+            Msg::MenuBar(input) => self.menu_bar(input),
+            Msg::Document(TabInput::Select(tab)) => self.document = tab,
+            Msg::Document(TabInput::Close(_)) => return Action::None,
+            Msg::Code(CodeInput::Click { line, col, .. }) => self.caret = (line, col),
+            Msg::Code(_) => return Action::None,
+            Msg::Drag(DragInput::Begin) => self.dragging = true,
+            Msg::Drag(DragInput::Move(x)) => {
+                let (x0, pane) = *self.drag_from.get_or_insert((x, self.pane));
+                self.pane = (pane + x - x0).clamp(PANE_WIDTH / 2, PANE_WIDTH * 2);
+            }
+            Msg::Drag(DragInput::End) => {
+                self.dragging = false;
+                self.drag_from = None;
+            }
             Msg::OpenDialog => self.dialog = true,
             Msg::CloseDialog => self.dialog = false,
         }
         Action::Rebuild
     }
 
-    /// The indeterminate bar on the feedback page moves only as often as it
-    /// is painted.
+    /// The indeterminate bar moves only as often as it is painted.
     fn tick_interval_ms(&self) -> Option<u64> {
-        (self.page == 6).then_some(TICK_MS)
+        (self.page == FEEDBACK).then_some(TICK_MS)
     }
 
     fn tick(&mut self) -> Action {

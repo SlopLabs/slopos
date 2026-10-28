@@ -3,23 +3,23 @@ use std::any::Any;
 use slopos_abi::draw::Color32;
 use slopos_abi::pixel::PixelFormat;
 use slopos_gfx::DrawBuffer;
-use slopos_theme_core::{Tone, space};
+use slopos_theme_core::Tone;
 
 use super::{FixedSizeWidget, key};
-use crate::components::Text;
+use crate::components::{ListRow, Text};
 use crate::constraints::{BoxConstraints, CrossAxisAlignment, Rect, Size};
-use crate::event::{EventPhase, MessageSink, NamedKey, PointerButton, WidgetEvent};
+use crate::event::{MessageSink, NamedKey, PointerButton, WidgetEvent};
 use crate::focus::FocusManager;
 use crate::layout::{HStackWidget, VStackWidget};
-use crate::node::{BarSegment, ButtonStyle, RadioOption, SegmentFill};
+use crate::node::{BarSegment, ButtonStyle, SegmentFill};
 use crate::paint::PaintContext;
 use crate::sender::AppSender;
 use crate::style::StyleSheet;
 use crate::traits::{FocusPolicy, MeasureCtx, Widget, WidgetId, measure_widget, place_widget};
 use crate::widgets::button::ButtonWidget;
+use crate::widgets::list::ListWidget;
 use crate::widgets::partition_bar::{MIN_SEGMENT_WIDTH, PartitionBarWidget, segment_widths};
 use crate::widgets::progress_bar::sweep;
-use crate::widgets::radio_group::RadioGroupWidget;
 use crate::widgets::slider::{Range, SliderGrab, SliderInput, SliderWidget};
 use crate::widgets::text::TextWidget;
 use slopos_windowing::UiQueue;
@@ -28,7 +28,7 @@ const GIB: u64 = 1 << 30;
 const MIB: u64 = 1 << 20;
 
 fn lay_out(widget: &mut dyn Widget, constraints: BoxConstraints, at: (i32, i32)) -> Size {
-    let style = StyleSheet::dark();
+    let style = StyleSheet::current();
     let mut ctx = MeasureCtx { style: &style };
     let size = measure_widget(widget, constraints, &mut ctx);
     place_widget(widget, Rect::new(at.0, at.1, size.width, size.height));
@@ -37,9 +37,7 @@ fn lay_out(widget: &mut dyn Widget, constraints: BoxConstraints, at: (i32, i32))
 
 fn deliver(widget: &mut dyn Widget, event: WidgetEvent) -> (bool, MessageSink) {
     let mut sink = MessageSink::new();
-    let consumed = widget
-        .event(&event, EventPhase::Target, &mut sink)
-        .is_consumed();
+    let consumed = widget.event(&event, &mut sink).is_consumed();
     (consumed, sink)
 }
 
@@ -52,185 +50,10 @@ fn press(x: i32, y: i32) -> WidgetEvent {
     }
 }
 
-fn option(label: &str, detail: &str, enabled: bool) -> RadioOption {
-    RadioOption {
-        label: String::from(label),
-        detail: String::from(detail),
-        enabled,
-    }
-}
-
-fn radio_group(options: Vec<RadioOption>, selected: Option<usize>) -> RadioGroupWidget {
-    let mut group = RadioGroupWidget::new(
-        options,
-        selected,
-        Some(Box::new(|i: usize| Box::new(i) as Box<dyn Any>)),
-    );
-    lay_out(
-        &mut group,
-        BoxConstraints::loose(Size::new(400, 400)),
-        (10, 20),
-    );
-    group
-}
-
 fn focused(widget: &mut dyn Widget) {
-    widget.event(
-        &WidgetEvent::FocusGained,
-        EventPhase::Target,
-        &mut MessageSink::new(),
-    );
+    widget.event(&WidgetEvent::FocusGained, &mut MessageSink::new());
 }
 
-fn chosen(sink: &mut MessageSink) -> Vec<usize> {
-    sink.drain_typed::<usize>()
-}
-
-/// Rows stack in order with the group's spacing; a detail is a second line
-/// under its label.
-pub(super) fn test_radio_group_stacks_its_options() {
-    let style = StyleSheet::dark();
-    let line = crate::text::ui::line_height(crate::text::BODY.size);
-    let label = style.checkbox_size.max(line).max(style.min_target);
-    let mut group = radio_group(
-        vec![
-            option("Erase", "", true),
-            option("Reinstall", "keeps what nvme0n1p3 holds", true),
-            option("Reuse", "", true),
-        ],
-        Some(0),
-    );
-    let size = group.measured_size();
-    assert_eq!(size.height, label * 3 + line + space::XS * 2);
-    assert!(size.width > style.checkbox_size + style.checkbox_gap);
-    assert_eq!(
-        group.layout_rect(),
-        Rect::new(10, 20, size.width, size.height)
-    );
-
-    let detail_bottom = 20 + label * 2 + line + space::XS - 1;
-    let (consumed, mut sink) = deliver(&mut group, press(12, detail_bottom));
-    assert!(consumed);
-    assert_eq!(chosen(&mut sink), [1]);
-    let (consumed, _) = deliver(&mut group, press(12, detail_bottom + 1));
-    assert!(!consumed, "the gap between options is no option's");
-    let third_row = 20 + label * 2 + line + space::XS * 2;
-    let (consumed, mut sink) = deliver(&mut group, press(12, third_row + 1));
-    assert!(consumed);
-    assert_eq!(chosen(&mut sink), [2]);
-    assert_eq!(group.selected(), Some(2));
-}
-
-/// A disabled option takes no click, and the press goes no further.
-pub(super) fn test_radio_group_click_on_a_disabled_option_chooses_nothing() {
-    let style = StyleSheet::dark();
-    let line = crate::text::ui::line_height(crate::text::BODY.size);
-    let label = style.checkbox_size.max(line).max(style.min_target);
-    let mut group = radio_group(
-        vec![
-            option("Erase", "", true),
-            option("Beside", "too small", false),
-        ],
-        Some(0),
-    );
-    let (consumed, mut sink) = deliver(&mut group, press(12, 20 + label + space::XS + 1));
-    assert!(consumed);
-    assert!(chosen(&mut sink).is_empty());
-    assert_eq!(group.selected(), Some(0));
-}
-
-/// The arrows move the choice, skipping disabled options and wrapping at
-/// both ends.
-pub(super) fn test_radio_group_arrows_skip_disabled_and_wrap() {
-    let mut group = radio_group(
-        vec![
-            option("a", "", true),
-            option("b", "", false),
-            option("c", "", true),
-        ],
-        Some(0),
-    );
-    focused(&mut group);
-    let steps = [
-        (NamedKey::Down, 2),
-        (NamedKey::Down, 0),
-        (NamedKey::Up, 2),
-        (NamedKey::Left, 0),
-        (NamedKey::Right, 2),
-    ];
-    for (named, expected) in steps {
-        let (consumed, mut sink) = deliver(&mut group, key(named, false));
-        assert!(consumed);
-        assert_eq!(chosen(&mut sink), [expected]);
-        assert_eq!(group.selected(), Some(expected));
-    }
-}
-
-/// Keys carry no position, so a group that is not focused leaves them to
-/// whatever is.
-pub(super) fn test_radio_group_keys_only_reach_a_focused_group() {
-    let mut group = radio_group(vec![option("a", "", true), option("b", "", true)], Some(0));
-    let (consumed, mut sink) = deliver(&mut group, key(NamedKey::Down, false));
-    assert!(!consumed);
-    assert!(chosen(&mut sink).is_empty());
-    assert_eq!(group.selected(), Some(0));
-}
-
-/// With nothing chosen, Space chooses the first option that can be; with
-/// one chosen it changes nothing.
-pub(super) fn test_radio_group_space_picks_the_first_enabled() {
-    let mut group = radio_group(
-        vec![
-            option("a", "", false),
-            option("b", "", true),
-            option("c", "", true),
-        ],
-        None,
-    );
-    focused(&mut group);
-    let (consumed, mut sink) = deliver(&mut group, key(NamedKey::Space, false));
-    assert!(consumed);
-    assert_eq!(chosen(&mut sink), [1]);
-    let (consumed, mut sink) = deliver(&mut group, key(NamedKey::Space, false));
-    assert!(consumed);
-    assert!(chosen(&mut sink).is_empty());
-}
-
-/// The group is one tab stop however many options it has, and none when no
-/// option can be chosen.
-pub(super) fn test_radio_group_is_one_tab_stop() {
-    let chain = |options: Vec<RadioOption>| {
-        let children: Vec<Box<dyn Widget>> = vec![
-            Box::new(FixedSizeWidget::focusable(10, 10)),
-            Box::new(RadioGroupWidget::new(options, None, None)),
-            Box::new(FixedSizeWidget::focusable(10, 10)),
-        ];
-        let stack = VStackWidget::new(children, 0, CrossAxisAlignment::Start);
-        let mut focus = FocusManager::new();
-        focus.rebuild_tab_chain(&stack);
-        focus.move_focus_next();
-        let first = focus.focused();
-        (1..)
-            .find(|_| {
-                focus.move_focus_next();
-                focus.focused() == first
-            })
-            .unwrap()
-    };
-    let three = vec![
-        option("a", "", true),
-        option("b", "", true),
-        option("c", "", true),
-    ];
-    assert_eq!(chain(three), 3);
-    assert_eq!(
-        chain(vec![option("a", "", false), option("b", "", false)]),
-        2
-    );
-}
-
-/// Values are `min + k * step` and `max`: a snap goes to the nearest, a step
-/// to the next one along, a page a tenth of the range on.
 pub(super) fn test_slider_range_snaps_and_steps_on_its_grid() {
     let range = Range::new(1, 11, 3);
     assert_eq!(range.snap(0), 1);
@@ -271,7 +94,7 @@ fn slider(value: u64, grab: Option<SliderGrab>) -> SliderWidget {
         grab,
         Some(Box::new(|i: SliderInput| Box::new(i) as Box<dyn Any>)),
     );
-    let style = StyleSheet::dark();
+    let style = StyleSheet::current();
     let width = 200 + style.checkbox_size;
     lay_out(
         &mut slider,
@@ -285,17 +108,15 @@ fn inputs(sink: &mut MessageSink) -> Vec<SliderInput> {
     sink.drain_typed::<SliderInput>()
 }
 
-/// The track spans the width less the knob, so both ends of the range are
-/// reachable with the knob wholly inside.
 pub(super) fn test_slider_lays_its_track_inside_its_width() {
-    let style = StyleSheet::dark();
+    let style = StyleSheet::current();
     let half = style.checkbox_size / 2;
     let s = slider(25, None);
     assert_eq!(s.measured_size().width, 200 + style.checkbox_size);
-    let ring = style.focus_ring_width + style.focus_ring_offset;
+    let ring = crate::focus::RING_REACH;
     assert_eq!(
         s.measured_size().height,
-        (style.checkbox_size + ring * 2).max(style.min_target)
+        (style.checkbox_size + ring * 2).max(crate::style::MIN_TARGET)
     );
     assert_eq!(s.thumb_x(), half + 50);
     assert_eq!(slider(0, None).thumb_x(), half);
@@ -314,12 +135,9 @@ fn moves(slider: &mut SliderWidget, xs: &[i32]) -> Vec<SliderInput> {
         .collect()
 }
 
-/// A press begins a drag at the value under the pointer and the widget it
-/// reached follows the moves until the release, which can reach it before
-/// the application's answer to the press rebuilds it; a widget built
-/// dragging follows them too.
+/// A release can come before the rebuild its press asked for.
 pub(super) fn test_slider_press_drag_and_release() {
-    let half = StyleSheet::dark().checkbox_size / 2;
+    let half = StyleSheet::current().checkbox_size / 2;
     let release = WidgetEvent::PointerUp {
         x: 1000,
         y: 1000,
@@ -346,9 +164,6 @@ pub(super) fn test_slider_press_drag_and_release() {
     assert_eq!(inputs(&mut sink), [SliderInput::End]);
 }
 
-/// A drag holds the knob where it was taken: a press on the knob keeps its
-/// value, so a click there changes nothing, and neither a press on the track
-/// nor a move then jumps the knob's centre to the pointer.
 pub(super) fn test_slider_drag_holds_the_knob_where_it_was_taken() {
     let mut s = SliderWidget::new(
         25,
@@ -359,7 +174,7 @@ pub(super) fn test_slider_drag_holds_the_knob_where_it_was_taken() {
         None,
         Some(Box::new(|i: SliderInput| Box::new(i) as Box<dyn Any>)),
     );
-    let width = 200 + StyleSheet::dark().checkbox_size;
+    let width = 200 + StyleSheet::current().checkbox_size;
     lay_out(&mut s, BoxConstraints::loose(Size::new(width, 100)), (0, 0));
     let x = s.thumb_x() + 5;
     let mid = s.layout_rect().height / 2;
@@ -370,15 +185,13 @@ pub(super) fn test_slider_drag_holds_the_knob_where_it_was_taken() {
     assert!(moves(&mut s, &[x]).is_empty());
     assert_eq!(moves(&mut s, &[x + 20]), [SliderInput::Change(35)]);
 
-    let half = StyleSheet::dark().checkbox_size / 2;
+    let half = StyleSheet::current().checkbox_size / 2;
     let mut track = slider(25, None);
     let (_, mut sink) = deliver(&mut track, press(half + 103, 5));
     assert_eq!(inputs(&mut sink), [SliderInput::Begin(50, SliderGrab(3))]);
     assert!(moves(&mut track, &[half + 106]).is_empty());
 }
 
-/// Arrows on either axis step, PageUp and PageDown page, Home and End go to
-/// the ends; a key at an end changes nothing and still belongs to the slider.
 pub(super) fn test_slider_keys_step_page_and_reach_the_ends() {
     let mut s = slider(50, None);
     let (consumed, _) = deliver(&mut s, key(NamedKey::Right, false));
@@ -407,8 +220,6 @@ pub(super) fn test_slider_keys_step_page_and_reach_the_ends() {
     assert!(!consumed);
 }
 
-/// A disabled slider is no tab stop and takes no press, but a release still
-/// ends a drag it was disabled in the middle of.
 pub(super) fn test_slider_disabled_takes_nothing_but_ends_a_drag() {
     let make = |grab: Option<SliderGrab>| {
         let mut s = SliderWidget::new(
@@ -443,8 +254,6 @@ pub(super) fn test_slider_disabled_takes_nothing_but_ends_a_drag() {
     assert_eq!(inputs(&mut sink), [SliderInput::End]);
 }
 
-/// A range of bytes, more values than pixels, reaches both of its ends
-/// exactly, and a press on its knob that moves only up or down leaves it be.
 pub(super) fn test_slider_reaches_both_ends_of_a_range_of_bytes() {
     let (min, max) = (7 * GIB, 510 * GIB + 3 * MIB);
     let mut s = SliderWidget::new(
@@ -484,9 +293,6 @@ pub(super) fn test_slider_reaches_both_ends_of_a_range_of_bytes() {
     assert_eq!(s.value(), 510 * GIB + 2 * MIB);
 }
 
-/// Every segment gets the floor and the rest in proportion, one of no size
-/// nothing; the widths add up to the bar's, and a narrow bar shares itself
-/// out evenly.
 pub(super) fn test_partition_bar_widths_keep_a_floor_and_add_up() {
     let sizes = [512 * MIB, 380 * GIB, 130 * GIB, 0];
     let widths = segment_widths(&sizes, 600);
@@ -516,11 +322,8 @@ fn lowest_ink_row(data: &[u8], width: usize, height: usize, x0: i32, x1: i32) ->
         .find(|&y| (x0..x1).any(|x| pixel(data, width, x, y) != 0))
 }
 
-/// Text beside text in another tone puts its text on the same row, whatever
-/// the row's alignment. "hill" stands on the baseline and does not cross it, so
-/// its lowest ink is the row above the baseline each widget reports.
-pub(super) fn test_text_beside_toned_text_shares_its_baseline() {
-    let style = StyleSheet::dark();
+pub(super) fn test_text_ink_stands_on_its_baseline() {
+    let style = StyleSheet::current();
     for align in [
         CrossAxisAlignment::Start,
         CrossAxisAlignment::Center,
@@ -528,7 +331,7 @@ pub(super) fn test_text_beside_toned_text_shares_its_baseline() {
     ] {
         let mut row = HStackWidget::new(
             vec![
-                Box::new(TextWidget::new(&Text::new("hill"))),
+                Box::new(FixedSizeWidget::new(12, 30)),
                 Box::new(TextWidget::new(&Text::new("hill").tone(Tone::Secondary))),
             ],
             16,
@@ -547,27 +350,14 @@ pub(super) fn test_text_beside_toned_text_shares_its_baseline() {
             let mut ctx = PaintContext::new(&mut buffer, &style);
             row.paint(&mut ctx);
         }
-        for child in row.children() {
-            let rect = child.layout_rect();
-            let ink = lowest_ink_row(&data, width, height, rect.x, rect.x + rect.width);
-            let baseline = rect.y + child.baseline().expect("text has a baseline");
-            assert_eq!(ink, Some(baseline - 1), "{align:?}");
-        }
-        let [label, styled] = row.children() else {
-            unreachable!("two children were built")
-        };
-        assert_eq!(
-            label.layout_rect().y + label.baseline().unwrap(),
-            styled.layout_rect().y + styled.baseline().unwrap(),
-            "{align:?}"
-        );
+        let text = &row.children()[1];
+        let rect = text.layout_rect();
+        let ink = lowest_ink_row(&data, width, height, rect.x, rect.x + rect.width);
+        let baseline = rect.y + text.baseline().expect("text has a baseline");
+        assert_eq!(ink, Some(baseline - 1), "{align:?}");
     }
 }
 
-/// A row aligned by baseline puts a button's label, the first line of a
-/// two-line label and a styled label on one row, stands a widget without text
-/// on it, and is as tall as the most any child reaches above it plus the most
-/// any reaches below.
 pub(super) fn test_a_baseline_row_lines_up_text_of_different_heights() {
     let mut row = HStackWidget::new(
         vec![
@@ -598,10 +388,8 @@ pub(super) fn test_a_baseline_row_lines_up_text_of_different_heights() {
     assert_eq!(size.height, above + below);
 }
 
-/// A solid segment is its colour, free space is striped, segments are
-/// parted by a line, and the highlighted one is ringed.
 pub(super) fn test_partition_bar_paints_fills_hatch_and_highlight() {
-    let style = StyleSheet::dark();
+    let style = StyleSheet::current();
     let theme = style.theme;
     let fill = theme.series(5);
     let segment = |size, fill| BarSegment {
@@ -645,8 +433,6 @@ pub(super) fn test_partition_bar_paints_fills_hatch_and_highlight() {
     assert_eq!(pixel(&data, width, 0, mid), encode(theme.border));
 }
 
-/// The indeterminate block is a quarter of the bar, goes across and back
-/// in one sweep, and never leaves the bar.
 pub(super) fn test_indeterminate_progress_sweeps_to_and_fro() {
     assert_eq!(sweep(400, 0), (0, 100));
     assert_eq!(sweep(400, 500), (150, 100));
@@ -664,8 +450,6 @@ pub(super) fn test_indeterminate_progress_sweeps_to_and_fro() {
 #[derive(Debug, PartialEq)]
 struct Posted(u32);
 
-/// Messages a thread sends arrive whole and in order, and the first one
-/// since the last drain makes the wakeup readable.
 pub(super) fn test_a_threads_messages_arrive_in_order_with_a_wakeup() {
     let queue = UiQueue::new().expect("pipe");
     assert!(!queue.drain_wakeup());
@@ -705,11 +489,17 @@ fn page(controls: &[Control]) -> (VStackWidget, Vec<WidgetId>) {
                 ButtonWidget::new(String::from(label), None, ButtonStyle::Primary, enabled)
             };
             match control {
-                Control::Group => Box::new(RadioGroupWidget::new(
-                    vec![option("a", "", true), option("b", "", true)],
-                    Some(0),
-                    None,
-                )),
+                Control::Group => {
+                    let rows = vec![ListRow::new("a"), ListRow::new("b")];
+                    let pick: Box<dyn Fn(usize) -> Box<dyn Any>> =
+                        Box::new(|i| Box::new(i) as Box<dyn Any>);
+                    Box::new(ListWidget::new(
+                        vec![(String::new(), rows)],
+                        Some(0),
+                        Some(pick),
+                        None,
+                    ))
+                }
                 Control::On(label) => Box::new(button(label, true)),
                 Control::Off(label) => Box::new(button(label, false)),
             }
@@ -722,10 +512,6 @@ fn page(controls: &[Control]) -> (VStackWidget, Vec<WidgetId>) {
     )
 }
 
-/// A rebuild whose chain changed length finds the focused control again by
-/// its role and name, counting those like it before it, wherever the change
-/// was; one relabelled in a chain of the same length keeps focus by position,
-/// and one gone from a chain of another length loses it.
 pub(super) fn test_focus_follows_a_control_whose_chain_changed_shape() {
     use Control::{Group, Off, On};
     let mut focus = FocusManager::new();
@@ -763,14 +549,10 @@ pub(super) fn test_focus_follows_a_control_whose_chain_changed_shape() {
     );
 }
 
-/// What a scroll view holds is laid out beside its scrollbar and takes the
-/// presses, moves and releases the bar does not, so a control in one can be
-/// clicked and dragged; the bar's own drag reports every offset it scrolls to.
 pub(super) fn test_a_scroll_view_hands_pointer_input_to_its_content() {
-    use crate::constraints::{ScrollDirection, ScrollbarVisibility};
     use crate::widgets::checkbox::CheckboxWidget;
     use crate::widgets::scroll_view::ScrollViewWidget;
-    let style = StyleSheet::dark();
+    let style = StyleSheet::current();
     let checkbox = CheckboxWidget::new(
         false,
         String::from("I understand"),
@@ -795,8 +577,6 @@ pub(super) fn test_a_scroll_view_hands_pointer_input_to_its_content() {
     ];
     let mut view = ScrollViewWidget::with_scroll(
         Box::new(VStackWidget::new(content, 0, CrossAxisAlignment::Stretch)),
-        ScrollDirection::Vertical,
-        ScrollbarVisibility::WhenNeeded,
         0,
         Some(Box::new(|y: i32| Box::new(y) as Box<dyn Any>)),
     );
@@ -810,9 +590,14 @@ pub(super) fn test_a_scroll_view_hands_pointer_input_to_its_content() {
     let tick = stack.children()[0].layout_rect();
     let slide = stack.children()[1].layout_rect();
 
-    let (consumed, mut sink) = deliver(&mut view, press(tick.x + 2, tick.y + tick.height / 2));
-    assert!(consumed);
-    assert_eq!(sink.drain_typed::<String>(), ["ticked"]);
+    let (x, y) = (tick.x + 2, tick.y + tick.height / 2);
+    assert!(deliver(&mut view, press(x, y)).0);
+    let up = WidgetEvent::PointerUp {
+        x,
+        y,
+        button: PointerButton::Left,
+    };
+    assert_eq!(deliver(&mut view, up).1.drain_typed::<String>(), ["ticked"]);
 
     let y = slide.y + slide.height / 2;
     let (_, mut sink) = deliver(&mut view, press(slide.x + 100, y));
@@ -840,11 +625,81 @@ pub(super) fn test_a_scroll_view_hands_pointer_input_to_its_content() {
     deliver(&mut view, release);
 }
 
-/// A bar with no value draws a quarter of itself in its tone, wherever the
-/// clock has the block.
+pub(super) fn test_a_press_on_the_bar_puts_its_thumb_there() {
+    use crate::traits::KeptAt;
+    use crate::widgets::scroll_view::ScrollViewWidget;
+    let mut view = ScrollViewWidget::new(Box::new(FixedSizeWidget::new(100, 400)));
+    lay_out(
+        &mut view,
+        BoxConstraints::tight(Size::new(200, 100)),
+        (0, 0),
+    );
+    let offset = |view: &ScrollViewWidget| view.kept().expect("its own offset").at;
+    let release = |x, y| WidgetEvent::PointerUp {
+        x,
+        y,
+        button: PointerButton::Left,
+    };
+    let bar = StyleSheet::current().scrollbar_width;
+    assert!(
+        !deliver(&mut view, press(200 - bar - 1, 99)).0,
+        "beside the bar"
+    );
+    let on = 200 - bar / 2;
+    assert!(deliver(&mut view, press(on, 99)).0);
+    assert_eq!(
+        offset(&view),
+        KeptAt::Scroll(300),
+        "to the end of the track"
+    );
+    deliver(&mut view, WidgetEvent::PointerMove { x: on, y: 0 });
+    assert_eq!(offset(&view), KeptAt::Scroll(0), "dragged back up");
+    deliver(&mut view, release(on, 0));
+    deliver(&mut view, WidgetEvent::PointerMove { x: on, y: 99 });
+    assert_eq!(offset(&view), KeptAt::Scroll(0), "a move after the release");
+}
+
+pub(super) fn test_a_sideways_turn_passes_a_view_that_scrolls_down() {
+    use crate::widgets::code_view::{CodeInput, CodeViewWidget};
+    use crate::widgets::tree_view::{TreeInput, TreeViewWidget};
+    let turn = |delta_x, delta_y| WidgetEvent::Scroll {
+        x: 10,
+        y: 10,
+        delta_x,
+        delta_y,
+    };
+    let code = CodeViewWidget::new(
+        Vec::new(),
+        0,
+        100,
+        0,
+        4,
+        None,
+        None,
+        true,
+        false,
+        false,
+        false,
+        Some(Box::new(|i: CodeInput| Box::new(i) as Box<dyn Any>)),
+    );
+    let on_tree = Box::new(|i: TreeInput| Box::new(i) as Box<dyn Any>);
+    let tree = TreeViewWidget::new(Vec::new(), 0, 100, None, false, false, Some(on_tree));
+    let views: [Box<dyn Widget>; 2] = [Box::new(code), Box::new(tree)];
+    for mut view in views {
+        lay_out(
+            view.as_mut(),
+            BoxConstraints::tight(Size::new(200, 100)),
+            (0, 0),
+        );
+        let (taken, sink) = deliver(view.as_mut(), turn(20, 0));
+        assert!(!taken && !sink.has_messages());
+        assert!(deliver(view.as_mut(), turn(0, -20)).0);
+    }
+}
+
 pub(super) fn test_indeterminate_progress_paints_its_block() {
     use crate::widgets::progress_bar::ProgressBarWidget;
-    let style = StyleSheet::dark();
+    let style = StyleSheet::current();
     let color = style.theme.success;
     let mut bar = ProgressBarWidget::new(None, String::new(), Tone::Success);
     let (width, height) = (200usize, 40usize);
@@ -867,9 +722,6 @@ pub(super) fn test_indeterminate_progress_paints_its_block() {
     assert!((48..=50).contains(&lit), "{lit} pixels of the block");
 }
 
-/// While a button is down, a rebuild that the gesture did not ask for waits
-/// for its release and runs once then, or after three seconds, for a release
-/// the compositor dropped.
 pub(super) fn test_a_rebuild_waits_for_the_pointer_release() {
     use crate::node::Action;
     use crate::run::Gesture;
@@ -914,10 +766,8 @@ fn luma(pixel: u32) -> u32 {
     (299 * r as u32 + 587 * g as u32 + 114 * b as u32) / 1000
 }
 
-/// A label is drawn whole, in the ink for an accent fill, in a segment it
-/// fits and not at all in one it does not.
 pub(super) fn test_partition_bar_labels_fit_whole_in_a_readable_ink() {
-    let style = StyleSheet::dark();
+    let style = StyleSheet::current();
     let theme = style.theme;
     let segment = |label: &str, size, n| BarSegment {
         label: String::from(label),
@@ -968,8 +818,6 @@ pub(super) fn test_partition_bar_labels_fit_whole_in_a_readable_ink() {
     );
 }
 
-/// A field that is a tab stop is reached and left by Tab, and says so; one
-/// that takes Tab itself, as a find bar does, keeps it.
 pub(super) fn test_a_tab_stop_field_reports_focus_and_lets_tab_through() {
     use crate::widgets::line_edit::{LineEditInput, LineEditWidget};
     let make = |tab_stop: bool, focused: bool| {
@@ -1019,17 +867,11 @@ pub(super) fn test_a_tab_stop_field_reports_focus_and_lets_tab_through() {
     ));
 }
 
-/// A scroll view that follows its end reports it as `i32::MAX`, and given
-/// that back keeps to the end of whatever it holds; one that does not reports
-/// the offset.
 pub(super) fn test_a_scroll_view_that_follows_its_end_reports_it_as_the_largest_offset() {
-    use crate::constraints::{ScrollDirection, ScrollbarVisibility};
     use crate::widgets::scroll_view::ScrollViewWidget;
     let view_of = |height: i32, scroll_y: i32| {
         let mut view = ScrollViewWidget::with_scroll(
             Box::new(FixedSizeWidget::new(10, height)),
-            ScrollDirection::Vertical,
-            ScrollbarVisibility::WhenNeeded,
             scroll_y,
             Some(Box::new(|y: i32| Box::new(y) as Box<dyn Any>)),
         )
@@ -1059,8 +901,6 @@ pub(super) fn test_a_scroll_view_that_follows_its_end_reports_it_as_the_largest_
 
     let mut page = ScrollViewWidget::with_scroll(
         Box::new(FixedSizeWidget::new(10, 400)),
-        ScrollDirection::Vertical,
-        ScrollbarVisibility::WhenNeeded,
         0,
         Some(Box::new(|y: i32| Box::new(y) as Box<dyn Any>)),
     );
@@ -1074,11 +914,7 @@ pub(super) fn test_a_scroll_view_that_follows_its_end_reports_it_as_the_largest_
     assert_eq!(sink.drain_typed::<i32>(), [280], "a page keeps its offset");
 }
 
-/// A control reached by Tab inside a scroll view is scrolled into view: its
-/// bottom to the view's below it, its top to the view's above it or when it
-/// is taller than the view, and nothing moves for one already shown.
 pub(super) fn test_a_control_reached_by_tab_is_scrolled_into_view() {
-    use crate::constraints::{ScrollDirection, ScrollbarVisibility};
     use crate::widgets::checkbox::CheckboxWidget;
     use crate::widgets::scroll_view::ScrollViewWidget;
     let content: Vec<Box<dyn Widget>> = vec![
@@ -1093,8 +929,6 @@ pub(super) fn test_a_control_reached_by_tab_is_scrolled_into_view() {
     ];
     let mut view = ScrollViewWidget::with_scroll(
         Box::new(VStackWidget::new(content, 0, CrossAxisAlignment::Stretch)),
-        ScrollDirection::Vertical,
-        ScrollbarVisibility::WhenNeeded,
         0,
         Some(Box::new(|y: i32| Box::new(y) as Box<dyn Any>)),
     );
@@ -1111,7 +945,7 @@ pub(super) fn test_a_control_reached_by_tab_is_scrolled_into_view() {
     let mut sink = MessageSink::new();
     crate::focus::reveal(&mut view, field, &mut sink);
     let shown = rect_of(&view, 1);
-    let room = crate::focus::RING_ROOM;
+    let room = crate::focus::RING_REACH;
     assert_eq!(
         shown.y + shown.height + room,
         120,
@@ -1127,4 +961,154 @@ pub(super) fn test_a_control_reached_by_tab_is_scrolled_into_view() {
     crate::focus::reveal(&mut view, tall, &mut sink);
     assert_eq!(rect_of(&view, 0).y, 0, "a tall one shows its top");
     assert_eq!(sink.drain_typed::<i32>(), [0]);
+}
+
+pub(super) fn test_a_checkbox_toggles_on_release_and_space() {
+    use crate::widgets::checkbox::CheckboxWidget;
+    let mut checkbox = CheckboxWidget::new(
+        false,
+        String::from("Show hidden files"),
+        Some(Box::new(|| Box::new(()) as Box<dyn Any>)),
+        true,
+    );
+    lay_out(
+        &mut checkbox,
+        BoxConstraints::loose(Size::new(300, 100)),
+        (0, 0),
+    );
+    let r = checkbox.layout_rect();
+    let (x, y) = (r.x + 4, r.y + r.height / 2);
+    let release = |x| WidgetEvent::PointerUp {
+        x,
+        y,
+        button: PointerButton::Left,
+    };
+    let toggles =
+        |checkbox: &mut CheckboxWidget, event| deliver(checkbox, event).1.drain_typed::<()>().len();
+    assert_eq!(toggles(&mut checkbox, press(x, y)), 0, "a press alone");
+    assert_eq!(toggles(&mut checkbox, release(x)), 1);
+    toggles(&mut checkbox, press(x, y));
+    assert_eq!(
+        toggles(&mut checkbox, release(1000)),
+        0,
+        "released elsewhere"
+    );
+    focused(&mut checkbox);
+    assert_eq!(toggles(&mut checkbox, key(NamedKey::Space, false)), 1);
+    assert!(!deliver(&mut checkbox, key(NamedKey::Enter, false)).0);
+}
+
+pub(super) fn test_menu_arrows_skip_what_cannot_be_chosen() {
+    use crate::node::{MenuItem, MenuItemKind};
+    use crate::widgets::menu::MenuWidget;
+    let item = |label, enabled, kind| MenuItem {
+        label,
+        shortcut: None,
+        enabled,
+        kind,
+    };
+    let items = vec![
+        item("Undo", false, MenuItemKind::Action),
+        item("", true, MenuItemKind::Separator),
+        item("Cut", true, MenuItemKind::Action),
+        item("Copy", true, MenuItemKind::Action),
+        item("Paste", false, MenuItemKind::Action),
+    ];
+    let count = items.len() as i32;
+    let mut menu = MenuWidget::new(
+        items,
+        Some(Box::new(|i: usize| Box::new(i) as Box<dyn Any>)),
+    );
+    let size = lay_out(
+        &mut menu,
+        BoxConstraints::loose(Size::new(400, 400)),
+        (0, 0),
+    );
+    assert_eq!(size.height, count * crate::style::MIN_TARGET);
+    focused(&mut menu);
+    let chosen = |menu: &mut MenuWidget, keys: &[NamedKey]| {
+        for &named in keys {
+            assert!(deliver(menu, key(named, false)).0);
+        }
+        deliver(menu, key(NamedKey::Enter, false))
+            .1
+            .drain_typed::<usize>()
+    };
+    assert_eq!(chosen(&mut menu, &[NamedKey::Down]), [2]);
+    assert_eq!(chosen(&mut menu, &[NamedKey::Down, NamedKey::Down]), [3]);
+    assert_eq!(chosen(&mut menu, &[NamedKey::Up, NamedKey::Up]), [2]);
+    assert_eq!(chosen(&mut menu, &[NamedKey::End]), [3]);
+    assert_eq!(chosen(&mut menu, &[NamedKey::Home]), [2]);
+}
+
+pub(super) fn test_a_menu_s_cursor_outlives_a_rebuild() {
+    use crate::node::{MenuItem, MenuItemKind, Node};
+    use crate::tree::{build_widget_tree, kept, layout_tree, restore_kept};
+    let menu = || -> Node<usize> {
+        let item = |label| MenuItem {
+            label,
+            shortcut: None,
+            enabled: true,
+            kind: MenuItemKind::Action,
+        };
+        Node::Popup {
+            x: 10,
+            y: 10,
+            child: Box::new(Node::Menu {
+                items: vec![item("End process"), item("Force quit")],
+                on_action: Some(|i| i),
+            }),
+            on_dismiss: None,
+        }
+    };
+    let style = StyleSheet::current();
+    let size = Size::new(400, 300);
+    let built = |was: Option<&dyn Widget>| {
+        let mut root = build_widget_tree(&menu());
+        let mut held = Vec::new();
+        if let Some(was) = was {
+            kept(was, &mut held);
+        }
+        restore_kept(root.as_mut(), &held);
+        layout_tree(root.as_mut(), size, &style);
+        focused(root.as_mut());
+        root
+    };
+    let mut root = built(None);
+    for named in [NamedKey::Down, NamedKey::Down] {
+        assert!(deliver(root.as_mut(), key(named, false)).0);
+    }
+    let mut root = built(Some(root.as_ref()));
+    let (_, mut sink) = deliver(root.as_mut(), key(NamedKey::Enter, false));
+    assert_eq!(sink.drain_typed::<usize>(), [1]);
+
+    let menu = &root.children()[0];
+    let row = menu.layout_rect();
+    let lit = crate::event::lit_at(root.as_ref(), row.x + 4, row.y + 4);
+    assert_eq!(lit, Some((menu.id(), 0)), "the pointer lights a row");
+}
+
+pub(super) fn test_a_focused_tree_without_a_choice_shows_focus() {
+    use crate::widgets::tree_view::{TreeRow, TreeViewWidget};
+    let row = TreeRow {
+        label: String::from("src"),
+        depth: 0,
+        is_dir: true,
+        expanded: false,
+        active: false,
+        modified: false,
+    };
+    let style = StyleSheet::current();
+    let size = Size::new(200, 120);
+    let painted = |selected: Option<usize>, focused: bool| {
+        let mut tree = TreeViewWidget::new(vec![row.clone()], 0, 1, selected, focused, false, None);
+        lay_out(&mut tree, BoxConstraints::tight(size), (0, 0));
+        crate::audit::paint_plain(&tree, size, &style, Rect::new(0, 0, 200, 120))
+    };
+    assert_ne!(painted(None, true), painted(None, false));
+    assert_ne!(
+        painted(Some(4), true),
+        painted(Some(4), false),
+        "chosen out of view"
+    );
 }

@@ -66,3 +66,25 @@ fn a_surface_keeps_its_trade_to_its_details() {
     assert!(plain("Two toolchains", &["toolchain"]).is_err());
     assert_eq!(plain("Copy the developer tools", &["toolchain"]), Ok(()));
 }
+
+#[test]
+fn a_size_says_its_unit_and_one_decimal_at_most() {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * KIB;
+    for (bytes, said) in [
+        (0, "0 bytes"),
+        (1, "1 byte"),
+        (1023, "1023 bytes"),
+        (KIB, "1 KiB"),
+        (1536, "1.5 KiB"),
+        (8 * MIB, "8 MiB"),
+        (MIB - 52, "1023.9 KiB"),
+        (MIB - 51, "1 MiB"),
+        (5 << 30, "5 GiB"),
+        (3 << 40, "3 TiB"),
+        (2048 << 40, "2048 TiB"),
+        (u64::MAX, "16777216 TiB"),
+    ] {
+        assert_eq!(format!("{}", Bytes(bytes)), said, "{bytes}");
+    }
+}

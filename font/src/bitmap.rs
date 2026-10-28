@@ -110,7 +110,7 @@ mod tests {
 
         let atlas = bitmap_to_coverage(&data, width, height, glyph_count)
             .expect("must convert")
-            .finish(crate::FontSource::BitmapFallback);
+            .finish();
 
         let stride = width as usize * height as usize;
         assert_eq!(atlas.coverage_len(), crate::GLYPH_COUNT * stride);

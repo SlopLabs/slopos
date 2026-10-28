@@ -7,9 +7,7 @@ use slopos_boot_core::gpt::{Header, Partition};
 use slopos_boot_core::install::{Place, Plan, ROLES, Role};
 use slopos_boot_core::layout::{self, ALIGN_BYTES, ROOT_TYPE};
 
-use crate::{
-    Contents, Layout, capitalised, disk_size, partition_node, role_words, short, type_name,
-};
+use crate::{Layout, disk_size, partition_node, short, type_name};
 
 /// An install as it would be done: the disk before and after, what happens
 /// to each partition, and what the install sets up beside them. The same
@@ -17,8 +15,6 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proposal {
     pub disk: String,
-    /// What the disk held, which an erase loses.
-    pub contents: Contents,
     pub before: Layout,
     pub after: Layout,
     pub erase: bool,
@@ -139,7 +135,6 @@ impl Table<'_> {
 /// keeps, which a proposal is built from.
 pub struct Planned<'a> {
     pub disk: &'a str,
-    pub contents: Contents,
     pub capacity: u64,
     /// The disk's table as it was read: the one a plan that keeps it was made
     /// on.
@@ -252,7 +247,6 @@ impl Proposal {
         };
         Proposal {
             disk: disk.into(),
-            contents: planned.contents,
             before: planned.before.map_or_else(
                 || Layout::empty(planned.capacity),
                 |table| Layout::of(disk, table.header, table.array),
@@ -293,7 +287,7 @@ impl Proposal {
             .map(|action| {
                 let said = match &action.target {
                     Target::Disk => format!("Everything on {}", short(&self.disk)),
-                    Target::Role(role, p) => part(capitalised(role_words(*role)), p),
+                    Target::Role(role, p) => part(type_name(&role.type_guid()), p),
                     Target::Other(p @ Part::Existing { kind, .. }) if !kind.is_empty() => {
                         part(kind.clone(), p)
                     }
@@ -332,7 +326,7 @@ impl Proposal {
             if let Target::Role(role, part) = &action.target {
                 lines.push(format!(
                     "{} partition: {}",
-                    capitalised(role_words(*role)),
+                    type_name(&role.type_guid()),
                     describe(*role, part, action.tag)
                 ));
             }

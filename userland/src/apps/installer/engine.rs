@@ -1,14 +1,10 @@
 //! What the installer finds, proposes and does, apart from how anyone is
-//! asked. [`System::probe`] reads the medium and every disk,
-//! [`System::propose`] lays a set of [`Choices`] out on what it read, and
-//! [`System::install`] reads the chosen disk again and writes nothing unless
-//! it still proposes what was reviewed. An install reports each step as an
-//! [`Event`], and keeps its steps and log lines as the new root's
-//! `/var/log/installer.log`. What it reads and proposes reaches a driver in
-//! another process as `slopos_installer_core`'s views.
+//! asked. [`System::install`] reads the chosen disk again and writes nothing
+//! unless it still proposes what was reviewed.
 
 use std::time::Instant;
 
+use slopos_boot_core::disk_id::Bus;
 use slopos_boot_core::gpt::{Header, Partition};
 use slopos_boot_core::install::{self, Mode as PlanMode, Place, Plan, ROLES, Role, RootSize};
 use slopos_boot_core::layout::{
@@ -16,9 +12,9 @@ use slopos_boot_core::layout::{
 };
 use slopos_boot_core::{Guid, bli};
 use slopos_installer_core::{
-    self as view, Choices, DEFAULT_CMDLINE, DEFAULT_REMOTE, Event, FIRST_PERSON, Failure,
-    FirstPerson, Issue, Mode, Opened, Person, Planned, Proposal, Refusal, STEPS, Setup, Summary,
-    Table as TableView, human,
+    self as view, Choices, DEFAULT_CMDLINE, DEFAULT_REMOTE, EspTrouble, Event, FIRST_PERSON,
+    Failure, FirstPerson, Issue, Mode, Opened, Person, Planned, Proposal, Refusal, Setup, Step,
+    Summary, Table as TableView,
 };
 
 use super::boot::{self, Fallback};
@@ -26,11 +22,9 @@ use super::disk::{self, Disk};
 use super::medium::Medium;
 use super::root;
 use crate::boot_disk::{
-    ListedOption, boot_order, listed_options, model_of as boot_disk_model, not_installable,
-    open_fat, partition_node, whole_disks,
+    ListedOption, boot_order, listed_options, open_fat, partition_node, whole_disks,
 };
 
-const CHECKING_THE_ROOT: u32 = 8;
 /// Room an ESP needs beside the loader for its directories and configuration.
 const ESP_SLACK_BYTES: u64 = 1 << 20;
 
@@ -48,22 +42,18 @@ pub trait Events {
 
 /// What a partition of the ESP's or SlopOS's types holds.
 enum Holds {
-    /// The ESP's FAT32 volume: its free bytes and its removable-media path.
-    Esp {
+    Esp(Esp),
+    Boot { fat: bool },
+    Root { ext4: bool },
+}
+
+enum Esp {
+    Volume {
         free: u64,
         fallback: Result<Fallback, String>,
     },
-    /// An ESP with no volume, as an install that made it, or a SlopOS format
-    /// cut short, leaves it.
-    EmptyEsp,
-    /// An ESP holding what this installer cannot use, and why.
-    UnusableEsp(String),
-    Boot {
-        fat: bool,
-    },
-    Root {
-        ext4: bool,
-    },
+    Empty,
+    Unusable(String),
 }
 
 struct Part {
@@ -79,14 +69,14 @@ impl Part {
             .as_deref()
             .ok()
             .and_then(|node| match entry.entry.type_guid {
-                ESP_TYPE => Some(match open_fat(node) {
-                    Ok(mut volume) => Holds::Esp {
+                ESP_TYPE => Some(Holds::Esp(match open_fat(node) {
+                    Ok(mut volume) => Esp::Volume {
                         free: u64::from(volume.free_clusters()) * volume.cluster_bytes() as u64,
                         fallback: Fallback::read(&mut volume, node, loader),
                     },
-                    Err(_) if disk::holds_no_volume(node) => Holds::EmptyEsp,
-                    Err(why) => Holds::UnusableEsp(why),
-                }),
+                    Err(_) if disk::holds_no_volume(node) => Esp::Empty,
+                    Err(why) => Esp::Unusable(why),
+                })),
                 BOOT_TYPE => Some(Holds::Boot {
                     fat: open_fat(node).is_ok(),
                 }),
@@ -142,46 +132,55 @@ impl OpenDisk {
 }
 
 pub enum State {
-    /// Never offered, and why.
     Refused(Refusal),
-    /// Offered, but it could not be read.
     Unreadable(String),
     Listed(Disk),
     /// Chosen: its table read again by the kernel, and its partitions read.
     Opened(OpenDisk),
 }
 
+impl State {
+    fn read(node: &str, medium: Guid) -> State {
+        match disk::not_offered(node, Some(medium)) {
+            Some(why) => State::Refused(why),
+            None => match Disk::open(node) {
+                Ok(disk) => State::Listed(disk),
+                Err(why) => State::Unreadable(why),
+            },
+        }
+    }
+
+    /// The disk, unless it is never offered or could not be read.
+    fn disk(&self, node: &str) -> Result<&Disk, Issue> {
+        match self {
+            State::Refused(why) => Err(Issue::Disk(format!("{node}: {}", why.words()))),
+            State::Unreadable(why) => Err(Issue::Disk(why.clone())),
+            State::Listed(disk) => Ok(disk),
+            State::Opened(open) => Ok(&open.disk),
+        }
+    }
+}
+
 pub struct Found {
     pub node: String,
+    pub bus: Option<Bus>,
     pub model: Option<String>,
     pub state: State,
 }
 
 impl Found {
     fn probe(node: String, medium: Guid) -> Found {
-        let state = match not_installable(&node, Some(medium)) {
-            Some(why) => State::Refused(why),
-            None => match Disk::open(&node) {
-                Ok(disk) => State::Listed(disk),
-                Err(why) => State::Unreadable(why),
-            },
-        };
+        let (bus, model) = disk::by_id(&node);
         Found {
-            model: boot_disk_model(&node),
+            state: State::read(&node, medium),
             node,
-            state,
+            bus,
+            model,
         }
     }
 
-    /// The disk, unless it is never offered or could not be read.
     pub fn disk(&self) -> Result<&Disk, Issue> {
-        let node = &self.node;
-        match &self.state {
-            State::Refused(why) => Err(Issue::Disk(format!("{node}: {}", why.words()))),
-            State::Unreadable(why) => Err(Issue::Disk(why.clone())),
-            State::Listed(disk) => Ok(disk),
-            State::Opened(open) => Ok(&open.disk),
-        }
+        self.state.disk(&self.node)
     }
 }
 
@@ -286,7 +285,7 @@ impl System {
             _ => Err(found
                 .disk()
                 .err()
-                .unwrap_or_else(|| Issue::Disk(format!("{node} has not been opened")))),
+                .unwrap_or_else(|| Issue::Unopened(node.to_owned()))),
         }
     }
 
@@ -297,8 +296,8 @@ impl System {
         let node = &self.disks[index].node;
         self.disks[index].disk()?;
         disk::reread(node).map_err(Issue::Disk)?;
-        let found = Found::probe(node.clone(), self.medium.disk_guid);
-        Ok(OpenDisk::of(found.disk()?.clone(), &self.loader))
+        let state = State::read(node, self.medium.disk_guid);
+        Ok(OpenDisk::of(state.disk(node)?.clone(), &self.loader))
     }
 
     /// Choose the disk `node`, which a proposal is made for.
@@ -326,9 +325,9 @@ impl System {
                 .ok_or_else(|| Issue::Disk(format!("{node} is too small for a partition table")))?;
             (header, vec![0u8; header.array_bytes()])
         } else {
-            let table = disk.table.as_ref().ok_or_else(|| Issue::OnlyErase {
+            let table = disk.table.as_ref().map_err(|held| Issue::OnlyErase {
                 node: node.clone(),
-                contents: disk.contents.clone(),
+                contents: held.clone(),
             })?;
             (table.header.grown(), table.array.clone())
         };
@@ -381,10 +380,15 @@ impl System {
             Place::New { .. } => true,
             Place::Existing(_) if formats.esp => true,
             Place::Existing(n) => match &open.part(n)?.holds {
-                Some(Holds::Esp { fallback, .. }) => fallback
-                    .as_ref()
-                    .map_err(|why| Issue::Esp(why.clone()))?
-                    .ours(&boot_unique),
+                Some(Holds::Esp(Esp::Volume { fallback, .. })) => match fallback {
+                    Ok(fallback) => fallback.ours(&boot_unique),
+                    Err(why) => {
+                        return Err(Issue::Esp {
+                            node: open.node(n)?,
+                            trouble: EspTrouble::Unreadable(why.clone()),
+                        });
+                    }
+                },
                 _ => false,
             },
         };
@@ -422,7 +426,11 @@ impl System {
                 .source
                 .then(|| remote.clone().unwrap_or_else(|| DEFAULT_REMOTE.to_owned())),
         };
-        let read = disk.table.as_ref().map(|t| (t.header.grown(), &t.array));
+        let read = disk
+            .table
+            .as_ref()
+            .ok()
+            .map(|t| (t.header.grown(), &t.array));
         let beside = menu
             .offered
             .iter()
@@ -432,7 +440,6 @@ impl System {
         let view = Proposal::of(
             Planned {
                 disk: node,
-                contents: disk.contents.clone(),
                 capacity: disk.geometry.capacity(),
                 before: read
                     .as_ref()
@@ -484,7 +491,7 @@ impl System {
         let listing = |disk: &Disk, opened| view::Listing {
             capacity: disk.geometry.capacity(),
             block: disk.geometry.block(),
-            contents: disk.contents.clone(),
+            contents: disk.contents(),
             layout: disk.layout(),
             opened,
         };
@@ -493,6 +500,7 @@ impl System {
             .iter()
             .map(|found| view::Disk {
                 node: found.node.clone(),
+                bus: found.bus,
                 model: found.model.clone(),
                 state: match &found.state {
                     State::Refused(why) => view::DiskState::Refused(*why),
@@ -548,13 +556,16 @@ impl System {
                 (entry.number, fit(mode))
             })
             .collect();
-        let reuse = match roots.iter().find(|(_, fit)| fit.is_ok()).or(roots.first()) {
-            Some((_, fit)) => fit.clone(),
-            None if open.disk.table.is_none() => Err(Issue::OnlyErase {
+        let reuse = match (
+            roots.iter().find(|(_, fit)| fit.is_ok()).or(roots.first()),
+            &open.disk.table,
+        ) {
+            (Some((_, fit)), _) => fit.clone(),
+            (None, Err(held)) => Err(Issue::OnlyErase {
                 node: node.clone(),
-                contents: open.disk.contents.clone(),
+                contents: held.clone(),
             }),
-            None => Err(Issue::NoRoot(node.clone())),
+            (None, Ok(_)) => Err(Issue::NoRoot(node.clone())),
         };
         let reinstall = open
             .parts
@@ -599,25 +610,21 @@ impl System {
             Place::New { .. } => false,
             Place::Existing(n) => {
                 let node = open.node(n)?;
+                let needed = self.loader.len() as u64 + ESP_SLACK_BYTES;
+                let refused = |trouble| Err(Issue::Esp { node, trouble });
                 match &open.part(n)?.holds {
-                    Some(Holds::Esp { free, .. }) => {
-                        let needed = self.loader.len() as u64 + ESP_SLACK_BYTES;
-                        if *free < needed {
-                            return Err(Issue::Esp(format!(
-                                "the ESP {node} has {} free; the loader needs {}",
-                                human(*free),
-                                human(needed)
-                            )));
-                        }
-                        false
+                    Some(Holds::Esp(Esp::Volume { free, .. })) if *free >= needed => false,
+                    Some(Holds::Esp(Esp::Empty)) => true,
+                    Some(Holds::Esp(Esp::Volume { free, .. })) => {
+                        return refused(EspTrouble::Full {
+                            free: *free,
+                            needed,
+                        });
                     }
-                    Some(Holds::EmptyEsp) => true,
-                    Some(Holds::UnusableEsp(why)) => {
-                        return Err(Issue::Esp(format!(
-                            "the ESP {node} holds a volume this installer cannot use: {why}"
-                        )));
+                    Some(Holds::Esp(Esp::Unusable(why))) => {
+                        return refused(EspTrouble::Unreadable(why.clone()));
                     }
-                    _ => return Err(Issue::Esp(format!("{node} is no ESP"))),
+                    _ => return refused(EspTrouble::WrongType),
                 }
             }
         };
@@ -644,24 +651,22 @@ impl System {
             started: Instant::now(),
             head: reviewed.head(),
             lines: Vec::new(),
-            step: 0,
+            step: None,
             root: None,
         };
-        let result = self
-            .run(&mut run, choices, reviewed)
-            .map_err(|message| Failure {
-                step: run.step,
-                message,
-            });
+        let result = match self.unchanged(choices, reviewed) {
+            Err(issue) => Err(Failure::Refused(issue)),
+            Ok((open, p)) => self
+                .run(&mut run, &open, &p)
+                .map_err(|why| Failure::Stopped {
+                    step: run.step,
+                    why,
+                }),
+        };
         if let Err(failure) = &result {
-            run.note(&format!(
-                "failed in step {} of {}: {}",
-                failure.step,
-                STEPS.len(),
-                failure.message
-            ));
+            run.note(&format!("failed: {failure}"));
             // Nothing writes the root once it has been checked.
-            if failure.step < CHECKING_THE_ROOT {
+            if failure.step().is_none_or(|step| step < Step::Check) {
                 let kept = run.keep_remounted();
                 run.unless_kept(kept);
             }
@@ -669,33 +674,23 @@ impl System {
         result
     }
 
-    fn run(
+    fn unchanged(
         &self,
-        run: &mut Run<'_>,
         choices: &Choices,
         reviewed: &Settled,
-    ) -> Result<Summary, String> {
-        let unwritten = |issue: Issue| {
-            let said = issue.to_string();
-            format!("{}; nothing was written", said.trim_end_matches('.'))
-        };
-        let open = self
-            .index(&choices.disk)
-            .and_then(|index| self.reopen(index))
-            .map_err(unwritten)?;
-        let p = self
-            .propose_on(&open, choices, reviewed.guids)
-            .map_err(unwritten)?;
-        if p != *reviewed {
-            return Err(format!(
-                "{} changed since it was reviewed; nothing was written",
-                choices.disk
-            ));
+    ) -> Result<(OpenDisk, Settled), Issue> {
+        let open = self.reopen(self.index(&choices.disk)?)?;
+        match self.propose_on(&open, choices, reviewed.guids) {
+            Ok(p) if p == *reviewed => Ok((open, p)),
+            _ => Err(Issue::Changed(choices.disk.clone())),
         }
+    }
+
+    fn run(&self, run: &mut Run<'_>, open: &OpenDisk, p: &Settled) -> Result<Summary, String> {
         let disk = &open.disk;
         let medium = &self.medium;
 
-        run.step(1);
+        run.step(Step::Partition);
         for role in ROLES {
             if let Place::New {
                 first_lba,
@@ -707,16 +702,16 @@ impl System {
             }
         }
         disk::write_table(disk, &p.header, &p.array, p.view.erase)?;
-        run.step(2);
+        run.step(Step::Reread);
         disk::reread(&disk.node)?;
         let [
             (esp, esp_node),
             (_, boot_node),
             (_, root_node),
             (_, crash_node),
-        ] = placed(&disk.node, &p)?;
+        ] = placed(&disk.node, p)?;
 
-        run.step(3);
+        run.step(Step::Format);
         if p.plan.esp.is_new() || p.formats.esp {
             disk::format_fat(&esp_node, ESP_LABEL)?;
             run.log(format!("{esp_node}: FAT32, {ESP_LABEL}"));
@@ -737,7 +732,7 @@ impl System {
             run.log(format!("{root_node}: ext4"));
         }
 
-        run.step(4);
+        run.step(Step::CopySystem);
         let mounted = root::Mounted::at(&root_node)?;
         let owners = root::lay_out(&mounted, !keep_root)?;
         if keep_root {
@@ -757,24 +752,24 @@ impl System {
         }
         mounted.finish()?;
 
-        run.step(5);
+        run.step(Step::CopyStartup);
         boot::write_boot(&boot_node, medium, run)?;
 
-        run.step(6);
+        run.step(Step::Menu);
         boot::write_loader(&esp_node, p.own_esp, &p.limine_conf, medium)?;
         boot::forget_slot_bases(&boot_node, run)?;
 
-        run.step(7);
+        run.step(Step::Default);
         let entry = boot::set_default()?;
         run.log(format!("{} is {entry}", bli::ENTRY_DEFAULT));
         // Before the check, which then covers the log, and the firmware entry,
         // which stays the last thing written.
         run.keep_remounted()?;
 
-        run.step(CHECKING_THE_ROOT);
+        run.step(Step::Check);
         disk::e2fsck(&root_node, run)?;
 
-        run.step(9);
+        run.step(Step::Register);
         let entry = boot::register(esp, boot_node, p.view.setup.first)?;
         Ok(Summary {
             disk: disk.node.clone(),
@@ -840,14 +835,14 @@ struct Run<'a> {
     started: Instant,
     head: Vec<String>,
     lines: Vec<String>,
-    step: u32,
+    step: Option<Step>,
     /// The root's node once it is laid out, which the log is kept on.
     root: Option<String>,
 }
 
 impl Run<'_> {
-    fn step(&mut self, index: u32) {
-        self.event(Event::step(index));
+    fn step(&mut self, step: Step) {
+        self.event(Event::Step(step));
     }
 
     fn note(&mut self, text: &str) {
@@ -899,13 +894,9 @@ impl Run<'_> {
 impl Events for Run<'_> {
     fn event(&mut self, event: Event) {
         match &event {
-            Event::Step {
-                index,
-                total,
-                title,
-            } => {
-                self.step = *index;
-                self.note(&format!("[{index}/{total}] {title}"));
+            Event::Step(step) => {
+                self.step = Some(*step);
+                self.note(&step.to_string());
             }
             Event::Log { line } => self.note(&format!("  {line}")),
             Event::Progress { .. } => {}

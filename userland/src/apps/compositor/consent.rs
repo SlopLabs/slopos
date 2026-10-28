@@ -1,27 +1,18 @@
-//! privd's questions to the person at the machine, drawn over every surface.
-//!
-//! The channel is the socket pair init made, so an answer here is the
-//! compositor's and nothing else's; the compositor owns both seats, so the
-//! answer is the keyboard's or the pointer's. While a question is up, no key
-//! or button pressed reaches a client and every surface is dimmed beneath it,
-//! so a password typed into it reaches privd alone.
+//! privd's questions, over the socket pair init made: while one is up no key
+//! or press reaches a client, so a password typed into it reaches privd alone.
 
 use std::string::String;
 
 use slopos_abi::InputEvent;
-use slopos_abi::input::keycode::{
-    KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_KP_ENTER, KEY_LEFT, KEY_RIGHT, KEY_TAB, KEY_UP,
-};
 use slopos_abi::syscall::{F_GETFD, MSG_NOSIGNAL};
-use slopos_appkit::embed::Embedded;
 use slopos_appkit::text::ui;
 use slopos_appkit::traits::Role;
 use slopos_appkit::{
-    Button, ButtonRow, CrossAxisAlignment, Disclosure, ImageData, ImageScale, Length, List,
-    ListRow, Node, PropertyList, Rect, Text,
+    Button, ButtonRow, Disclosure, ImageData, ImageScale, Length, List, ListRow, Node,
+    PropertyList, Rect, Text, column,
 };
+use slopos_chrome_core::key::Key as Typed;
 use slopos_gfx::image::ImageSampling;
-use slopos_image::DecodeOptions;
 use slopos_priv_core::consent::{
     self as protocol, Ask, Dialog, Focus, Inbound, Key, Kind, Link, kind,
 };
@@ -30,18 +21,11 @@ use slopos_remote_core::Deframer;
 use slopos_slibc::pal::{Pal, Sys};
 use slopos_theme_core::{Icon, TextRole, Tone, space};
 
+use super::overlay::Overlay;
 use crate::apps::privd::CONSENT_FD;
 use crate::gfx::{DamageRect, DrawBuffer};
 use crate::syscall::{OwnedFd, RawFd, SyscallError, core as sys_core, fs, net};
 
-/// More keys than a hand holds down at once.
-const TAKEN_MAX: usize = 16;
-/// Well past the size an icon is drawn at, so a huge one is refused before
-/// it is decoded.
-const ICON_PIXELS_MAX: usize = 256 * 256;
-const ICON_BYTES_MAX: u64 = 1 << 20;
-const PASSWORD: &str = "Password";
-const ADMIN_NEEDED: &str = "This needs an administrator's password.";
 /// How long after its last key a password question that went unanswered
 /// keeps taking keys, so the rest of a password typed into it reaches no
 /// client.
@@ -52,37 +36,15 @@ pub struct Consent {
     frames: Deframer,
     link: Link,
     showing: Option<Dialog>,
-    /// The question on screen as the tree that draws it, built afresh once
-    /// it is `stale`.
-    tree: Option<Embedded>,
-    stale: bool,
+    overlay: Overlay,
     icon: Option<ImageData>,
     /// The screen and anchor the question was first laid out on, kept so the
     /// window of the app that asks cannot move it under the person's pointer.
     placed: Option<(Rect, Option<Rect>)>,
-    /// The compositor can draw a question.
     drawing: bool,
     /// privd may send a question: a `READY` went since the last one came.
     offered: bool,
-    dirty: bool,
-    /// Keys pressed into the dialog, whose releases no client may see: a
-    /// release names its key, and so would spell a password typed there.
-    taken: Vec<u16>,
     quiet_until: Option<u64>,
-    /// The version this side names in `READY`.
-    speaks: u32,
-}
-
-/// The version to name in `READY`: this side's to a privd that reads one
-/// there, which asks in the older of its own and that.
-fn privd_reads() -> u32 {
-    let interface = std::fs::read(slopos_boot_core::base::INTERFACE_PATH)
-        .ok()
-        .and_then(|text| slopos_boot_core::base::parse_interface(&text).ok());
-    match interface {
-        Some(n) if n >= protocol::SINCE_INTERFACE => protocol::VERSION,
-        _ => 1,
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -91,8 +53,6 @@ pub enum Msg {
     Pick(usize),
 }
 
-/// The question as the person sees it: a dialog of appkit's components,
-/// centred over `anchor` where that fits.
 pub fn view(dialog: &Dialog, icon: Option<&ImageData>, anchor: Option<Rect>) -> Node<Msg> {
     let ask = dialog.ask();
     let mut content: Vec<Node<Msg>> = Vec::new();
@@ -100,7 +60,7 @@ pub fn view(dialog: &Dialog, icon: Option<&ImageData>, anchor: Option<Rect>) -> 
         content.push(Text::new(detail.clone()).wrap().into());
     }
     if ask.kind == Kind::Admin {
-        content.push(Text::new(ADMIN_NEEDED).wrap().into());
+        content.push(Text::new(words::ADMIN_NEEDED).wrap().into());
     }
     if ask.admins.len() > 1 {
         let rows = ask
@@ -118,7 +78,7 @@ pub fn view(dialog: &Dialog, icon: Option<&ImageData>, anchor: Option<Rect>) -> 
     if let Some(label) = dialog.field_label() {
         let field = Node::LineEdit {
             text: ui::BULLET.repeat(dialog.typed_chars()),
-            placeholder: String::from(PASSWORD),
+            placeholder: String::from(words::PASSWORD),
             caret: dialog.typed_chars(),
             focused: false,
             icon: Some(Icon::KeyRound),
@@ -127,11 +87,10 @@ pub fn view(dialog: &Dialog, icon: Option<&ImageData>, anchor: Option<Rect>) -> 
             tab_stop: true,
             on_input: Some(|_| Msg::Press(Focus::Field)),
         };
-        content.push(Node::VStack {
-            children: vec![Text::new(label).role(TextRole::Label).wrap().into(), field],
-            spacing: space::XS,
-            align: CrossAxisAlignment::Stretch,
-        });
+        content.push(column(
+            space::XS,
+            vec![Text::new(label).role(TextRole::Label).wrap().into(), field],
+        ));
     }
     let shown = |text: String| {
         Text::new(text)
@@ -140,11 +99,11 @@ pub fn view(dialog: &Dialog, icon: Option<&ImageData>, anchor: Option<Rect>) -> 
             .wrap_anywhere()
     };
     let mut details = PropertyList::new()
-        .row_with("Asked by", shown(dialog.requester()))
-        .row_with("Runs", shown(ask.command_line()))
-        .row_with("In", shown(ask.directory()));
+        .row_with(words::ASKED_BY, shown(dialog.requester()))
+        .row_with(words::RUNS, shown(ask.command_line()))
+        .row_with(words::IN, shown(ask.directory()));
     if let Some(extension) = &ask.extension {
-        details = details.row_with("Extension", shown(extension.clone()));
+        details = details.row_with(words::EXTENSION, shown(extension.clone()));
     }
     let toggle = match dialog.expanded() {
         true => words::SHOW_LESS,
@@ -157,7 +116,7 @@ pub fn view(dialog: &Dialog, icon: Option<&ImageData>, anchor: Option<Rect>) -> 
             .into(),
     );
     let cancel = Button::new(words::CANCEL).on_press(Msg::Press(Focus::Deny));
-    let allow = Button::new(dialog.verb()).on_press(Msg::Press(Focus::Allow));
+    let allow = Button::new(ask.verb.clone()).on_press(Msg::Press(Focus::Allow));
     let footer = match ask.destructive {
         true => ButtonRow::new().cancel(cancel).destructive(allow),
         false => ButtonRow::new().cancel(cancel).confirm(allow),
@@ -174,10 +133,9 @@ pub fn view(dialog: &Dialog, icon: Option<&ImageData>, anchor: Option<Rect>) -> 
             }),
         },
         None => {
-            let (icon, tone) = match (dialog.names_app(), &ask.app) {
-                (false, _) => (Icon::Shield, Tone::Secondary),
-                (true, Some(_)) => (Icon::AppWindow, Tone::Secondary),
-                (true, None) => (Icon::TriangleAlert, Tone::Warning),
+            let (icon, tone) = match &ask.app {
+                Some(_) => (Icon::AppWindow, Tone::Secondary),
+                None => (Icon::TriangleAlert, Tone::Warning),
             };
             Node::Icon {
                 icon,
@@ -186,31 +144,17 @@ pub fn view(dialog: &Dialog, icon: Option<&ImageData>, anchor: Option<Rect>) -> 
             }
         }
     };
-    Node::Dialog {
-        title: dialog.headline(),
-        icon: Some(Box::new(mark)),
-        content: Box::new(Node::VStack {
-            children: content,
-            spacing: space::MD,
-            align: CrossAxisAlignment::Stretch,
-        }),
-        footer,
-        on_dismiss: None,
-        anchor,
-    }
+    slopos_appkit::Dialog::new(ask.headline())
+        .icon(mark)
+        .content(column(space::MD, content))
+        .footer(footer)
+        .anchor(anchor)
+        .into()
 }
 
 /// The icon at `path`, which privd named from a share no process writes.
 fn load_icon(path: &str) -> Option<ImageData> {
-    if !protocol::icon_path(path) {
-        return None;
-    }
-    let bytes = crate::app_entry::read_bounded(std::path::Path::new(path), ICON_BYTES_MAX)?;
-    let options = DecodeOptions {
-        max_pixels: ICON_PIXELS_MAX,
-        ..DecodeOptions::default()
-    };
-    let image = slopos_image::decode(&bytes, options).ok()?;
+    let image = crate::app_entry::read_icon(std::path::Path::new(path))?;
     ImageData::new(image.width, image.height, image.pixels)
 }
 
@@ -235,16 +179,12 @@ impl Consent {
             frames: slopos_priv_core::wire::deframer(),
             link: Link::new(crate::privd::request_id()),
             showing: None,
-            tree: None,
-            stale: false,
+            overlay: Overlay::new(),
             icon: None,
             placed: None,
             drawing: false,
             offered: false,
-            dirty: false,
-            taken: Vec::new(),
             quiet_until: None,
-            speaks: privd_reads(),
         };
         if !consent.write(&consent.link.hello()) {
             consent.fd = None;
@@ -261,13 +201,12 @@ impl Consent {
         self.offer();
     }
 
-    /// Tell privd a question can be drawn, once nothing is on screen.
     fn offer(&mut self) {
         if !self.drawing || self.offered || self.showing.is_some() {
             return;
         }
         self.offered = true;
-        if !self.write(&protocol::ready_frame(self.speaks)) {
+        if !self.write(&protocol::ready_frame()) {
             self.fd = None;
         }
     }
@@ -286,7 +225,7 @@ impl Consent {
         true
     }
 
-    /// Take what privd sent; `false` once the channel is gone.
+    /// `false` once the channel is gone.
     pub fn read(&mut self) -> bool {
         let Some(fd) = &self.fd else {
             return false;
@@ -310,7 +249,6 @@ impl Consent {
                 Ok(Inbound::Stale) => {}
                 Ok(Inbound::Reset(seen)) => {
                     self.withdraw();
-                    self.speaks = privd_reads();
                     self.offered = false;
                     if !self.write(&seen) {
                         return self.close();
@@ -328,8 +266,7 @@ impl Consent {
                         self.icon = ask.icon.as_deref().and_then(load_icon);
                         self.showing = Some(Dialog::new(ask));
                         self.placed = None;
-                        self.stale = true;
-                        self.dirty = true;
+                        self.overlay.changed();
                     }
                     Err(_) => return self.close(),
                 },
@@ -357,8 +294,7 @@ impl Consent {
         let Some(dialog) = self.showing.take() else {
             return;
         };
-        self.tree = None;
-        self.dirty = true;
+        self.overlay.hide();
         if dialog.ask().kind.takes_secret() {
             self.quiet_until = Some(sys_core::get_time_ms() + QUIET_MS);
         }
@@ -374,19 +310,13 @@ impl Consent {
         self.showing.is_some() || self.quiet(sys_core::get_time_ms())
     }
 
-    /// Whether a key press is the dialog's, which then takes it: while it
-    /// is [`capturing`](Self::capturing), or when the press repeats a key
-    /// pressed into the dialog. A fresh press of a key the dialog took is a
-    /// client's, release and all, since the dialog's release was lost.
+    /// Whether a press is the dialog's: while it is
+    /// [`capturing`](Self::capturing), or a repeat of a key pressed into it. A
+    /// fresh press of a key it took is a client's, release and all.
     pub fn takes_press(&mut self, event: &InputEvent) -> bool {
-        let keycode = event.key_keycode();
-        let held = self.taken.contains(&keycode);
-        if self.capturing() || (held && event.key_is_repeat()) {
+        if self.capturing() || self.overlay.taken.repeats(event) {
             self.key(event);
             return true;
-        }
-        if held {
-            self.taken.retain(|&k| k != keycode);
         }
         false
     }
@@ -395,19 +325,21 @@ impl Consent {
         self.showing.is_some()
     }
 
-    /// The pid of who asks the question on screen, whose window it centres
-    /// over.
     pub fn asker(&self) -> Option<u32> {
         self.showing.as_ref().map(|dialog| dialog.ask().pid)
     }
 
-    /// Whether the dialog appeared, changed or went since the last frame,
-    /// which shows it on `screen` over the `anchor` it was first laid out
-    /// on. A screen that changed moves it, and input waits again; privd
-    /// hears when a question first goes on screen.
-    pub fn take_dirty(&mut self, screen: Rect, anchor: Option<Rect>) -> bool {
+    /// What to repaint since the last frame, the dialog laid out over
+    /// `anchor` the first time. A screen that changed moves it and input
+    /// waits again; privd hears when a question first goes on screen.
+    pub fn take_damage(
+        &mut self,
+        screen: Rect,
+        anchor: Option<Rect>,
+        pointer: (i32, i32),
+    ) -> impl Iterator<Item = DamageRect> + use<> {
         let Some(dialog) = self.showing.as_mut() else {
-            return std::mem::take(&mut self.dirty);
+            return self.overlay.take_damage();
         };
         let now = sys_core::get_time_ms();
         let placed = match self.placed {
@@ -419,64 +351,43 @@ impl Consent {
             }
         };
         if dialog.drawn(now) {
-            eprintln!(
-                "COMPOSITOR: shown a question from {}",
-                printable(dialog.app())
-            );
+            log!("shown a question from {}", dialog.ask().app_name());
             let id = dialog.ask().id;
-            if protocol::says_shown(self.speaks) && !self.write(&protocol::shown_frame(id)) {
+            if !self.write(&protocol::shown_frame(id)) {
                 self.close();
-                return std::mem::take(&mut self.dirty);
+                return self.overlay.take_damage();
             }
         }
-        if self.stale || self.tree.is_none() || self.placed != Some(placed) {
-            self.lay_out(placed);
+        if self.overlay.stale() || self.placed != Some(placed) {
+            self.lay_out(placed, pointer);
         }
-        std::mem::take(&mut self.dirty)
+        self.overlay.take_damage()
     }
 
-    fn lay_out(&mut self, (screen, anchor): (Rect, Option<Rect>)) {
+    fn lay_out(&mut self, (screen, anchor): (Rect, Option<Rect>), pointer: (i32, i32)) {
         let Some(dialog) = &self.showing else {
             return;
         };
         let node = view(dialog, self.icon.as_ref(), anchor);
-        match &mut self.tree {
-            Some(tree) => tree.rebuild(&node, screen),
-            None => self.tree = Some(Embedded::new(&node, screen)),
-        }
-        let (role, name) = match dialog.focus() {
-            Focus::Field => (Role::TextField, PASSWORD),
+        let focus = match dialog.focus() {
+            Focus::Field => (Role::TextField, words::PASSWORD),
             Focus::Details if dialog.expanded() => (Role::Button, words::SHOW_LESS),
             Focus::Details => (Role::Button, words::SHOW_DETAILS),
             Focus::Deny => (Role::Button, words::CANCEL),
-            Focus::Allow => (Role::Button, dialog.verb()),
+            Focus::Allow => (Role::Button, dialog.ask().verb.as_str()),
         };
-        if let Some(tree) = &mut self.tree {
-            tree.focus(role, name);
-        }
+        self.overlay.show(&node, screen, pointer, Some(focus));
         self.placed = Some((screen, anchor));
-        self.stale = false;
-        self.dirty = true;
     }
 
-    /// Whether the release of `keycode` is the dialog's, which took its press.
-    /// Any other release reaches the client that saw the press, question or
-    /// not, so nothing stays held down behind one.
+    /// Any release but of a key it took reaches the client that saw the
+    /// press, question or not, so nothing stays held down behind one.
     pub fn takes_release(&mut self, keycode: u16) -> bool {
-        let Some(at) = self.taken.iter().position(|&k| k == keycode) else {
-            return false;
-        };
-        self.taken.remove(at);
-        true
+        self.overlay.taken.release(keycode)
     }
 
     fn key(&mut self, event: &InputEvent) {
-        if !event.key_is_repeat() && !self.taken.contains(&event.key_keycode()) {
-            if self.taken.len() >= TAKEN_MAX {
-                self.taken.remove(0);
-            }
-            self.taken.push(event.key_keycode());
-        }
+        self.overlay.taken.take(event);
         let now = sys_core::get_time_ms();
         let Some(dialog) = self.showing.as_mut() else {
             if self.quiet(now) {
@@ -484,42 +395,34 @@ impl Consent {
             }
             return;
         };
-        if event.key_is_repeat() && event.key_keycode() != KEY_BACKSPACE {
-            return;
-        }
-        let key = match event.key_keycode() {
-            KEY_TAB => Key::Move,
-            KEY_LEFT | KEY_RIGHT => Key::Arrow,
-            KEY_ENTER | KEY_KP_ENTER => Key::Press,
-            KEY_ESC => Key::Dismiss,
-            KEY_BACKSPACE => Key::Erase,
-            KEY_UP => Key::Choose { next: false },
-            KEY_DOWN => Key::Choose { next: true },
-            _ => match char::from_u32(event.key_codepoint()) {
-                Some(ch) if ch != '\0' => Key::Text(ch),
-                _ => return,
-            },
+        let key = match Typed::read(event) {
+            Some(Typed::Move { back }) => Key::Move { back },
+            Some(Typed::Arrow { right }) => Key::Arrow { right },
+            Some(Typed::Choose { next }) => Key::Choose { next },
+            Some(Typed::Press) => Key::Press,
+            Some(Typed::Dismiss) => Key::Dismiss,
+            Some(Typed::Erase) => Key::Erase,
+            Some(Typed::Text(ch)) => Key::Text(ch),
+            None => return,
         };
         let answer = dialog.key(key, now);
-        self.stale = true;
-        self.dirty = true;
+        self.overlay.changed();
         if let Some(answer) = answer {
             self.answer(answer);
         }
     }
 
-    /// The primary button went down or up at `(x, y)`: what the control
-    /// there answers, for a press made while the dialog was armed.
+    /// What the control at `(x, y)` answers, for a press made while the
+    /// dialog was armed.
     pub fn click(&mut self, x: i32, y: i32, pressed: bool) {
-        let (Some(tree), Some(dialog)) = (self.tree.as_mut(), self.showing.as_mut()) else {
+        let Some(dialog) = self.showing.as_mut() else {
             return;
         };
         let now = sys_core::get_time_ms();
         if pressed && !dialog.pointer_down(now) {
             return;
         }
-        let sent: Vec<Msg> = tree.click(x, y, pressed);
-        self.dirty = true;
+        let sent: Vec<Msg> = self.overlay.click(x, y, pressed);
         for msg in sent {
             let Some(dialog) = self.showing.as_mut() else {
                 return;
@@ -531,7 +434,7 @@ impl Consent {
                     None
                 }
             };
-            self.stale = true;
+            self.overlay.changed();
             if let Some(answer) = answer {
                 self.answer(answer);
             }
@@ -541,32 +444,22 @@ impl Consent {
     /// The primary button went up over the lock or login screen, which hides
     /// the question: whatever it pressed answers nothing.
     pub fn release_unseen(&mut self) {
-        if let Some(tree) = self.tree.as_mut() {
-            tree.release_unseen();
-        }
+        self.overlay.release_unseen();
     }
 
-    /// A turn of the wheel at `(x, y)`, which scrolls what the question
-    /// holds when it is taller than the screen.
     pub fn wheel(&mut self, x: i32, y: i32, value_v120: i32) {
-        if let Some(tree) = self.tree.as_mut() {
-            let _: Vec<Msg> = tree.wheel(x, y, value_v120);
-            self.dirty = true;
-        }
+        let _: Vec<Msg> = self.overlay.wheel(x, y, value_v120);
     }
 
     pub fn hover(&mut self, x: i32, y: i32) {
-        if let Some(tree) = self.tree.as_mut() {
-            self.dirty |= tree.hover(x, y);
-        }
+        self.overlay.hover(x, y);
     }
 
     fn answer(&mut self, answer: protocol::Answer) {
         if self.showing.take().is_none() {
             return;
         }
-        self.tree = None;
-        self.dirty = true;
+        self.overlay.hide();
         let mut frame = answer.frame();
         drop(answer);
         if !self.write(&frame) {
@@ -577,22 +470,6 @@ impl Consent {
     }
 
     pub fn draw(&self, buf: &mut DrawBuffer, clip: &DamageRect) {
-        let (Some(_), Some(tree)) = (&self.showing, &self.tree) else {
-            return;
-        };
-        let clip = Rect::new(
-            clip.x0,
-            clip.y0,
-            clip.x1 - clip.x0 + 1,
-            clip.y1 - clip.y0 + 1,
-        );
-        tree.paint(buf, clip);
+        self.overlay.draw(buf, clip);
     }
-}
-
-/// `text` with every control character shown as `?`, for a log line.
-fn printable(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() { '?' } else { c })
-        .collect()
 }

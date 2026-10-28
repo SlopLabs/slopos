@@ -23,7 +23,6 @@ const GRACE_MS: u64 = 10_000;
 
 /// The requester's side of a question while it waits.
 pub trait Waiting {
-    /// The question is on screen now.
     fn shown(&mut self);
     /// Whether the requester has gone or withdrawn the request.
     fn withdrawn(&mut self) -> bool;
@@ -65,7 +64,6 @@ impl Broker {
         }
     }
 
-    /// The person's allowing answer, or why there is none.
     pub fn ask(&self, ask: Ask, waiting: &mut impl Waiting) -> Result<Answer, Refusal> {
         let (events, received) = mpsc::channel();
         let withdrawn = Arc::new(AtomicBool::new(false));
@@ -211,15 +209,11 @@ fn serve(channel: Option<OwnedFd>, shown: &AtomicBool, incoming: Receiver<(Ask, 
                 continue;
             }
         }
-        let version = questions.version();
-        if let Some((ask, asker)) = questions.next(now()) {
-            if !live.write(&ask.frame(version)) {
-                agent = None;
-                continue;
-            }
-            if !protocol::says_shown(version) {
-                let _ = asker.events.send(Event::Shown);
-            }
+        if let Some((ask, _)) = questions.next(now())
+            && !live.write(&ask.frame())
+        {
+            agent = None;
+            continue;
         }
         let mut fds = [UserPollFd {
             fd: live.fd.raw(),
@@ -236,9 +230,8 @@ fn serve(channel: Option<OwnedFd>, shown: &AtomicBool, incoming: Receiver<(Ask, 
     }
 }
 
-/// Take what the agent sent; `false` once it is gone or broke the protocol,
-/// either of which ends it as the agent. A new agent, or init on behalf of
-/// one that exited, interrupts every question.
+/// `false` once the agent is gone or broke the protocol. A new agent, or init
+/// on behalf of one that exited, interrupts every question.
 fn read(agent: &mut Agent, questions: &mut Questions<Asker>, now: u64) -> bool {
     let mut buf = [0u8; 1024];
     loop {
@@ -278,11 +271,11 @@ fn read(agent: &mut Agent, questions: &mut Questions<Asker>, now: u64) -> bool {
                 let Ok(version) = protocol::decode_ready(&payload) else {
                     return false;
                 };
-                questions.ready(version);
+                for asker in questions.ready(version) {
+                    asker.settle(Err(Refusal::Outdated));
+                }
             }
-            Ok(Inbound::Frame(kind::SHOWN, payload))
-                if protocol::says_shown(questions.version()) =>
-            {
+            Ok(Inbound::Frame(kind::SHOWN, payload)) => {
                 let Ok(id) = protocol::decode_shown(&payload) else {
                     return false;
                 };

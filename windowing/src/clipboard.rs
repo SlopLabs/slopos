@@ -1,12 +1,5 @@
-//! Clipboard transfer for windowed applications.
-//!
-//! The wire is fd-based in both directions: a copy hands the compositor a memfd
-//! holding the bytes, and a paste is a round trip — ask, be told the size, hand
-//! back a destination memfd of exactly that size, then read it. The destination
-//! is the receiver's because the server→client event path carries no fd.
-//!
-//! [`Clipboard`] owns the buffer between the two halves of that round trip,
-//! which is the whole of the state a client needs to keep.
+//! A copy hands the compositor a memfd holding the bytes; a paste asks, is told
+//! the size and hands back a memfd of that size, since no event carries an fd.
 
 use crate::connection::ProtocolHandle;
 use slopos_cabi::SharedMemory;
@@ -14,12 +7,8 @@ use slopos_cabi::SharedMemory;
 /// Ceiling on one transfer, matching the compositor's.
 pub const MAX_CLIPBOARD_BYTES: usize = 16 * 1024 * 1024;
 
-/// Where a paste round trip has got to.
-///
-/// Explicit, because the round trip is three messages long and a second
-/// request part way through it used to drop the destination buffer the first
-/// was still waiting on — losing that paste, or answering it with the *next*
-/// transfer's buffer.
+/// Where a paste round trip has got to, so a second request during one does
+/// not drop the buffer the first waits on.
 #[derive(Default)]
 enum Paste {
     #[default]
@@ -59,11 +48,8 @@ impl Clipboard {
             .is_ok()
     }
 
-    /// Asks for the selection; the answer arrives as
-    /// [`crate::Event::ClipboardOffer`].
-    ///
-    /// False while a round trip is already running, which leaves the caller to
-    /// fall back rather than cancelling a paste that is about to land.
+    /// Asks for the selection, which arrives as
+    /// [`crate::Event::ClipboardOffer`]; false while a round trip runs.
     pub fn request(&mut self, handle: &ProtocolHandle) -> bool {
         if !matches!(self.paste, Paste::Idle) {
             return false;
@@ -78,10 +64,8 @@ impl Clipboard {
         sent
     }
 
-    /// Answers an offer with a destination buffer of exactly `len` bytes.
-    ///
-    /// Every failure here ends the round trip, or an empty selection would
-    /// leave the clipboard refusing every later paste.
+    /// Answers an offer with a buffer of exactly `len` bytes. Every failure
+    /// ends the round trip, or an empty selection would refuse later pastes.
     pub fn accept_offer(&mut self, handle: &ProtocolHandle, len: u32) -> bool {
         if !matches!(self.paste, Paste::AwaitingOffer) {
             return false;
@@ -105,11 +89,8 @@ impl Clipboard {
         }
     }
 
-    /// Takes the pasted text once the compositor reports it written.
-    ///
-    /// Control bytes other than tab and newline are dropped: a clipboard is
-    /// untrusted input, and an editor that accepted an escape sequence would be
-    /// pasting something no one typed.
+    /// The pasted text, less control bytes but tab and newline: a clipboard is
+    /// untrusted, and an escape sequence pasted is something no one typed.
     pub fn take(&mut self, len: u32) -> Option<String> {
         let Paste::AwaitingData(mut buffer) = core::mem::take(&mut self.paste) else {
             return None;

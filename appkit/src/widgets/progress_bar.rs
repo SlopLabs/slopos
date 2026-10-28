@@ -1,10 +1,12 @@
-use slopos_theme_core::{Tone, space};
+use std::cell::Cell;
+
+use slopos_theme_core::{TextRole, Tone, space};
 
 use crate::constraints::{BoxConstraints, Rect, Size};
-use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use crate::event::{EventResponse, MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
-use crate::text::BODY;
-use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
+use crate::text::ui;
+use crate::traits::{MeasureCtx, Widget, WidgetCore};
 
 const SWEEP_MS: u64 = 2000;
 
@@ -29,6 +31,7 @@ pub struct ProgressBarWidget {
     value: Option<u32>,
     label: String,
     tone: Tone,
+    cut: Cell<bool>,
 }
 
 impl ProgressBarWidget {
@@ -38,6 +41,7 @@ impl ProgressBarWidget {
             value: value.map(|v| v.min(100)),
             label,
             tone,
+            cut: Cell::new(false),
         }
     }
 }
@@ -51,11 +55,12 @@ impl Widget for ProgressBarWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let height = BODY.line_height + space::XS;
+        let height = TextRole::Body.style().line_height + space::XS;
         let width = if constraints.is_width_bounded() {
             constraints.max_width
         } else {
-            ctx.style.field_min_width.max(ctx.text_width(&self.label))
+            let label = ui::width(&self.label, TextRole::Body) + space::SM * 2;
+            ctx.style.field_min_width.max(label)
         };
         constraints.constrain(Size::new(width, height))
     }
@@ -77,10 +82,14 @@ impl Widget for ProgressBarWidget {
             None => sweep(rect.width, slopos_windowing::get_time_ms()),
         };
         let filled = Rect::new(rect.x + at, rect.y, len, rect.height);
-        let tw = ctx.text_width(&self.label);
+        let room = rect.width - space::SM * 2;
+        let tw = ui::width(&self.label, TextRole::Body).min(room);
         let tx = rect.x + (rect.width - tw) / 2;
-        let ty = rect.y + (rect.height - ctx.text_height()) / 2;
-        ctx.draw_text_transparent(tx, ty, &self.label, theme.text);
+        let ty = ui::centred_top(rect.y, rect.height, TextRole::Body);
+        let label = |ctx: &mut PaintContext, ink| {
+            ctx.draw_text_fitted(tx, ty, &self.label, TextRole::Body, room, ink)
+        };
+        self.cut.set(label(ctx, theme.text));
         ctx.with_viewport(filled, |ctx| {
             ctx.fill_rect(
                 filled.x,
@@ -89,25 +98,16 @@ impl Widget for ProgressBarWidget {
                 filled.height,
                 theme.ink(self.tone),
             );
-            ctx.draw_text_transparent(tx, ty, &self.label, theme.text_on_accent);
+            label(ctx, theme.text_on_accent);
         });
         ctx.draw_rect(rect.x, rect.y, rect.width, rect.height, theme.border);
     }
 
-    fn event(
-        &mut self,
-        _event: &WidgetEvent,
-        _phase: EventPhase,
-        _sink: &mut MessageSink,
-    ) -> EventResponse {
+    fn event(&mut self, _event: &WidgetEvent, _sink: &mut MessageSink) -> EventResponse {
         EventResponse::Ignored
     }
 
-    fn role(&self) -> Role {
-        Role::None
-    }
-
-    fn focus_policy(&self) -> FocusPolicy {
-        FocusPolicy::None
+    fn tooltip(&self, _x: i32, _y: i32) -> Option<&str> {
+        self.cut.get().then_some(self.label.as_str())
     }
 }

@@ -1,3 +1,10 @@
+macro_rules! log {
+    ($($arg:tt)*) => {{
+        let line = std::format!("COMPOSITOR: {}\n", format_args!($($arg)*));
+        let _ = $crate::syscall::tty::write(line.as_bytes());
+    }};
+}
+
 mod confirm;
 pub mod consent;
 pub mod decorations;
@@ -8,6 +15,7 @@ mod hover;
 mod input;
 pub mod menu_bar;
 mod output;
+mod overlay;
 mod popover;
 pub mod protocol;
 mod region;
@@ -20,8 +28,7 @@ use crate::gfx::DamageRect;
 use crate::init_control::Command;
 use crate::net_query;
 use crate::ring::{Ring, slopfut};
-use crate::syscall::{DisplayInfo, UserWindowInfo, core as sys_core, process, tty, window};
-use crate::theme::*;
+use crate::syscall::{DisplayInfo, UserWindowInfo, core as sys_core, process, window};
 use region::Region;
 use slopos_abi::input::POINTER_AXIS_VERTICAL;
 use slopos_abi::net::{
@@ -31,17 +38,20 @@ use slopos_abi::net::{
 use slopos_abi::syscall::POLLIN;
 use slopos_chrome_core::clock::WallTime;
 use slopos_chrome_core::menu::{Choice, Ending};
-use slopos_chrome_core::status::MAX_STATUS_ITEMS;
-use slopos_chrome_core::{
+use slopos_chrome_core::netstate::{
     IfaceKind, IfaceRow, NetIndicatorState, NetPanelModel, indicator_state_for,
 };
+use slopos_chrome_core::positioner;
+use slopos_chrome_core::status::{BAR_HEIGHT, MAX_STATUS_ITEMS};
 use slopos_protocol::server::MAX_CLIENTS;
 use std::time::Instant;
 use std::vec::Vec;
 
-use frame::WindowBounds;
+use dock::{DOCK_HEIGHT, Dock};
+use frame::{TITLE_BAR_HEIGHT, WindowBounds};
 use hover::HoverRegistry;
-use input::InputHandler;
+use input::{InputHandler, Pressed};
+use menu_bar::MenuBar;
 use output::{CompositorOutput, FrameMetrics, RenderMode, estimate_present_bytes};
 use protocol::ProtocolBridge;
 use renderer::Renderer;
@@ -61,88 +71,69 @@ struct WindowManager {
     hover_registry: HoverRegistry,
     surface_cache: ClientSurfaceCache,
 
-    system_bar: menu_bar::SystemBar,
-    shelf: dock::LauncherShelf,
-    /// Compositor-owned chrome; holds a pointer grab while open.
+    menu_bar: MenuBar,
+    dock: Dock,
     popover: popover::Popover,
-    /// What a choice that ends something asks first, while it is up.
     asking: confirm::Asking,
-    /// Endings the person went ahead with that did not happen, for
-    /// [`confirm::Asking::failed`] to say so.
+    /// Endings the person went ahead with that did not happen.
     undone: std::sync::mpsc::Receiver<Ending>,
     undone_tx: std::sync::mpsc::Sender<Ending>,
-    /// privd's question, while one is up: above everything, and the only
-    /// thing input reaches.
     consent: consent::Consent,
-    /// The login screen, or this desktop's lock screen, above even that.
     gate: gate::Gate,
-    /// Another session is in front: nothing is drawn, and init says when
-    /// this one is again.
+    /// Another session is in front: nothing is drawn until init says this
+    /// one is again.
     behind: bool,
     init_says: Option<InitSays>,
-    /// A new base changed the session's programs: open the system panel,
-    /// which offers the restart, on the next frame.
+    /// A new base changed the session's programs: the system menu offers the
+    /// restart on the next frame.
     restart_offer_due: bool,
 
-    /// `None` if the AF_UNIX bind failed.
+    /// `None` on the login screen, or when its socket could not be bound.
     protocol: Option<Box<ProtocolBridge>>,
 
     protocol_serial: u32,
     protocol_pointer_focus: u32,
-    /// The surface holding the implicit pointer grab, or 0.
-    ///
-    /// A press on a client's content pins pointer delivery to that client
-    /// until every button is up again — the `wl_pointer` rule. Without it a
-    /// drag that leaves the window takes the pointer's focus with it, the
-    /// release is delivered to whatever is underneath instead, and the client
-    /// is left holding a drag it was never told had ended.
+    /// The surface a press on its content pinned the pointer to until every
+    /// button is up, as `wl_pointer` has it, or 0: a drag that leaves the
+    /// window still ends there.
     protocol_pointer_grab: u32,
-    /// The grabbed surface's generation, because the task id alone is a slot
-    /// index and slots are recycled.
+    /// The task id is a slot, which is recycled.
     protocol_pointer_grab_gen: u32,
 
     first_frame: bool,
-    /// This frame's accumulated, disjoint damage region.
+    /// Disjoint.
     output_damage: Region,
-    /// Tracked separately from `output_damage` so that region stays a precise
-    /// rect set.
     force_full_redraw: bool,
-    /// Damage from a present that did not reach the screen, carried forward
-    /// until actually shown.
+    /// What a present that did not reach the screen leaves for the next.
     pending_damage: Region,
-    /// A suppressed/failed *full* present to retry next frame.
     pending_full: bool,
-    /// Surfaces (by `task_id`) whose committed damage was folded into this
-    /// frame. Only these are cleared after a present that reached the screen —
-    /// a commit landing after the snapshot stays dirty and exports next frame.
+    /// The surfaces whose damage this frame shows, which alone are clean
+    /// once it reaches the screen.
     frame_dirty_surfaces: Vec<u32>,
     prev_window_bounds: [WindowBounds; MAX_WINDOWS],
     prev_cursor_shape: u8,
     net_cache: NetPanelModel,
     net_indicator: NetIndicatorState,
-    /// Only consulted on the fallback path — see [`WindowManager::net_event_driven`].
     net_last_poll: Option<Instant>,
-    /// Whether a `net_monitor` fd is driving refreshes. When it is, the poll
-    /// timer is switched off entirely rather than kept as a backstop, so a
-    /// monitor that stopped firing is noticed instead of masked.
+    /// A `net_monitor` drives refreshes, and no timer backs it up, so one
+    /// that stopped is noticed rather than masked.
     net_event_driven: bool,
-    /// `None` = not yet probed, `Some(true)` = the virtio-gpu overlay owns the
-    /// pointer (software cursor suppressed), `Some(false)` = unavailable.
+    /// Whether the virtio-gpu overlay draws the pointer, once probed.
     hw_cursor: Option<bool>,
-    /// Cursor shape last uploaded to the hardware overlay (`-1` = none).
+    /// -1 before any.
     hw_cursor_shape: i32,
-    /// Last position sent to the hardware cursor (`i32::MIN` = never), so the
-    /// blocking move is only issued when the pointer actually moved.
+    /// Where the overlay was last moved to, so a move that blocks is made
+    /// only when the pointer moved.
     hw_cursor_last_x: i32,
     hw_cursor_last_y: i32,
 }
 
 impl WindowManager {
     fn new(consent: consent::Consent, gate: gate::Gate) -> Self {
-        let mut shelf = dock::LauncherShelf::new();
+        let mut dock = Dock::new();
         let home = std::env::var("HOME").ok();
         if !gate.greeter() {
-            shelf.pin(crate::app_entry::pinned(home.as_deref()));
+            dock.pin(crate::app_entry::pinned(home.as_deref()));
         }
         let protocol = match gate.greeter() {
             true => None,
@@ -158,8 +149,8 @@ impl WindowManager {
             renderer: Renderer::new(),
             hover_registry: HoverRegistry::new(),
             surface_cache: ClientSurfaceCache::new(),
-            system_bar: menu_bar::SystemBar::new(),
-            shelf,
+            menu_bar: MenuBar::new(),
+            dock,
             popover: popover::Popover::new(
                 net_toggle_unasked(),
                 gate.person().unwrap_or_default().to_owned(),
@@ -196,9 +187,8 @@ impl WindowManager {
         }
     }
 
-    /// Drive the virtio-gpu hardware cursor: probe lazily, re-upload on shape
-    /// change, and report whether the overlay owns the pointer (so the renderer
-    /// skips compositing a software cursor into the frame).
+    /// Whether the virtio-gpu overlay draws the pointer, `shape` uploaded to
+    /// it when it changed.
     fn update_hw_cursor(&mut self, shape: u8) -> bool {
         match self.hw_cursor {
             Some(false) => return false,
@@ -218,8 +208,8 @@ impl WindowManager {
             self.hw_cursor_shape = shape as i32;
             return true;
         }
-        // A failed re-upload after activation stays on hardware, keeping the
-        // last good overlay shape, so overlay and software cursor never coexist.
+        // A failed upload once the overlay is in use keeps its last shape, so
+        // two pointers never show.
         if self.hw_cursor.is_none() {
             self.hw_cursor = Some(false);
             false
@@ -228,17 +218,15 @@ impl WindowManager {
         }
     }
 
-    /// Rebuild the network model from the kernel and republish the indicator.
-    ///
-    /// A failed query leaves the previous model in place rather than falling
-    /// back to `EMPTY`: a transient error is not evidence the network went away.
+    /// A failed query keeps the model it had: a passing error is no sign the
+    /// network went away.
     fn refresh_from_kernel(&mut self) {
         let Some(model) = read_net_model() else {
             return;
         };
         self.net_indicator = indicator_state_for(&model);
         self.net_cache = model;
-        self.system_bar.set_network(true, self.net_indicator);
+        self.menu_bar.set_network(true, self.net_indicator);
     }
 
     fn refresh_windows(&mut self) {
@@ -260,7 +248,7 @@ impl WindowManager {
         self.surface_cache
             .cleanup_stale(&self.windows, self.window_count);
 
-        self.shelf
+        self.dock
             .sync_running_apps(&self.windows, self.window_count);
 
         self.output_damage.clear();
@@ -284,8 +272,7 @@ impl WindowManager {
             if let Some(prev_idx) = prev {
                 let old = saved_bounds[prev_idx];
                 let geometry_changed = old != curr_bounds;
-                // A pure restack changes no geometry but changes occlusion, so
-                // the covered/revealed area must be repainted.
+                // A restack moves nothing but changes what covers what.
                 let restacked = prev_idx != i;
                 let retitled = self.prev_windows[prev_idx].title != window.title;
                 if geometry_changed || restacked || retitled {
@@ -316,72 +303,46 @@ impl WindowManager {
         }
     }
 
-    /// Cursor-trail / shelf / hover damage. Must run after the frame's input
-    /// events are dispatched: `process_input_events` populates the cursor trail.
+    /// What the pointer's path, the dock and hover repaint, once the frame's
+    /// input has laid the path.
     fn add_pointer_damage(&mut self) {
         let cursor_moved = self.input.cursor_trail_count > 0;
-        let shelf_content_changed = self.shelf.take_content_dirty();
-        if cursor_moved || shelf_content_changed {
-            let shelf_bounds = self.shelf.bounds();
-            if shelf_bounds.is_valid() {
-                self.output_damage.add_rect(
-                    shelf_bounds.x0,
-                    shelf_bounds.y0,
-                    shelf_bounds.x1,
-                    shelf_bounds.y1,
-                );
-            }
+        if self.dock.take_content_dirty() || cursor_moved {
+            self.output_damage.add(self.dock.bounds());
+            self.output_damage
+                .add(self.dock.reach(self.input.mouse_x, self.input.mouse_y));
         }
-
-        if self.input.cursor_trail_count > 0 {
+        if cursor_moved {
             for i in 0..self.input.cursor_trail_count {
                 let (x, y) = self.input.cursor_trail[i];
-                self.add_cursor_damage_at(x, y);
+                self.output_damage.add(renderer::cursor_reach(x, y));
             }
-            self.add_cursor_damage_at(self.input.mouse_x, self.input.mouse_y);
+            self.output_damage.add(renderer::cursor_reach(
+                self.input.mouse_x,
+                self.input.mouse_y,
+            ));
         }
-
-        self.register_hover_regions();
     }
 
-    fn register_hover_regions(&mut self) {
+    fn register_hover_regions(&mut self, buttons_hovered_task: u32) {
         self.hover_registry.begin_frame();
 
         if self.renderer.output_height == 0 {
             return;
         }
 
-        // The renderer shows/hides the button glyphs from this hover state.
-        for i in (0..self.window_count as usize).rev() {
-            let w = self.windows[i];
+        for w in self.windows[..self.window_count as usize].iter().rev() {
             if w.state == WINDOW_STATE_MINIMIZED {
                 continue;
             }
-
-            let frame_y = w.y - TITLE_BAR_HEIGHT;
-            let group_hovered = decorations::hit_test_signal_group(
-                w.x,
-                frame_y,
-                self.input.mouse_x,
-                self.input.mouse_y,
-            );
-
-            let gx = w.x + SIGNAL_GROUP_X;
-            let gy = frame_y + SIGNAL_GROUP_Y;
-            self.hover_registry.register(
-                hover::HOVER_SIGNAL_GROUP_BASE | w.task_id,
-                DamageRect {
-                    x0: gx,
-                    y0: gy,
-                    x1: gx + SIGNAL_GROUP_W - 1,
-                    y1: gy + SIGNAL_GROUP_H - 1,
-                },
-                group_hovered,
-            );
+            let group = decorations::buttons_group(w.x, w.y - TITLE_BAR_HEIGHT);
+            let hovered = w.task_id == buttons_hovered_task;
+            self.hover_registry
+                .register(hover::HOVER_BUTTONS_BASE | w.task_id, group, hovered);
         }
 
         let mut status_regions = [(0u32, DamageRect::invalid(), false); MAX_STATUS_ITEMS];
-        let status_count = self.system_bar.hover_regions(
+        let status_count = self.menu_bar.hover_regions(
             self.renderer.output_width,
             self.input.mouse_x,
             self.input.mouse_y,
@@ -391,21 +352,12 @@ impl WindowManager {
             self.hover_registry.register(id, rect, hovered);
         }
 
-        let mut hover_damage = [DamageRect::invalid(); 32];
-        let hover_damage_count = self.hover_registry.changed_regions(&mut hover_damage);
-        for i in 0..hover_damage_count {
-            self.output_damage.add_rect(
-                hover_damage[i].x0,
-                hover_damage[i].y0,
-                hover_damage[i].x1,
-                hover_damage[i].y1,
-            );
-        }
+        let damage = &mut self.output_damage;
+        self.hover_registry.changed_regions(|rect| damage.add(rect));
     }
 
-    /// The index this `task_id` held in the previous frame's window list. The
-    /// index doubles as its stacking rank (bottom = 0), so callers detect
-    /// restacks by comparing it against the current index.
+    /// Where `task_id` was in the last frame's list, which is its rank from
+    /// the bottom.
     fn find_prev_index(&self, task_id: u32) -> Option<usize> {
         (0..self.prev_window_count as usize).find(|&i| self.prev_windows[i].task_id == task_id)
     }
@@ -415,28 +367,25 @@ impl WindowManager {
     }
 
     fn add_bounds_damage(&mut self, bounds: &WindowBounds) {
-        let rect = bounds.rect();
-        if rect.is_valid() {
-            self.output_damage
-                .add_rect(rect.x0, rect.y0, rect.x1, rect.y1);
-        }
+        self.output_damage.add(bounds.rect());
     }
 
-    /// Dispatch the frame's raw input events in stream order: each event is
-    /// processed against the input state accumulated up to that event, so a
-    /// press is hit-tested at its own pointer position rather than at the
-    /// end-of-batch one.
-    fn process_input_events(&mut self, fb_width: i32, fb_height: i32) {
+    /// The frame's events in order, each against the state the ones before
+    /// it left, so a press is tested where the pointer was then.
+    fn process_input_events(&mut self, area: positioner::Rect) {
         use slopos_abi::InputEventType;
 
-        // Taken out so it can be passed mutably into `InputHandler` methods
-        // without borrowing all of `self`.
+        // Out of `self`, so `InputHandler` can borrow it mutably beside the
+        // rest.
         let mut proto_box = self.protocol.take();
 
         for i in 0..self.input.raw_event_count {
             let event = self.input.raw_event_buf[i];
             let time = event.timestamp_ms as u32;
             let primary = event.data.data0 & 0x01 != 0;
+            if event.event_type == InputEventType::PointerMotion {
+                self.input.apply_motion(&event);
+            }
             let gated = match event.event_type {
                 InputEventType::KeyPress => self.gate.takes_press(&event),
                 InputEventType::KeyRelease => self.gate.takes_release(event.key_keycode()),
@@ -451,7 +400,6 @@ impl WindowManager {
                 self.asking.withdraw();
                 match event.event_type {
                     InputEventType::PointerMotion => {
-                        self.input.apply_motion(&event);
                         self.gate.hover(self.input.mouse_x, self.input.mouse_y);
                     }
                     InputEventType::PointerButtonPress if primary => {
@@ -502,7 +450,6 @@ impl WindowManager {
             if self.consent.active() {
                 match event.event_type {
                     InputEventType::PointerMotion => {
-                        self.input.apply_motion(&event);
                         self.consent.hover(self.input.mouse_x, self.input.mouse_y);
                         continue;
                     }
@@ -535,7 +482,6 @@ impl WindowManager {
             } else if self.asking.active() {
                 match event.event_type {
                     InputEventType::PointerMotion => {
-                        self.input.apply_motion(&event);
                         self.asking.hover(self.input.mouse_x, self.input.mouse_y);
                         continue;
                     }
@@ -556,7 +502,6 @@ impl WindowManager {
             }
             match event.event_type {
                 InputEventType::PointerMotion => {
-                    self.input.apply_motion(&event);
                     self.popover.hover(self.input.mouse_x, self.input.mouse_y);
                     self.input.apply_grab_motion(proto_box.as_deref_mut());
                     self.sync_pointer_focus(proto_box.as_deref_mut());
@@ -574,31 +519,36 @@ impl WindowManager {
                 }
                 InputEventType::PointerButtonPress => {
                     let button = event.data.data0 as u8;
-                    let popover_rect = self.popover.rect();
                     let screen_w = self.renderer.output_width;
-                    let should_forward = self.input.on_button_press(
+                    let pressed = self.input.on_button_press(
                         button,
-                        fb_width,
-                        fb_height,
+                        area,
                         &self.windows,
                         self.window_count,
-                        &self.shelf,
-                        popover_rect,
+                        &self.dock,
+                        self.popover.rect(),
                         screen_w,
-                        &self.system_bar,
+                        &self.menu_bar,
                         proto_box.as_deref_mut(),
                     );
-                    if let Some(request) = self.input.take_chrome_request() {
-                        self.apply_chrome_request(request);
+                    let (x, y) = (self.input.mouse_x, self.input.mouse_y);
+                    match pressed {
+                        Pressed::TogglePanel(panel) => {
+                            if let Some(item) = self.menu_bar.item_rect(screen_w, panel) {
+                                self.popover.toggle(panel, item);
+                            }
+                        }
+                        Pressed::DismissPanel => self.popover.dismiss(),
+                        Pressed::InPanel => self.popover.click(x, y, true),
+                        Pressed::PassOn | Pressed::Taken => {}
                     }
-                    // Self-heals a grab left over from a release the kernel
-                    // queue dropped under a motion flood, as the input layer's
-                    // own drag and resize grabs do.
+                    // A grab whose release a flood of motion lost ends at the
+                    // next press, as the input layer's own drags do.
                     if self.input.mouse_buttons & !button == 0 {
                         self.release_pointer_grab();
                         self.sync_pointer_focus(proto_box.as_deref_mut());
                     }
-                    if should_forward && self.protocol_pointer_focus != 0 {
+                    if pressed == Pressed::PassOn && self.protocol_pointer_focus != 0 {
                         if self.live_pointer_grab(proto_box.as_deref()) == 0 {
                             self.protocol_pointer_grab = self.protocol_pointer_focus;
                             self.protocol_pointer_grab_gen = proto_box
@@ -641,8 +591,6 @@ impl WindowManager {
                             );
                         }
                     }
-                    // The one authoritative mask, already updated by
-                    // `on_button_release`.
                     if self.input.mouse_buttons == 0 && self.protocol_pointer_grab != 0 {
                         self.release_pointer_grab();
                         self.sync_pointer_focus(proto_box.as_deref_mut());
@@ -680,30 +628,14 @@ impl WindowManager {
             }
         }
 
-        // Pointer focus can change without a motion event — a window moved,
-        // appeared or vanished under a static cursor.
+        // A window can move, come or go under a pointer that stays still.
         self.sync_pointer_focus(proto_box.as_deref_mut());
 
         self.protocol = proto_box;
     }
 
-    fn apply_chrome_request(&mut self, request: input::ChromeRequest) {
-        match request {
-            input::ChromeRequest::PopoverToggle(panel) => {
-                if let Some(item) = self.system_bar.item_rect(self.renderer.output_width, panel) {
-                    self.popover.toggle(panel, item);
-                }
-            }
-            input::ChromeRequest::PopoverDismiss => self.popover.dismiss(),
-            input::ChromeRequest::PopoverPress { x, y } => self.popover.click(x, y, true),
-        }
-    }
-
-    /// Recompute pointer focus and emit protocol enter/leave events on
-    /// transitions. Decorations and the desktop belong to the compositor, so a
-    /// non-`Content` hit drops focus to none.
-    /// Where a pointer event goes: the grab holder while one is held, the
-    /// surface under the pointer otherwise.
+    /// The grab's holder while one is held, else the surface under the
+    /// pointer.
     fn pointer_target(&mut self, proto: Option<&ProtocolBridge>) -> u32 {
         match self.live_pointer_grab(proto) {
             0 => self.protocol_pointer_focus,
@@ -711,12 +643,8 @@ impl WindowManager {
         }
     }
 
-    /// The grab holder, or 0 once the surface that took it is gone.
-    ///
-    /// A task id is a slot index and slots are recycled, so a client that died
-    /// mid-drag — with no release ever arriving to clear the grab — would hand
-    /// its pointer stream to whatever opened in its place. The generation the
-    /// grab was taken with is what tells the successor apart.
+    /// The grab's holder, or 0 once the surface that took it is gone, which
+    /// its generation tells from whatever took its slot.
     fn live_pointer_grab(&mut self, proto: Option<&ProtocolBridge>) -> u32 {
         if self.protocol_pointer_grab == 0 {
             return 0;
@@ -735,25 +663,25 @@ impl WindowManager {
         self.protocol_pointer_grab_gen = 0;
     }
 
-    /// Whether the lock or login screen or a question is over every window,
-    /// so the pointer reaches none.
+    /// The lock or login screen or a question is over every window, so the
+    /// pointer reaches none.
     fn covered(&self) -> bool {
         self.gate.shown() || self.consent.active() || self.asking.active()
     }
 
+    /// Enter and leave the surfaces the pointer moved onto and off; it
+    /// enters content alone.
     fn sync_pointer_focus(&mut self, proto: Option<&mut ProtocolBridge>) {
-        // Leaving the window mid-drag is the ordinary way to drag, not a
-        // reason to hand the pointer to the window underneath.
         if self.live_pointer_grab(proto.as_deref()) != 0 {
             return;
         }
         let hit = self.input.resolve_cursor_hit(
             &self.windows,
             self.window_count,
-            &self.shelf,
+            &self.dock,
             self.popover.rect(),
             self.renderer.output_width,
-            &self.system_bar,
+            &self.menu_bar,
         );
         let new_ptr_focus = match hit.part {
             input::CursorPart::Content if !self.covered() => hit.task_id,
@@ -764,11 +692,11 @@ impl WindowManager {
         }
         if let Some(p) = proto {
             if self.protocol_pointer_focus != 0 {
-                self.protocol_serial = self.protocol_serial.wrapping_add(1);
-                p.send_pointer_leave_for_task(self.protocol_pointer_focus, self.protocol_serial);
+                p.send_pointer_leave_for_task(self.protocol_pointer_focus);
             }
             if new_ptr_focus != 0 {
-                // Serial 0 is the "never entered" sentinel the cursor gate rejects.
+                // 0 is the serial of no enter, which a cursor request may not
+                // carry.
                 self.protocol_serial = self.protocol_serial.wrapping_add(1).max(1);
                 p.send_pointer_enter_for_task(
                     new_ptr_focus,
@@ -810,8 +738,7 @@ impl WindowManager {
             if let Some(j) = prev_idx {
                 let p = pre_bounds[j];
                 let geometry_changed = p != curr_bounds;
-                // A raise/lower happens during input processing, so a restack
-                // is only visible here, in the post-input re-fetch.
+                // A press raises a window, so a restack shows only here.
                 let restacked = j != i;
                 if geometry_changed || restacked {
                     self.add_bounds_damage(&p);
@@ -829,8 +756,7 @@ impl WindowManager {
             return;
         }
 
-        for i in 0..window.damage_count as usize {
-            let region = &window.damage_regions[i];
+        for region in &window.damage_regions[..window.damage_count as usize] {
             if region.is_valid() {
                 self.output_damage.add_rect(
                     window.x + region.x0,
@@ -842,15 +768,9 @@ impl WindowManager {
         }
     }
 
-    fn add_cursor_damage_at(&mut self, x: i32, y: i32) {
-        // Conservative rect covering ALL cursor shapes:
-        // default arrow (12×17 at x,y) and resize arrows (up to 17×17 centered).
-        self.output_damage.add_rect(x - 9, y - 9, x + 12, y + 17);
-    }
-
     /// What a change of focus repaints of the window `task_id`: its title
-    /// bar and its shadow, which darkens with focus, and the corners of its
-    /// content, which blend over the shadow.
+    /// bar, its shadow, which darkens with focus, and its content's corners,
+    /// which blend over the shadow.
     fn add_focus_damage_for_task(&mut self, task_id: u32) {
         let Some(w) = self.windows[..self.window_count as usize]
             .iter()
@@ -862,7 +782,7 @@ impl WindowManager {
             x0: w.x,
             y0: w.y,
             x1: w.x + w.effective_width() as i32 - 1,
-            y1: w.y + w.effective_height() as i32 - 1 - WINDOW_CORNER_RADIUS,
+            y1: w.y + w.effective_height() as i32 - 1 - slopos_theme_core::radius::WINDOW,
         };
         let mut changed = Region::from_rect(frame::bounds(w));
         changed.subtract(&interior);
@@ -878,15 +798,17 @@ impl WindowManager {
             || !self.output_damage.is_empty()
     }
 
-    /// Whether the question changed since the last frame, laid out on the
-    /// screen over the window of the app that asks, when it has one shown.
-    fn consent_dirty(&mut self, fb_info: &DisplayInfo) -> bool {
-        let screen = screen_rect(fb_info);
+    /// What the lock or login screen and the questions repaint, each laid out
+    /// again when it changed: privd's over the topmost window of the process
+    /// that asks, when it has one shown.
+    fn add_overlay_damage(&mut self, screen: slopos_appkit::Rect) {
+        let pointer = (self.input.mouse_x, self.input.mouse_y);
         let windows = &self.windows[..self.window_count as usize];
         let anchor = self.consent.asker().and_then(|pid| {
             let w = windows
                 .iter()
-                .find(|w| w.task_id == pid && w.state != WINDOW_STATE_MINIMIZED)?;
+                .rev()
+                .find(|w| w.pid == pid && w.state != WINDOW_STATE_MINIMIZED)?;
             let frame = frame::frame_box(w);
             Some(slopos_appkit::Rect::new(
                 frame.x0,
@@ -895,12 +817,17 @@ impl WindowManager {
                 frame.y1 - frame.y0 + 1,
             ))
         });
-        self.consent.take_dirty(screen, anchor)
+        for rect in self.consent.take_damage(screen, anchor, pointer) {
+            self.output_damage.add(rect);
+        }
+        for rect in self.gate.take_damage(screen, pointer) {
+            self.output_damage.add(rect);
+        }
+        for rect in self.asking.take_damage(screen, pointer) {
+            self.output_damage.add(rect);
+        }
     }
 
-    /// The synchronous per-frame work the timer arm invokes: gather input,
-    /// refresh window state, render+present if dirty, emit frame_done, reap
-    /// disconnected clients and flush. Accept and pacing live in the driver.
     fn render_frame(
         &mut self,
         output: &mut CompositorOutput,
@@ -913,14 +840,11 @@ impl WindowManager {
         target_frame_ms: u64,
     ) {
         let wm = self;
+        let screen = screen_rect(fb_info);
         wm.input.drain_events();
         wm.refresh_windows();
         wm.gate.poll();
-        if wm.consent_dirty(fb_info) | wm.gate.take_dirty(screen_rect(fb_info)) {
-            wm.force_full_redraw = true;
-        }
-        // Snapshot before any input processing so a change from any source —
-        // sync, click, shelf, spawn — is one comparison afterwards.
+        wm.add_overlay_damage(screen);
         let focus_before = wm.input.focused_task();
 
         wm.input.sync_keyboard_focus(
@@ -929,9 +853,7 @@ impl WindowManager {
             &wm.prev_windows,
             wm.prev_window_count,
         );
-        wm.input
-            .process_pending_close_requests(&wm.windows, wm.window_count);
-        wm.process_input_events(fb_info.width as i32, fb_info.height as i32);
+        wm.process_input_events(work_area(fb_info.width, fb_info.height));
         match wm.popover.take_choice() {
             Some(Choice::Lock) => wm.gate.lock(),
             Some(Choice::SwitchUser) => ask_init(Command::Greeter),
@@ -955,32 +877,31 @@ impl WindowManager {
             wm.popover.dismiss();
             wm.asking.withdraw();
         }
-        if wm.consent_dirty(fb_info) | wm.gate.take_dirty(screen_rect(fb_info)) {
-            wm.force_full_redraw = true;
-        }
 
         wm.add_pointer_damage();
 
-        // Resolved once, against this window snapshot, before the post-input
-        // resync can reorder the array.
+        // Against this snapshot of the windows, before the resync below can
+        // reorder them.
         let cursor_hit = wm.input.resolve_cursor_hit(
             &wm.windows,
             wm.window_count,
-            &wm.shelf,
+            &wm.dock,
             wm.popover.rect(),
             wm.renderer.output_width,
-            &wm.system_bar,
+            &wm.menu_bar,
         );
-        let (cursor_shape, signal_hovered_task) = match wm.covered() {
+        let (cursor_shape, buttons_hovered_task) = match wm.covered() {
             true => (slopos_abi::window::CURSOR_SHAPE_DEFAULT, 0),
             false => (
                 wm.input.cursor_shape_for(&cursor_hit, &wm.windows),
-                wm.input.signal_hovered_task(&cursor_hit, &wm.windows),
+                wm.input.buttons_hovered_task(&cursor_hit, &wm.windows),
             ),
         };
+        wm.register_hover_regions(buttons_hovered_task);
 
         if cursor_shape != wm.prev_cursor_shape {
-            wm.add_cursor_damage_at(wm.input.mouse_x, wm.input.mouse_y);
+            wm.output_damage
+                .add(renderer::cursor_reach(wm.input.mouse_x, wm.input.mouse_y));
             wm.prev_cursor_shape = cursor_shape;
         }
 
@@ -1000,12 +921,8 @@ impl WindowManager {
         if focus_after != focus_before {
             wm.add_focus_damage_for_task(focus_before);
             wm.add_focus_damage_for_task(focus_after);
-            // The bar names the focused application and nothing else in the
-            // frame touches the bar strip, so its name would otherwise stay
-            // stale until an unrelated change repainted it.
-            let name_rect = wm.system_bar.app_name_damage(output.width);
             wm.output_damage
-                .add_rect(name_rect.x0, name_rect.y0, name_rect.x1, name_rect.y1);
+                .add(wm.menu_bar.app_name_damage(output.width));
         }
 
         wm.resync_windows_post_input();
@@ -1023,36 +940,28 @@ impl WindowManager {
             !wm.gate.shown() && !wm.behind && !wm.consent.active() && !wm.asking.active();
         if undisturbed
             && std::mem::take(&mut wm.restart_offer_due)
-            && let Some(item) = wm
-                .system_bar
-                .item_rect(output.width, popover::Panel::System)
+            && let Some(item) = wm.menu_bar.item_rect(output.width, popover::Panel::System)
         {
             wm.popover.offer_restart(item);
         }
         // Before the panel is laid out, so a switch request that timed out
-        // this frame reverts in the same frame rather than one later.
+        // this frame reverts in this frame.
         wm.popover.settle(&wm.net_cache);
+        let pointer = (wm.input.mouse_x, wm.input.mouse_y);
         wm.popover
-            .refresh(&wm.net_cache, output.width, output.height);
-        if wm.asking.take_dirty(screen_rect(fb_info)) {
-            wm.force_full_redraw = true;
+            .refresh(&wm.net_cache, output.width, output.height, pointer);
+        for rect in wm.popover.take_damage() {
+            wm.output_damage.add(rect);
         }
-
-        let mut popover_damage = [DamageRect::invalid(); 2];
-        let popover_damage_count = wm.popover.take_damage(&mut popover_damage);
-        for rect in &popover_damage[..popover_damage_count] {
-            wm.output_damage
-                .add_rect(rect.x0, rect.y0, rect.x1, rect.y1);
-        }
+        wm.add_overlay_damage(screen);
 
         let now = sys_core::realtime_secs().and_then(WallTime::from_unix);
         let mut bar_damage = [DamageRect::invalid(); menu_bar::MAX_BAR_DAMAGE];
-        let bar_damage_count =
-            wm.system_bar
-                .take_damage(output.width, now.as_ref(), &mut bar_damage);
+        let bar_damage_count = wm
+            .menu_bar
+            .take_damage(output.width, now.as_ref(), &mut bar_damage);
         for rect in &bar_damage[..bar_damage_count] {
-            wm.output_damage
-                .add_rect(rect.x0, rect.y0, rect.x1, rect.y1);
+            wm.output_damage.add(*rect);
         }
 
         if wm.needs_redraw() {
@@ -1069,8 +978,7 @@ impl WindowManager {
                 RenderMode::Partial
             };
 
-            // A superset of the painted region: never fewer pixels than were
-            // repainted, so the scanout copy covers everything that changed.
+            // Never fewer pixels than were painted.
             let (damage_arr, damage_n) = frame_damage.to_bounded::<MAX_OUTPUT_DAMAGE_REGIONS>();
 
             if let Some(mut buf) = output.draw_buffer() {
@@ -1080,21 +988,20 @@ impl WindowManager {
                     &wm.windows,
                     wm.window_count,
                     wm.input.focused_task(),
-                    &wm.shelf,
+                    &wm.dock,
                 );
 
                 wm.renderer.render(
                     &mut buf,
-                    &wm.windows,
-                    wm.window_count as usize,
+                    &wm.windows[..wm.window_count as usize],
                     wm.input.focused_task(),
-                    signal_hovered_task,
+                    buttons_hovered_task,
                     wm.input.mouse_x,
                     wm.input.mouse_y,
                     cursor_shape,
                     &mut wm.surface_cache,
-                    &wm.system_bar,
-                    &mut wm.shelf,
+                    &wm.menu_bar,
+                    &mut wm.dock,
                     &wm.popover,
                     &wm.asking,
                     &wm.consent,
@@ -1105,7 +1012,7 @@ impl WindowManager {
                 );
             }
 
-            // Empty damage means a full flip.
+            // No damage is a whole flip.
             let damage_slice: &[DamageRect] = if force_full {
                 &[]
             } else {
@@ -1115,9 +1022,9 @@ impl WindowManager {
             let flip_result = output.present(damage_slice);
             if *frame_count < 3 {
                 if flip_result {
-                    tty::write(b"COMPOSITOR: fb_flip ok\n");
+                    log!("fb_flip ok");
                 } else {
-                    tty::write(b"COMPOSITOR: fb_flip FAILED\n");
+                    log!("fb_flip FAILED");
                 }
             }
             *frame_count = frame_count.saturating_add(1);
@@ -1156,25 +1063,18 @@ impl WindowManager {
         if let Some((frames, bytes)) =
             metrics.take_window(time_origin.elapsed().as_millis() as u64, METRICS_REPORT_MS)
         {
-            let mut line = std::string::String::new();
-            use core::fmt::Write;
-            let _ = write!(line, "COMPOSITOR: frames={frames} bytes={bytes}\n");
-            tty::write(line.as_bytes());
+            log!("frames={frames} bytes={bytes}");
         }
 
-        // `process_requests()` is load-bearing, not an optimisation:
-        // `cleanup_disconnected`'s close-probe recv empties the kernel-side
-        // socket, so the per-client readiness stream never fires again for
-        // bytes it pulled into the read buffer. Without an every-frame parse
-        // those bytes are never handled.
+        // Every frame: the probe in `cleanup_disconnected` reads bytes the
+        // client's readiness stream will not fire for again.
         if let Some(ref mut proto) = wm.protocol {
             proto.process_requests();
             proto.cleanup_disconnected();
             proto.flush_all();
         }
 
-        // Dock and shelf launches are fire-and-forget — `spawn_program` keeps
-        // no tid — and the compositor outlives them, so it reaps them all.
+        // What the dock launched, whose ids nothing keeps.
         process::reap_exited_children();
     }
 }
@@ -1202,9 +1102,8 @@ impl WindowManager {
         }
     }
 
-    /// Act on what init said since the last pass, before the pass takes any
-    /// input: a lock init sent before handing the seats back is then in
-    /// force for every key typed after.
+    /// Before the pass takes any input, so a lock init sent before handing
+    /// the seats back holds for every key typed after.
     fn hear_init(&mut self) {
         let Some(says) = self.init_says.as_mut() else {
             return;
@@ -1214,13 +1113,12 @@ impl WindowManager {
             self.told(&line);
         }
         if closed {
-            tty::write(b"COMPOSITOR: init's session pipe closed\n");
+            log!("init's session pipe closed");
             self.init_says = None;
         }
     }
 
-    /// What a compositor behind still does each pass: serve and reap its
-    /// clients, whose frames wait until it is in front again.
+    /// Behind, its clients are still served, and their frames wait.
     fn look_after_clients(&mut self) {
         self.gate.poll();
         if let Some(ref mut proto) = self.protocol {
@@ -1257,51 +1155,46 @@ pub fn compositor_user_main() {
     let readiness = crate::readiness::ReadinessNotifier::acquire();
     let consent = consent::Consent::acquire();
     let session = session_pipe();
-    let role = match std::env::args().nth(1).as_deref() {
-        Some(GREETER_ARG) => gate::Role::Greeter,
-        _ => gate::Role::Desktop {
+    let kind = match std::env::args().nth(1).as_deref() {
+        Some(GREETER_ARG) => gate::Kind::Greeter,
+        _ => gate::Kind::Desktop {
             name: std::env::var("USER").unwrap_or_default(),
         },
     };
-    tty::write(b"COMPOSITOR: starting\n");
+    log!("starting");
 
-    // Ownership of the screen and the input stream is announced here, once,
-    // rather than re-asserted by every frame. Both fds are deliberately leaked
-    // for the process lifetime: closing one would not release the seat anyway
-    // (release is arbiter revocation at task exit), and holding them keeps the
-    // descriptor's existence honest about what this process owns.
-    // A session of init's takes the seats only as init hands them over,
-    // once it is the session in front.
+    // The seats are held for the process's life, released only by its exit;
+    // a session of init's takes them as init hands them over.
     if session.is_none() {
         if !acquire_seat(window::screen_acquire) {
-            tty::write(b"COMPOSITOR: screen seat unavailable\n");
+            log!("screen seat unavailable");
         }
         if !acquire_seat(window::input_sink_acquire) {
-            tty::write(b"COMPOSITOR: input seat unavailable\n");
+            log!("input seat unavailable");
         }
     }
 
-    let mut wm = WindowManager::new(consent, gate::Gate::new(role));
+    let mut wm = WindowManager::new(consent, gate::Gate::new(kind));
     let mut fb_info = DisplayInfo::default();
 
     if window::fb_info(&mut fb_info) < 0 {
-        tty::write(b"COMPOSITOR: fb_info failed\n");
+        log!("fb_info failed");
         loop {
             sys_core::yield_now();
         }
     }
-    tty::write(b"COMPOSITOR: fb_info ok\n");
+    log!("fb_info ok");
 
     let output = match CompositorOutput::new(&fb_info) {
         Some(out) => out,
         None => {
-            tty::write(b"COMPOSITOR: output alloc failed\n");
+            log!("output alloc failed");
             loop {
                 sys_core::yield_now();
             }
         }
     };
-    tty::write(b"COMPOSITOR: output allocated\n");
+    log!("output allocated");
 
     wm.renderer
         .set_output_info(output.width, output.height, output.bytes_pp, output.pitch);
@@ -1318,8 +1211,7 @@ pub fn compositor_user_main() {
 
     let pixel_format = fb_info.format;
 
-    // Ring sized for the peak armed-row count: one accept-readiness stream,
-    // one per connected client (MAX_CLIENTS), and the frame timer.
+    // The accept stream, one per client and the frame timer.
     let ring = Ring::setup(64).expect("COMPOSITOR: ring setup failed");
     slopfut::block_on(
         ring,
@@ -1330,10 +1222,8 @@ pub fn compositor_user_main() {
 const GREETER_ARG: &str = "--greeter";
 /// Where init tells a compositor whether its session is in front.
 const SESSION_FD: i32 = 5;
-/// How often a compositor behind looks after its clients.
 const BEHIND_FRAME_MS: u64 = 100;
 
-/// The pipe init hands over at [`SESSION_FD`], when it is one.
 fn session_pipe() -> Option<crate::syscall::OwnedFd> {
     use slopos_abi::syscall::F_GETFD;
     use slopos_slibc::pal::{Pal, Sys};
@@ -1378,17 +1268,21 @@ fn screen_rect(fb_info: &DisplayInfo) -> slopos_appkit::Rect {
     slopos_appkit::Rect::new(0, 0, fb_info.width as i32, fb_info.height as i32)
 }
 
-/// How an ending the person went ahead with did not happen.
+/// Where windows open and what a maximized one fills: the screen between the
+/// menu bar, its border row included, and the dock.
+pub fn work_area(screen_w: u32, screen_h: u32) -> positioner::Rect {
+    let top = BAR_HEIGHT + 1;
+    positioner::Rect::new(0, top, screen_w as i32, screen_h as i32 - top - DOCK_HEIGHT)
+}
+
 enum Undone {
     /// The person answered privd's question so.
     Refused,
     Failed(String),
 }
 
-/// Carry `ending` out on a thread of its own: init logs out or restarts the
-/// desktop, privd restarts or powers off the computer. `undone` hears of
-/// one that did not happen but for the person's own no; why goes to the
-/// log.
+/// Carry `ending` out on a thread of its own, through init or privd; `undone`
+/// hears of one that failed other than by the person's no, and the log why.
 fn carry_out(ending: Ending, undone: std::sync::mpsc::Sender<Ending>) {
     let report = undone.clone();
     let spawned = std::thread::Builder::new()
@@ -1397,16 +1291,16 @@ fn carry_out(ending: Ending, undone: std::sync::mpsc::Sender<Ending>) {
             let done = match ending {
                 Ending::RestartDesktop => init(Command::RestartSession),
                 Ending::LogOut => init(Command::EndSession),
-                Ending::Restart => privd("org.slopos.power.reboot", "reboot"),
-                Ending::PowerOff => privd("org.slopos.power.poweroff", "poweroff"),
+                Ending::Restart => power("org.slopos.power.reboot", "reboot"),
+                Ending::PowerOff => power("org.slopos.power.poweroff", "poweroff"),
             };
             if let Err(Undone::Failed(why)) = done {
-                eprintln!("compositor: {}: {why}", ending.verb());
+                log!("{}: {why}", ending.verb());
                 let _ = undone.send(ending);
             }
         });
     if let Err(why) = spawned {
-        eprintln!("compositor: {}: {why}", ending.verb());
+        log!("{}: {why}", ending.verb());
         let _ = report.send(ending);
     }
 }
@@ -1415,16 +1309,21 @@ fn init(command: Command) -> Result<(), Undone> {
     crate::init_control::ask(command).map_err(Undone::Failed)
 }
 
-/// privd's `action` with `arg`, once it has run or refused.
-fn privd(action: &str, arg: &str) -> Result<(), Undone> {
-    let null = crate::syscall::fs::open_cstr(c"/dev/null", slopos_abi::fs::O_RDWR)
-        .map_err(|e| Undone::Failed(format!("/dev/null: {e}")))?;
-    match crate::privd::run_feeding(action, &[arg], b"", null.raw(), 2) {
+fn power(action: &str, arg: &str) -> Result<(), Undone> {
+    match privd(action, &[arg], b"") {
         Ok(0) => Ok(()),
         Ok(code) => Err(Undone::Failed(format!("{action} exited {code}"))),
         Err(not) if not.by_person => Err(Undone::Refused),
         Err(not) => Err(Undone::Failed(format!("{action}: {not}"))),
     }
+}
+
+/// privd's `action`, `input` on its standard input, its output discarded and
+/// its errors on ours; its status once it has run.
+fn privd(action: &str, args: &[&str], input: &[u8]) -> Result<i32, crate::privd::NotRun> {
+    let null = crate::syscall::fs::open_cstr(c"/dev/null", slopos_abi::fs::O_RDWR)
+        .map_err(|e| crate::privd::NotRun::from(format!("/dev/null: {e}")))?;
+    crate::privd::run_feeding(action, args, input, null.raw(), 2)
 }
 
 /// Ask init on a thread of its own, which init answers once it has acted.
@@ -1433,44 +1332,31 @@ pub(super) fn ask_init(command: Command) {
         .name("compositor-init".into())
         .spawn(move || {
             if let Err(why) = crate::init_control::ask(command) {
-                eprintln!("compositor: init: {why}");
+                log!("init: {why}");
             }
         });
 }
 
 const TARGET_FRAME_MS: u64 = 16;
 
-/// Network poll cadence for the fallback path only; with a monitor fd this
-/// never runs. Free at 60 Hz, and fast enough to reflect a pulled cable.
+/// Polled only without a `net_monitor`.
 const NET_POLL_INTERVAL_MS: u128 = 2000;
 
-/// Frame-cost report cadence. Off unless `SLOPOS_COMPOSITOR_METRICS` is set,
-/// because the report goes to the TTY over whatever the user is doing.
 const METRICS_REPORT_MS: u64 = 5000;
 
-/// Whether to print the periodic damage report. Read once by the caller — the
-/// environment does not change under a running compositor.
+/// Off unless `SLOPOS_COMPOSITOR_METRICS` asks, since the report goes to the
+/// console over whatever the person is doing.
 fn metrics_reporting_enabled() -> bool {
     std::env::var("SLOPOS_COMPOSITOR_METRICS").is_ok_and(|v| v != "0")
 }
 
-/// Maximum rect count handed to the kernel flip per frame. Must match the
-/// kernel's per-flip damage capacity: it drops rects beyond that, which would
-/// leave painted pixels un-scanned-out.
+/// The kernel's per flip, past which it drops rects.
 const MAX_OUTPUT_DAMAGE_REGIONS: usize = slopos_abi::damage::MAX_DAMAGE_REGIONS;
 
-/// Maximum new connections drained from the listen backlog in one accept wake.
 const ACCEPT_BATCH: usize = MAX_CLIENTS;
 
-/// Async compositor driver: an accept task, a task per client, and this root
-/// future as the frame-timer arm, all on the single-threaded `!Send` executor.
-/// Sharing state through `Rc<RefCell<…>>` is sound because no borrow is held
-/// across an `.await`.
-///
-/// The accept task waits on listen-socket readiness rather than the ring's
-/// `accept_multishot`, so `Server::accept()` stays the sole client-slot
-/// allocator and fds are never accepted out from under it. It is woken
-/// independently of the frame timer, so a new client is never gated on a frame.
+/// One thread runs the accept task, each client's and the frame timer, so no
+/// `RefCell` borrow may cross an `.await`.
 async fn compositor_async(
     wm: WindowManager,
     mut output: CompositorOutput,
@@ -1484,8 +1370,7 @@ async fn compositor_async(
 
     let wm = Rc::new(RefCell::new(wm));
 
-    // Accept pass and request drain before signalling readiness, so a
-    // connection queued during init is greeted before init is told the
+    // A connection queued while starting is greeted before init hears the
     // compositor is up.
     let listen_fd = {
         let mut w = wm.borrow_mut();
@@ -1504,7 +1389,6 @@ async fn compositor_async(
         listen_fd
     };
 
-    // Boot-critical: init blocks on this byte before launching the shell.
     if let Some(n) = readiness.take() {
         n.signal_ready();
     }
@@ -1517,9 +1401,8 @@ async fn compositor_async(
     spawn_base_task(wm.clone());
     wm.borrow_mut().init_says = session.map(InitSays::new);
 
-    // A multishot row can die on a transient error and the listen socket
-    // outlives any such transient, so stream-end re-arms rather than ending
-    // all future accepts.
+    // Readiness rather than `accept_multishot`, so `Server::accept()` alone
+    // gives out slots; a stream that ends on a passing error is armed again.
     if let Some(listen_fd) = listen_fd {
         let wm_accept = wm.clone();
         slopfut::spawn(async move {
@@ -1538,25 +1421,20 @@ async fn compositor_async(
                         spawn_client_task(wm_accept.clone(), idx, fd, generation);
                     }
                 }
-                tty::write(b"COMPOSITOR: accept stream ended; re-arming\n");
-                // Paced so a persistently failing arm cannot become a hot loop;
-                // the per-frame sweep below covers the gap meanwhile.
+                log!("accept stream ended; re-arming");
+                // The frame's own accept covers the gap.
                 slopfut::time::sleep_ms(50).await;
             }
         });
     }
 
-    // The per-frame work runs synchronously under a `borrow_mut` dropped
-    // before the next timer await, so no other task sees an overlapping borrow.
     let mut frame_count: u32 = 0;
     let mut metrics = FrameMetrics::new(metrics_reporting_enabled());
     let time_origin = Instant::now();
     loop {
         let frame_start = Instant::now();
 
-        // Covers the accept task while its readiness stream is between
-        // re-arms. `Server::accept()` stays the sole slot allocator, so the
-        // two paths cannot double-accept a connection.
+        // Covers the accept stream while it is armed again.
         {
             let mut accepted = [(0usize, -1i32, 0u64); ACCEPT_BATCH];
             let n = {
@@ -1603,25 +1481,17 @@ async fn compositor_async(
     }
 }
 
-/// Drive the network indicator from a `net_monitor` fd instead of a timer.
-///
-/// The fd is a change *notification* only: every wake re-reads the whole model
-/// through `net_query` rather than applying the event payload as a delta, which
-/// is what makes a dropped event harmless.
-///
-/// The monitor is opened before the first query, so an interface appearing
-/// between the two shows up as an event rather than being missed by both.
-///
-/// Returns whether the fd was opened; a failure leaves the caller on the timer.
+/// Drive the network indicator from a `net_monitor`: each wake reads the
+/// whole model again, so a lost event costs nothing, and the monitor opens
+/// before the first read, so nothing falls between. Whether it opened.
 fn spawn_net_monitor_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) -> bool {
     let fd = match crate::syscall::net::net_monitor(NET_MON_DEFAULT, 0) {
         Ok(fd) => fd,
         Err(_) => {
-            tty::write(b"COMPOSITOR: net_monitor unavailable; polling instead\n");
+            log!("net_monitor unavailable; polling instead");
             return false;
         }
     };
-    // Handed to the task rather than closed here; it lives until exit.
     let raw = fd.into_raw();
 
     wm.borrow_mut().refresh_from_kernel();
@@ -1631,24 +1501,20 @@ fn spawn_net_monitor_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) ->
         loop {
             let mut stream = slopfut::poll_add_multishot(raw, POLLIN);
             while stream.next().await.is_some() {
-                // Drain to empty, or POLLIN stays asserted and the stream
-                // spins. An empty netmon read is `EAGAIN`, never a block.
+                // To empty, or the stream spins; an empty read is `EAGAIN`.
                 while crate::syscall::fs::read_slice(raw, &mut buf).unwrap_or(0) > 0 {}
                 wm.borrow_mut().refresh_from_kernel();
             }
-            // The fd outlives a multishot row that died on a transient error,
-            // so re-arm. Logged because there is no polling backstop here.
-            tty::write(b"COMPOSITOR: net_monitor stream ended; re-arming\n");
+            log!("net_monitor stream ended; re-arming");
             slopfut::time::sleep_ms(500).await;
         }
     });
     true
 }
 
-/// Read privd's questions as they arrive, once privd has been told the
-/// compositor can draw them. A oneshot poll each time: a multishot fires only
-/// when readiness changes, so a frame landing between a read and the ring's
-/// next pass would wake nothing, and privd answers a `READY` at once.
+/// A oneshot poll each time: a multishot fires only when readiness changes,
+/// so a question landing between a read and the ring's next pass would wake
+/// nothing, and privd answers a `READY` at once.
 fn spawn_consent_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) {
     let fd = {
         let mut w = wm.borrow_mut();
@@ -1666,7 +1532,7 @@ fn spawn_consent_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) {
                 break;
             }
         }
-        tty::write(b"COMPOSITOR: privd's consent channel closed\n");
+        log!("privd's consent channel closed");
     });
 }
 
@@ -1686,8 +1552,7 @@ impl InitSays {
         }
     }
 
-    /// The whole lines written since the last read, and whether init has
-    /// closed its end.
+    /// The lines written since, and whether init closed its end.
     fn read(&mut self) -> (Vec<Vec<u8>>, bool) {
         let mut buf = [0u8; 256];
         let closed = loop {
@@ -1706,9 +1571,8 @@ impl InitSays {
     }
 }
 
-/// Hear a new base come in, and offer a session restart while it holds
-/// another compositor or terminal than the session started from, which run
-/// until then. A oneshot poll each time, as [`spawn_consent_task`]'s is.
+/// Offer a restart of the desktop while the base holds another compositor or
+/// terminal than the session started from.
 fn spawn_base_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) {
     use crate::init_control::{COMPOSITOR, TERMINAL};
     let Some(mut watch) = crate::base_watch::BaseWatch::open() else {
@@ -1735,9 +1599,7 @@ fn spawn_base_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) {
     });
 }
 
-/// Spawn a per-client task that drains `idx`'s requests on each readiness of
-/// `fd` until it disconnects, then exits — dropping its stream, which
-/// `OP_CANCEL`s the armed ring row.
+/// Serve `idx`'s requests as `fd` is readable, until it disconnects.
 fn spawn_client_task(
     wm: std::rc::Rc<std::cell::RefCell<WindowManager>>,
     idx: usize,
@@ -1747,9 +1609,7 @@ fn spawn_client_task(
     if fd < 0 {
         return;
     }
-    // Both the slot index and the fd number are recycled across
-    // disconnect→reconnect, so a successor client can inherit this exact
-    // slot+fd; only the monotonic generation distinguishes it.
+    // A successor can hold this slot and fd; only the generation tells.
     let owns = move |proto: &ProtocolBridge| {
         proto.client_fd(idx) == Some(fd) && proto.client_gen(idx) == Some(generation)
     };
@@ -1781,15 +1641,11 @@ fn spawn_client_task(
                     }
                 }
                 None => {
-                    // The kernel coalesces POLLHUP with a final POLLIN on peer
-                    // close and the terminal CQE surfaces as `None` without
-                    // yielding that data edge, so drain once before teardown
-                    // to recover a trailing request burst.
+                    // The last requests may come with the hangup, which ends
+                    // the stream without a readiness of their own.
                     let mut w = wm.borrow_mut();
                     if let Some(ref mut proto) = w.protocol {
                         if owns(proto) {
-                            // A false return means the teardown funnel already
-                            // ran, so only disconnect if it drained clean.
                             if proto.process_client(idx) {
                                 proto.disconnect_client(idx);
                             }
@@ -1799,15 +1655,11 @@ fn spawn_client_task(
                 }
             }
         }
-        // `stream` drops here → its armed ring row is cancelled (`OP_CANCEL`).
     });
 }
 
-/// Read the whole network model out of `net_query`: interfaces, addresses and
-/// the one global record, joined on `ifindex`. The resolver is not queried —
-/// nothing the bar or panel draws reads the nameserver list, so it stays empty.
-///
-/// `None` if any query failed, which the caller reads as "keep what you had".
+/// Interfaces, addresses and the global record, joined on `ifindex`; `None`
+/// when a query failed.
 fn read_net_model() -> Option<NetPanelModel> {
     let ifaces = net_query::fetch::<UserIface>(NET_Q_IFACES, NET_IFINDEX_NONE).ok()?;
     let addrs = net_query::fetch::<UserAddr>(NET_Q_ADDRS, NET_IFINDEX_NONE).ok()?;
@@ -1827,8 +1679,6 @@ fn read_net_model() -> Option<NetPanelModel> {
         row.admin_up = iface.admin_up != 0;
         row.carrier = iface.carrier != 0;
         row.oper = iface.oper_state;
-        // Any address will do: the indicator asks only whether there is one,
-        // and the panel reads the full list from `net_cache`, not this summary.
         if let Some(addr) = addrs
             .records
             .iter()
@@ -1848,7 +1698,7 @@ fn active_app_name(
     windows: &[UserWindowInfo; MAX_WINDOWS],
     count: u32,
     focused_task: u32,
-    shelf: &dock::LauncherShelf,
+    dock: &Dock,
 ) -> String {
     let Some(window) = windows[..count as usize]
         .iter()
@@ -1856,8 +1706,7 @@ fn active_app_name(
     else {
         return String::new();
     };
-    shelf
-        .app_name(window.app_id.as_str())
+    dock.app_name(window.app_id.as_str())
         .unwrap_or_else(|| window.title_str())
         .to_owned()
 }

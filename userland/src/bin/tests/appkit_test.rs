@@ -2,8 +2,9 @@ use slopos_appkit::embed::Embedded;
 use slopos_appkit::{Node, Size};
 use slopos_chrome_core::clock::WallTime;
 use slopos_chrome_core::gate::{Checked, Gate};
+use slopos_chrome_core::key::Key;
 use slopos_chrome_core::menu::{Confirm, Ending, Menu};
-use slopos_chrome_core::{IfaceKind, IfaceRow, Key, NetPanelModel};
+use slopos_chrome_core::netstate::{IfaceKind, IfaceRow, NetPanelModel};
 use slopos_slibc::test_harness::{TestStatus, report};
 use slopos_userland::apps::compositor::views;
 
@@ -23,7 +24,7 @@ fn audited_panel<M: Clone + 'static>(name: &str, node: &Node<M>) -> Vec<String> 
     let mut found = audited(name, node);
     let room = 2 * slopos_theme_core::space::SM;
     for most in [views::PANEL_WIDTH, 240] {
-        let size = Embedded::natural_size(node, Size::new(most, 720));
+        let size = Embedded::natural(node, Size::new(most, 720)).rect();
         found.extend(
             slopos_appkit::audit::audit_node(node, &[size.width + room], size.height + room)
                 .into_iter()
@@ -39,11 +40,6 @@ fn typed(gate: &mut Gate, text: &str) {
     }
 }
 
-/// The compositor's own surfaces pass the audit in every state a person
-/// meets them in: the lock and login screens with and without the time, the
-/// system menu with and without the update notice, the network and clock
-/// panels, at the size each is shown at, and each question a choice that
-/// ends something asks, and what takes its place when that did not happen.
 fn the_compositor_s_surfaces_read_whole_at_every_width() {
     let now = WallTime::from_unix(1_793_085_900);
     let mut found = Vec::new();
@@ -136,14 +132,8 @@ const CHROME_CASES: &[(&str, fn())] = &[(
     the_compositor_s_surfaces_read_whole_at_every_width,
 )];
 
-/// Runs appkit's widget/layout unit tests on the target, against the font atlas
-/// and allocator the GUI apps actually use, and holds the compositor's own
-/// surfaces to the audit.
-///
-/// Cases are a runtime slice of asserting `fn()`, so `test_harness::run` (which
-/// wants compile-time `fn() -> bool`) cannot drive them. Userland is built
-/// `panic-strategy = abort`, so a failing case takes the process down: its name
-/// goes to stderr before it runs, so the serial log names the case that died.
+/// A failing case aborts the process, so each case's name goes to stderr
+/// before it runs: the serial log names the one that died.
 fn main() {
     let cases = slopos_appkit::tests::cases();
     let mut passed = 0usize;

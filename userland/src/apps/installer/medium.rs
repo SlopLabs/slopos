@@ -72,16 +72,10 @@ impl Medium {
         let served =
             dir_and_fs(dir).is_some_and(|(_, stats)| stats.f_type == slopos_abi::fs::BASEFS_MAGIC);
         if !served {
-            return Err(format!(
-                "{dir} holds no installer; start the computer from the SlopOS USB stick or DVD to install"
-            ));
+            return Err(format!("{dir} holds no installer"));
         }
-        let disk_guid = medium_disk_guid()?.ok_or_else(|| {
-            format!(
-                "{dir}/{} is missing; start the computer from the SlopOS USB stick or DVD to install",
-                layout::MEDIUM_DISK_GUID
-            )
-        })?;
+        let disk_guid = medium_disk_guid()?
+            .ok_or_else(|| format!("{dir}/{} is missing", layout::MEDIUM_DISK_GUID))?;
         let payload = payload_mounted();
         let mut medium = Medium {
             disk_guid,
@@ -101,10 +95,7 @@ impl Medium {
             layout::MEDIUM_APPS,
         ] {
             if !medium.has(file) {
-                return Err(format!(
-                    "{} is missing; start the computer from the SlopOS USB stick or DVD to install",
-                    medium.path(file).display()
-                ));
+                return Err(format!("{} is missing", medium.path(file).display()));
             }
         }
         let toolchain_manifest = slopos_tree_core::manifest_path(slopos_tree_core::TOOLCHAIN);

@@ -2,11 +2,11 @@ use slopos_gfx::DrawBuffer;
 use slopos_theme_core::{Icon, TextRole, Tone};
 
 use crate::audit::audit_node;
-use crate::components::{Button, ButtonRow, Text};
-use crate::constraints::Rect;
+use crate::components::{Button, ButtonRow, Dialog, Disclosure, List, ListRow, Text};
+use crate::constraints::{CrossAxisAlignment, Rect};
 use crate::embed::Embedded;
 use crate::node::Node;
-use crate::traits::{Role, Widget};
+use crate::traits::{Kept, KeptAt, Role, Widget};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Said {
@@ -17,20 +17,21 @@ enum Said {
 const SCREEN: Rect = Rect::new(0, 0, 800, 600);
 
 fn dialog(anchor: Option<Rect>) -> Node<Said> {
-    Node::Dialog {
-        title: String::from("Terminal wants to change the network settings."),
-        icon: Some(Box::new(Node::Icon {
-            icon: Icon::Terminal,
-            role: TextRole::Display,
-            tone: Tone::Secondary,
-        })),
-        content: Box::new(Text::new("Nothing else changes.").wrap().into()),
-        footer: ButtonRow::new()
-            .cancel(Button::new("Cancel").on_press(Said::Cancel))
-            .confirm(Button::new("Change").on_press(Said::Allow)),
-        on_dismiss: None,
-        anchor,
-    }
+    let icon = Node::Icon {
+        icon: Icon::Terminal,
+        role: TextRole::Display,
+        tone: Tone::Secondary,
+    };
+    Dialog::new("Terminal wants to change the network settings.")
+        .icon(icon)
+        .content(Text::new("Nothing else changes.").wrap())
+        .footer(
+            ButtonRow::new()
+                .cancel(Button::new("Cancel").on_press(Said::Cancel))
+                .confirm(Button::new("Change").on_press(Said::Allow)),
+        )
+        .anchor(anchor)
+        .into()
 }
 
 fn named(widget: &dyn Widget, name: &str) -> Option<Rect> {
@@ -55,8 +56,6 @@ fn painted(tree: &Embedded) -> Vec<u8> {
     data
 }
 
-/// A click that starts and ends on a button answers with its message; one
-/// that ends elsewhere, or where the tree is not shown, answers nothing.
 pub(super) fn test_an_embedded_tree_answers_a_click_with_its_message() {
     let mut tree = Embedded::new(&dialog(None), SCREEN);
     let allow = named(tree.root(), "Change").expect("the allowing button");
@@ -80,8 +79,6 @@ pub(super) fn test_an_embedded_tree_answers_a_click_with_its_message() {
     );
 }
 
-/// Focus shows where the holder says, and moves when it says so again; a
-/// rebuild shows none until it does.
 pub(super) fn test_an_embedded_tree_shows_focus_where_it_is_told() {
     let mut tree = Embedded::new(&dialog(None), SCREEN);
     let unfocused = painted(&tree);
@@ -98,8 +95,6 @@ pub(super) fn test_an_embedded_tree_shows_focus_where_it_is_told() {
     assert_eq!(painted(&tree), unfocused);
 }
 
-/// Moving the pointer changes what is drawn only as it enters or leaves a
-/// control.
 pub(super) fn test_hover_counts_only_between_controls() {
     let mut tree = Embedded::new(&dialog(None), SCREEN);
     let allow = named(tree.root(), "Change").expect("the allowing button");
@@ -113,8 +108,55 @@ pub(super) fn test_hover_counts_only_between_controls() {
     assert!(tree.hover(1, 1));
 }
 
-/// The card centres over its anchor where it fits, and stays on the screen
-/// when the anchor is near an edge or off it.
+pub(super) fn test_hover_lights_what_a_press_reaches() {
+    let disclosure: Node<Said> = Disclosure::new("Details", Text::new("inside"))
+        .expanded(true)
+        .into();
+    let mut tree = Embedded::new(&disclosure, Rect::new(0, 0, 400, 200));
+    assert!(tree.hover(10, 10), "onto the header");
+    assert!(tree.hover(390, 10), "beside it");
+    assert!(!tree.hover(40, 40), "the content is no control");
+
+    let rows: Vec<Node<Said>> = (0..20)
+        .map(|i| Text::new(format!("Line {i}")).into())
+        .collect();
+    let scrolled = Node::ScrollView {
+        child: Box::new(Node::VStack {
+            children: rows,
+            spacing: 0,
+            align: CrossAxisAlignment::Stretch,
+        }),
+        scroll_y: 0,
+        on_scroll: None,
+        follow_end: false,
+    };
+    let mut tree = Embedded::new(&scrolled, Rect::new(0, 0, 200, 100));
+    assert!(!tree.hover(20, 5));
+    assert!(tree.hover(197, 5), "onto the thumb");
+    assert!(tree.hover(197, 95), "down the track past it");
+
+    let list = || -> Node<Said> {
+        List::new(vec![ListRow::new("One"), ListRow::new("Two")])
+            .on_activate(|_| Said::Allow)
+            .into()
+    };
+    let mut tree = Embedded::new(&list(), Rect::new(0, 0, 200, 200));
+    assert!(tree.hover(20, 10));
+    let covered = Node::ZStack {
+        children: vec![
+            list(),
+            Node::Popup {
+                x: 0,
+                y: 150,
+                child: Box::new(Text::new("Over").into()),
+                on_dismiss: None,
+            },
+        ],
+    };
+    let mut tree = Embedded::new(&covered, Rect::new(0, 0, 200, 200));
+    assert!(!tree.hover(20, 10), "a row beneath the popup");
+}
+
 pub(super) fn test_a_dialog_centres_over_its_anchor_where_it_fits() {
     let left = |anchor| {
         let tree = Embedded::new(&dialog(anchor), SCREEN);
@@ -130,8 +172,6 @@ pub(super) fn test_a_dialog_centres_over_its_anchor_where_it_fits() {
     assert_eq!(left(Some(Rect::new(-500, 900, 100, 100))), centred);
 }
 
-/// A dialog with an icon beside its title passes the audit at every width,
-/// and is named by its title.
 pub(super) fn test_a_dialog_with_an_icon_reads_at_every_width() {
     let found = audit_node(&dialog(None), &[360, 640, 960], 480);
     assert!(found.is_empty(), "{}", found.join("\n"));
@@ -140,4 +180,63 @@ pub(super) fn test_a_dialog_with_an_icon_reads_at_every_width() {
         tree.root().accessible_name(),
         Some("Terminal wants to change the network settings.")
     );
+}
+
+pub(super) fn test_an_embedded_thumb_drags() {
+    let rows: Vec<Node<Said>> = (0..20)
+        .map(|i| Text::new(format!("Line {i}")).into())
+        .collect();
+    let scrolled = Node::ScrollView {
+        child: Box::new(Node::VStack {
+            children: rows,
+            spacing: 0,
+            align: CrossAxisAlignment::Stretch,
+        }),
+        scroll_y: 0,
+        on_scroll: None,
+        follow_end: false,
+    };
+    let mut tree = Embedded::new(&scrolled, Rect::new(0, 0, 200, 100));
+    let down = |tree: &Embedded| {
+        let mut kept = Vec::new();
+        crate::tree::kept(tree.root(), &mut kept);
+        match kept[..] {
+            [
+                Kept {
+                    at: KeptAt::Scroll(y),
+                    ..
+                },
+            ] => y,
+            _ => panic!("one scroll view: {kept:?}"),
+        }
+    };
+    assert!(tree.click::<Said>(197, 1, true).is_empty());
+    assert_eq!(down(&tree), 0);
+    assert!(tree.hover(197, 99), "the thumb follows the pointer");
+    let bottom = down(&tree);
+    assert!(bottom > 0);
+    assert!(tree.click::<Said>(197, 99, false).is_empty());
+    tree.hover(197, 1);
+    assert_eq!(down(&tree), bottom, "a move after the release");
+}
+
+pub(super) fn test_a_slider_and_a_field_light_under_the_pointer() {
+    let slider: Node<Said> = Node::Slider {
+        value: 40,
+        min: 0,
+        max: 100,
+        step: 1,
+        enabled: true,
+        grab: None,
+        on_input: None,
+    };
+    let field: Node<Said> = crate::components::SearchField::new("", 0).into();
+    for node in [slider, field] {
+        let mut tree = Embedded::new(&node, Rect::new(0, 0, 300, 40));
+        let still = painted(&tree);
+        let knob = tree.root().layout_rect();
+        let at = (knob.x + knob.width * 2 / 5, knob.y + knob.height / 2);
+        assert!(tree.hover(at.0, at.1));
+        assert_ne!(painted(&tree), still);
+    }
 }

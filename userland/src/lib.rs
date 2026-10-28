@@ -23,7 +23,6 @@ pub mod runtime;
 pub mod sealed;
 pub mod secret;
 pub mod syscall;
-pub mod theme;
 pub mod tls;
 pub mod tree;
 

@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 
-use super::{Answer, Ask, Kind, Secret, UNIDENTIFIED};
+use super::{Answer, Ask, Kind, Secret, UNIDENTIFIED, password_for};
 
 /// Input this soon after the question is first drawn, or after focus moves
 /// or the dialog changes shape, was meant for what was there before.
@@ -17,14 +17,14 @@ pub enum Focus {
     Allow,
 }
 
-/// What a key does to the dialog: Tab moves focus, and Left and Right
-/// between the buttons, Enter presses what has it, Escape denies; Backspace
-/// and what is typed edit the password, Up and Down choose another
-/// administrator.
+/// What a key does to the dialog: Tab and Shift+Tab move focus, Left and
+/// Right move to the button on that side without wrapping, Enter presses what
+/// has it, Escape denies; Backspace and what is typed edit the password, Up
+/// and Down choose another administrator.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key {
-    Move,
-    Arrow,
+    Move { back: bool },
+    Arrow { right: bool },
     Press,
     Dismiss,
     Erase,
@@ -44,7 +44,6 @@ pub struct Dialog {
     focus: Focus,
     armed_at: Option<u64>,
     typed: Secret,
-    /// Which of the administrators listed answers.
     admin: usize,
     expanded: bool,
     /// The primary button went down while the dialog was armed and has not
@@ -123,27 +122,29 @@ impl Dialog {
         }
     }
 
-    /// The answer a key pressed at `now` gives, once it gives one.
     pub fn key(&mut self, key: Key, now: u64) -> Option<Answer> {
         if !self.armed(now) {
             return None;
         }
         let field = self.ask.kind.takes_secret();
         match key {
-            Key::Move => {
+            Key::Move { back } => {
                 let stops = self.stops();
                 let at = stops.iter().position(|&f| f == self.focus).unwrap_or(0);
-                self.focus = stops[(at + 1) % stops.len()];
+                let step = if back { stops.len() - 1 } else { 1 };
+                self.focus = stops[(at + step) % stops.len()];
                 self.rearm(now);
                 None
             }
-            Key::Arrow => {
-                self.focus = match self.focus {
-                    Focus::Deny => Focus::Allow,
-                    Focus::Allow => Focus::Deny,
-                    Focus::Field | Focus::Details => return None,
+            Key::Arrow { right } => {
+                let to = match right {
+                    true => Focus::Allow,
+                    false => Focus::Deny,
                 };
-                self.rearm(now);
+                if matches!(self.focus, Focus::Deny | Focus::Allow) && self.focus != to {
+                    self.focus = to;
+                    self.rearm(now);
+                }
                 None
             }
             Key::Press if self.focus == Focus::Details => {
@@ -181,8 +182,6 @@ impl Dialog {
         }
     }
 
-    /// The answer a click on `target` at `now` gives; one on the field
-    /// gives it focus, and one on the toggle shows or hides the details.
     pub fn click(&mut self, target: Focus, now: u64) -> Option<Answer> {
         if !self.down || !self.armed(now) {
             return None;
@@ -202,8 +201,6 @@ impl Dialog {
         }
     }
 
-    /// The administrator at place `admin` answers, chosen by a click at
-    /// `now`.
     pub fn pick(&mut self, admin: usize, now: u64) {
         if self.down
             && self.armed(now)
@@ -237,8 +234,6 @@ impl Dialog {
         self.rearm(now);
     }
 
-    /// Deny denies; Allow, or Enter in the field, allows once whatever the
-    /// question takes is typed.
     fn press(&mut self, on: Focus) -> Option<Answer> {
         let id = self.ask.id;
         if on == Focus::Deny {
@@ -268,43 +263,9 @@ impl Dialog {
         })
     }
 
-    /// Who the dialog says asks.
-    pub fn app(&self) -> &str {
-        self.ask.app.as_deref().unwrap_or(UNIDENTIFIED)
-    }
-
-    /// Whether the question names who asks, as one from a privd of the
-    /// third version on does.
-    pub fn names_app(&self) -> bool {
-        self.ask.verb.is_some()
-    }
-
-    /// The question, in one sentence: "{App} wants to {describe}.", or in a
-    /// privd's words from before it named the app.
-    pub fn headline(&self) -> String {
-        match self.names_app() {
-            true => format!("{} wants to {}.", self.app(), self.ask.describe),
-            false => format!("Allow: {}?", self.ask.describe),
-        }
-    }
-
-    /// What the allowing button says, which never says what another of the
-    /// dialog's controls does.
-    pub fn verb(&self) -> &str {
-        self.ask
-            .verb
-            .as_deref()
-            .filter(|verb| crate::words::verb(verb).is_ok())
-            .unwrap_or(crate::words::VERB)
-    }
-
     /// Who asks, as the kernel attested them and the accounts name them.
     pub fn requester(&self) -> String {
-        let program = self
-            .ask
-            .program
-            .as_deref()
-            .unwrap_or("A program outside the system");
+        let program = self.ask.program.as_deref().unwrap_or(UNIDENTIFIED);
         let who = match (&self.ask.person, self.ask.uid) {
             (Some(name), _) => name.clone(),
             (None, 0) => "root".to_string(),
@@ -313,13 +274,12 @@ impl Dialog {
         format!("{program} as {who} (pid {})", self.ask.pid)
     }
 
-    /// What the password field is for, when the question takes one.
     pub fn field_label(&self) -> Option<String> {
         let whose = match self.ask.kind {
             Kind::Confirm => return None,
             Kind::Password => self.ask.person.as_deref()?,
             Kind::Admin => self.ask.admins.get(self.admin)?,
         };
-        Some(format!("Password for {whose}"))
+        Some(password_for(whose))
     }
 }

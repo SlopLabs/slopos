@@ -30,6 +30,7 @@ pub enum TextRole {
 }
 
 impl TextRole {
+    #[cfg(test)]
     pub const ALL: [TextRole; 8] = [
         TextRole::Hero,
         TextRole::Display,

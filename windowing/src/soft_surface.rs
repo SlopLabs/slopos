@@ -1,14 +1,5 @@
-//! Software rendering surface backed by shared memory.
-//!
-//! `SoftSurface` owns a pair of [`SharedMemory`]s and implements [`RenderSurface`]
-//! as a CPU rendering backend for compositor-managed windows;
-//! [`Surface`](crate::surface::Surface) handles the windowing lifecycle.
-//!
-//! `BufferRelease` events must reach
-//! [`release_buffer`](SoftSurface::release_buffer) — [`Window`](crate::window::Window)
-//! forwards them, but a consumer polling the socket directly must do so itself,
-//! or both buffers stay in flight and the surface falls back to single-buffer
-//! in-place updates.
+//! A window drawn on the CPU into two shared-memory buffers; a consumer that
+//! polls the socket itself hands `BufferRelease` to [`SoftSurface::release_buffer`].
 
 use slopos_abi::pixel::PixelFormat;
 use slopos_gfx::{DrawBuffer, RenderError, RenderSurface};
@@ -22,7 +13,6 @@ const NUM_BUFFERS: usize = 2;
 
 const AGE_UNDEFINED: u32 = u32::MAX;
 
-/// A CPU/SHM rendering backend for compositor-managed surfaces.
 pub struct SoftSurface {
     handle: ProtocolHandle,
     bufs: [SharedMemory; NUM_BUFFERS],
@@ -32,7 +22,7 @@ pub struct SoftSurface {
     busy: [bool; NUM_BUFFERS],
     /// Frames since each slot last held a presented frame; saturates at `AGE_UNDEFINED`.
     age: [u32; NUM_BUFFERS],
-    /// The slot `frame()` last handed out / `present()` will commit.
+    /// The slot `frame()` last handed out and `present()` commits.
     current: usize,
     surface_id: SurfaceId,
     width: u32,
@@ -43,10 +33,7 @@ pub struct SoftSurface {
 }
 
 impl SoftSurface {
-    /// Create a new software rendering surface for a compositor `surface_id`.
-    ///
-    /// Nothing is attached or committed until the first
-    /// [`present`](RenderSurface::present).
+    /// Nothing is attached until the first [`present`](RenderSurface::present).
     pub fn new(
         handle: ProtocolHandle,
         surface_id: SurfaceId,
@@ -97,14 +84,13 @@ impl SoftSurface {
         if age >= AGE_UNDEFINED { 0 } else { age }
     }
 
-    /// Mark a buffer slot drawable again after the compositor releases it.
     pub fn release_buffer(&mut self, buffer_id: u32) {
         if let Some(b) = self.busy.get_mut(buffer_id as usize) {
             *b = false;
         }
     }
 
-    /// Choose the slot to draw the next frame into: a free buffer, else the current one.
+    /// A free buffer, else the current one.
     fn pick_slot(&self) -> usize {
         let other = 1 - self.current;
         if !self.busy[other] {

@@ -1,10 +1,11 @@
 use std::any::Any;
+use std::cell::Cell;
 
 use slopos_theme_core::{Icon, State, TextRole, radius, space};
 
 use super::button::Press;
 use crate::constraints::{BoxConstraints, Rect, Size};
-use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use crate::event::{EventResponse, MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::text::ui;
 use crate::traits::{
@@ -20,10 +21,11 @@ pub struct DisclosureWidget {
     title: String,
     expanded: bool,
     on_toggle: Option<Box<dyn Fn() -> Box<dyn Any>>>,
-    /// The content, while expanded.
+    /// Empty while closed.
     content: Vec<Box<dyn Widget>>,
     press: Press,
     header: Rect,
+    cut: Cell<bool>,
 }
 
 impl DisclosureWidget {
@@ -41,6 +43,7 @@ impl DisclosureWidget {
             content: content.into_iter().collect(),
             press: Press::default(),
             header: Rect::ZERO,
+            cut: Cell::new(false),
         }
     }
 
@@ -53,7 +56,7 @@ impl DisclosureWidget {
     }
 
     fn header_width(&self) -> i32 {
-        PAD * 2 + Self::indent() + ui::role_width(&self.title, ROLE)
+        PAD * 2 + Self::indent() + ui::width(&self.title, ROLE)
     }
 
     fn title_room(&self) -> i32 {
@@ -107,9 +110,10 @@ impl Widget for DisclosureWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         let h = self.header;
         let theme = ctx.theme();
-        let state = self.press.state(h, ctx);
+        let state = self.press.state(self.id(), ctx);
         if state != State::Normal {
-            ctx.fill_rounded_wash(h, radius::CONTROL, theme.overlay(state));
+            let wash = theme.overlay(state);
+            ctx.fill_rounded_rect(h, radius::CONTROL, wash);
         }
         let size = ROLE.style().icon;
         let chevron = if self.expanded {
@@ -125,9 +129,11 @@ impl Widget for DisclosureWidget {
             size,
             theme.text_secondary,
         );
-        let top = h.y + (h.height - ui::role_line_height(ROLE)) / 2;
+        let top = ui::centred_top(h.y, h.height, ROLE);
         let room = self.title_room();
-        ctx.draw_text_fitted(x + Self::indent(), top, &self.title, ROLE, room, theme.text);
+        let cut =
+            ctx.draw_text_fitted(x + Self::indent(), top, &self.title, ROLE, room, theme.text);
+        self.cut.set(cut);
         if self.press.focused {
             ctx.draw_focus_ring(h);
         }
@@ -136,13 +142,8 @@ impl Widget for DisclosureWidget {
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        let (response, pressed) = self.press.event(self.header, true, event, phase);
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
+        let (response, pressed) = self.press.event(self.header, true, event);
         if pressed {
             if let Some(f) = &self.on_toggle {
                 sink.emit_raw(f());
@@ -155,7 +156,7 @@ impl Widget for DisclosureWidget {
             return response;
         }
         for content in &mut self.content {
-            let r = content.event(event, phase, sink);
+            let r = content.event(event, sink);
             if r.is_consumed() {
                 return r;
             }
@@ -172,16 +173,19 @@ impl Widget for DisclosureWidget {
     }
 
     fn tooltip(&self, x: i32, y: i32) -> Option<&str> {
-        let cut = ui::role_width(&self.title, ROLE) > self.title_room();
-        (cut && self.header.contains(x, y)).then_some(&self.title)
+        (self.cut.get() && self.header.contains(x, y)).then_some(&self.title)
     }
 
     fn baseline(&self) -> Option<i32> {
-        Some((Self::header_height() - ui::role_line_height(ROLE)) / 2 + ui::role_ascent(ROLE))
+        Some(ui::baseline_in(Self::header_height(), ROLE))
     }
 
     fn focus_policy(&self) -> FocusPolicy {
-        FocusPolicy::StrongFocus
+        Press::focus_policy(true)
+    }
+
+    fn hover_part(&self, x: i32, y: i32) -> Option<usize> {
+        Press::hover_part(true, self.header, x, y)
     }
 
     fn children(&self) -> &[Box<dyn Widget>] {

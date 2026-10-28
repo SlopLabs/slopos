@@ -8,23 +8,18 @@ mod checker;
 
 use slopos_abi::damage::DamageRect;
 use slopos_appkit::embed::Embedded;
-use slopos_appkit::theme::space;
-use slopos_appkit::{
-    EdgeInsets, EmptyState, Icon, Node, Rect, Size, Surface, Text, TextRole, Tone, document_title,
-};
+use slopos_appkit::{EmptyState, Icon, Node, Rect, StatusBar, Surface, document_title};
 use slopos_gfx::DrawBuffer;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
 use slopos_image::{DecodeOptions, Image, ImageError, PngError};
 use slopos_windowing::{ControlFlow, Event, Window, WindowedApp};
 
-/// The app's name, as its dock entry and its window give it.
 pub const NAME: &str = "Image Viewer";
 
 const DEFAULT_IMAGE: &str = "/usr/share/slopos/wallpapers/default.png";
 const MIN_ZOOM: f64 = 0.05;
 const MAX_ZOOM: f64 = 32.0;
 
-/// Why a picture is not shown, and what to do about it.
 struct Unshown {
     title: &'static str,
     body: String,
@@ -73,7 +68,6 @@ fn embed(fb: &mut DrawBuffer<'_>, node: &Node<()>, rect: Rect) {
 struct ImageViewer {
     path: String,
     loaded: Result<Image, Unshown>,
-    status_height: i32,
     fit_mode: bool,
     zoom: f64,
     pan_x: i32,
@@ -89,13 +83,9 @@ impl ImageViewer {
             eprintln!("image_viewer: {path}: {e}");
             unshown(file_name(&path), &e)
         });
-        let status_height =
-            Embedded::natural_size(&status_bar(String::new()), Size::new(i32::MAX, i32::MAX))
-                .height;
         Self {
             path,
             loaded,
-            status_height,
             fit_mode: true,
             zoom: 1.0,
             pan_x: 0,
@@ -106,8 +96,8 @@ impl ImageViewer {
         }
     }
 
-    fn view_height(&self, fb: &DrawBuffer) -> i32 {
-        (fb.height() as i32 - self.status_height).max(1)
+    fn view_height(height: u32) -> i32 {
+        (height as i32 - StatusBar::HEIGHT).max(1)
     }
 
     fn fit_zoom_for(&self, view_w: i32, view_h: i32) -> f64 {
@@ -191,21 +181,6 @@ fn file_name(path: &str) -> &str {
         .unwrap_or(path)
 }
 
-fn status_bar(text: String) -> Node<()> {
-    Node::Background {
-        surface: Surface::Chrome,
-        child: Box::new(Node::Padding {
-            padding: EdgeInsets::symmetric(space::SM, space::XS),
-            child: Box::new(
-                Text::new(text)
-                    .role(TextRole::Caption)
-                    .tone(Tone::Secondary)
-                    .into(),
-            ),
-        }),
-    }
-}
-
 impl WindowedApp for ImageViewer {
     fn init(&mut self, win: &mut Window) {
         win.set_title(&document_title(file_name(&self.path), NAME));
@@ -215,7 +190,7 @@ impl WindowedApp for ImageViewer {
 
     fn on_event(&mut self, win: &mut Window, event: Event) -> ControlFlow {
         let view_w = win.width() as i32;
-        let view_h = (win.height() as i32 - self.status_height).max(1);
+        let view_h = Self::view_height(win.height());
         match event {
             Event::CloseRequest => ControlFlow::Exit,
             Event::Configure { .. } => {
@@ -251,15 +226,15 @@ impl WindowedApp for ImageViewer {
                 win.request_redraw();
                 ControlFlow::Continue
             }
-            Event::KeyPress { ascii, .. } => {
-                match ascii {
-                    b'f' | b'F' => self.reset_fit(),
-                    b'0' => self.reset_actual(),
-                    b'+' | b'=' => {
+            Event::KeyPress { codepoint, .. } => {
+                match char::from_u32(codepoint) {
+                    Some('f' | 'F') => self.reset_fit(),
+                    Some('0') => self.reset_actual(),
+                    Some('+' | '=') => {
                         let (x, y) = win.pointer();
                         self.zoom_around(x, y.min(view_h - 1), view_w, view_h, 1.2);
                     }
-                    b'-' | b'_' => {
+                    Some('-' | '_') => {
                         let (x, y) = win.pointer();
                         self.zoom_around(x, y.min(view_h - 1), view_w, view_h, 1.0 / 1.2);
                     }
@@ -273,7 +248,7 @@ impl WindowedApp for ImageViewer {
     }
 
     fn draw(&mut self, fb: &mut DrawBuffer<'_>) {
-        let view_h = self.view_height(fb);
+        let view_h = Self::view_height(fb.height());
         let view_w = fb.width() as i32;
         let zoom = self.active_zoom(view_w, view_h);
         checker::draw(fb, view_h);
@@ -315,12 +290,8 @@ impl WindowedApp for ImageViewer {
             }
         }
 
-        let status = status_bar(self.status_text(zoom));
-        embed(
-            fb,
-            &status,
-            Rect::new(0, view_h, view_w, self.status_height),
-        );
+        let status: Node<()> = StatusBar::new(self.status_text(zoom)).into();
+        embed(fb, &status, Rect::new(0, view_h, view_w, StatusBar::HEIGHT));
     }
 }
 

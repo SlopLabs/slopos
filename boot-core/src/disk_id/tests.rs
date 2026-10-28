@@ -168,3 +168,63 @@ fn kept_is_udevs_whitelist() {
         assert!(!kept(c), "{c:?}");
     }
 }
+
+fn model(described: Option<Described<'_>>) -> Option<(Bus, String)> {
+    let described = described?;
+    let words: std::vec::Vec<&str> = described.model().collect();
+    Some((described.bus, words.join(" ")))
+}
+
+#[test]
+fn a_disk_s_model_is_read_back_from_the_names_it_is_given() {
+    let read_back = |id: Option<DiskId>| {
+        let id = id.expect("a name");
+        let names: std::vec::Vec<String> = [false, true]
+            .into_iter()
+            .filter_map(|alias| named(Some(id), alias, None))
+            .collect();
+        model(describe(names.iter().map(String::as_str)))
+    };
+    let said = |bus, words: &str| Some((bus, String::from(words)));
+    let kingston = DiskId::nvme(b"KINGSTON SNV3S1000G   ", b"50026B7382A1B2C3  ", 1);
+    assert_eq!(read_back(kingston), said(Bus::Nvme, "KINGSTON SNV3S1000G"));
+    let spaced = DiskId::nvme(b"Model X", b"  S4EW123", 2);
+    assert_eq!(read_back(spaced), said(Bus::Nvme, "Model X"));
+    let split = DiskId::nvme(b"Model X", b"S4EW 123", 1);
+    assert_eq!(read_back(split), said(Bus::Nvme, "Model X S4EW"));
+    let stick = DiskId::usb(b"SanDisk ", b"Ultra Fit       ", Some(b"4C530001"), 0);
+    assert_eq!(read_back(stick), said(Bus::Usb, "SanDisk Ultra Fit"));
+    let unnamed = DiskId::usb(b"", b"Flash Disk", Some(b"4C530001"), 0);
+    assert_eq!(read_back(unnamed), said(Bus::Usb, "Flash Disk"));
+    let virtio = DiskId::virtio(b"slopos-verified");
+    assert_eq!(read_back(virtio), said(Bus::Virtio, ""));
+}
+
+#[test]
+fn a_disk_s_model_is_read_from_the_names_udev_gives_it() {
+    let said = |bus, words: &str| Some((bus, String::from(words)));
+    let nvme = [
+        "nvme-QEMU_NVMe_Ctrl_slopos-root_1",
+        "nvme-QEMU_NVMe_Ctrl_slopos-root",
+    ];
+    assert_eq!(model(describe(nvme)), said(Bus::Nvme, "QEMU NVMe Ctrl"));
+    assert_eq!(
+        model(describe(nvme.into_iter().rev())),
+        said(Bus::Nvme, "QEMU NVMe Ctrl")
+    );
+    assert_eq!(
+        model(describe(["nvme-KINGSTON_SNV3S1000G_50026B7382A1B2C3_2"])),
+        said(Bus::Nvme, "KINGSTON SNV3S1000G")
+    );
+    assert_eq!(
+        model(describe(["usb-QEMU_QEMU_HARDDISK_slopos-usb-0:0"])),
+        said(Bus::Usb, "QEMU QEMU HARDDISK")
+    );
+    assert_eq!(
+        model(describe(["nvme-Model_X___S4EW123_2"])),
+        said(Bus::Nvme, "Model X")
+    );
+    assert_eq!(model(describe(["nvme-nothing"])), said(Bus::Nvme, ""));
+    assert_eq!(model(describe(["scsi-0QEMU_disk"])), None);
+    assert_eq!(model(describe([])), None);
+}

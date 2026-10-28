@@ -1,26 +1,20 @@
-//! A single-line input whose text and caret live in the application.
-//!
-//! [`super::text_field::TextFieldWidget`] keeps its own text and its own idea of
-//! focus, which works for a form and not for an editor: the widget tree is
-//! rebuilt on every message, so anything the widget remembers is lost. This one
-//! holds nothing — text, caret and focus are all given to it, every keystroke is
-//! reported, and a tab stop reports focus arriving and leaving — which makes a
-//! find bar, a path prompt, a command palette and a form's field all the same
-//! widget with different state behind them.
+//! A line of text whose text, caret and focus the app keeps: every key is
+//! reported, and a tab stop reports focus arriving and leaving.
 
 use std::any::Any;
+use std::cell::Cell;
 
-use slopos_theme_core::inset;
+use slopos_theme_core::{Icon, TextRole, space};
 
-use crate::constraints::{BoxConstraints, Size};
+use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{
-    EventPhase, EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent,
+    EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent,
 };
 use crate::paint::PaintContext;
-use crate::text::BODY;
+use crate::text::ui;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
-use slopos_theme_core::Icon;
+const ROLE: TextRole = TextRole::Body;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LineEditInput {
@@ -31,7 +25,7 @@ pub enum LineEditInput {
         key: Key,
         modifiers: Modifiers,
     },
-    /// Caret placed by a click, in characters.
+    /// Placed by a click, in characters.
     Caret {
         col: usize,
     },
@@ -45,17 +39,16 @@ pub struct LineEditWidget {
     core: WidgetCore,
     text: String,
     placeholder: String,
-    /// Caret position in characters.
+    /// In characters.
     caret: usize,
     focused: bool,
     icon: Option<Icon>,
-    /// Drawn on the right: a match counter, a hint, an error.
     suffix: String,
-    /// Red when the content is not usable — a search with no match.
     invalid: bool,
     tab_stop: bool,
     on_input: Option<InputCallback>,
     padding_h: i32,
+    placeholder_cut: Cell<bool>,
 }
 
 impl LineEditWidget {
@@ -81,7 +74,8 @@ impl LineEditWidget {
             invalid,
             tab_stop: false,
             on_input,
-            padding_h: 8,
+            padding_h: 0,
+            placeholder_cut: Cell::new(false),
         }
     }
 
@@ -91,48 +85,37 @@ impl LineEditWidget {
     }
 
     fn text_x(&self) -> i32 {
-        let rect = self.layout_rect();
-        let icon = if self.icon.is_some() {
-            self.icon_size() + self.padding_h / 2
-        } else {
-            0
+        let icon = match self.icon {
+            Some(_) => ROLE.style().icon + space::XS,
+            None => 0,
         };
-        rect.x + self.padding_h + icon
-    }
-
-    fn icon_size(&self) -> i32 {
-        (BODY.size as i32 + 2).clamp(10, 20)
+        self.layout_rect().x + self.padding_h + icon
     }
 
     fn prefix_width(&self, chars: usize) -> i32 {
         let prefix: String = self.text.chars().take(chars).collect();
-        crate::text::ui::width(&prefix, BODY.size)
+        ui::width(&prefix, ROLE)
     }
 
-    /// Width of the content area, inside the padding, the icon and the suffix.
+    /// Inside the padding, the icon and the suffix.
     fn content_width(&self) -> i32 {
         let rect = self.layout_rect();
         let suffix = if self.suffix.is_empty() {
             0
         } else {
-            crate::text::ui::width(&self.suffix, BODY.size) + self.padding_h
+            ui::width(&self.suffix, ROLE) + self.padding_h
         };
         (rect.x + rect.width - self.text_x() - self.padding_h - suffix).max(0)
     }
 
-    /// How far the text is scrolled left so the caret stays in view.
-    ///
-    /// Derived rather than remembered: the widget is rebuilt on every message,
-    /// so a stored offset would be gone by the next keystroke — and the caret
-    /// and the text it belongs to are all this needs.
+    /// How far the text is scrolled left so the caret shows.
     fn scroll_offset(&self) -> i32 {
         let caret_x = self.prefix_width(self.caret);
         let width = self.content_width();
         if width <= 0 {
             return 0;
         }
-        // The 2 px keeps the caret bar itself on screen at the right edge.
-        (caret_x - width + 2).max(0)
+        (caret_x - width + super::CARET).max(0)
     }
 
     fn col_at(&self, x: i32) -> usize {
@@ -140,11 +123,8 @@ impl LineEditWidget {
         if local <= 0 {
             return 0;
         }
-        // Measured as prefixes, never as a sum of per-character advances: the
-        // renderer accumulates fractional advances and rounds once at the end,
-        // so a per-character sum over-counts by up to a pixel a glyph and the
-        // caret would drift further right of the click the longer the text got.
-        let byte = crate::text::ui::prefix_fitting(&self.text, BODY.size, local, BODY.weight);
+        // As prefixes: a sum of rounded advances drifts a pixel a glyph.
+        let byte = ui::prefix_fitting(&self.text, ROLE, local);
         let col = self.text[..byte].chars().count();
         let before = self.prefix_width(col);
         let after = self.prefix_width(col + 1);
@@ -176,11 +156,11 @@ impl Widget for LineEditWidget {
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
         self.padding_h = ctx.style.field_padding_h;
-        let height = BODY.line_height + inset::CONTROL.vertical();
+        let height = ctx.style.control_height;
         let width = if constraints.is_width_bounded() {
             constraints.max_width
         } else {
-            ctx.text_width(&self.text).max(ctx.style.field_min_width)
+            ui::width(&self.text, ROLE).max(ctx.style.field_min_width)
         };
         constraints.constrain(Size::new(width, height))
     }
@@ -196,10 +176,11 @@ impl Widget for LineEditWidget {
         } else {
             theme.border_strong
         };
-        super::field_frame(ctx, rect, self.focused, edge);
+        let lit = ctx.lit(self.id()).is_some();
+        super::field_frame(ctx, rect, self.focused, lit, edge);
 
         if let Some(icon) = self.icon {
-            let size = self.icon_size();
+            let size = ROLE.style().icon;
             ctx.draw_icon(
                 icon,
                 rect.x + self.padding_h,
@@ -209,46 +190,34 @@ impl Widget for LineEditWidget {
             );
         }
 
-        let text_h = ctx.text_height();
-        let text_y = rect.y + (rect.height - text_h) / 2;
+        let text_y = ui::centred_top(rect.y, rect.height, ROLE);
         let text_x = self.text_x() - self.scroll_offset();
 
-        let content =
-            crate::constraints::Rect::new(self.text_x(), rect.y, self.content_width(), rect.height);
+        let content = Rect::new(self.text_x(), rect.y, self.content_width(), rect.height);
 
+        self.placeholder_cut.set(false);
         ctx.with_viewport(content, |ctx| {
             if self.text.is_empty() {
-                ctx.draw_text_transparent(text_x, text_y, &self.placeholder, theme.text_secondary);
+                let (room, ink) = (self.content_width(), theme.text_secondary);
+                let cut = ctx.draw_text_fitted(text_x, text_y, &self.placeholder, ROLE, room, ink);
+                self.placeholder_cut.set(cut);
             } else {
-                ctx.draw_text_transparent(text_x, text_y, &self.text, theme.text);
+                ctx.draw_text(text_x, text_y, &self.text, ROLE, theme.text);
             }
             if self.focused {
                 let caret_x = text_x + self.prefix_width(self.caret);
-                ctx.fill_rect(caret_x, text_y, 2, text_h, theme.accent);
+                let h = ui::font_height(ROLE);
+                ctx.fill_rect(caret_x, text_y, super::CARET, h, theme.accent);
             }
         });
 
         if !self.suffix.is_empty() {
-            let w = ctx.text_width(&self.suffix);
-            ctx.draw_text_transparent(
-                rect.x + rect.width - self.padding_h - w,
-                text_y,
-                &self.suffix,
-                theme.text_secondary,
-            );
+            let x = rect.x + rect.width - self.padding_h - ui::width(&self.suffix, ROLE);
+            ctx.draw_text(x, text_y, &self.suffix, ROLE, theme.text_secondary);
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        if phase != EventPhase::Target && phase != EventPhase::Bubble {
-            return EventResponse::Ignored;
-        }
-
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
         match event {
             WidgetEvent::FocusGained if self.tab_stop => {
                 self.focused = true;
@@ -322,14 +291,26 @@ impl Widget for LineEditWidget {
     fn declares_focus(&self) -> bool {
         self.focused
     }
+
+    fn hover_part(&self, x: i32, y: i32) -> Option<usize> {
+        super::button::Press::hover_part(true, self.layout_rect(), x, y)
+    }
+
+    /// The placeholder, while it shows cut short: the text typed scrolls to
+    /// the caret instead.
+    fn tooltip(&self, _x: i32, _y: i32) -> Option<&str> {
+        self.placeholder_cut
+            .get()
+            .then_some(self.placeholder.as_str())
+    }
 }
 
-/// Text and caret for one input line. The widget draws it and reports keys;
-/// this is where they take effect.
+/// Text and caret for one input line, where the keys a line edit reports take
+/// effect.
 #[derive(Clone, Debug, Default)]
 pub struct LineInput {
     pub text: String,
-    /// Caret position in characters.
+    /// In characters.
     pub caret: usize,
 }
 
@@ -414,12 +395,8 @@ impl LineInput {
         self.caret = 0;
     }
 
-    /// Deletes back to the previous word boundary, as Ctrl+Backspace does
-    /// everywhere else.
-    ///
-    /// A separator counts as a boundary, not just whitespace: what this line
-    /// most often holds is a path, and a whitespace-only rule makes one
-    /// Ctrl+Backspace erase the whole of it rather than the last segment.
+    /// Deletes back to the start of the word, as Ctrl+Backspace does; a `/`
+    /// ends a word too, since a line most often holds a path.
     pub fn delete_word_left(&mut self) {
         let boundary = |c: char| c.is_whitespace() || c == '/';
         let chars: Vec<char> = self.text.chars().collect();
@@ -436,8 +413,8 @@ impl LineInput {
         self.caret = start;
     }
 
-    /// Applies a key that edits or moves within the line. Returns false for a
-    /// key the caller should interpret itself (Enter, Escape, Up, Down, Tab).
+    /// Applies a key that edits or moves within the line; false for one the
+    /// caller interprets, as Enter, Escape, Up, Down and Tab.
     pub fn handle_key(&mut self, key: Key, mods: Modifiers) -> bool {
         match key {
             Key::Named(NamedKey::Space) if !mods.ctrl && !mods.plain_alt() => {

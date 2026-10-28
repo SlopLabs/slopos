@@ -1,11 +1,5 @@
-//! What an action says to the person it asks, held to the voice a screen a
-//! person must act on speaks in: no capability name, none of the policy's
-//! own words, no flag and no `...`.
-//!
-//! `describe` completes "{App} wants to …": a verb phrase in lower case,
-//! without a full stop. `detail` is one sentence about what follows from
-//! allowing it. `verb` names the button that allows it, from [`VERBS`].
-//! `label` holds any other name a control or a heading shows.
+//! What an action says to the person it asks: no capability name, none of
+//! the policy's own words, no flag and no `...`.
 
 use slopos_theme_core::words;
 
@@ -13,14 +7,20 @@ use crate::CAPABILITIES;
 
 pub const DESCRIBE_MAX: usize = 72;
 pub const DETAIL_MAX: usize = 160;
-pub const VERB_MAX: usize = 20;
-/// The allowing button of an action that names no verb.
 pub const VERB: &str = "Allow";
-/// The refusing button, and what else the dialog labels, which no verb may
-/// say: what has focus is found by what it says.
+pub const ADMIN_NEEDED: &str = "This needs an administrator's password.";
+pub const ASKED_BY: &str = "Asked by";
+pub const RUNS: &str = "Runs";
+pub const IN: &str = "In";
+pub const EXTENSION: &str = "Extension";
+
+// The dialog's own controls, which no verb may say: what has focus is found by
+// what it says.
 pub const CANCEL: &str = "Cancel";
 pub const SHOW_DETAILS: &str = "Show details";
 pub const SHOW_LESS: &str = "Show less";
+pub const PASSWORD: &str = "Password";
+
 /// What an allowing button may say: each does what it says, and none reads
 /// as refusing, as more to read, or as another of the dialog's controls.
 pub const VERBS: [&str; 31] = [
@@ -98,13 +98,6 @@ pub fn verb(text: &str) -> Result<(), &'static str> {
         true => Ok(()),
         false => Err("verb is one of slopos_priv_core::words::VERBS: Allow, Install, Run…"),
     }
-}
-
-/// The words of a button, a menu entry, a heading or a passing status: a
-/// capital first and no full stop.
-pub fn label(text: &str) -> Result<(), &'static str> {
-    words::label(text, &[])?;
-    plain(text)
 }
 
 fn plain(text: &str) -> Result<(), &'static str> {

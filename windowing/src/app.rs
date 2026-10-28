@@ -1,7 +1,4 @@
-//! Generic event loop for windowed applications.
-//!
-//! Provides the `WindowedApp` trait and a `run()` function that owns the
-//! poll -> dispatch -> redraw -> present -> yield loop.
+//! The event loop of an app that draws its own window.
 
 use slopos_gfx::{DrawBuffer, RenderSurface};
 
@@ -9,22 +6,18 @@ use slopos_protocol::types::Event as ProtocolEvent;
 
 use crate::connection;
 use crate::event::Event;
-use crate::surface::SurfaceError;
 use crate::window::{EVENT_BUF_LEN, Window};
 
-/// Instructs the event loop what to do after processing an event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControlFlow {
     Continue,
     Exit,
 }
 
-/// Callbacks driven by the [`run()`] event loop.
 pub trait WindowedApp {
-    /// Called once after window creation, before the first frame.
+    /// Once the window exists, before the first frame.
     fn init(&mut self, _win: &mut Window) {}
 
-    /// Called for each input event; return `ControlFlow::Exit` to quit.
     fn on_event(&mut self, _win: &mut Window, event: Event) -> ControlFlow {
         match event {
             Event::CloseRequest => ControlFlow::Exit,
@@ -32,7 +25,7 @@ pub trait WindowedApp {
         }
     }
 
-    /// Called when a redraw was requested via `Window::request_redraw()`.
+    /// After [`Window::request_redraw`].
     fn draw(&mut self, fb: &mut DrawBuffer<'_>);
 
     /// `Some(ms)` makes the loop request a redraw every `ms` even without input.
@@ -41,25 +34,10 @@ pub trait WindowedApp {
     }
 }
 
-/// Run a windowed application to completion.
-///
-/// Never returns: exits the process on `ControlFlow::Exit`.
+/// Runs `app` until it answers [`ControlFlow::Exit`], which exits the process.
 pub fn run<A: WindowedApp>(mut app: A, width: u32, height: u32) -> ! {
-    let handle = connection::connect().expect("compositor not running");
-
-    let mut win = match Window::new(handle.clone(), width, height) {
-        Ok(w) => w,
-        Err(e) => {
-            let msg = match e {
-                SurfaceError::NoDisplay => "no display",
-                SurfaceError::BadSize => "bad surface size",
-                SurfaceError::ShmFailed => "shm alloc failed",
-                SurfaceError::AttachFailed => "surface attach failed",
-            };
-            eprintln!("windowing: {msg}");
-            std::process::exit(1);
-        }
-    };
+    let handle = connection::connect().unwrap_or_else(|e| panic!("{e}"));
+    let mut win = Window::new(handle.clone(), width, height).unwrap_or_else(|e| panic!("{e}"));
 
     app.init(&mut win);
 

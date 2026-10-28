@@ -1,17 +1,17 @@
-//! The copy rules over every word the window and the CLI take from here,
-//! on every fixture: no flag, no three dots, no word the glossary replaces;
-//! a capital on what is a label and a full stop on what is a sentence; and
-//! the installer's trade — what the details may name — off both.
+//! The copy rules over every word the window and the CLI take from here, the
+//! installer's trade kept to the details.
 
 use alloc::string::String;
 use alloc::vec;
 
+use slopos_boot_core::disk_id::Bus;
 use slopos_boot_core::install::{PlanError, ROLES};
 use slopos_theme_core::words::{label, plain, sentence};
 
 use super::*;
-use crate::fixtures::{GIB, gapped};
-use crate::{Layout, Listing, MbrPartition, Medium, Refusal, STEPS, System};
+use crate::fixtures::{GIB, gapped, no_tables};
+use crate::wizard::say::Shape;
+use crate::{Contents, EspTrouble, Layout, Listing, Medium, Refusal, Step, System};
 
 const TRADE: [&str; 13] = [
     "toolchain",
@@ -62,12 +62,15 @@ impl Said {
         }
     }
 
-    /// Everything the window shows of `w`'s page, `live` or from the dock.
+    /// Everything the window shows of `w`'s page, live or from the dock.
     fn page(&mut self, w: &Wizard) {
         for live in [true, false] {
             let heading = w.heading(live);
             self.label(heading.title);
             self.sentence(heading.subtitle);
+            if let Some(disk) = heading.disk {
+                self.caption(disk);
+            }
         }
         if w.page() != Page::Install {
             self.label(w.primary_label());
@@ -101,6 +104,9 @@ impl Said {
         if let Some(proposal) = w.proposal() {
             self.proposal(proposal);
         }
+        if let Some(Failure::Stopped { why, .. }) = w.failure() {
+            self.caption(why.clone());
+        }
     }
 
     fn layout(&mut self, layout: &Layout) {
@@ -124,6 +130,16 @@ impl Said {
     }
 
     fn hold(&self) {
+        for text in self
+            .labels
+            .iter()
+            .chain(&self.sentences)
+            .chain(&self.captions)
+        {
+            for unit in ["KiB", "MiB", "GiB", "TiB", "PiB"] {
+                assert!(!text.contains(unit), "{text:?} is not in decimal units");
+            }
+        }
         for text in &self.labels {
             assert_eq!(label(text, &TRADE), Ok(()), "label {text:?}");
         }
@@ -136,7 +152,8 @@ impl Said {
     }
 }
 
-fn issues() -> Vec<Issue> {
+/// Every issue the engine can answer the window's choices with.
+fn window_issues() -> Vec<Issue> {
     let plan = |error| Issue::Plan {
         error,
         node: NODE.into(),
@@ -146,13 +163,28 @@ fn issues() -> Vec<Issue> {
         Issue::Medium("/media/install holds no installer".into()),
         Issue::Probe("/dev: gone".into()),
         Issue::Disk("/dev/nvme0n1: I/O error".into()),
-        Issue::NothingToKeep("/dev/nvme0n1p3".into()),
         Issue::NoRoot("/dev/nvme0n1".into()),
-        Issue::Esp("full".into()),
-        Issue::Person("bad".into()),
+        Issue::Esp {
+            node: "/dev/nvme0n1p1".into(),
+            trouble: EspTrouble::Full {
+                free: 512 << 10,
+                needed: 3 << 20,
+            },
+        },
+        Issue::Esp {
+            node: "/dev/nvme0n1p1".into(),
+            trouble: EspTrouble::Unreadable("not FAT32".into()),
+        },
+        Issue::Esp {
+            node: "/dev/nvme0n1p1".into(),
+            trouble: EspTrouble::WrongType,
+        },
         Issue::Menu("no".into()),
-        Issue::RootSize,
         Issue::Remote("a\nb".into()),
+        Issue::Unprobed,
+        Issue::Unopened(NODE.into()),
+        Issue::Unproposed,
+        Issue::Changed(NODE.into()),
         plan(PlanError::NoRegion),
         plan(PlanError::NoRoom {
             needed: 8 * GIB,
@@ -173,26 +205,23 @@ fn issues() -> Vec<Issue> {
         plan(PlanError::NoSlot),
     ];
     issues.extend(ROLES.map(|role| plan(PlanError::Ambiguous(role))));
-    issues.extend(contents().into_iter().map(|contents| Issue::OnlyErase {
+    issues.extend(no_tables().into_iter().map(|contents| Issue::OnlyErase {
         node: NODE.into(),
         contents,
     }));
     issues
 }
 
-fn contents() -> Vec<Contents> {
-    vec![
-        Contents::Gpt,
-        Contents::Blank,
-        Contents::Mbr(vec![MbrPartition {
-            index: 0,
-            kind: 0x83,
-            bytes: GIB,
-        }]),
-        Contents::UnreadableGpt,
-        Contents::Ext4,
-        Contents::Data,
-    ]
+/// The window's issues and those only the CLI's own choices raise: a name,
+/// a size for a reused root or a root to keep.
+fn issues() -> Vec<Issue> {
+    let mut issues = window_issues();
+    issues.extend([
+        Issue::NothingToKeep("/dev/nvme0n1p3".into()),
+        Issue::Person("bad".into()),
+        Issue::RootSize,
+    ]);
+    issues
 }
 
 /// A computer whose installer lacks the developer tools and could not read
@@ -211,30 +240,35 @@ fn every_disk() -> System {
     let mut disks = vec![
         crate::Disk {
             node: "/dev/sda".into(),
+            bus: Some(Bus::Usb),
             model: None,
             state: DiskState::Refused(Refusal::Medium),
         },
         crate::Disk {
             node: "/dev/sdb".into(),
+            bus: Some(Bus::Usb),
             model: Some("Ultra Fit".into()),
             state: DiskState::Refused(Refusal::ReadOnly),
         },
         crate::Disk {
             node: "/dev/sdc".into(),
+            bus: Some(Bus::Usb),
             model: None,
             state: DiskState::Unreadable("/dev/sdc: I/O error".into()),
         },
         crate::Disk {
             node: NODE.into(),
+            bus: Some(Bus::Nvme),
             model: Some(MODEL.into()),
             state: listed(Contents::Gpt, Layout::of(NODE, &header, &array)),
         },
     ];
-    for (n, contents) in contents().into_iter().skip(1).enumerate() {
+    for (n, contents) in no_tables().into_iter().enumerate() {
         disks.push(crate::Disk {
             node: alloc::format!("/dev/vd{}", (b'a' + n as u8) as char),
+            bus: Some(Bus::Virtio),
             model: None,
-            state: listed(contents, Layout::empty(16 * GIB)),
+            state: listed(Contents::NoTable(contents), Layout::empty(16 * GIB)),
         });
     }
     System {
@@ -250,36 +284,40 @@ fn every_disk() -> System {
     }
 }
 
+fn steps() -> impl Iterator<Item = Option<Step>> {
+    core::iter::once(None).chain(Step::ALL.map(Some))
+}
+
 #[test]
 fn the_fixed_words_keep_the_rules() {
     let mut said = Said::default();
-    for text in say::LABELS {
-        said.label(text);
+    for &(shape, text) in say::ALL {
+        match shape {
+            Shape::Label => said.label(text),
+            Shape::Sentence => said.sentence(text),
+            Shape::Caption => said.caption(text),
+        }
     }
-    for text in say::SENTENCES {
-        said.sentence(text);
-    }
-    said.sentence(say::REMOTE_CAPTION);
     for kind in [Kind::Erase, Kind::Free, Kind::Reuse, Kind::Reinstall] {
         said.label(kind.title());
     }
     for refusal in [Refusal::Medium, Refusal::ReadOnly] {
         said.sentence(refusal.words());
     }
-    for contents in contents() {
+    for contents in no_tables() {
         said.sentence(contents.only_erase());
         said.caption(contents.holds().unwrap_or_default());
     }
-    for step in 0..=STEPS.len() as u32 {
+    for step in steps() {
         said.sentence(
-            Failure {
+            Failure::Stopped {
                 step,
-                message: String::new(),
+                why: String::new(),
             }
             .words(),
         );
     }
-    for issue in issues() {
+    for issue in window_issues() {
         let words = issue.words();
         assert!(
             words.matches(". ").count() >= 1,
@@ -288,7 +326,6 @@ fn the_fixed_words_keep_the_rules() {
         said.sentence(words);
         said.caption(issue.detail().unwrap_or_default());
     }
-    said.sentence(MISMATCHED);
     said.hold();
 }
 
@@ -305,26 +342,30 @@ fn the_cli_says_what_the_window_says_and_names_its_flag() {
     for issue in issues() {
         let cli = issue.to_string();
         assert_eq!(plain(&unflagged(&cli), &[]), Ok(()), "{cli}");
-        let engine_said = matches!(
-            issue,
-            Issue::Medium(_)
-                | Issue::Probe(_)
-                | Issue::Disk(_)
-                | Issue::Esp(_)
-                | Issue::Person(_)
-                | Issue::Menu(_)
-        );
-        if engine_said {
-            continue;
-        }
+        assert!(cli.ends_with('.'), "{cli:?} ends at a full stop");
         let words = issue.words();
         let fact = words
             .split_inclusive(". ")
             .next()
             .unwrap_or(&words)
-            .trim_end();
+            .trim_end()
+            .trim_end_matches('.');
         assert!(cli.contains(fact), "{cli:?} does not say {fact:?}");
-        assert!(cli.contains("--"), "{cli:?} names no flag to pass instead");
+        let no_flag = matches!(
+            issue,
+            Issue::Medium(_)
+                | Issue::Probe(_)
+                | Issue::Menu(_)
+                | Issue::Unprobed
+                | Issue::Unopened(_)
+                | Issue::Unproposed
+                | Issue::Changed(_)
+        );
+        assert_eq!(
+            cli.contains("--"),
+            !no_flag,
+            "{cli:?} names a flag where one changes it"
+        );
     }
 }
 
@@ -372,7 +413,7 @@ fn every_page_of_every_install_keeps_the_rules() {
         (opened(Err(no_room()), None), free()),
         (
             opened(Ok(()), None),
-            Case::erasing(Some(foreign()), Contents::Gpt).proposal(),
+            Case::erasing(Some(foreign())).proposal(),
         ),
         reinstall(true),
         reinstall(false),
@@ -385,18 +426,25 @@ fn every_page_of_every_install_keeps_the_rules() {
             said.page(&w);
         }
     }
-    for failed in 0..=STEPS.len() as u32 {
+    for failed in steps() {
         let (mut w, _) = at_how(opened(Ok(()), None), free_proposal());
         review(&mut w);
-        reply(&mut w, Reply::Event(Event::step(failed.max(1))));
+        let step = failed.unwrap_or(Step::Partition);
+        reply(&mut w, Reply::Event(Event::Step(step)));
         said.page(&w);
         reply(
             &mut w,
-            Reply::Failed(Failure {
+            Reply::Failed(Failure::Stopped {
                 step: failed,
-                message: "mke2fs exited 1".into(),
+                why: "mke2fs exited 1".into(),
             }),
         );
+        said.page(&w);
+    }
+    for issue in window_issues() {
+        let (mut w, _) = at_how(opened(Ok(()), None), free_proposal());
+        review(&mut w);
+        reply(&mut w, Reply::Failed(Failure::Refused(issue)));
         said.page(&w);
     }
     let (mut w, _) = at_how(opened(Ok(()), None), free_proposal());

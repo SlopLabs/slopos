@@ -15,10 +15,9 @@ pub fn init() {
     if slopos_font::atlas::init_global_bitmap() {
         if let Some(a) = atlas() {
             klog_info!(
-                "Font atlas ready: {}x{} cells (VGA bitmap, source={:?})",
+                "Font atlas ready: {}x{} cells (VGA bitmap)",
                 a.cell_width(),
                 a.cell_height(),
-                a.source(),
             );
         }
     } else {

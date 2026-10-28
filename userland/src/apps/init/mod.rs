@@ -19,7 +19,6 @@ use slopos_abi::syscall::{
     POLLIN, UserPollFd,
 };
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
-use slopos_font::atlas::GlyphAtlas;
 use slopos_priv_core::sessions::{Class, LINKS};
 
 use self::control::{Control, Request, answer};
@@ -38,13 +37,8 @@ use crate::syscall::process::{self, Endowment, WaitStatus};
 use crate::syscall::{OwnedFd, RawFd, core as sys_core, fs, net, tty};
 
 fn upgrade_console_font() {
-    let font_data = match crate::gfx::font_loader::load_font("mono") {
-        Some(data) => data,
-        None => return,
-    };
-    let atlas = match GlyphAtlas::new(font_data, 16) {
-        Some(a) => a,
-        None => return,
+    let Some(atlas) = crate::gfx::font::atlas() else {
+        return;
     };
     let mut payload = Vec::with_capacity(atlas.coverage_len() + atlas.replacement().len());
     for chunk in atlas.coverage_chunks() {

@@ -4,25 +4,11 @@ use super::constraints::Rect;
 use super::event::MessageSink;
 use super::traits::{Role, Widget, WidgetId};
 
-/// Room round a control for its focus ring, which a view showing it keeps.
-pub(crate) const RING_ROOM: i32 = stroke::FOCUS * 2;
+const RING_GAP: i32 = 1;
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct FocusScopeId(pub u32);
-
-/// A focus scope traps Tab navigation within a subtree.
-pub struct FocusScope {
-    pub id: FocusScopeId,
-    /// Widgets in this scope, in tab order.
-    pub chain: Vec<WidgetId>,
-    /// Where focus sat in the enclosing chain when this scope was entered, and
-    /// how long that chain was.
-    ///
-    /// A position and not a `WidgetId`: ids come from a global counter and the
-    /// tree is rebuilt on every message, so by the time a scope closes the id
-    /// that held focus when it opened designates nothing.
-    pub restore_to: Option<(usize, usize)>,
-}
+/// How far outside a control its focus ring reaches, which a view showing the
+/// control keeps room for.
+pub(crate) const RING_REACH: i32 = RING_GAP + stroke::FOCUS;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Stop {
@@ -36,31 +22,25 @@ struct Beneath {
     stop: Option<(Stop, usize)>,
 }
 
+/// Where the keyboard is, kept across rebuilds by place rather than by id:
+/// every widget is new after a rebuild, but the chain is built by walking the
+/// same view in the same order.
 pub struct FocusManager {
     focused: Option<WidgetId>,
-    /// Where `focused` sits in the tab chain.
-    ///
-    /// Ids come from a global counter and the tree is rebuilt on every
-    /// message, so an id does not survive one. A position does: the chain is
-    /// built by walking the same view in the same order.
     focused_index: Option<usize>,
     /// How long the chain was when `focused_index` was taken, so a view that
-    /// changed shape is not silently re-focused on a different control.
+    /// changed shape is not re-focused on another control.
     chain_len_at_focus: Option<usize>,
-    /// Every focusable widget, in depth-first order.
     tab_chain: Vec<WidgetId>,
     tab_stops: Vec<Stop>,
-    /// `focused`'s stop in the global chain, and how many like it precede it.
+    /// `focused`'s stop, and how many like it precede it.
     focused_stop: Option<(Stop, usize)>,
     /// The modal layer the chain was built from, when one covers the page.
     layer: Option<Stop>,
     /// Where focus sat on the page when a layer covered it, to go back to.
     beneath: Option<Beneath>,
-    /// Empty means the global chain is active.
-    scope_stack: Vec<FocusScope>,
-    /// Navigating by keyboard; drives focus-ring visibility.
+    /// Navigating by keyboard, which shows the focus ring.
     keyboard_active: bool,
-    next_scope_id: u32,
 }
 
 impl FocusManager {
@@ -74,9 +54,7 @@ impl FocusManager {
             focused_stop: None,
             layer: None,
             beneath: None,
-            scope_stack: Vec::new(),
             keyboard_active: false,
-            next_scope_id: 1,
         }
     }
 
@@ -84,16 +62,12 @@ impl FocusManager {
         self.focused
     }
 
-    pub fn is_focused(&self, id: WidgetId) -> bool {
-        self.focused == Some(id)
-    }
-
     pub fn is_focus_visible(&self) -> bool {
         self.keyboard_active
     }
 
     pub fn set_focused(&mut self, id: Option<WidgetId>) {
-        let index = id.and_then(|id| self.active_chain().iter().position(|&c| c == id));
+        let index = id.and_then(|id| self.tab_chain.iter().position(|&c| c == id));
         self.focused = id;
         self.set_index(index);
     }
@@ -106,15 +80,14 @@ impl FocusManager {
 
     fn set_index(&mut self, index: Option<usize>) {
         self.focused_index = index;
-        self.chain_len_at_focus = index.map(|_| self.active_chain().len());
-        self.focused_stop = index.filter(|_| self.scope_stack.is_empty()).and_then(|i| {
+        self.chain_len_at_focus = index.map(|_| self.tab_chain.len());
+        self.focused_stop = index.and_then(|i| {
             let stop = self.tab_stops.get(i)?;
             let nth = self.tab_stops[..i].iter().filter(|s| *s == stop).count();
             Some((stop.clone(), nth))
         });
     }
 
-    /// Record a non-modifier key press.
     pub fn note_keyboard_input(&mut self) {
         self.keyboard_active = true;
     }
@@ -123,15 +96,13 @@ impl FocusManager {
         self.keyboard_active = false;
     }
 
-    /// Rebuilds the chain and re-derives `focused` from it: the stop of the
-    /// same role and name, as many such stops along, or failing that the stop
-    /// of the same role at the same position in a chain of the same length.
+    /// Rebuilds the chain and finds focus in it again: the stop of the same
+    /// role and name, as many such stops along, or failing that the stop of
+    /// the same role at the same position in a chain of the same length.
     ///
-    /// Answers the id that should now be told it has focus, when that is a
-    /// different widget from the one that held it before — which after a
-    /// rebuild it always is, because every widget is new. A dialog that opens
-    /// starts with nothing focused; one that closes gives the page its focus
-    /// back.
+    /// Answers the widget now focused, which a rebuild always makes new. A
+    /// dialog that opens starts with nothing focused; one that closes gives
+    /// the page its focus back.
     pub fn rebuild_tab_chain(&mut self, root: &dyn Widget) -> Option<WidgetId> {
         self.tab_chain.clear();
         self.tab_stops.clear();
@@ -162,33 +133,25 @@ impl FocusManager {
             self.focused_stop = back.stop;
         }
         let Some(index) = self.focused_index else {
-            // `focused` names a widget the rebuild destroyed; leaving it makes
-            // `move_focus_next` jump back to the first control.
             self.focused = None;
             return None;
         };
-        // A chain that gained or lost a control holds another widget at the old
-        // position, so a position is trusted only in a chain of the same length.
-        let same_shape = self.chain_len_at_focus == Some(self.active_chain().len());
-        let found = self
-            .focused_stop
-            .as_ref()
-            .filter(|_| self.scope_stack.is_empty())
-            .and_then(|(stop, nth)| {
-                self.tab_stops
-                    .iter()
-                    .enumerate()
-                    .filter(|&(_, s)| s == stop)
-                    .nth(*nth)
-                    .map(|(i, _)| i)
-            });
+        let same_shape = self.chain_len_at_focus == Some(self.tab_chain.len());
+        let found = self.focused_stop.as_ref().and_then(|(stop, nth)| {
+            self.tab_stops
+                .iter()
+                .enumerate()
+                .filter(|&(_, s)| s == stop)
+                .nth(*nth)
+                .map(|(i, _)| i)
+        });
         let same_kind = self.focused_stop.as_ref().is_none_or(|(stop, _)| {
             self.tab_stops
                 .get(index)
                 .is_some_and(|s| s.role == stop.role)
         });
         let index = found.or((same_shape && same_kind).then_some(index));
-        let restored = index.and_then(|i| self.active_chain().get(i).copied());
+        let restored = index.and_then(|i| self.tab_chain.get(i).copied());
         self.focused = restored;
         self.set_index(restored.and(index));
         restored
@@ -214,81 +177,31 @@ impl FocusManager {
         }
     }
 
-    fn active_chain(&self) -> &[WidgetId] {
-        if let Some(scope) = self.scope_stack.last() {
-            &scope.chain
-        } else {
-            &self.tab_chain
-        }
-    }
-
     pub fn move_focus_next(&mut self) {
-        self.keyboard_active = true;
-        let chain = self.active_chain();
-        if chain.is_empty() {
-            return;
-        }
-        let index = match self
-            .focused
-            .and_then(|current| chain.iter().position(|&id| id == current))
-        {
-            Some(pos) => (pos + 1) % chain.len(),
-            None => 0,
-        };
-        self.focused = Some(chain[index]);
-        self.set_index(Some(index));
+        self.step(true);
     }
 
     pub fn move_focus_prev(&mut self) {
+        self.step(false);
+    }
+
+    fn step(&mut self, forward: bool) {
         self.keyboard_active = true;
-        let chain = self.active_chain();
-        if chain.is_empty() {
+        let len = self.tab_chain.len();
+        if len == 0 {
             return;
         }
-        let index = match self
+        let at = self
             .focused
-            .and_then(|current| chain.iter().position(|&id| id == current))
-        {
-            Some(0) | None => chain.len() - 1,
-            Some(pos) => pos - 1,
+            .and_then(|current| self.tab_chain.iter().position(|&id| id == current));
+        let index = match (at, forward) {
+            (Some(at), true) => (at + 1) % len,
+            (None, true) => 0,
+            (Some(at), false) => (at + len - 1) % len,
+            (None, false) => len - 1,
         };
-        self.focused = Some(chain[index]);
+        self.focused = Some(self.tab_chain[index]);
         self.set_index(Some(index));
-    }
-
-    pub fn push_scope(&mut self, focusable_ids: Vec<WidgetId>) -> FocusScopeId {
-        let id = FocusScopeId(self.next_scope_id);
-        self.next_scope_id += 1;
-        let scope = FocusScope {
-            id,
-            chain: focusable_ids,
-            restore_to: self.focused_index.zip(self.chain_len_at_focus),
-        };
-        self.scope_stack.push(scope);
-        // Through `set_focused`, so the index and chain length a rebuild
-        // restores from describe the scope that is now active.
-        if let Some(&first) = self.scope_stack.last().and_then(|s| s.chain.first()) {
-            self.set_focused(Some(first));
-        }
-        id
-    }
-
-    /// Pop the topmost focus scope, restoring the focus it was entered with.
-    ///
-    /// By position, against the chain as it is now: the tree is rebuilt on
-    /// every message while a scope is open, so the id that held focus when the
-    /// scope was entered names a widget that no longer exists.
-    pub fn pop_scope(&mut self) -> Option<FocusScopeId> {
-        let scope = self.scope_stack.pop()?;
-        let outer_len = self.active_chain().len();
-        let restored = match scope.restore_to {
-            // Same rule as a rebuild: a chain that gained or lost a control
-            // indexes a different widget, and dropping focus cannot be wrong.
-            Some((index, len)) if len == outer_len => self.active_chain().get(index).copied(),
-            _ => None,
-        };
-        self.set_focused(restored);
-        Some(scope.id)
     }
 }
 
@@ -321,9 +234,6 @@ pub(crate) fn beside_in_toolbar(
     id: WidgetId,
     forward: bool,
 ) -> Option<WidgetId> {
-    fn holds(widget: &dyn Widget, id: WidgetId) -> bool {
-        widget.id() == id || widget.children().iter().any(|c| holds(c.as_ref(), id))
-    }
     fn toolbar(widget: &dyn Widget, id: WidgetId) -> Option<&dyn Widget> {
         let inner = widget
             .children()
@@ -343,7 +253,6 @@ pub(crate) fn holds(widget: &dyn Widget, id: WidgetId) -> bool {
     widget.id() == id || widget.children().iter().any(|c| holds(c.as_ref(), id))
 }
 
-/// [`modal_layer`], mutably.
 pub(crate) fn modal_layer_mut(root: &mut dyn Widget) -> &mut dyn Widget {
     fn path(widget: &dyn Widget, at: &mut Vec<usize>, best: &mut Option<Vec<usize>>) {
         if widget.is_modal() {
@@ -364,13 +273,15 @@ pub(crate) fn modal_layer_mut(root: &mut dyn Widget) -> &mut dyn Widget {
     layer
 }
 
+/// Scrolls every view holding `id` so it shows with its ring; answers where it
+/// is then.
 pub(crate) fn reveal(
     widget: &mut dyn Widget,
     id: WidgetId,
     sink: &mut MessageSink,
 ) -> Option<Rect> {
     if widget.id() == id {
-        return Some(widget.focus_rect().inflate(RING_ROOM));
+        return Some(widget.focus_rect().inflate(RING_REACH));
     }
     let mut found = None;
     for child in widget.children_mut() {

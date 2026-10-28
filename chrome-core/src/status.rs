@@ -1,26 +1,22 @@
-//! Right-to-left layout of the system bar's status items: index 0 is
-//! rightmost, each further present item goes to its left, and the space left
-//! over becomes [`StatusLayout::app_name_limit`].
-//!
-//! [`layout_status_items`] is the only function that knows where an item is —
-//! drawing, hit-testing and damage all call it, so nothing hit-tests against a
-//! rectangle cached from a previous frame.
+//! The menu bar's status items, right to left; [`layout_status_items`] alone
+//! knows where one is, so drawing, hit-testing and damage cannot disagree.
 
-/// The most status items the bar lays out in one pass. Items beyond this are
-/// ignored: the bar is one strip and has nowhere to wrap to.
+use slopos_theme_core::space;
+
+/// Past this the bar, one strip, ignores the rest.
 pub const MAX_STATUS_ITEMS: usize = 8;
 
-/// Inset from a screen edge to the outermost bar content, both sides.
-pub const BAR_PADDING_X: i32 = 12;
+/// From either edge of the screen to the bar's outermost content.
+pub const BAR_PADDING_X: i32 = space::MD;
 
-pub const BAR_ITEM_GAP: i32 = 16;
+const BAR_ITEM_GAP: i32 = space::LG;
 
-/// Height of the interactive bar strip. The bar paints one further border row
-/// at `y == BAR_HEIGHT` that belongs to the strip, not to any item's hit region.
+/// Stated here alone, where the items' hit regions are, so the compositor
+/// cannot draw an item away from where it is clicked. The bar's border row
+/// lies at `y == BAR_HEIGHT`, outside every item.
 pub const BAR_HEIGHT: i32 = 24;
 
-/// Which indicator a status item is. The discriminants index the compositor's
-/// per-item cache array: appending a variant is safe, reordering is not.
+/// The discriminants index the compositor's per-item state.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StatusKind {
@@ -28,10 +24,8 @@ pub enum StatusKind {
     Network = 1,
 }
 
-/// What an item tells the layout about itself. `width` is measured by whoever
-/// owns the item's rendering, since only that code knows the font; `revision`
-/// is opaque here and moves whenever the item's *content* changes, which is
-/// what the bar's damage pass repaints on.
+/// `width` is measured by whoever draws the item; `revision` moves whenever
+/// its content does, which is what the bar's damage pass repaints on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatusItemSpec {
     pub kind: StatusKind,
@@ -41,8 +35,7 @@ pub struct StatusItemSpec {
 }
 
 impl StatusItemSpec {
-    /// An item of `kind` that is not currently shown. A hidden item takes no
-    /// width *and no gap*, so hiding one closes the hole it left.
+    /// Takes no width and no gap, so hiding an item closes its hole.
     pub const fn hidden(kind: StatusKind) -> Self {
         Self {
             kind,
@@ -52,17 +45,16 @@ impl StatusItemSpec {
         }
     }
 
-    /// Whether this spec is eligible for a slot. A zero- or negative-width item
-    /// counts as hidden: it would consume a gap while painting nothing.
+    /// An item of no width counts as hidden, or it would take a gap and
+    /// paint nothing.
     #[inline]
     pub const fn is_placeable(&self) -> bool {
         self.present && self.width > 0
     }
 }
 
-/// Where the layout put one item. `idx` is the item's index in the slice handed
-/// to [`layout_status_items`], not its slot position, so a caller can find the
-/// item's cached state again without searching by kind.
+/// `idx` is the item's index in what [`layout_status_items`] was handed, not
+/// its slot's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatusSlot {
     pub kind: StatusKind,
@@ -79,55 +71,43 @@ impl StatusSlot {
         idx: 0,
     };
 
-    /// Whether `(x, y)` falls inside this slot's interactive region.
     #[inline]
     pub const fn contains(&self, x: i32, y: i32) -> bool {
         y >= 0 && y < BAR_HEIGHT && x >= self.x && x < self.x + self.w
     }
 
-    /// One past the slot's right edge.
     #[inline]
     pub const fn right(&self) -> i32 {
         self.x + self.w
     }
 }
 
-/// The placed items plus everything derived from their placement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StatusLayout {
     pub slots: [StatusSlot; MAX_STATUS_ITEMS],
     pub slot_count: usize,
-    /// Right edge available to the bar's app-name text: the leftmost placed
-    /// item's x, minus one gap. With no items placed this is the right screen
-    /// edge less [`BAR_PADDING_X`].
+    /// The leftmost item's x less one gap, or the screen's right edge less
+    /// [`BAR_PADDING_X`] with none.
     pub app_name_limit: i32,
-    /// Index into [`Self::slots`] of the slot under the cursor.
     pub hovered: Option<usize>,
-    /// Digest of everything the geometry depends on: each item's kind, presence
-    /// and width, and how many were offered. Deliberately **not** a function of
-    /// [`StatusItemSpec::revision`] — a content change must not read as a
-    /// layout change.
+    /// Of each item's kind, presence and width and how many were offered, but
+    /// not of a revision, so a change of content is no change of layout.
     pub signature: u64,
 }
 
 impl StatusLayout {
-    /// The placed slots, in right-to-left order.
+    /// Right to left.
     #[inline]
     pub fn slots(&self) -> &[StatusSlot] {
         &self.slots[..self.slot_count]
     }
 
-    /// The slot holding `kind`, if that item was placed.
     pub fn slot_for(&self, kind: StatusKind) -> Option<&StatusSlot> {
         self.slots().iter().find(|slot| slot.kind == kind)
     }
 }
 
-/// Place `items` right-to-left from the right screen edge, index 0 rightmost.
-/// Hidden or zero-width items consume neither width nor a gap.
-///
-/// `cursor_x` / `cursor_y` only select [`StatusLayout::hovered`]; a caller
-/// wanting placement alone can pass a coordinate no cursor can occupy.
+/// The cursor only selects [`StatusLayout::hovered`].
 pub fn layout_status_items(
     items: &[StatusItemSpec],
     screen_width: i32,
@@ -173,8 +153,6 @@ pub fn layout_status_items(
     }
 }
 
-/// Which indicator `(x, y)` lands on, if any. Given a layout produced for the
-/// same screen width, the answer is the item actually drawn under that pixel.
 pub fn hit_status_item(layout: &StatusLayout, x: i32, y: i32) -> Option<StatusKind> {
     hit_slot(layout.slots(), x, y).map(|i| layout.slots[i].kind)
 }
@@ -183,8 +161,7 @@ fn hit_slot(slots: &[StatusSlot], x: i32, y: i32) -> Option<usize> {
     slots.iter().position(|slot| slot.contains(x, y))
 }
 
-/// FNV-1a, 64-bit. Stable across builds, which a `DefaultHasher` is not — and
-/// `core` ships no hasher at all.
+/// FNV-1a, 64-bit: `core` ships no hasher.
 struct Fnv(u64);
 
 impl Fnv {
@@ -210,15 +187,6 @@ impl Fnv {
 mod tests {
     use super::*;
 
-    /// A fixed rect against the right edge of the strip, independent of the
-    /// clock's measured width.
-    const LEGACY_CLOCK_DAMAGE_WIDTH: i32 = 80;
-
-    /// `HH:MM:SS` at the shipped mono font's 10 px advance. Equal to
-    /// [`LEGACY_CLOCK_DAMAGE_WIDTH`], so a fixed rect against the right edge
-    /// misses the clock's leading [`BAR_PADDING_X`] pixels.
-    const CONSOLE_CLOCK_WIDTH: i32 = 8 * 10;
-
     fn item(kind: StatusKind, width: i32) -> StatusItemSpec {
         StatusItemSpec {
             kind,
@@ -228,7 +196,6 @@ mod tests {
         }
     }
 
-    /// A cursor position no bar pixel can hold.
     const NO_CURSOR: (i32, i32) = (i32::MIN, i32::MIN);
 
     fn layout(items: &[StatusItemSpec], sw: i32) -> StatusLayout {
@@ -380,36 +347,6 @@ mod tests {
 
         let elsewhere = layout_status_items(&items, 1920, 4, 12);
         assert_eq!(elsewhere.hovered, None);
-    }
-
-    /// The tight direction is under-coverage: a [`CONSOLE_CLOCK_WIDTH`] clock
-    /// is exactly as wide as the fixed rect, so the text starts
-    /// [`BAR_PADDING_X`] pixels left of it and its leading digits would go
-    /// unrepainted on a tick.
-    #[test]
-    fn clock_slot_is_no_worse_than_the_legacy_damage_rect() {
-        for sw in [640, 800, 1024, 1280, 1920] {
-            for width in 1..=LEGACY_CLOCK_DAMAGE_WIDTH {
-                let l = layout(&[item(StatusKind::Clock, width)], sw);
-                let slot = l.slots[0];
-
-                assert!(
-                    slot.w <= LEGACY_CLOCK_DAMAGE_WIDTH,
-                    "sw={sw} width={width}: repaints {} px, more than the {LEGACY_CLOCK_DAMAGE_WIDTH} px it replaces",
-                    slot.w
-                );
-                assert_eq!(slot.w, width);
-                assert_eq!(slot.right(), sw - BAR_PADDING_X);
-                assert!(slot.right() - 1 <= sw - 1);
-            }
-        }
-
-        let l = layout(&[item(StatusKind::Clock, CONSOLE_CLOCK_WIDTH)], 1280);
-        assert_eq!(l.slots[0].x, 1280 - BAR_PADDING_X - CONSOLE_CLOCK_WIDTH);
-        assert!(
-            l.slots[0].x < 1280 - LEGACY_CLOCK_DAMAGE_WIDTH,
-            "the pinned console clock width must still be the under-covered case"
-        );
     }
 
     #[test]

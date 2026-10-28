@@ -12,11 +12,10 @@ use slopos_userland::apps::terminal::input::{
 };
 use slopos_vt::MouseTracking;
 
-fn key(ascii: u8, code: u16, mods: u8) -> KeyPress {
+fn key(code: u16, codepoint: u32, mods: u8) -> KeyPress {
     KeyPress {
-        ascii,
         keycode: code,
-        codepoint: ascii as u32,
+        codepoint,
         mods,
     }
 }
@@ -146,49 +145,49 @@ fn test_bracketed_paste_tracks_decset_2004() -> bool {
 /// line discipline.
 fn test_ctrl_shift_c_copies_not_sigint() -> bool {
     if !matches!(
-        encode_key(key(0x03, 0, MODIFIER_CTRL | MODIFIER_SHIFT), false),
+        encode_key(
+            key(keycode::KEY_C, 0x03, MODIFIER_CTRL | MODIFIER_SHIFT),
+            false
+        ),
         KeyAction::CopySelection
     ) {
         return false;
     }
-    key_is(key(0x03, 0, MODIFIER_CTRL), false, &[0x03])
+    key_is(key(keycode::KEY_C, 0x03, MODIFIER_CTRL), false, &[0x03])
 }
 
 /// Ctrl+Shift+V requests a compositor paste; plain Ctrl+V passes through.
 fn test_ctrl_shift_v_requests_paste() -> bool {
     if !matches!(
-        encode_key(key(0x16, 0, MODIFIER_CTRL | MODIFIER_SHIFT), false),
+        encode_key(
+            key(keycode::KEY_V, 0x16, MODIFIER_CTRL | MODIFIER_SHIFT),
+            false
+        ),
         KeyAction::RequestPaste
     ) {
         return false;
     }
-    key_is(key(0x16, 0, MODIFIER_CTRL), false, &[0x16])
+    key_is(key(keycode::KEY_V, 0x16, MODIFIER_CTRL), false, &[0x16])
 }
 
-/// F-keys carry no legacy byte; the whole set was dropped before this.
 fn test_function_keys_reach_the_pty() -> bool {
-    key_is(key(0, keycode::KEY_F1, 0), false, b"\x1bOP")
-        && key_is(key(0, keycode::KEY_F5, 0), false, b"\x1b[15~")
-        && key_is(key(0, keycode::KEY_F12, 0), false, b"\x1b[24~")
-        && key_is(key(0, keycode::KEY_INSERT, 0), false, b"\x1b[2~")
+    key_is(key(keycode::KEY_F1, 0, 0), false, b"\x1bOP")
+        && key_is(key(keycode::KEY_F5, 0, 0), false, b"\x1b[15~")
+        && key_is(key(keycode::KEY_F12, 0, 0), false, b"\x1b[24~")
+        && key_is(key(keycode::KEY_INSERT, 0, 0), false, b"\x1b[2~")
 }
 
 /// Modified navigation and DECCKM's SS3 form, both of which an editor's key
 /// table is written against.
 fn test_modified_and_application_cursor_keys() -> bool {
-    // 0x84 is the driver's baked pseudo-code for Left.
     key_is(
-        key(0x84, keycode::KEY_LEFT, MODIFIER_CTRL),
+        key(keycode::KEY_LEFT, 0, MODIFIER_CTRL),
         false,
         b"\x1b[1;5D",
-    ) && key_is(key(0x82, keycode::KEY_UP, 0), true, b"\x1bOA")
+    ) && key_is(key(keycode::KEY_UP, 0, 0), true, b"\x1bOA")
+        && key_is(key(keycode::KEY_UP, 0, MODIFIER_CTRL), true, b"\x1b[1;5A")
         && key_is(
-            key(0x82, keycode::KEY_UP, MODIFIER_CTRL),
-            true,
-            b"\x1b[1;5A",
-        )
-        && key_is(
-            key(b'\t', keycode::KEY_TAB, MODIFIER_SHIFT),
+            key(keycode::KEY_TAB, '\t' as u32, MODIFIER_SHIFT),
             false,
             b"\x1b[Z",
         )
@@ -197,11 +196,11 @@ fn test_modified_and_application_cursor_keys() -> bool {
 /// PgUp/PgDn belongs to the application now, so the local scrollback moved to
 /// a chord the keyboard driver must let through.
 fn test_page_keys_reach_the_pty_and_the_chord_scrolls() -> bool {
-    key_is(key(0x80, keycode::KEY_PAGEUP, 0), false, b"\x1b[5~")
-        && key_is(key(0x81, keycode::KEY_PAGEDOWN, 0), false, b"\x1b[6~")
+    key_is(key(keycode::KEY_PAGEUP, 0, 0), false, b"\x1b[5~")
+        && key_is(key(keycode::KEY_PAGEDOWN, 0, 0), false, b"\x1b[6~")
         && matches!(
             encode_key(
-                key(0x80, keycode::KEY_PAGEUP, MODIFIER_CTRL | MODIFIER_SHIFT),
+                key(keycode::KEY_PAGEUP, 0, MODIFIER_CTRL | MODIFIER_SHIFT),
                 false
             ),
             KeyAction::ScrollUp(_)

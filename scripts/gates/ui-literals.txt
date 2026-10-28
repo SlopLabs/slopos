@@ -3,4 +3,3 @@
 # nothing fails the gate.
 colour apps/src/editor/syntax.rs the code view's syntax palette
 colour apps/src/image_viewer/checker.rs the checks an image's transparent pixels are judged against
-colour appkit/src/app_icon.rs an icon's pixels: the theme's colours, the tile's coverage as their alpha

@@ -19,8 +19,6 @@ use crate::sidecar::Sidecar;
 use crate::symbols;
 use crate::words::render_list;
 
-/// What every check is made against: the keys the owner trusts, the base's
-/// ceiling and the running `libc.so`.
 pub struct Bounds<'a> {
     pub keys: &'a Keys,
     pub ceiling: u64,
@@ -31,7 +29,6 @@ pub struct Bounds<'a> {
 pub enum Authority<'a> {
     /// The person approved the grant a first install's command line names.
     Person { name: &'a str, grant: &'a Grant },
-    /// Its sidecar, signed.
     Signed {
         sidecar: &'a [u8],
         signature: &'a [u8],
@@ -77,8 +74,6 @@ pub fn clashes(name: &str, grant: &Grant, others: &[(&str, &Grant)]) -> Result<(
     Ok(())
 }
 
-/// Whether `image` goes in under `authority`, beside `record` when the store
-/// keeps one, and beside `others`.
 pub fn install<S: Source>(
     record: Option<&Record>,
     image: &mut Image<S>,
@@ -114,7 +109,6 @@ pub fn install<S: Source>(
         return Ok(admitted);
     }
     within_base(&declared, bounds.ceiling)?;
-    image.declaration.words().or_else(refuse)?;
     clashes(&release.name, &declared, others)?;
     symbols::check_image(image, bounds.libc).map_err(|e| Refusal(e.to_string()))?;
     Ok(Admitted::Install(Installed {
@@ -139,7 +133,6 @@ pub fn ahead(
     beside(record, said.version, said.sha256)
 }
 
-/// What a key's install of `version` meets in `record` alone.
 fn under_key(record: Option<&Record>, fingerprint: &str, version: u64) -> Result<(), Refusal> {
     let Some(record) = record else {
         return Ok(());
@@ -162,8 +155,7 @@ fn under_key(record: Option<&Record>, fingerprint: &str, version: u64) -> Result
     Ok(())
 }
 
-/// Whether `record` takes `version` of the bytes `digest`: `Current` when
-/// it runs them already.
+/// `Current` when `record` runs those bytes already.
 fn beside(
     record: Option<&Record>,
     version: u64,
@@ -232,8 +224,6 @@ pub fn activation<S: Source>(
     symbols::check_image(image, bounds.libc).map_err(|e| Refusal(e.to_string()))
 }
 
-/// The trusted key `signature` names over `sidecar`, once the sidecar
-/// describes the image `release` and `digest` name.
 fn signed<'k>(
     sidecar: &[u8],
     signature: &[u8],
@@ -248,7 +238,6 @@ fn signed<'k>(
     Ok(key)
 }
 
-/// The sidecar `sidecar` says and the trusted key `signature` names over it.
 pub fn signer<'k>(
     sidecar: &[u8],
     signature: &[u8],

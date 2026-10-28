@@ -127,7 +127,7 @@ fn every_rule_of_the_grammar_refuses_with_its_line() {
         |settings: &str| format!("user\nservice s\n  program /opt/hello/bin/s\n{settings}");
     let action = |settings: &str| {
         format!(
-            "action a\n  program /opt/hello/bin/a\n  args a\n  caps Power\n  describe \"A\"\n{settings}"
+            "action a\n  program /opt/hello/bin/a\n  args a\n  caps Power\n  describe \"a\"\n{settings}"
         )
     };
     for (text, line) in [
@@ -192,10 +192,16 @@ fn every_rule_of_the_grammar_refuses_with_its_line() {
         (&action("  allow user extra words\n"), 6),
         (&action("  detail \"It goes.\"\n  detail \"It goes.\"\n"), 7),
         (&action("  verb \"Run\"\n  verb \"Run\"\n"), 7),
+        (&action("  verb \"Disallow\"\n"), 6),
+        (&action("  detail \"it goes\"\n"), 6),
+        (
+            "action a\n  program /opt/hello/bin/a\n  args a\n  caps Power\n  describe \"A\"\n",
+            5,
+        ),
         (&action("  destructive now\n"), 6),
         (&action("  destructive\n  destructive\n"), 7),
         (
-            "action a\n  program /opt/hello/bin/a\n  args a\n  caps Power\n  describe \"A\"\n",
+            "action a\n  program /opt/hello/bin/a\n  args a\n  caps Power\n  describe \"a\"\n",
             1,
         ),
         (
@@ -207,12 +213,12 @@ fn every_rule_of_the_grammar_refuses_with_its_line() {
             4,
         ),
         (
-            "action a\n  args a\n  caps Power\n  allow user\n  describe \"A\"\n",
+            "action a\n  args a\n  caps Power\n  allow user\n  describe \"a\"\n",
             1,
         ),
         (
             &action(
-                "  allow user\naction a\n  program /opt/hello/bin/a\n  args a\n  caps Power\n  allow user\n  describe \"A\"\n",
+                "  allow user\naction a\n  program /opt/hello/bin/a\n  args a\n  caps Power\n  allow user\n  describe \"a\"\n",
             ),
             7,
         ),
@@ -223,14 +229,14 @@ fn every_rule_of_the_grammar_refuses_with_its_line() {
     }
     let long = "abcdefghijklmnopqrstuvwxyz012345";
     let text = format!(
-        "action {long}\n  program /opt/{long}/bin/a\n  args a\n  caps Power\n  allow user\n  describe \"A\"\n"
+        "action {long}\n  program /opt/{long}/bin/a\n  args a\n  caps Power\n  allow user\n  describe \"a\"\n"
     );
     assert_eq!(
         Declaration::parse(long, &text).map_err(|e| e.line),
         Err(1),
         "ext.<name>.<action> is past privd's 64 bytes"
     );
-    let text = "action a\n  program /opt/2fa/bin/a\n  args a\n  caps Power\n  allow user\n  describe \"A\"\n";
+    let text = "action a\n  program /opt/2fa/bin/a\n  args a\n  caps Power\n  allow user\n  describe \"a\"\n";
     assert_eq!(
         Declaration::parse("2fa", text).map_err(|e| e.msg),
         Err("privd names no action by a word that starts with a digit")
@@ -263,32 +269,32 @@ action alone
   args     a
   caps     Power
   allow    user alone
-  describe \"A\"
+  describe \"a\"
 action shell
   program  /opt/hello/libexec/b
   args     b
   caps     Mount
   allow    program /bin/shell
-  describe \"B\"
+  describe \"b\"
 action admin
   program  /opt/hello/libexec/d
   args     d
   caps     Clock
   allow    admin
-  describe \"D\"
+  describe \"d\"
 action asked
   program  /opt/hello/libexec/c
   args     c
   caps     RawBlock
   allow    user confirm
   allow    admin password
-  describe \"C\"
+  describe \"c\"
 action remote
   program  /opt/hello/libexec/e
   args     e
   caps     NetAdmin
   allow    paired
-  describe \"E\"
+  describe \"e\"
 ";
     let d = Declaration::parse("hello", declare).unwrap();
     assert_eq!(d.grant().unasked, ["alone", "shell", "admin", "remote"]);

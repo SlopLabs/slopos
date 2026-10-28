@@ -1,75 +1,106 @@
-//! Title bars, the signal buttons (close / minimize / expand) and the
-//! hit-tests that map a cursor onto them.
+//! A window's title bar, its close, minimise and zoom buttons, and the
+//! hit-tests that map the pointer onto them and onto its edges.
 
 use slopos_abi::damage::DamageRect;
+use slopos_abi::draw::Color32;
 use slopos_appkit::text::ui;
 use slopos_gfx::canvas_ops::line_aa;
 use slopos_gfx::rounded::Rounded;
+use slopos_theme_core::{TextRole, Theme};
 
+use super::frame::{TITLE_BAR_HEIGHT, resize_reach};
+use super::input::ResizeEdge;
 use crate::gfx::{self, DrawBuffer};
-use crate::theme;
 
-/// Half-length of the close/expand cross/plus glyph arms.
-const GLYPH_HALF: i32 = theme::SIGNAL_GLYPH_SIZE / 2;
-const MINIMIZE_DASH_HALF: i32 = 4;
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WindowButton {
+    Close,
+    Minimize,
+    Zoom,
+}
 
-/// The title bar of the window whose frame is `outline`: its background,
-/// rounded with the frame's top corners, its signal buttons and its title.
-///
-/// The buttons show their glyphs while `signal_hovered`, the cursor being
-/// in their group, and are grey on a window without focus otherwise.
+impl WindowButton {
+    const ALL: [WindowButton; 3] = [
+        WindowButton::Close,
+        WindowButton::Minimize,
+        WindowButton::Zoom,
+    ];
+
+    fn centre_x(self) -> i32 {
+        match self {
+            WindowButton::Close => 18,
+            WindowButton::Minimize => 38,
+            WindowButton::Zoom => 58,
+        }
+    }
+
+    fn color(self, theme: &Theme) -> Color32 {
+        match self {
+            WindowButton::Close => theme.danger,
+            WindowButton::Minimize => theme.warning,
+            WindowButton::Zoom => theme.success,
+        }
+    }
+}
+
+const BUTTON_RADIUS: i32 = 6;
+const BUTTON_CY: i32 = TITLE_BAR_HEIGHT / 2;
+/// Where the pointer shows the buttons' glyphs, from the frame's top-left.
+const GROUP: DamageRect = DamageRect {
+    x0: 6,
+    y0: 2,
+    x1: 69,
+    y1: 25,
+};
+/// Half a glyph's stroke; the close cross's diagonals are as long.
+const ARM: i32 = 4;
+const DIAGONAL_ARM: i32 = 3;
+/// What the buttons and their mirror on the right leave the title.
+const TITLE_MARGIN: i32 = 140;
+/// How far along each edge from a corner a resize takes both edges.
+const RESIZE_CORNER: i32 = 24;
+
+/// The title bar of the window whose frame is `outline`, rounded with its
+/// top corners. The buttons show their glyphs while `hovered` and are grey
+/// on a window without focus; a window that does not zoom shows its zoom
+/// button grey and without a glyph.
 pub fn draw_window_decorations(
     buf: &mut DrawBuffer,
     outline: &Rounded,
     title: &str,
     focused: bool,
-    signal_hovered: bool,
+    hovered: bool,
+    zooms: bool,
     clip: &DamageRect,
 ) {
-    draw_title_bar_background(buf, outline, clip);
-    draw_signal_buttons(buf, outline.x, outline.y, focused, signal_hovered, clip);
-    draw_title_text(
-        buf,
-        outline.x,
-        outline.y,
-        outline.w as u32,
-        title,
-        focused,
-        clip,
-    );
+    let theme = slopos_theme_core::current();
+    draw_title_bar_background(buf, outline, theme, clip);
+    draw_buttons(buf, outline, theme, focused, hovered, zooms, clip);
+    draw_title_text(buf, outline, theme, title, focused, clip);
 }
 
-/// Hit-test the signal button group: `Some(0)` = close, `Some(1)` = minimize,
-/// `Some(2)` = expand, `None` = miss.
-pub fn hit_test_signal_button(window_x: i32, window_y: i32, px: i32, py: i32) -> Option<u8> {
-    let buttons: [(i32, u8); 3] = [
-        (window_x + theme::SIGNAL_BUTTON_1_CX, 0), // close
-        (window_x + theme::SIGNAL_BUTTON_2_CX, 1), // minimize
-        (window_x + theme::SIGNAL_BUTTON_3_CX, 2), // expand
-    ];
-    let cy = window_y + theme::SIGNAL_BUTTON_CY;
+/// The button at `(px, py)` of the window whose frame's top-left is
+/// `(frame_x, frame_y)`.
+pub fn button_at(frame_x: i32, frame_y: i32, px: i32, py: i32) -> Option<WindowButton> {
+    let dy = py - (frame_y + BUTTON_CY);
+    WindowButton::ALL.into_iter().find(|button| {
+        let dx = px - (frame_x + button.centre_x());
+        dx * dx + dy * dy <= BUTTON_RADIUS * BUTTON_RADIUS
+    })
+}
 
-    for &(cx, id) in &buttons {
-        let dx = px - cx;
-        let dy = py - cy;
-        if dx * dx + dy * dy <= theme::SIGNAL_BUTTON_RADIUS * theme::SIGNAL_BUTTON_RADIUS {
-            return Some(id);
-        }
+/// The buttons' group, which shows their glyphs while the pointer is in it.
+pub fn buttons_group(frame_x: i32, frame_y: i32) -> DamageRect {
+    DamageRect {
+        x0: frame_x + GROUP.x0,
+        y0: frame_y + GROUP.y0,
+        x1: frame_x + GROUP.x1,
+        y1: frame_y + GROUP.y1,
     }
-    None
 }
 
-pub fn hit_test_signal_group(window_x: i32, window_y: i32, px: i32, py: i32) -> bool {
-    let gx = window_x + theme::SIGNAL_GROUP_X;
-    let gy = window_y + theme::SIGNAL_GROUP_Y;
-    px >= gx && px < gx + theme::SIGNAL_GROUP_W && py >= gy && py < gy + theme::SIGNAL_GROUP_H
-}
-
-/// Detect if `(px, py)` is in a resize grab zone: the shadow region outside the
-/// window frame, with corners taking priority over edges.
-///
-/// `window_y` is the content top (kernel's `window.y`); the title bar extends
-/// above it.
+/// The edge `(px, py)` takes for a resize: in the shadow outside the frame,
+/// a corner before an edge. `window_y` is the content's top.
 pub fn hit_test_resize_edge(
     window_x: i32,
     window_y: i32,
@@ -77,22 +108,20 @@ pub fn hit_test_resize_edge(
     window_h: u32,
     px: i32,
     py: i32,
-) -> super::input::ResizeEdge {
-    use super::input::ResizeEdge;
-
+) -> ResizeEdge {
     let ww = window_w as i32;
     let wh = window_h as i32;
 
     let frame_x0 = window_x;
-    let frame_y0 = window_y - theme::TITLE_BAR_HEIGHT;
+    let frame_y0 = window_y - TITLE_BAR_HEIGHT;
     let frame_x1 = window_x + ww - 1;
     let frame_y1 = window_y + wh - 1;
 
-    let spread = theme::RESIZE_REACH;
-    let ext_x0 = frame_x0 - spread;
-    let ext_y0 = frame_y0 - spread;
-    let ext_x1 = frame_x1 + spread;
-    let ext_y1 = frame_y1 + spread;
+    let reach = resize_reach();
+    let ext_x0 = frame_x0 - reach;
+    let ext_y0 = frame_y0 - reach;
+    let ext_x1 = frame_x1 + reach;
+    let ext_y1 = frame_y1 + reach;
 
     if px < ext_x0 || px > ext_x1 || py < ext_y0 || py > ext_y1 {
         return ResizeEdge::NONE;
@@ -103,8 +132,8 @@ pub fn hit_test_resize_edge(
     }
 
     let frame_w = ww;
-    let frame_h = wh + theme::TITLE_BAR_HEIGHT;
-    let corner_range = theme::RESIZE_CORNER.min(frame_w / 2).min(frame_h / 2);
+    let frame_h = wh + TITLE_BAR_HEIGHT;
+    let corner_range = RESIZE_CORNER.min(frame_w / 2).min(frame_h / 2);
 
     let near_left = px < frame_x0 + corner_range;
     let near_right = px > frame_x1 - corner_range;
@@ -140,160 +169,110 @@ pub fn hit_test_resize_edge(
     ResizeEdge::NONE
 }
 
-fn draw_title_bar_background(buf: &mut DrawBuffer, outline: &Rounded, clip: &DamageRect) {
-    let bg = theme::TITLE_BAR;
+fn draw_title_bar_background(
+    buf: &mut DrawBuffer,
+    outline: &Rounded,
+    theme: &Theme,
+    clip: &DamageRect,
+) {
+    let bg = theme.chrome;
     let (x, y, w) = (outline.x, outline.y, outline.w);
-    let r = outline.radius.clamp(0, theme::TITLE_BAR_HEIGHT.min(w / 2));
+    let r = outline.radius.clamp(0, TITLE_BAR_HEIGHT.min(w / 2));
     gfx::fill_rect_clipped(buf, x + r, y, w - 2 * r, r, bg, clip);
-    gfx::fill_rect_clipped(buf, x, y + r, w, theme::TITLE_BAR_HEIGHT - r, bg, clip);
+    gfx::fill_rect_clipped(buf, x, y + r, w, TITLE_BAR_HEIGHT - r, bg, clip);
     for corner in &outline.corners()[..2] {
         outline.fill(buf, corner, clip, |_, _| bg);
     }
 }
 
-fn draw_signal_buttons(
+fn draw_buttons(
     buf: &mut DrawBuffer,
-    window_x: i32,
-    window_y: i32,
+    outline: &Rounded,
+    theme: &Theme,
     focused: bool,
-    signal_hovered: bool,
+    hovered: bool,
+    zooms: bool,
     clip: &DamageRect,
 ) {
-    let cy = window_y + theme::SIGNAL_BUTTON_CY;
-    let lit = focused || signal_hovered;
-    let buttons = [
-        (theme::SIGNAL_BUTTON_1_CX, theme::SIGNAL_CLOSE),
-        (theme::SIGNAL_BUTTON_2_CX, theme::SIGNAL_MINIMIZE),
-        (theme::SIGNAL_BUTTON_3_CX, theme::SIGNAL_EXPAND),
-    ];
-    let r = theme::SIGNAL_BUTTON_RADIUS;
-    for (cx, color) in buttons {
-        let color = if lit { color } else { theme::SIGNAL_INACTIVE };
-        let circle = Rounded::circle(window_x + cx - r, cy - r, 2 * r + 1);
-        circle.fill(buf, &circle.bounds(), clip, |_, _| color);
-    }
-    if signal_hovered {
-        draw_signal_glyphs(buf, window_x, window_y, clip);
+    let cy = outline.y + BUTTON_CY;
+    for button in WindowButton::ALL {
+        let enabled = zooms || button != WindowButton::Zoom;
+        let color = match enabled && (focused || hovered) {
+            true => button.color(theme),
+            false => theme.border_strong,
+        };
+        let (cx, r) = (outline.x + button.centre_x(), BUTTON_RADIUS);
+        Rounded::circle(cx - r, cy - r, 2 * r + 1).draw(buf, clip, color);
+        if enabled && hovered {
+            draw_glyph(buf, button, cx, cy, theme.text_on_accent, clip);
+        }
     }
 }
 
-fn draw_signal_glyphs(buf: &mut DrawBuffer, window_x: i32, window_y: i32, clip: &DamageRect) {
-    let glyph_color = theme::SIGNAL_GLYPH;
-    let cy = window_y + theme::SIGNAL_BUTTON_CY;
-
-    let close_cx = window_x + theme::SIGNAL_BUTTON_1_CX;
-    let close_rect = DamageRect {
-        x0: close_cx - GLYPH_HALF,
-        y0: cy - GLYPH_HALF,
-        x1: close_cx + GLYPH_HALF,
-        y1: cy + GLYPH_HALF,
+fn draw_glyph(
+    buf: &mut DrawBuffer,
+    button: WindowButton,
+    cx: i32,
+    cy: i32,
+    ink: Color32,
+    clip: &DamageRect,
+) {
+    let reach = match button {
+        WindowButton::Close => DIAGONAL_ARM,
+        WindowButton::Minimize | WindowButton::Zoom => ARM,
     };
-    if rects_intersect(&close_rect, clip) {
-        line_aa(
-            buf,
-            close_cx - GLYPH_HALF,
-            cy - GLYPH_HALF,
-            close_cx + GLYPH_HALF,
-            cy + GLYPH_HALF,
-            glyph_color,
-        );
-        line_aa(
-            buf,
-            close_cx + GLYPH_HALF,
-            cy - GLYPH_HALF,
-            close_cx - GLYPH_HALF,
-            cy + GLYPH_HALF,
-            glyph_color,
-        );
+    let area = DamageRect {
+        x0: cx - reach,
+        y0: cy - reach,
+        x1: cx + reach,
+        y1: cy + reach,
+    };
+    if !area.intersects(clip) {
+        return;
     }
-
-    let min_cx = window_x + theme::SIGNAL_BUTTON_2_CX;
-    let min_rect = DamageRect {
-        x0: min_cx - MINIMIZE_DASH_HALF,
-        y0: cy,
-        x1: min_cx + MINIMIZE_DASH_HALF,
-        y1: cy,
-    };
-    if rects_intersect(&min_rect, clip) {
-        line_aa(
-            buf,
-            min_cx - MINIMIZE_DASH_HALF,
-            cy,
-            min_cx + MINIMIZE_DASH_HALF,
-            cy,
-            glyph_color,
-        );
-    }
-
-    let exp_cx = window_x + theme::SIGNAL_BUTTON_3_CX;
-    let exp_rect = DamageRect {
-        x0: exp_cx - MINIMIZE_DASH_HALF,
-        y0: cy - MINIMIZE_DASH_HALF,
-        x1: exp_cx + MINIMIZE_DASH_HALF,
-        y1: cy + MINIMIZE_DASH_HALF,
-    };
-    if rects_intersect(&exp_rect, clip) {
-        line_aa(
-            buf,
-            exp_cx - MINIMIZE_DASH_HALF,
-            cy,
-            exp_cx + MINIMIZE_DASH_HALF,
-            cy,
-            glyph_color,
-        );
-        line_aa(
-            buf,
-            exp_cx,
-            cy - MINIMIZE_DASH_HALF,
-            exp_cx,
-            cy + MINIMIZE_DASH_HALF,
-            glyph_color,
-        );
+    let mut line = |x0, y0, x1, y1| line_aa(&mut *buf, x0, y0, x1, y1, ink);
+    match button {
+        WindowButton::Close => {
+            line(cx - reach, cy - reach, cx + reach, cy + reach);
+            line(cx + reach, cy - reach, cx - reach, cy + reach);
+        }
+        WindowButton::Minimize => {
+            line(cx - reach, cy, cx + reach, cy);
+        }
+        WindowButton::Zoom => {
+            line(cx - reach, cy, cx + reach, cy);
+            line(cx, cy - reach, cx, cy + reach);
+        }
     }
 }
 
 fn draw_title_text(
     buf: &mut DrawBuffer,
-    window_x: i32,
-    window_y: i32,
-    window_w: u32,
+    outline: &Rounded,
+    theme: &Theme,
     title: &str,
     focused: bool,
     clip: &DamageRect,
 ) {
-    if title.is_empty() {
+    let max_text_w = outline.w - TITLE_MARGIN;
+    if title.is_empty() || max_text_w <= 0 {
         return;
     }
-
-    let text_color = if focused {
-        theme::TEXT_PRIMARY
-    } else {
-        theme::TEXT_SECONDARY
+    let ink = match focused {
+        true => theme.text,
+        false => theme.text_secondary,
     };
-    let bg_color = theme::TITLE_BAR;
-
-    let max_text_w = (window_w as i32 - theme::TITLE_MAX_TEXT_WIDTH_MARGIN).max(0);
-    if max_text_w == 0 {
-        return;
-    }
-
-    let size = theme::TITLE_TEXT_PX;
-    let weight = ui::Weight::Regular;
-    let text_w = ui::elided_width(title, size, weight, max_text_w);
+    let role = TextRole::Body;
+    let text_w = ui::elided_width(title, role, max_text_w);
     ui::draw_elided(
         buf,
-        window_x + (window_w as i32 - text_w) / 2,
-        ui::centred_top(window_y, theme::TITLE_BAR_HEIGHT, size),
+        outline.x + (outline.w - text_w) / 2,
+        ui::centred_top(outline.y, TITLE_BAR_HEIGHT, role),
         title,
-        size,
-        weight,
+        role,
         max_text_w,
-        text_color,
-        bg_color,
+        ink,
+        theme.chrome,
         clip,
     );
-}
-
-fn rects_intersect(a: &DamageRect, b: &DamageRect) -> bool {
-    a.x0 <= b.x1 && a.x1 >= b.x0 && a.y0 <= b.y1 && a.y1 >= b.y0
 }

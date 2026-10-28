@@ -1,9 +1,5 @@
-//! The compositor's protocol version range, held against the real compositor:
-//! a client built against `PROTOCOL_VERSION_MIN` is served, and a version
-//! outside the range or a request ahead of `Hello` is refused with a reason
-//! before the connection closes.
-//!
-//! Under `tests=on` init starts no compositor, so this test starts its own.
+//! A compositor this test starts, since a test boot runs none, serves a client
+//! of `PROTOCOL_VERSION` and refuses another version, or a request before `Hello`, with a reason.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -14,8 +10,9 @@ use slopos_abi::caps::{DISPLAY_SEAT, INPUT_SEAT};
 use slopos_abi::net::{AF_UNIX, SOCK_STREAM};
 use slopos_abi::signal::SIGKILL;
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
+use slopos_protocol::connection::MAX_PENDING_FDS;
 use slopos_protocol::{
-    Client, Connection, Event, PROTOCOL_VERSION, PROTOCOL_VERSION_MIN, ProtocolError, Request,
+    Client, Connection, Decode, Encode, Event, FdFifo, PROTOCOL_VERSION, ProtocolError, Request,
     SurfaceId, ToplevelId,
 };
 use slopos_userland::syscall::process::{self, Endowment};
@@ -138,14 +135,14 @@ fn refused(mut conn: Connection, reason: ProtocolError) -> bool {
     }
 }
 
-fn oldest_served_version_draws() -> bool {
+fn a_client_of_the_version_draws() -> bool {
     let Some(mut conn) = connect() else {
         return false;
     };
     if !greeted(&mut conn)
         || conn
             .send(&Request::Hello {
-                version: PROTOCOL_VERSION_MIN,
+                version: PROTOCOL_VERSION,
             })
             .is_err()
     {
@@ -212,7 +209,7 @@ fn oldest_served_version_draws() -> bool {
     false
 }
 
-fn newest_version_connects() -> bool {
+fn the_client_connects() -> bool {
     let path = slopos_protocol::socket_path(process::geteuid());
     match Client::connect(&path).and_then(|mut client| client.ensure_output_info()) {
         Ok(()) => true,
@@ -232,11 +229,11 @@ fn refuses_version(version: u32) -> bool {
         && refused(conn, ProtocolError::VersionMismatch)
 }
 
-fn version_below_oldest_is_refused() -> bool {
-    refuses_version(PROTOCOL_VERSION_MIN - 1)
+fn an_older_version_is_refused() -> bool {
+    refuses_version(PROTOCOL_VERSION - 1)
 }
 
-fn version_above_newest_is_refused() -> bool {
+fn a_newer_version_is_refused() -> bool {
     refuses_version(PROTOCOL_VERSION + 1)
 }
 
@@ -253,12 +250,10 @@ fn request_before_hello_is_refused() -> bool {
         && refused(conn, ProtocolError::MalformedMessage)
 }
 
-fn reused_surface_id_is_refused() -> bool {
-    let Some(mut conn) = connect() else {
-        return false;
-    };
-    let surface = SurfaceId::from_raw(1);
-    greeted(&mut conn)
+/// A connection past its handshake.
+fn served() -> Option<Connection> {
+    let mut conn = connect()?;
+    let ready = greeted(&mut conn)
         && conn
             .send(&Request::Hello {
                 version: PROTOCOL_VERSION,
@@ -267,14 +262,64 @@ fn reused_surface_id_is_refused() -> bool {
         && matches!(
             conn.wait_recv::<Event>(TIMEOUT_MS),
             Ok(Event::OutputInfo { .. })
-        )
-        && conn
-            .send(&Request::CreateSurface { new_id: surface })
-            .is_ok()
+        );
+    ready.then_some(conn)
+}
+
+fn reused_surface_id_is_refused() -> bool {
+    let Some(conn) = served() else {
+        return false;
+    };
+    let surface = SurfaceId::from_raw(1);
+    conn.send(&Request::CreateSurface { new_id: surface })
+        .is_ok()
         && conn
             .send(&Request::CreateSurface { new_id: surface })
             .is_ok()
         && refused(conn, ProtocolError::MalformedMessage)
+}
+
+/// A message's bytes as they go on the wire after its length.
+struct Raw<'a>(&'a [u8]);
+
+impl Encode for Raw<'_> {
+    fn encode(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
+        let out = buf
+            .get_mut(..self.0.len())
+            .ok_or(ProtocolError::MessageTooLarge)?;
+        out.copy_from_slice(self.0);
+        Ok(self.0.len())
+    }
+}
+
+fn a_retired_request_is_refused() -> bool {
+    [11u8, 15, 16].into_iter().all(|tag| {
+        let Some(conn) = served() else {
+            return false;
+        };
+        let sent = conn.send(&Raw(&[tag, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]));
+        let refused = sent.is_ok() && refused(conn, ProtocolError::MalformedMessage);
+        if !refused {
+            eprintln!("protocol_test: request {tag} was not refused");
+        }
+        refused
+    })
+}
+
+fn a_retired_event_is_refused() -> bool {
+    [1u8, 11, 12].into_iter().all(|tag| {
+        let mut fds = [-1i32; MAX_PENDING_FDS];
+        let mut count = 0u8;
+        let mut fifo = FdFifo::new(&mut fds, &mut count);
+        let refused = matches!(
+            Event::decode(&[tag, 1, 0, 0, 0], &mut fifo),
+            Err(ProtocolError::MalformedMessage)
+        );
+        if !refused {
+            eprintln!("protocol_test: event {tag} was not refused");
+        }
+        refused
+    })
 }
 
 /// Last, since it stops the compositor. The exit path wakes the parent before
@@ -306,21 +351,20 @@ fn main() {
         std::process::exit(1);
     }
     slopos_slibc::test_harness::run(&[
-        ("oldest_served_version_draws", oldest_served_version_draws),
-        ("newest_version_connects", newest_version_connects),
         (
-            "version_below_oldest_is_refused",
-            version_below_oldest_is_refused,
+            "a_client_of_the_version_draws",
+            a_client_of_the_version_draws,
         ),
-        (
-            "version_above_newest_is_refused",
-            version_above_newest_is_refused,
-        ),
+        ("the_client_connects", the_client_connects),
+        ("an_older_version_is_refused", an_older_version_is_refused),
+        ("a_newer_version_is_refused", a_newer_version_is_refused),
         (
             "request_before_hello_is_refused",
             request_before_hello_is_refused,
         ),
         ("reused_surface_id_is_refused", reused_surface_id_is_refused),
+        ("a_retired_request_is_refused", a_retired_request_is_refused),
+        ("a_retired_event_is_refused", a_retired_event_is_refused),
         (
             "seat_is_free_once_the_compositor_is_gone",
             seat_is_free_once_the_compositor_is_gone,

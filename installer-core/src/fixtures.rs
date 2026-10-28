@@ -5,14 +5,15 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use slopos_boot_core::Guid;
+use slopos_boot_core::disk_id::Bus;
 use slopos_boot_core::gpt::{Entry, Geometry, Header};
 use slopos_boot_core::install::{self, Mode as PlanMode, Plan, PlanError, RootSize};
 use slopos_boot_core::layout::{BOOT_TYPE, CRASH_TYPE, ESP_NAME, ESP_TYPE, ROOT_TYPE};
 
 use crate::{
     Contents, DEFAULT_CMDLINE, DEFAULT_REMOTE, Disk, DiskState, FIRST_PERSON, FirstPerson, Fit,
-    Issue, Layout, Listing, Medium, Opened, Planned, Proposal, Refusal, Reinstall, Setup, System,
-    Table,
+    Issue, Layout, Listing, MbrPartition, Medium, NoTable, Opened, Planned, Proposal, Refusal,
+    Reinstall, Setup, System, Table,
 };
 
 pub const MIB: u64 = 1 << 20;
@@ -99,7 +100,6 @@ pub fn setup() -> Setup {
 /// An install on [`NODE`], planned from the table it was read with.
 pub struct Case {
     pub before: Option<(Header, Vec<u8>)>,
-    pub contents: Contents,
     pub erase: bool,
     pub mode: PlanMode,
     pub size: RootSize,
@@ -111,7 +111,6 @@ impl Case {
     pub fn on(before: (Header, Vec<u8>), mode: PlanMode) -> Case {
         Case {
             before: Some(before),
-            contents: Contents::Gpt,
             erase: false,
             mode,
             size: RootSize {
@@ -123,10 +122,9 @@ impl Case {
         }
     }
 
-    pub fn erasing(before: Option<(Header, Vec<u8>)>, contents: Contents) -> Case {
+    pub fn erasing(before: Option<(Header, Vec<u8>)>) -> Case {
         Case {
             before,
-            contents,
             erase: true,
             ..Case::on(table(16 * GIB, &[]), PlanMode::Free { region: None })
         }
@@ -159,7 +157,6 @@ impl Case {
         Proposal::of(
             Planned {
                 disk: NODE,
-                contents: self.contents.clone(),
                 capacity: header.geometry().capacity(),
                 before,
                 erase: self.erase,
@@ -177,6 +174,20 @@ impl Case {
             setup(),
         )
     }
+}
+
+pub fn no_tables() -> Vec<NoTable> {
+    vec![
+        NoTable::Blank,
+        NoTable::Mbr(vec![MbrPartition {
+            index: 0,
+            kind: 0x83,
+            bytes: GIB,
+        }]),
+        NoTable::UnreadableGpt,
+        NoTable::Ext4,
+        NoTable::Data,
+    ]
 }
 
 pub fn no_room() -> Issue {
@@ -221,11 +232,13 @@ pub fn machine(opened: Option<Opened>) -> System {
         disks: vec![
             Disk {
                 node: "/dev/sda".into(),
+                bus: Some(Bus::Usb),
                 model: Some("QEMU QEMU HARDDISK".into()),
                 state: DiskState::Refused(Refusal::Medium),
             },
             Disk {
                 node: NODE.into(),
+                bus: Some(Bus::Nvme),
                 model: Some(MODEL.into()),
                 state: DiskState::Listed(Listing {
                     capacity: 16 * GIB,
@@ -237,11 +250,12 @@ pub fn machine(opened: Option<Opened>) -> System {
             },
             Disk {
                 node: "/dev/vda".into(),
+                bus: Some(Bus::Virtio),
                 model: None,
                 state: DiskState::Listed(Listing {
                     capacity: 16 * GIB,
                     block: 512,
-                    contents: Contents::Blank,
+                    contents: Contents::NoTable(NoTable::Blank),
                     layout: Layout::empty(16 * GIB),
                     opened: None,
                 }),

@@ -1,15 +1,5 @@
-//! TrueType font rasterizer for SlopOS.
-//!
-//! Parses `.ttf` outline data, rasterizes glyphs with coverage-based
-//! anti-aliasing, and caches the results.
-//!
-//! # Usage
-//!
-//! ```ignore
-//! let font_data: &[u8] = /* load .ttf file */;
-//! let mut renderer = FontRenderer::new(font_data).unwrap();
-//! renderer.draw_text(&mut canvas, 10, 20, "Hello", 16, Color32::WHITE, Color32::BLACK);
-//! ```
+//! TrueType font rasterizer for SlopOS: parses `.ttf` outlines, rasterizes
+//! glyphs with coverage anti-aliasing and caches them.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -26,9 +16,7 @@ pub mod ttf_parser;
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 
-/// First printable ASCII codepoint (space).
 pub const ASCII_FIRST: u32 = 0x20;
-/// Last printable ASCII codepoint (tilde).
 pub const ASCII_LAST: u32 = 0x7E;
 
 /// The glyph set, in slot order: inclusive codepoint ranges whose slots are
@@ -98,54 +86,22 @@ use outline::outline_to_edges;
 use rasterizer::{RasterizedGlyph, rasterize};
 use ttf_parser::TtfFont;
 
-/// Describes the origin of font data for diagnostics and fallback logic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FontSource {
-    /// Compiled into the binary via `include_bytes!`.
-    Embedded,
-    Filesystem,
-    /// Loaded via `SYS_FONT_SET` from userland-provided bitmap or coverage data.
-    Syscall,
-    /// Minimal bitmap fallback (VGA 8\u{d7}16) used when no other font is available.
-    BitmapFallback,
-}
-
 pub struct FontRenderer<'a> {
     pub(crate) font: TtfFont<'a>,
     cache: GlyphCache,
-    source: FontSource,
 }
 
 impl<'a> FontRenderer<'a> {
-    /// Create a new font renderer from raw TrueType font data.
-    ///
-    /// Returns `None` if the font data cannot be parsed. Source defaults to
-    /// [`FontSource::Embedded`].
     pub fn new(ttf_data: &'a [u8]) -> Option<Self> {
-        Self::new_with_source(ttf_data, FontSource::Embedded)
-    }
-
-    pub fn new_with_source(ttf_data: &'a [u8], source: FontSource) -> Option<Self> {
-        let font = TtfFont::parse(ttf_data)?;
         Some(Self {
-            font,
+            font: TtfFont::parse(ttf_data)?,
             cache: GlyphCache::new(),
-            source,
         })
     }
 
-    pub fn source(&self) -> FontSource {
-        self.source
-    }
-
-    /// Draw a text string onto a canvas at the given position.
-    ///
-    /// `(x, y)` is the top-left corner of the text's line: its baseline lands
-    /// on row `y + ascent(size_px)`. `bg` is the background colour for
-    /// anti-alias blending; pass an opaque colour for MMIO/write-only
-    /// surfaces, or `Color32::TRANSPARENT` to composite over existing content
-    /// (requires a readable surface). Returns the damage rectangle covering all
-    /// rendered glyphs.
+    /// Draws `text` with its line's top-left at `(x, y)`, its baseline on row
+    /// `y + ascent(size_px)`. An opaque `bg` never reads the target, so it is
+    /// safe over MMIO; a transparent one composites over what is there.
     pub fn draw_text<T: Canvas>(
         &mut self,
         target: &mut T,
@@ -159,11 +115,7 @@ impl<'a> FontRenderer<'a> {
         self.draw_text_inner(target, x, y, text, size_px, color, bg, None)
     }
 
-    /// [`Self::draw_text`] confined to `clip`; pixels outside it are untouched.
-    ///
-    /// The advance is unaffected, so a clipped run lands on the same pixels as
-    /// the unclipped one — which is what lets a caller scroll text under a
-    /// viewport instead of re-laying it out.
+    /// [`Self::draw_text`] confined to `clip`, on the same pixels.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_text_clipped<T: Canvas>(
         &mut self,
@@ -196,9 +148,7 @@ impl<'a> FontRenderer<'a> {
         let mut damage: Option<DamageRect> = None;
 
         for placed in Run::new(&self.font, text, size_px) {
-            // Pen and bitmap round once, together, to the nearest quarter
-            // pixel: the whole pixel places the bitmap, the quarter picks the
-            // phase it was rasterised at.
+            // The whole pixel places the bitmap, the quarter picks its phase.
             let quarters = libm::floorf((x as f32 + placed.pen) * 4.0 + 0.5) as i32;
             let column = quarters.div_euclid(4);
             let key = (placed.codepoint, size_px, quarters.rem_euclid(4) as u8);
@@ -208,8 +158,7 @@ impl<'a> FontRenderer<'a> {
                     self.cache.insert(key, glyph);
                 }
             }
-            // The cache borrow is held across the blit rather than cloning the
-            // coverage: a clone here is one heap allocation per glyph per frame.
+            // Borrowed across the blit: a clone is an allocation per glyph.
             let glyph_damage = self.cache.get(key).and_then(|g| {
                 Self::draw_glyph_coverage_clipped(
                     target,
@@ -235,22 +184,16 @@ impl<'a> FontRenderer<'a> {
         damage
     }
 
-    /// Measure the width and height of a text string at the given size.
-    pub fn measure_text(&self, text: &str, size_px: u16) -> (i32, i32) {
-        metrics::measure_text(&self.font, text, size_px)
-    }
-
-    /// Advance width of `text` at `size_px`, kerning included, in pixels.
+    /// Advance width of `text` at `size_px`, kerning included.
     pub fn text_width(&self, text: &str, size_px: u16) -> i32 {
         metrics::measure_text(&self.font, text, size_px).0
     }
 
-    /// Baseline offset from the top of a line box at `size_px`.
     pub fn ascent(&self, size_px: u16) -> i32 {
-        libm::roundf(self.font.hhea().ascender as f32 * scale(&self.font, size_px)) as i32
+        ascent(&self.font, size_px)
     }
 
-    /// Ascender-to-descender height of one line at `size_px`.
+    /// Ascender to descender at `size_px`, each rounded up as glyphs are.
     pub fn line_height(&self, size_px: u16) -> i32 {
         metrics::measure_text(&self.font, "", size_px).1
     }
@@ -268,17 +211,6 @@ impl<'a> FontRenderer<'a> {
         text.len()
     }
 
-    /// Draw a coverage bitmap onto a canvas.
-    ///
-    /// An opaque `bg` blends fg/bg directly, with no framebuffer read-back, so
-    /// it is safe over MMIO; a transparent `bg` composites onto the existing
-    /// pixel and requires a readable surface like `DrawBuffer`.
-    /// Confined to `clip` when one is given, and to the buffer bounds always.
-    ///
-    /// A transparent `bg` composites each partial-coverage pixel onto what the
-    /// surface already holds, so anti-aliased ink over a coloured panel is the
-    /// panel's colour rather than a dark fringe. A write-only surface reads back
-    /// 0 and so still blends towards black, which is what it did before.
     #[allow(clippy::too_many_arguments)]
     fn draw_glyph_coverage_clipped<T: Canvas>(
         target: &mut T,
@@ -346,29 +278,37 @@ impl<'a> FontRenderer<'a> {
     }
 }
 
-/// Pixels per font unit at `size_px`. `TtfFont::parse` refuses a zero
-/// `unitsPerEm`, so this never divides by zero.
+/// Pixels per font unit; `TtfFont::parse` refuses a zero `unitsPerEm`.
 #[inline]
 pub(crate) fn scale(font: &TtfFont<'_>, size_px: u16) -> f32 {
     size_px as f32 / font.units_per_em() as f32
 }
 
-/// The glyph a codepoint draws with. `.notdef` is "no glyph": measuring its
-/// advance while refusing to draw it is how a measured width and a drawn run
-/// would disagree on exactly the codepoints the half-em fallback exists for.
+/// The row below a line's top its baseline is on, for every renderer: the
+/// ascender rounded up, so no glyph's whole-pixel top rises above the line.
+pub(crate) fn ascent(font: &TtfFont<'_>, size_px: u16) -> i32 {
+    libm::ceilf(font.hhea().ascender as f32 * scale(font, size_px)) as i32
+}
+
+/// The rows below the baseline a line's glyphs can reach.
+pub(crate) fn descent(font: &TtfFont<'_>, size_px: u16) -> i32 {
+    libm::ceilf(-(font.hhea().descender as f32) * scale(font, size_px)) as i32
+}
+
+/// `.notdef` is no glyph, so a measured width and a drawn run agree on the
+/// codepoints the half-em fallback is for.
 #[inline]
 fn drawable_glyph(font: &TtfFont<'_>, codepoint: u32) -> Option<u16> {
     font.glyph_index(codepoint)
         .filter(|&gid| gid != 0 || codepoint == 0)
 }
 
-/// One glyph of a laid-out run.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Placed {
     /// Byte offset of its character in the text.
     pub offset: usize,
     pub codepoint: u32,
-    /// Where its origin sits, in pixels from the run's, kerning included.
+    /// From the run's origin, kerning included.
     pub pen: f32,
     pub advance: f32,
 }
@@ -424,21 +364,15 @@ impl Iterator for Run<'_, '_, '_> {
     }
 }
 
-/// Width of `text`'s run at `size_px`, unrounded.
 pub(crate) fn run_width(font: &TtfFont<'_>, text: &str, size_px: u16) -> f32 {
     Run::new(font, text, size_px)
         .last()
         .map_or(0.0, |last| last.pen + last.advance)
 }
 
-/// Rasterize one glyph with its origin `phase` quarter pixels right of a pixel
-/// boundary.
-///
-/// The bitmap's box is whole pixels: its top is `ceil(y_max · scale)` above
-/// the baseline and its left `floor(x_min · scale + phase / 4)` right of the
-/// origin, with the outline drawn at its exact offset inside. The baseline
-/// therefore falls on a row boundary in every glyph, so a run's glyphs share
-/// one bottom edge.
+/// One glyph with its origin `phase` quarter pixels right of a pixel boundary,
+/// in a whole-pixel box whose top is `ceil(y_max · scale)` above the baseline,
+/// so the baseline falls on a row boundary in every glyph.
 pub(crate) fn rasterize_glyph(
     font: &TtfFont<'_>,
     codepoint: u32,
@@ -599,15 +533,14 @@ mod tests {
     #[test]
     fn measure_text_nonzero() {
         let renderer = FontRenderer::new(INTER_TTF).unwrap();
-        let (w, h) = renderer.measure_text("Hello", 16);
+        let (w, h) = (renderer.text_width("Hello", 16), renderer.line_height(16));
         assert!(w > 0 && h > 0, "w={w}, h={h}");
     }
 
     #[test]
     fn measure_empty_text_zero_width() {
         let renderer = FontRenderer::new(INTER_TTF).unwrap();
-        let (w, _) = renderer.measure_text("", 16);
-        assert_eq!(w, 0);
+        assert_eq!(renderer.text_width("", 16), 0);
     }
 
     #[test]
@@ -661,44 +594,30 @@ mod tests {
 
     #[test]
     fn different_sizes_produce_different_metrics() {
-        let r1 = FontRenderer::new(INTER_TTF).unwrap();
-        let r2 = FontRenderer::new(INTER_TTF).unwrap();
-        let (w1, h1) = r1.measure_text("A", 12);
-        let (w2, h2) = r2.measure_text("A", 24);
-        assert!(w2 > w1, "24px should be wider than 12px");
-        assert!(h2 > h1, "24px should be taller than 12px");
+        let r = FontRenderer::new(INTER_TTF).unwrap();
+        assert!(r.text_width("A", 24) > r.text_width("A", 12));
+        assert!(r.line_height(24) > r.line_height(12));
     }
 
     #[test]
     fn space_advances_cursor() {
         let renderer = FontRenderer::new(INTER_TTF).unwrap();
-        let (w_a, _) = renderer.measure_text("A", 16);
-        let (w_aa, _) = renderer.measure_text("A A", 16);
+        let w_a = renderer.text_width("A", 16);
+        let w_aa = renderer.text_width("A A", 16);
         assert!(w_aa > w_a * 2 - 5, "A={w_a}, A_A={w_aa}");
     }
 
     #[test]
-    fn font_source_default_is_embedded() {
-        let r = FontRenderer::new(INTER_TTF).unwrap();
-        assert_eq!(r.source(), FontSource::Embedded);
-    }
-
-    #[test]
-    fn font_source_filesystem_tracking() {
-        let r = FontRenderer::new_with_source(INTER_TTF, FontSource::Filesystem).unwrap();
-        assert_eq!(r.source(), FontSource::Filesystem);
-    }
-
-    #[test]
-    fn atlas_source_default_is_embedded() {
-        let atlas = GlyphAtlas::new(INTER_TTF, 16).unwrap();
-        assert_eq!(atlas.source(), FontSource::Embedded);
-    }
-
-    #[test]
-    fn atlas_source_with_override() {
-        let atlas = GlyphAtlas::new_with_source(INTER_TTF, 16, FontSource::Filesystem).unwrap();
-        assert_eq!(atlas.source(), FontSource::Filesystem);
+    fn the_atlas_and_the_renderer_put_the_baseline_on_one_row() {
+        let mono: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../assets/fonts/JetBrainsMono-Regular.ttf"
+        ));
+        let renderer = FontRenderer::new(mono).unwrap();
+        for size in 11u16..=24 {
+            let atlas = GlyphAtlas::new(mono, size).unwrap();
+            assert_eq!(atlas.ascent(), renderer.ascent(size), "{size} px");
+        }
     }
 
     #[test]

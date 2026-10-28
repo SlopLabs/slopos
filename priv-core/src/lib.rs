@@ -6,9 +6,10 @@
 //! frames, its descriptors riding along as `SCM_RIGHTS`:
 //!
 //! ```text
-//! client REQUEST{id, action, arg.., cwd?}  + stdin, stdout, stderr[, cwd]
+//! client REQUEST{id, action, arg.., cwd?, terminal?}
+//!                                          + stdin, stdout, stderr[, cwd]
 //!   privd  ASKING{id, app?}                the person at the machine is asked
-//!   privd  PROMPT{id, prompt, about?}      or its terminal, for a password
+//!   privd  PROMPT{id, prompt, about}       or its terminal, for a password
 //!   client SECRET{id, secret}
 //!   privd  DENIED{id, reason, person?}
 //!   privd  STARTED{id, pid}
@@ -21,13 +22,15 @@
 //! The consent channel is a socket pair init hands privd and the compositor:
 //!
 //! ```text
-//! agent READY{version?}                 it can draw a dialog
+//! either RESET{epoch}                   a new instance, see `consent::Link`
+//!   other RESET_SEEN{epoch}
+//! agent READY{version}                  it can draw a dialog
 //! privd ASK{id, action, describe, program?, uid, pid, cwd, arg..,
 //!           kind, person?, admin.., app?, icon?, detail?, verb,
 //!           destructive?, extension?}
 //!   agent SHOWN{id}                     on screen
 //!   agent ANSWER{id, allow, secret?, as?}
-//!   privd CANCEL{id}                    expired
+//!   privd CANCEL{id}                    withdrawn, expired or hidden
 //! ```
 
 #![no_std]
@@ -139,7 +142,6 @@ const _: () = {
     assert!(all == caps::ALL);
 };
 
-/// The capability `name` names.
 pub fn capability(name: &str) -> Option<u64> {
     CAPABILITIES
         .iter()

@@ -39,6 +39,11 @@ fn a_detail_is_one_sentence() {
     }
 }
 
+fn label(text: &str) -> Result<(), &'static str> {
+    words::label(text, &[])?;
+    plain(text)
+}
+
 #[test]
 fn a_label_is_capitalised_and_unstopped() {
     for good in [
@@ -85,18 +90,39 @@ fn a_verb_is_one_the_dialog_knows() {
     }
 }
 
-/// Every verb fits the button, is capitalised and plain, and says what no
-/// other control of the dialog says, in any case.
 #[test]
 fn every_verb_is_its_own_button() {
     for said in VERBS {
-        assert!(said.len() <= VERB_MAX, "{said}");
+        assert!(said.len() <= 20, "{said}");
         assert!(said.starts_with(|c: char| c.is_ascii_uppercase()), "{said}");
         assert_eq!(plain(said), Ok(()), "{said}");
-        for label in [CANCEL, SHOW_DETAILS, SHOW_LESS] {
+        for label in [CANCEL, SHOW_DETAILS, SHOW_LESS, PASSWORD] {
             assert!(!label.eq_ignore_ascii_case(said), "{said}");
         }
     }
+}
+
+#[test]
+fn the_dialog_s_own_words_hold_to_the_rules() {
+    for said in [
+        CANCEL,
+        SHOW_DETAILS,
+        SHOW_LESS,
+        PASSWORD,
+        ASKED_BY,
+        RUNS,
+        IN,
+        EXTENSION,
+        crate::consent::UNIDENTIFIED,
+        &crate::consent::named_extension("hello"),
+        &crate::consent::password_for("alice"),
+    ] {
+        assert_eq!(label(said), Ok(()), "{said}");
+    }
+    assert_eq!(
+        slopos_theme_core::words::sentence(ADMIN_NEEDED, &[]),
+        Ok(())
+    );
 }
 
 #[test]
@@ -126,8 +152,6 @@ fn the_policy_s_vocabulary_stays_off_the_screen() {
     assert!(describe("update the database").is_ok());
 }
 
-/// What privd says back is held to the same rules a detail is: sentences
-/// addressed to the person, none of the policy's words.
 #[test]
 fn every_refusal_speaks_to_the_person() {
     use crate::Refused;

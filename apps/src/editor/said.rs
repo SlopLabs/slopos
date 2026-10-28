@@ -1,32 +1,31 @@
-//! What the editor tells the person when something goes wrong: what
-//! happened, then what to do about it.
+//! What the editor tells the person: a passing status as a label, and when
+//! something goes wrong, what happened, then what to do about it.
 
 use std::io::ErrorKind;
+
+use slopos_appkit::theme::words::Bytes;
+use slopos_editor_core::document::file_name;
 
 use super::Overwrite;
 use super::commands::Command;
 use super::files::MAX_FILE_BYTES;
 
-/// The app's name, as its dock entry, its window and its About box give it.
-pub const NAME: &str = "Editor";
-
-const MIB: u64 = 1024 * 1024;
-
-fn name(path: &str) -> &str {
-    path.rsplit('/')
-        .find(|part| !part.is_empty())
-        .unwrap_or(path)
+macro_rules! name {
+    () => {
+        "Editor"
+    };
 }
+pub(super) use name;
 
-/// A command as a sentence names it, without the ellipsis its menu entry
-/// carries.
+pub const NAME: &str = name!();
+
+/// A command as a sentence names it: without its menu entry's ellipsis.
 pub fn choose(command: Command) -> &'static str {
     command.label().trim_end_matches('…')
 }
 
-/// A file that could not be read, by why.
 pub fn unreadable(path: &str, kind: ErrorKind) -> String {
-    let name = name(path);
+    let name = file_name(path);
     match kind {
         ErrorKind::NotFound => format!("Couldn't find {name}. Check its name, then open it again."),
         ErrorKind::PermissionDenied => {
@@ -36,9 +35,8 @@ pub fn unreadable(path: &str, kind: ErrorKind) -> String {
     }
 }
 
-/// A folder of the sidebar that could not be listed, by why.
 pub fn unlisted(path: &str, kind: ErrorKind) -> String {
-    let name = name(path);
+    let name = file_name(path);
     match kind {
         ErrorKind::PermissionDenied => {
             format!("You can't open the folder {name}. Ask whoever owns it to share it with you.")
@@ -50,49 +48,47 @@ pub fn unlisted(path: &str, kind: ErrorKind) -> String {
 pub fn folder(path: &str) -> String {
     format!(
         "Can't open {} as a file, because it's a folder. Choose {} to open it.",
-        name(path),
+        file_name(path),
         choose(Command::OpenFolder)
     )
 }
 
-pub fn too_large(path: &str, bytes: u64) -> String {
+pub fn too_large(path: &str) -> String {
     format!(
-        "Can't open {}, because it's {} MiB and {NAME} opens files up to {} MiB. Open a smaller file.",
-        name(path),
-        bytes.div_ceil(MIB),
-        MAX_FILE_BYTES / MIB
+        "Can't open {}, because {NAME} opens files up to {}. Open a smaller file.",
+        file_name(path),
+        Bytes(MAX_FILE_BYTES)
     )
 }
 
 pub fn not_text(path: &str) -> String {
     format!(
         "Can't open {}, because it isn't a text file. Choose a text file instead.",
-        name(path)
+        file_name(path)
     )
 }
 
 pub fn too_many_lines(path: &str) -> String {
     format!(
         "Can't open {}, because it has more lines than {NAME} can hold. Open a shorter file.",
-        name(path)
+        file_name(path)
     )
 }
 
-/// A save the filesystem refused, by why.
 pub fn unsaved(path: &str, kind: ErrorKind) -> String {
     let save_as = choose(Command::SaveAs);
     match kind {
         ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem => format!(
             "You can't save in the folder {} is in. Choose {save_as} to save it somewhere you can.",
-            name(path)
+            file_name(path)
         ),
         ErrorKind::StorageFull | ErrorKind::QuotaExceeded => format!(
             "There's no room to save {}. Free some space, then save again.",
-            name(path)
+            file_name(path)
         ),
         _ => format!(
             "Couldn't save {}. Try again, or choose {save_as} to save it somewhere else.",
-            name(path)
+            file_name(path)
         ),
     }
 }
@@ -100,7 +96,7 @@ pub fn unsaved(path: &str, kind: ErrorKind) -> String {
 pub fn open_elsewhere(path: &str) -> String {
     format!(
         "Another tab has {} open. Close that tab, or choose {} to save this one under another name.",
-        name(path),
+        file_name(path),
         choose(Command::SaveAs)
     )
 }
@@ -155,10 +151,9 @@ pub fn index_full(folders: usize) -> String {
     )
 }
 
-/// The question a save asks before it writes over `path`: its title and
-/// what follows from saving.
+/// The title and body of the question a save asks before it writes over `path`.
 pub fn overwrite(path: &str, found: Overwrite) -> (String, String) {
-    let name = name(path);
+    let name = file_name(path);
     match found {
         Overwrite::Changed => (
             format!("Replace {name} with this tab's copy?"),
@@ -177,3 +172,62 @@ pub fn overwrite(path: &str, found: Overwrite) -> (String, String) {
 
 pub const NOT_SAVED_YET: &str =
     "This file isn't saved yet, so the sidebar can't show it. Save it first.";
+
+pub fn opened(path: &str) -> String {
+    format!("Opened {path}")
+}
+
+pub fn saved(path: &str) -> String {
+    format!("Saved {path}")
+}
+
+pub const CUT: &str = "Cut";
+pub const COPIED: &str = "Copied";
+pub const EMPTY_CLIPBOARD: &str = "The clipboard is empty";
+pub const NOTHING_TO_UNDO: &str = "Nothing to undo";
+pub const NOTHING_TO_REDO: &str = "Nothing to redo";
+
+pub fn no_comments(language: &str) -> String {
+    format!("{language} has no comments to toggle")
+}
+
+pub fn no_match(query: &str) -> String {
+    format!("No match for “{query}”")
+}
+
+pub fn replaced(count: usize) -> String {
+    match count {
+        1 => String::from("Replaced 1 match"),
+        count => format!("Replaced {count} matches"),
+    }
+}
+
+/// `bar_open`: the find bar shows, so only typing is wanted.
+pub fn nothing_to_find(bar_open: bool) -> String {
+    match bar_open {
+        true => String::from("There's nothing to find yet. Type what to look for."),
+        false => format!(
+            "There's nothing to find yet. Choose {}, then type what to look for.",
+            choose(Command::Find)
+        ),
+    }
+}
+
+/// `bar_open`: the find bar shows with its replacement field.
+pub fn nothing_to_replace(bar_open: bool) -> String {
+    match bar_open {
+        true => String::from("There's nothing to replace yet. Type what to find."),
+        false => format!(
+            "There's nothing to replace yet. Choose {}, then type what to find and what goes in its place.",
+            choose(Command::Replace)
+        ),
+    }
+}
+
+pub fn no_replacement() -> String {
+    format!(
+        "{} needs what goes in place of each match. Choose {} and type it.",
+        choose(Command::ReplaceAll),
+        choose(Command::Replace)
+    )
+}

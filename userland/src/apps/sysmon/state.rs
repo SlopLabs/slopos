@@ -1,23 +1,22 @@
 use core::cmp::Ordering;
-use core::option::Option::{self, None, Some};
-use std::string::String;
-
-/// Display-side cap on visible tasks, independent of the kernel's `MAX_TASKS`.
-/// `process_list` truncates to this many entries.
-pub(crate) const MAX_TASKS: usize = 256;
 
 use crate::apps::cpufreq::sample::Usage;
 use crate::syscall::{
     UserCpuInfo, UserCpuPerf, UserCpuPerfInfo, UserPerCpuStats, UserSysInfo, UserTaskEntry,
     core as sys_core,
 };
+use slopos_abi::task::TaskStatus;
 use slopos_cpufreq_core::CoreType;
 
 use super::selection::{self, TaskKey};
-use super::{MAX_CPUS, REFRESH_INTERVAL_MS, is_idle_task, task_name_bytes, task_name_string};
+use super::{
+    MAX_CPUS, REFRESH_INTERVAL_MS, is_idle_task, task_name_bytes, task_name_string, task_state,
+};
 
-/// The network facts the overview shows, read from `net_query` so sysmon and
-/// `ip` cannot disagree about what "online" means.
+/// The most tasks listed; `process_list` gives no more than this.
+pub(crate) const MAX_TASKS: usize = 256;
+
+/// Read from `net_query`, so sysmon and `ip` agree on what "up" means.
 #[derive(Clone, Copy)]
 pub(crate) struct NetSummary {
     pub(crate) oper_state: u8,
@@ -78,11 +77,6 @@ pub(crate) enum Tab {
     Hardware,
 }
 
-/// A task named by the row the user acted on.
-///
-/// Carries the full [`TaskKey`] rather than a pid: ids recycle, so a refresh
-/// between opening the dialog and pressing Kill can put a different task on
-/// that number, and the key's creation time distinguishes them.
 #[derive(Clone, PartialEq)]
 pub(crate) struct KillTarget {
     pub(crate) key: TaskKey,
@@ -101,7 +95,6 @@ pub(crate) struct ContextMenu {
     pub(crate) y: i32,
 }
 
-/// Outcome of a kill attempt, surfaced in the process panel's status line.
 pub(crate) enum KillOutcome {
     Sent { name: String },
     Failed { name: String, errno: i32 },
@@ -138,14 +131,11 @@ pub(crate) struct SysmonApp {
     pub(crate) perf_count: usize,
     pub(crate) prev_perf: [UserCpuPerf; MAX_CPUS],
     pub(crate) prev_perf_count: usize,
-    /// By `percpu` index: a hybrid part's kind of core in words, empty where
-    /// the part reports none.
+    /// By `percpu` index, empty where the part reports no kind of core.
     pub(crate) cpu_type: [&'static str; MAX_CPUS],
-    /// By `percpu` index: the busy-weighted clock since the last refresh,
-    /// `None` where the CPU does not report it.
+    /// By `percpu` index: the busy-weighted clock since the last refresh.
     pub(crate) cpu_eff_mhz: [Option<u64>; MAX_CPUS],
-    /// The selected task, not the row it occupies: the table re-sorts on every
-    /// refresh, so a row index would slide the highlight onto another task.
+    /// A task, not a row: the table re-sorts on every refresh.
     pub(crate) selected: Option<TaskKey>,
     pub(crate) sort_column: SortColumn,
     pub(crate) sort_ascending: bool,
@@ -154,7 +144,6 @@ pub(crate) struct SysmonApp {
     pub(crate) context_menu: Option<ContextMenu>,
     pub(crate) last_kill: Option<KillOutcome>,
     pub(crate) sorted_indices: [usize; MAX_TASKS],
-    /// This process's own id, so sysmon cannot be asked to kill itself.
     pub(crate) self_pid: u32,
 }
 
@@ -213,8 +202,7 @@ impl SysmonApp {
             (raw_count as usize).min(MAX_TASKS)
         };
 
-        // The per-CPU usage bar already surfaces system idleness; `idle/N` rows
-        // would only dominate the table.
+        // Each CPU's bar shows idleness; `idle/N` rows would fill the table.
         let mut kept = 0;
         for i in 0..raw_count {
             if !is_idle_task(&self.tasks[i]) {
@@ -262,8 +250,8 @@ impl SysmonApp {
             self.selected = None;
         }
 
-        // A target that exited designates nothing; drop the affordance rather
-        // than let it act on whatever inherits the number.
+        // A target that exited designates nothing, rather than whatever
+        // inherits its number.
         if self
             .confirm_kill
             .as_ref()
@@ -280,7 +268,6 @@ impl SysmonApp {
         }
     }
 
-    /// The table index for `target`, or `None` once that task has exited.
     fn live_target(&self, target: &KillTarget) -> Option<usize> {
         selection::index_of(target.key, self.task_slice())
     }
@@ -305,8 +292,8 @@ impl SysmonApp {
         self.selected = selection::key_at_row(self.task_slice(), self.order_slice(), row);
     }
 
-    /// Refusing our own pid keeps the window from tearing itself down mid-frame;
-    /// the kernel enforces the real privilege rules and answers EPERM.
+    /// Refuses only sysmon itself, which would vanish mid-frame; the kernel
+    /// decides the rest.
     pub(crate) fn is_killable(&self, pid: u32) -> bool {
         pid != self.self_pid
     }
@@ -329,7 +316,6 @@ impl SysmonApp {
         })
     }
 
-    /// Re-validate the pending target at the moment Kill is pressed.
     pub(crate) fn pending_kill_target(&self) -> Option<&KillTarget> {
         let target = self.confirm_kill.as_ref()?;
         self.live_target(target).map(|_| target)
@@ -446,7 +432,7 @@ impl SysmonApp {
         match self.sort_column {
             SortColumn::Pid => a.task_id.cmp(&b.task_id),
             SortColumn::Name => task_name_bytes(a).cmp(task_name_bytes(b)),
-            SortColumn::State => a.state.cmp(&b.state),
+            SortColumn::State => state_place(a).cmp(&state_place(b)),
             SortColumn::CpuPct => self.task_cpu_pct[a_idx].cmp(&self.task_cpu_pct[b_idx]),
             SortColumn::Priority => a.priority.cmp(&b.priority),
             SortColumn::Cpu => a.last_cpu.cmp(&b.last_cpu),
@@ -477,4 +463,8 @@ impl SysmonApp {
         }
         Some(self.sorted_indices[row])
     }
+}
+
+fn state_place(task: &UserTaskEntry) -> usize {
+    task_state(TaskStatus::from_u8(task.state)).0
 }

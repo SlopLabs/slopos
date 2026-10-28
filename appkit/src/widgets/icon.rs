@@ -1,7 +1,7 @@
 use slopos_theme_core::{Icon, TextRole, Tone};
 
 use crate::constraints::{BoxConstraints, Size};
-use crate::event::{EventPhase, EventResponse, MessageSink, WidgetEvent};
+use crate::event::{EventResponse, MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::traits::{MeasureCtx, Widget, WidgetCore};
 
@@ -50,12 +50,7 @@ impl Widget for IconWidget {
         );
     }
 
-    fn event(
-        &mut self,
-        _event: &WidgetEvent,
-        _phase: EventPhase,
-        _sink: &mut MessageSink,
-    ) -> EventResponse {
+    fn event(&mut self, _event: &WidgetEvent, _sink: &mut MessageSink) -> EventResponse {
         EventResponse::Ignored
     }
 }

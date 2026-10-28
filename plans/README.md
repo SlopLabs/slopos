@@ -16,7 +16,6 @@ editing.
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
-| `ui-overhaul.md` | The desktop's look, words and toolkit: every phase landed — text, theme, components, icon font, layout audit, `just ui-shots`, the permission dialog, the chrome, and one voice and glossary across the installer and the apps rebuilt from the components |
 
 The driver-framework base has **landed and its plan is retired**. One `Bus` trait
 (`drivers/src/driver_core/bus.rs`) and one generic `probe_bus` matchmaker drive the
@@ -135,6 +134,17 @@ proposal and checks the disk again before it writes. Read `AGENTS.md` rather
 than a document: its installer paragraph states the invariants,
 `installer-core` and `userland/src/apps/installer{,_ui}/` hold the code, and
 `installer_ui_test` and `just test-installer` grade it.
+
+The desktop's look, words and toolkit have **landed and their plan is
+retired**. Text sits on one kerned baseline in Inter, every colour, type role,
+spacing and shadow is a `theme-core` token, apps build from appkit's
+components and name roles rather than colours, the permission dialog, the
+lock and login screens and the menus are appkit trees the compositor paints,
+and one glossary holds the installer, privd and the apps to the same words.
+Read `AGENTS.md` and `appkit/GUIDE.md` rather than a document:
+`check_ui_literals.sh` and `appkit::audit` grade the look, the copy tests in
+`theme-core`, `priv-core` and `installer-core` grade the words, and `just
+ui-shots` shows every surface.
 
 ## When To Promote A Plan
 

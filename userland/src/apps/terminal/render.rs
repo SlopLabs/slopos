@@ -1,8 +1,5 @@
-//! Glyph rendering for the terminal grid.
-//!
-//! Only cells the grid marked damaged are repainted, and the presented damage
-//! rect is their bounding box, so a cursor blink moves one cell's worth of
-//! pixels through the compositor rather than a window's.
+//! Glyphs for the grid. Only damaged cells repaint, and only their bounds are
+//! presented, so a cursor blink sends the compositor one cell.
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::Color32;
@@ -10,39 +7,29 @@ use slopos_abi::draw::Color32;
 use crate::gfx::DrawBuffer;
 use crate::gfx::font;
 
-use super::grid::{Cell, TerminalGrid};
+use super::grid::{BG_COLOR, Cell, TerminalGrid};
 use super::input::{Selection, cell_in_selection};
 use super::surface;
 
 use slopos_terminal_core::damage::CellDamage;
 
-/// Matches the grid's default cell background.
-const WINDOW_BG: Color32 = Color32::rgb(0x1E, 0x1E, 0x1E);
+const WINDOW_BG: Color32 = color_from_rgb(BG_COLOR);
 
-/// Between the window's edges and the cells, in the cells' background.
 pub const MARGIN: i32 = slopos_theme_core::space::SM;
 
-/// Matches the shell's selection blue.
+/// The shell's selection blue.
 const SELECTION_BG: Color32 = Color32::rgb(0x26, 0x4F, 0x78);
 
-/// How many cells of `cell` pixels fit across `pixels` within the margins.
 pub fn cells_in(pixels: i32, cell: i32, max: usize) -> u16 {
     ((pixels - 2 * MARGIN) / cell.max(1)).clamp(1, max as i32) as u16
 }
 
-#[inline]
-fn cell_width() -> i32 {
-    font::cell_width()
-}
-
-#[inline]
-fn cell_height() -> i32 {
-    font::cell_height()
+pub fn cell_size() -> (i32, i32) {
+    (font::cell_width().max(1), font::cell_height().max(1))
 }
 
 /// Grid colors are `0x00RRGGBB`.
-#[inline]
-fn color_from_rgb(rgb: u32) -> Color32 {
+const fn color_from_rgb(rgb: u32) -> Color32 {
     Color32(0xFF00_0000 | (rgb & 0x00FF_FFFF))
 }
 
@@ -54,16 +41,15 @@ fn draw_cell_at(
     fg: Color32,
     bg: Color32,
 ) {
-    let x = MARGIN + col as i32 * cell_width();
-    let y = MARGIN + row as i32 * cell_height();
+    let (cw, ch) = cell_size();
+    let x = MARGIN + col as i32 * cw;
+    let y = MARGIN + row as i32 * ch;
     font::draw_glyph(buf, x, y, cell.glyph(), fg, bg);
 }
 
-/// Rows below the last grid row are excluded, so the trailing partial-cell
-/// remainder is only repainted by a full paint.
+/// The partial cell below the last row is left to a full paint.
 fn damage_bounds(damage: &CellDamage) -> Option<DamageRect> {
-    let cw = cell_width();
-    let ch = cell_height();
+    let (cw, ch) = cell_size();
     let mut out: Option<DamageRect> = None;
     for row in 0..damage.rows() {
         let Some(span) = damage.span(row) else {
@@ -96,8 +82,7 @@ pub fn render_damage(
     };
 
     surface::draw(|buf| {
-        // A glyph's cell is the atlas cell size, which need not equal the
-        // grid's, so an unscissored blit can overhang the presented rect.
+        // A glyph's atlas cell need not be the grid's, and could overhang.
         buf.set_scissor(Some(bounds));
         for row in 0..damage.rows() {
             let Some(span) = damage.span(row) else {
@@ -116,8 +101,6 @@ pub fn render_damage(
     );
 }
 
-/// For the first frame and after a resize, where the backing buffer's contents
-/// are undefined and no per-cell damage set describes what has to be written.
 pub fn render_full(grid: &TerminalGrid, selection: &Selection, cursor_on: bool) {
     let rows = grid.rows as usize;
     let cols = grid.cols as usize;
@@ -158,8 +141,6 @@ fn draw_row_span(
         let mut fg = color_from_rgb(cell.attrs.fg);
         let mut bg = color_from_rgb(cell.attrs.bg);
 
-        // The selection is content-anchored, so it tracks the selected text
-        // through scrollback; the cursor below is suppressed there instead.
         if let Some((lo, hi)) = sel_range {
             if cell_in_selection(abs, col, lo, hi) {
                 bg = SELECTION_BG;

@@ -1,14 +1,14 @@
-//! The compositor's own surfaces as trees of appkit's components: the lock
-//! and login screens, the system menu, the network and clock panels, and the
-//! question a choice that ends something asks. Each is the view of a model
-//! the compositor holds, which takes the keys; the tree takes the pointer.
+//! The compositor's own surfaces as trees of appkit's components, each the
+//! view of a model the compositor holds.
 
 use slopos_appkit::constraints::TextAlignment;
+use slopos_appkit::traits::Role;
 use slopos_appkit::{
-    Button, ButtonRow, CrossAxisAlignment, Length, List, ListRow, Node, Notice, PropertyList, Text,
+    Button, ButtonRow, CrossAxisAlignment, Dialog, Length, List, ListRow, Node, Notice,
+    PropertyList, Text, column,
 };
 use slopos_chrome_core::clock::{self, WallTime};
-use slopos_chrome_core::gate::{Gate, LOG_IN, PASSWORD, PEOPLE_SHOWN, SWITCH_USER, Target, UNLOCK};
+use slopos_chrome_core::gate::{Gate, LOG_IN, PEOPLE_SHOWN, SWITCH_USER, Target, UNLOCK};
 use slopos_chrome_core::menu::{
     Answer, CLOSE, Choice, Confirm, Ending, Menu, RESTART_NOTICE, TRY_AGAIN,
 };
@@ -19,19 +19,18 @@ use slopos_chrome_core::netstate::{
 };
 use slopos_net_core::Ipv4;
 use slopos_net_core::render::iface_kind;
-use slopos_priv_core::words::CANCEL;
+use slopos_priv_core::words::{CANCEL, PASSWORD};
 use slopos_theme_core::{Icon, Surface, TextRole, Tone, inset, space};
 
-/// How wide the lock and login screens' column is at most.
 const GATE_WIDTH: i32 = 360;
-/// How wide a panel under the menu bar is at most.
 pub const PANEL_WIDTH: i32 = 320;
 
-fn column<M>(children: Vec<Node<M>>, spacing: i32, align: CrossAxisAlignment) -> Node<M> {
+/// `children` one under another, each as wide as it is and centred.
+fn middle<M>(children: Vec<Node<M>>) -> Node<M> {
     Node::VStack {
         children,
-        spacing,
-        align,
+        spacing: 0,
+        align: CrossAxisAlignment::Center,
     }
 }
 
@@ -39,11 +38,9 @@ fn centred(text: Text) -> Text {
     text.align(TextAlignment::Center)
 }
 
-/// A panel's card, `content` inside its inset.
 fn panel<M>(content: Node<M>) -> Node<M> {
     Node::Card {
         surface: Surface::Raised,
-        border: true,
         shadow: false,
         child: Box::new(Node::Padding {
             padding: inset::CARD,
@@ -52,7 +49,6 @@ fn panel<M>(content: Node<M>) -> Node<M> {
     }
 }
 
-/// The [`PEOPLE_SHOWN`] people of the login screen the model shows.
 fn people(gate: &Gate) -> Node<Target> {
     let first = gate.first_shown();
     let shown = gate.people().iter().skip(first).take(PEOPLE_SHOWN);
@@ -80,11 +76,7 @@ pub fn gate(gate: &Gate, now: Option<&WallTime>) -> Node<Target> {
     match (gate.greeter(), gate.person()) {
         (true, _) if !gate.people().is_empty() => form.push(people(gate)),
         (false, Some(name)) => {
-            form.push(column(
-                vec![Node::Avatar { name: name.into() }],
-                0,
-                CrossAxisAlignment::Center,
-            ));
+            form.push(middle(vec![Node::Avatar { name: name.into() }]));
             form.push(centred(Text::new(name).role(TextRole::Title)).into());
         }
         _ => {}
@@ -118,20 +110,16 @@ pub fn gate(gate: &Gate, now: Option<&WallTime>) -> Node<Target> {
     let form = Node::SizedBox {
         width: Some(Length::Px(GATE_WIDTH)),
         height: None,
-        child: Box::new(column(form, space::MD, CrossAxisAlignment::Stretch)),
+        child: Box::new(column(space::MD, form)),
     };
-    column(
-        vec![
-            Node::Spacer { size: Length::FILL },
-            form,
-            Node::Spacer { size: Length::FILL },
-        ],
-        0,
-        CrossAxisAlignment::Center,
-    )
+    middle(vec![
+        Node::Spacer { size: Length::FILL },
+        form,
+        Node::Spacer { size: Length::FILL },
+    ])
 }
 
-/// What [`gate`] names the control that has focus by: its role's name.
+/// The name [`gate`] gives the control that has focus.
 pub fn gate_focus_name(gate: &Gate) -> &str {
     use slopos_chrome_core::gate::Focus;
     match gate.focus() {
@@ -157,8 +145,7 @@ fn choice_icon(choice: Choice) -> Icon {
     }
 }
 
-/// Where the menu's entries split into what ends the session and what ends
-/// the computer's running.
+/// Where the menu's entries split into the session's and the computer's.
 const SESSION_CHOICES: usize = 3;
 
 /// The system menu of `person`'s desktop: who they are, the update notice
@@ -198,12 +185,11 @@ pub fn system_menu(menu: &Menu, person: &str) -> Node<Choice> {
             .on_activate(|i| Choice::MENU[SESSION_CHOICES + i])
             .into(),
     );
-    panel(column(parts, space::SM, CrossAxisAlignment::Stretch))
+    panel(column(space::SM, parts))
 }
 
 /// The role and name [`system_menu`] gives what the keyboard is on.
-pub fn menu_focus_name(menu: &Menu) -> Option<(slopos_appkit::traits::Role, &'static str)> {
-    use slopos_appkit::traits::Role;
+pub fn menu_focus_name(menu: &Menu) -> Option<(Role, &'static str)> {
     let at = menu.cursor()?;
     if at == Choice::RestartDesktop {
         return Some((Role::Button, at.label()));
@@ -215,7 +201,7 @@ pub fn menu_focus_name(menu: &Menu) -> Option<(slopos_appkit::traits::Role, &'st
     Some((Role::List, first.label()))
 }
 
-/// What a press on the network panel asks.
+/// A press on the network panel's switch.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Toggle;
 
@@ -272,6 +258,7 @@ pub fn network_panel(model: &NetPanelModel, switch: Option<bool>) -> Node<Toggle
                     Node::Expand {
                         weight: 1,
                         child: Box::new(column(
+                            0,
                             vec![
                                 Text::new(iface.name_str()).into(),
                                 Text::new(detail)
@@ -279,8 +266,6 @@ pub fn network_panel(model: &NetPanelModel, switch: Option<bool>) -> Node<Toggle
                                     .tone(Tone::Secondary)
                                     .into(),
                             ],
-                            0,
-                            CrossAxisAlignment::Stretch,
                         )),
                     },
                 ],
@@ -300,13 +285,14 @@ pub fn network_panel(model: &NetPanelModel, switch: Option<bool>) -> Node<Toggle
                 .into(),
         );
     }
-    panel(column(parts, space::SM, CrossAxisAlignment::Stretch))
+    panel(column(space::SM, parts))
 }
 
 /// The date under the clock, and what the clock is set in.
 pub fn clock_panel<M: Clone + 'static>(now: Option<&WallTime>) -> Node<M> {
     let date = now.map_or_else(|| String::from(clock::DATE_UNKNOWN), WallTime::date);
     panel(column(
+        space::XS,
         vec![
             Text::new(date).role(TextRole::Heading).into(),
             Text::new(clock::ZONE)
@@ -314,24 +300,21 @@ pub fn clock_panel<M: Clone + 'static>(now: Option<&WallTime>) -> Node<M> {
                 .tone(Tone::Secondary)
                 .into(),
         ],
-        space::XS,
-        CrossAxisAlignment::Stretch,
     ))
 }
 
 /// The question `asked` puts before what it ends, Cancel first.
 pub fn confirm(asked: &Confirm) -> Node<Answer> {
     let ending = asked.ending();
-    Node::Dialog {
-        title: String::from(ending.question()),
-        icon: None,
-        content: Box::new(Text::new(ending.detail()).wrap().into()),
-        footer: ButtonRow::new()
-            .cancel(Button::new(CANCEL).on_press(Answer::Cancel))
-            .destructive(Button::new(ending.verb()).on_press(Answer::Go)),
-        on_dismiss: Some(Answer::Cancel),
-        anchor: None,
-    }
+    Dialog::new(ending.question())
+        .content(Text::new(ending.detail()).wrap())
+        .footer(
+            ButtonRow::new()
+                .cancel(Button::new(CANCEL).on_press(Answer::Cancel))
+                .destructive(Button::new(ending.verb()).on_press(Answer::Go)),
+        )
+        .on_dismiss(Answer::Cancel)
+        .into()
 }
 
 /// The name [`confirm`] gives the button that has focus.
@@ -344,12 +327,9 @@ pub fn confirm_focus_name(asked: &Confirm) -> &'static str {
 
 /// What takes the question's place once `ending` did not happen.
 pub fn failed(ending: Ending) -> Node<Answer> {
-    Node::Dialog {
-        title: String::from(ending.failed()),
-        icon: None,
-        content: Box::new(Text::new(TRY_AGAIN).wrap().into()),
-        footer: ButtonRow::new().confirm(Button::new(CLOSE).on_press(Answer::Cancel)),
-        on_dismiss: Some(Answer::Cancel),
-        anchor: None,
-    }
+    Dialog::new(ending.failed())
+        .content(Text::new(TRY_AGAIN).wrap())
+        .footer(ButtonRow::new().confirm(Button::new(CLOSE).on_press(Answer::Cancel)))
+        .on_dismiss(Answer::Cancel)
+        .into()
 }

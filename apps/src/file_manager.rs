@@ -4,21 +4,53 @@ use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-use slopos_appkit::theme::space;
+use slopos_appkit::theme::words::Bytes;
+use slopos_appkit::theme::{space, stroke};
 use slopos_appkit::{
     Action, App, Button, CrossAxisAlignment, EdgeInsets, EmptyState, Icon, IconButton, Key, List,
-    ListRow, Modifiers, NamedKey, Node, Sidebar, Surface, TableColumn, TableColumnWidth, Text,
-    TextAlignment, TextRole, Tone, Toolbar, WindowSpec, document_title,
+    ListRow, Modifiers, NamedKey, Node, SIDEBAR_WIDTH, Sidebar, StatusBar, TableColumn,
+    TableColumnWidth, Text, TextAlignment, TextRole, Tone, Toolbar, WindowSpec, column,
+    document_title, row,
 };
 
-/// The app's name, as its dock entry and its window give it.
 pub const NAME: &str = "Files";
 
-/// A table row tall enough for an icon and the least a control may be.
-const ROW_HEIGHT: i32 = 7 * space::XS;
-/// The size column, as wide as `1023.9 KiB`.
-const SIZE_WIDTH: i32 = 12 * space::SM;
+/// Wide enough for every size under a pebibyte.
+fn size_width() -> TableColumnWidth {
+    static WIDTH: OnceLock<TableColumnWidth> = OnceLock::new();
+    *WIDTH.get_or_init(|| {
+        // 1023.9 of each unit, the most digits it shows before the next.
+        let longest = (1..=4).map(|unit| 1024u64.pow(unit) * 10_239 / 10);
+        let sizes: Vec<String> = [1023]
+            .into_iter()
+            .chain(longest)
+            .map(|n| Bytes(n).to_string())
+            .collect();
+        TableColumnWidth::fitting("Size", sizes.iter().map(String::as_str))
+    })
+}
+
+fn columns() -> Vec<TableColumn> {
+    vec![
+        TableColumn {
+            label: "Name".into(),
+            width: TableColumnWidth::Flex(1),
+            sort_indicator: None,
+        },
+        TableColumn {
+            label: "Size".into(),
+            width: size_width(),
+            sort_indicator: None,
+        },
+    ]
+}
+
+fn least_width() -> i32 {
+    let icon = TextRole::Body.style().icon + space::SM;
+    SIDEBAR_WIDTH + stroke::EDGE + icon + TableColumn::least_width(&columns())
+}
 
 #[derive(Clone, Debug)]
 pub enum FileMsg {
@@ -213,21 +245,19 @@ impl FileManagerApp {
             .into()
     }
 
-    /// The folder's name and where it is.
     fn location(&self) -> Node<FileMsg> {
         Node::Padding {
             padding: EdgeInsets::symmetric(space::LG, space::SM),
-            child: Box::new(Node::VStack {
-                children: vec![
+            child: Box::new(column(
+                0,
+                vec![
                     Text::new(self.folder_name()).role(TextRole::Heading).into(),
                     Text::new(self.path.display().to_string())
                         .role(TextRole::Caption)
                         .tone(Tone::Secondary)
                         .into(),
                 ],
-                spacing: 0,
-                align: CrossAxisAlignment::Stretch,
-            }),
+            )),
         }
     }
 
@@ -237,21 +267,23 @@ impl FileManagerApp {
         } else {
             Icon::File
         };
-        let name = Node::HStack {
-            children: vec![
+        let name = row(
+            space::SM,
+            vec![
                 Node::Icon {
                     icon,
                     role: TextRole::Body,
                     tone: Tone::Secondary,
                 },
-                Text::new(entry.name.clone()).into(),
+                Node::Expand {
+                    weight: 1,
+                    child: Box::new(Text::new(entry.name.clone()).into()),
+                },
             ],
-            spacing: space::SM,
-            align: CrossAxisAlignment::Center,
-        };
+        );
         let size = match entry.folder {
             true => String::new(),
-            false => file_size(entry.size),
+            false => Bytes(entry.size).to_string(),
         };
         vec![
             name,
@@ -275,20 +307,8 @@ impl FileManagerApp {
         let mut shows = DefaultHasher::new();
         self.path.hash(&mut shows);
         Node::Table {
-            columns: vec![
-                TableColumn {
-                    label: "Name".into(),
-                    width: TableColumnWidth::Flex(1),
-                    sort_indicator: None,
-                },
-                TableColumn {
-                    label: "Size".into(),
-                    width: TableColumnWidth::Fixed(SIZE_WIDTH),
-                    sort_indicator: None,
-                },
-            ],
+            columns: columns(),
             rows: entries.iter().map(Self::row).collect(),
-            row_height: ROW_HEIGHT,
             selected: self.selected,
             on_select: Some(FileMsg::Select),
             on_activate: Some(FileMsg::Open),
@@ -298,7 +318,6 @@ impl FileManagerApp {
         }
     }
 
-    /// Why the folder could not be listed, and the way out.
     fn unreadable(&self, kind: ErrorKind) -> Node<FileMsg> {
         let name = self.folder_name();
         let (title, body) = match kind {
@@ -342,7 +361,7 @@ impl FileManagerApp {
         if let Some(entry) = self.selected.and_then(|i| entries.get(i)) {
             return match entry.folder {
                 true => format!("“{}” selected", entry.name),
-                false => format!("“{}” selected, {}", entry.name, file_size(entry.size)),
+                false => format!("“{}” selected, {}", entry.name, Bytes(entry.size)),
             };
         }
         let folders = entries.iter().filter(|e| e.folder).count();
@@ -361,59 +380,24 @@ impl FileManagerApp {
             ),
         }
     }
-
-    fn status_bar(&self) -> Node<FileMsg> {
-        Node::Background {
-            surface: Surface::Chrome,
-            child: Box::new(Node::Padding {
-                padding: EdgeInsets::symmetric(space::SM, space::XS),
-                child: Box::new(
-                    Text::new(self.status())
-                        .role(TextRole::Caption)
-                        .tone(Tone::Secondary)
-                        .into(),
-                ),
-            }),
-        }
-    }
-}
-
-/// A file's size in binary units, as the file manager lists it.
-fn file_size(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["KiB", "MiB", "GiB", "TiB"];
-    if bytes < 1024 {
-        return match bytes {
-            1 => "1 byte".into(),
-            n => format!("{n} bytes"),
-        };
-    }
-    let mut value = bytes as f64 / 1024.0;
-    let mut unit = 0;
-    while value >= 1023.95 && unit + 1 < UNITS.len() {
-        value /= 1024.0;
-        unit += 1;
-    }
-    format!("{value:.1} {}", UNITS[unit])
 }
 
 impl App for FileManagerApp {
     type Message = FileMsg;
 
     fn view(&self) -> Node<FileMsg> {
-        let main = Node::VStack {
-            children: vec![
+        let main = column(
+            0,
+            vec![
                 self.toolbar(),
                 self.location(),
                 Node::Expand {
                     weight: 1,
                     child: Box::new(self.content()),
                 },
-                Node::Divider,
-                self.status_bar(),
+                StatusBar::new(self.status()).into(),
             ],
-            spacing: 0,
-            align: CrossAxisAlignment::Stretch,
-        };
+        );
         Node::HStack {
             children: vec![
                 self.sidebar(),
@@ -451,7 +435,6 @@ impl App for FileManagerApp {
 
     fn on_key(&mut self, key: Key, modifiers: Modifiers) -> Action {
         match (key, modifiers.alt) {
-            (Key::Named(NamedKey::Enter), _) => self.open_selected(),
             (Key::Named(NamedKey::Backspace), _) | (Key::Named(NamedKey::Up), true) => self.go_up(),
             (Key::Named(NamedKey::Left), true) => self.go_back(),
             (Key::Named(NamedKey::Right), true) => self.go_forward(),
@@ -469,7 +452,9 @@ impl App for FileManagerApp {
     }
 
     fn window(&self) -> WindowSpec {
-        WindowSpec::new(720, 480)
+        let least = least_width();
+        let spec = WindowSpec::new(least.max(720), 480);
+        spec.min_size(least, spec.min_size.height)
     }
 }
 

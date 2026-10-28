@@ -1,8 +1,5 @@
-//! The dock holds to the app entries: it pins exactly the apps the root's
-//! entries name, each launching the program its entry names and drawn from
-//! its smaller icon, an entry the person adds replaces
-//! the system's with its id, and the installer's shows only on a boot from
-//! the install medium.
+//! The dock holds to the app entries: what they name, launch and show, the
+//! person's replacing the system's, and the installer's on the medium alone.
 
 use std::ffi::CString;
 use std::fs;
@@ -13,7 +10,7 @@ use slopos_abi::window::AppId;
 use slopos_slibc::ffi::syscalls::mkfifo;
 
 use slopos_userland::app_entry::{self, AppEntry};
-use slopos_userland::apps::compositor::dock::LauncherShelf;
+use slopos_userland::apps::compositor::dock::Dock;
 use slopos_userland::syscall::UserWindowInfo;
 
 const HOME: &str = "/var/tmp/dock_test";
@@ -28,17 +25,17 @@ const INSTALLED: &[(&str, &str)] = &[
     ("org.slopos.terminal", "/bin/terminal"),
 ];
 
-fn pinned(home: Option<&str>, medium: bool) -> (Vec<AppEntry>, LauncherShelf) {
+fn pinned(home: Option<&str>, medium: bool) -> (Vec<AppEntry>, Dock) {
     let entries = app_entry::read(&app_entry::shares(home), medium);
-    let mut shelf = LauncherShelf::new();
-    shelf.pin(entries.clone());
-    (entries, shelf)
+    let mut dock = Dock::new();
+    dock.pin(entries.clone());
+    (entries, dock)
 }
 
-/// The shelf pins every entry the base and `/usr/local` carry, in the order
+/// The dock pins every entry the base and `/usr/local` carry, in the order
 /// read, each launching an executable and showing an icon that decodes.
-fn the_shelf_pins_every_installed_app() -> bool {
-    let (entries, shelf) = pinned(None, false);
+fn the_dock_pins_every_installed_app() -> bool {
+    let (entries, dock) = pinned(None, false);
     let mut found: Vec<(&str, &str)> = entries
         .iter()
         .map(|e| (e.id.as_str(), e.exec.as_str()))
@@ -48,7 +45,7 @@ fn the_shelf_pins_every_installed_app() -> bool {
         eprintln!("dock_test: the entries name {found:?}, not {INSTALLED:?}");
         return false;
     }
-    let held: Vec<(&str, &str)> = shelf
+    let held: Vec<(&str, &str)> = dock
         .entries()
         .iter()
         .map(|e| (e.app_id.as_str(), e.exec.as_str()))
@@ -57,11 +54,11 @@ fn the_shelf_pins_every_installed_app() -> bool {
         .iter()
         .map(|e| (e.id.as_str(), e.exec.as_str()))
         .collect();
-    if held != read || !shelf.entries().iter().all(|e| e.pinned) {
-        eprintln!("dock_test: the shelf pins {held:?}, the entries say {read:?}");
+    if held != read || !dock.entries().iter().all(|e| e.pinned) {
+        eprintln!("dock_test: the dock pins {held:?}, the entries say {read:?}");
         return false;
     }
-    entries.iter().zip(shelf.entries()).all(|(entry, held)| {
+    entries.iter().zip(dock.entries()).all(|(entry, held)| {
         let runs = fs::metadata(&entry.exec)
             .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0);
         if !runs || !held.has_icon() {
@@ -74,7 +71,6 @@ fn the_shelf_pins_every_installed_app() -> bool {
     })
 }
 
-/// The icon `path` names, decoded, and its size.
 fn icon_size(path: &Path) -> Option<(u32, u32)> {
     let bytes = fs::read(path).ok()?;
     let icon = slopos_image::decode(&bytes, slopos_image::DecodeOptions::default()).ok()?;
@@ -87,7 +83,7 @@ fn icon_size(path: &Path) -> Option<(u32, u32)> {
 /// one whose title changes looks the same and two windows of it are one
 /// entry.
 fn every_app_is_drawn_from_its_smaller_icon() -> bool {
-    let (entries, mut shelf) = pinned(None, false);
+    let (entries, mut dock) = pinned(None, false);
     let mut held = true;
     for entry in &entries {
         let Some(icon) = entry.icon.as_deref() else {
@@ -105,7 +101,7 @@ fn every_app_is_drawn_from_its_smaller_icon() -> bool {
             held = false;
         }
     }
-    if let Some(large) = shelf.entries().iter().find(|e| e.picture().width != 64) {
+    if let Some(large) = dock.entries().iter().find(|e| e.picture().width != 64) {
         eprintln!(
             "dock_test: the dock draws {} from {} px",
             large.app_id,
@@ -121,9 +117,8 @@ fn every_app_is_drawn_from_its_smaller_icon() -> bool {
         window.title[..title.len()].copy_from_slice(title);
         window
     };
-    let drawn = |shelf: &LauncherShelf| -> Vec<(bool, bool, String, Vec<u32>)> {
-        shelf
-            .entries()
+    let drawn = |dock: &Dock| -> Vec<(bool, bool, String, Vec<u32>)> {
+        dock.entries()
             .iter()
             .filter(|e| e.app_id == "org.example.unlisted")
             .map(|e| {
@@ -138,12 +133,12 @@ fn every_app_is_drawn_from_its_smaller_icon() -> bool {
             })
             .collect()
     };
-    shelf.sync_running_apps(&[window(77, b"~/src - sh")], 1);
-    let first = drawn(&shelf);
-    shelf.sync_running_apps(&[window(77, b"vim notes"), window(78, b"vim more")], 2);
-    let renamed = drawn(&shelf);
-    shelf.sync_running_apps(&[], 0);
-    let gone = drawn(&shelf);
+    dock.sync_running_apps(&[window(77, b"~/src - sh")], 1);
+    let first = drawn(&dock);
+    dock.sync_running_apps(&[window(77, b"vim notes"), window(78, b"vim more")], 2);
+    let renamed = drawn(&dock);
+    dock.sync_running_apps(&[], 0);
+    let gone = drawn(&dock);
     let picture = |seen: &[(bool, bool, String, Vec<u32>)]| seen.first().map(|s| s.3.clone());
     let as_expected = first.len() == 1
         && first[0].0
@@ -160,6 +155,36 @@ fn every_app_is_drawn_from_its_smaller_icon() -> bool {
         held = false;
     }
     held
+}
+
+fn a_window_without_an_app_id_is_its_own_entry() -> bool {
+    let (entries, mut dock) = pinned(None, false);
+    let Some(named) = entries.first() else {
+        eprintln!("dock_test: no entry to name a window after");
+        return false;
+    };
+    let mut window = UserWindowInfo::default();
+    window.task_id = 77;
+    window.title[..named.name.len()].copy_from_slice(named.name.as_bytes());
+    for _ in 0..2 {
+        dock.sync_running_apps(&[window], 1);
+        let running: Vec<(bool, u32, &str)> = dock
+            .entries()
+            .iter()
+            .filter(|e| e.running)
+            .map(|e| (e.pinned, e.task_id, e.name.as_str()))
+            .collect();
+        if running != [(false, 77, named.name.as_str())]
+            || dock.entries().len() != entries.len() + 1
+        {
+            eprintln!(
+                "dock_test: a window titled {:?} runs {running:?}",
+                named.name
+            );
+            return false;
+        }
+    }
+    true
 }
 
 fn write(path: &str, text: &str) -> bool {
@@ -211,7 +236,7 @@ fn the_persons_entries_come_last() -> bool {
             .iter()
             .all(|(id, text)| write(&format!("{apps}/{id}.app"), text))
         && write(&format!("{apps}/README"), "id=x\nname=x\nexec=/x\n");
-    let (entries, shelf) = pinned(Some(HOME), false);
+    let (entries, dock) = pinned(Some(HOME), false);
     let _ = fs::remove_dir_all(HOME);
     if !staged {
         return false;
@@ -234,11 +259,11 @@ fn the_persons_entries_come_last() -> bool {
         eprintln!("dock_test: the person's entry read as {editor:?}");
         return false;
     }
-    let names: Vec<&str> = shelf.entries().iter().map(|e| e.name.as_str()).collect();
+    let names: Vec<&str> = dock.entries().iter().map(|e| e.name.as_str()).collect();
     let mut by_name = names.clone();
     by_name.sort_by_key(|name| name.to_lowercase());
     if names != by_name {
-        eprintln!("dock_test: the shelf is not in name order: {names:?}");
+        eprintln!("dock_test: the dock is not in name order: {names:?}");
         return false;
     }
     true
@@ -320,7 +345,7 @@ fn a_share_cannot_stall_or_swell_the_dock() -> bool {
         let _ = fs::remove_dir_all(HOME);
         return false;
     }
-    let (entries, shelf) = pinned(Some(HOME), false);
+    let (entries, dock) = pinned(Some(HOME), false);
     let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
     let refused = ["org.slopos.linked", "org.slopos.fifo", "org.slopos.big"];
     let iconless = [
@@ -335,7 +360,7 @@ fn a_share_cannot_stall_or_swell_the_dock() -> bool {
         );
         held = false;
     }
-    if let Some(shown) = shelf
+    if let Some(shown) = dock
         .entries()
         .iter()
         .find(|e| iconless.contains(&e.app_id.as_str()) && e.has_icon())
@@ -367,7 +392,7 @@ fn a_share_cannot_stall_or_swell_the_dock() -> bool {
 fn the_installer_is_pinned_from_the_medium_alone() -> bool {
     let ids = |entries: &[AppEntry]| entries.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
     let (off, _) = pinned(None, false);
-    let (on, shelf) = pinned(None, true);
+    let (on, dock) = pinned(None, true);
     let installer = on.iter().find(|e| e.id == INSTALLER);
     let mut expected = ids(&off);
     expected.push(INSTALLER.to_owned());
@@ -385,7 +410,7 @@ fn the_installer_is_pinned_from_the_medium_alone() -> bool {
     let Some(installer) = installer else {
         return false;
     };
-    let held = shelf.entries().iter().find(|e| e.app_id == INSTALLER);
+    let held = dock.entries().iter().find(|e| e.app_id == INSTALLER);
     if installer.name != "Install SlopOS"
         || installer.exec != "/bin/installer-ui"
         || !installer.medium
@@ -441,12 +466,16 @@ fn the_installer_is_pinned_from_the_medium_alone() -> bool {
 
 const CASES: &[(&str, fn() -> bool)] = &[
     (
-        "the_shelf_pins_every_installed_app",
-        the_shelf_pins_every_installed_app,
+        "the_dock_pins_every_installed_app",
+        the_dock_pins_every_installed_app,
     ),
     (
         "every_app_is_drawn_from_its_smaller_icon",
         every_app_is_drawn_from_its_smaller_icon,
+    ),
+    (
+        "a_window_without_an_app_id_is_its_own_entry",
+        a_window_without_an_app_id_is_its_own_entry,
     ),
     (
         "the_persons_entries_come_last",

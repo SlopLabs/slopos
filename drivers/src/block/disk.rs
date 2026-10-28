@@ -53,7 +53,6 @@ impl EngineDisk {
         self
     }
 
-    /// Named under `/dev/disk/by-id` as `id` says, memory allowing.
     pub fn identified(mut self, id: Option<DiskId>) -> Self {
         self.id = id.and_then(|id| KArc::try_new(id).ok());
         self

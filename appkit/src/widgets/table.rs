@@ -1,88 +1,149 @@
 use std::any::Any;
+use std::cell::Cell;
 use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
 
+use slopos_theme_core::{Icon, TextRole, space};
+
+use super::RowState;
+use super::scrollbar::Bar;
 use crate::constraints::{BoxConstraints, Rect, Size};
-use crate::event::{
-    EventPhase, EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent,
-};
+use crate::event::{EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent};
 use crate::node::{ContextMenuAt, SortIndicator, TableColumn, TableColumnWidth};
 use crate::paint::PaintContext;
+use crate::text::ui;
 use crate::traits::{
-    FocusPolicy, MeasureCtx, Role, Scrolled, Widget, WidgetCore, measure_widget, place_widget,
+    FocusPolicy, Kept, KeptAt, MeasureCtx, Role, Widget, WidgetCore, measure_widget, place_widget,
 };
 
-use slopos_theme_core::State;
+const CELL_PAD: i32 = space::SM;
+const HEADING: TextRole = TextRole::Body;
 
-const CELL_PADDING: i32 = 4;
+/// Body text's widest digit, measured over a run of each, since a lone
+/// digit's width is rounded up to a whole pixel.
+fn widest_digit() -> &'static str {
+    static DIGIT: OnceLock<String> = OnceLock::new();
+    DIGIT.get_or_init(|| {
+        let run = |digit: &String| ui::width(&digit.repeat(10), TextRole::Body);
+        let digits = (0..10).map(|digit: u8| digit.to_string());
+        digits.max_by_key(run).unwrap_or_default()
+    })
+}
 
-/// Fixed row height; only the visible row range is painted.
+fn fitting_width<'a>(heading: &str, values: impl IntoIterator<Item = &'a str>) -> i32 {
+    let arrow = HEADING.style().icon + space::XS;
+    let shape = |value: &str| value.replace(|c: char| c.is_ascii_digit(), widest_digit());
+    let widest = values
+        .into_iter()
+        .map(|value| ui::width(&shape(value), TextRole::Body))
+        .max()
+        .unwrap_or(0);
+    (ui::width(heading, HEADING) + arrow).max(widest) + 2 * CELL_PAD
+}
+
+impl TableColumnWidth {
+    /// Fixed as wide as `heading` beside a sort arrow or the widest of
+    /// `values` in body text, whichever is wider, each digit of a value
+    /// measured as the widest digit so any value of its shape fits.
+    pub fn fitting<'a>(heading: &str, values: impl IntoIterator<Item = &'a str>) -> Self {
+        Self::Fixed(fitting_width(heading, values))
+    }
+}
+
+impl TableColumn {
+    /// The least width a table of `columns` lays out at: each fixed column
+    /// whole, and each flexible one as wide as a name of a dozen letters,
+    /// beside its scrollbar.
+    pub fn least_width(columns: &[TableColumn]) -> i32 {
+        let name = "n".repeat(12);
+        let columns: i32 = columns
+            .iter()
+            .map(|column| match column.width {
+                TableColumnWidth::Fixed(px) => px,
+                TableColumnWidth::Flex(_) => fitting_width(&column.label, [name.as_str()]),
+            })
+            .sum();
+        columns + crate::style::StyleSheet::current().scrollbar_width
+    }
+}
+
+type Emit<A> = Box<dyn Fn(A) -> Box<dyn Any>>;
+
+/// Rows of cells under column headings, all one height; only the rows in
+/// view are painted.
 pub struct TableWidget {
     core: WidgetCore,
     columns: Vec<TableColumn>,
     rows: Vec<Vec<Box<dyn Widget>>>,
     row_height: i32,
     selected: Option<usize>,
-    hovered_row: Option<usize>,
-    on_select: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
-    on_activate: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
-    on_header_click: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
-    on_context_menu: Option<Box<dyn Fn(ContextMenuAt) -> Box<dyn Any>>>,
+    on_select: Option<Emit<usize>>,
+    on_activate: Option<Emit<usize>>,
+    on_header_click: Option<Emit<usize>>,
+    on_context_menu: Option<Emit<ContextMenuAt>>,
     scroll_offset: i32,
     shows: u64,
-    header_height: i32,
     col_widths: Vec<i32>,
+    headings_cut: Vec<Cell<bool>>,
     focused: bool,
-    /// A scrollbar drag is live. Internal, unlike the code surface's: this
-    /// widget scrolls itself and emits nothing, so no rebuild intervenes.
+    /// Kept here, unlike a code view's: this widget scrolls itself and emits
+    /// nothing, so no rebuild comes between a press and its moves.
     thumb_dragging: bool,
-    /// Scrollbar metrics from the last measure. Hit testing must use what
-    /// paint used, or a press lands beside the bar it is aiming at.
-    sb_width: i32,
+    bar: i32,
     thumb_min: i32,
 }
 
 impl TableWidget {
-    pub fn new(
-        columns: Vec<TableColumn>,
-        rows: Vec<Vec<Box<dyn Widget>>>,
-        row_height: i32,
-        selected: Option<usize>,
-        on_select: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
-        on_header_click: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>,
-        on_context_menu: Option<Box<dyn Fn(ContextMenuAt) -> Box<dyn Any>>>,
-    ) -> Self {
-        let col_count = columns.len();
-        #[cfg(debug_assertions)]
-        for (i, row) in rows.iter().enumerate() {
-            debug_assert_eq!(
-                row.len(),
-                col_count,
-                "Table row {} has {} cells but {} columns",
-                i,
-                row.len(),
-                col_count
-            );
-        }
+    pub fn new(columns: Vec<TableColumn>, rows: Vec<Vec<Box<dyn Widget>>>) -> Self {
+        debug_assert!(
+            rows.iter().all(|row| row.len() == columns.len()),
+            "a table row has other than one cell per column"
+        );
         Self {
             core: WidgetCore::new(),
+            col_widths: vec![0; columns.len()],
+            headings_cut: columns.iter().map(|_| Cell::new(false)).collect(),
             columns,
             rows,
-            row_height,
-            selected,
-            hovered_row: None,
-            on_select,
+            row_height: 0,
+            selected: None,
+            on_select: None,
             on_activate: None,
-            on_header_click,
-            on_context_menu,
+            on_header_click: None,
+            on_context_menu: None,
             scroll_offset: 0,
             shows: 0,
-            header_height: row_height,
-            col_widths: vec![0; col_count],
             focused: false,
             thumb_dragging: false,
-            sb_width: 8,
-            thumb_min: 20,
+            bar: 0,
+            thumb_min: 0,
         }
+    }
+
+    pub fn selected(mut self, selected: Option<usize>) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    pub fn on_select(mut self, f: Option<Emit<usize>>) -> Self {
+        self.on_select = f;
+        self
+    }
+
+    /// Emitted by Enter and by a click on the row already chosen.
+    pub fn on_activate(mut self, f: Option<Emit<usize>>) -> Self {
+        self.on_activate = f;
+        self
+    }
+
+    pub fn on_header_click(mut self, f: Option<Emit<usize>>) -> Self {
+        self.on_header_click = f;
+        self
+    }
+
+    pub fn on_context_menu(mut self, f: Option<Emit<ContextMenuAt>>) -> Self {
+        self.on_context_menu = f;
+        self
     }
 
     /// What the rows are of; see [`Node::Table`](crate::Node::Table).
@@ -91,129 +152,133 @@ impl TableWidget {
         self
     }
 
-    fn row_count(&self) -> usize {
-        self.rows.len()
+    fn header_height(&self) -> i32 {
+        self.row_height
     }
 
-    fn body_height(&self) -> i32 {
-        (self.layout_rect().height - self.header_height).max(0)
+    fn body(&self) -> Rect {
+        let rect = self.layout_rect();
+        let top = rect.y + self.header_height();
+        Rect::new(
+            rect.x,
+            top,
+            rect.width,
+            (rect.height - self.header_height()).max(0),
+        )
     }
 
-    fn total_content_height(&self) -> i32 {
-        self.row_count() as i32 * self.row_height
+    fn content_height(&self) -> i32 {
+        self.rows.len() as i32 * self.row_height
     }
 
     fn max_scroll_offset(&self) -> i32 {
-        (self.total_content_height() - self.body_height()).max(0)
+        (self.content_height() - self.body().height).max(0)
+    }
+
+    fn row_top(&self, row: usize) -> i32 {
+        self.body().y + row as i32 * self.row_height - self.scroll_offset
+    }
+
+    fn row_rect(&self, row: usize) -> Rect {
+        let rect = self.layout_rect();
+        let width = self.rows_width(rect.width, rect.height);
+        Rect::new(rect.x, self.row_top(row), width, self.row_height)
+    }
+
+    /// How wide the rows are in a table `width` by `height`: beside the
+    /// scrollbar while they overflow, so a row's focus ring shows all round.
+    fn rows_width(&self, width: i32, height: i32) -> i32 {
+        let body = height - self.header_height();
+        let overflows = body > 0 && self.content_height() > body;
+        width - if overflows { self.bar } else { 0 }
+    }
+
+    /// The row the keyboard is on: the chosen one, else the first.
+    fn cursor(&self) -> Option<usize> {
+        self.selected.or((!self.rows.is_empty()).then_some(0))
+    }
+
+    /// Where focus shows: round the cursor's row while all of it is in view,
+    /// else round the whole table.
+    fn ringed_row(&self) -> Option<usize> {
+        let body = self.body();
+        let in_view = |r: Rect| r.y >= body.y && r.y + r.height <= body.y + body.height;
+        self.cursor().filter(|&row| in_view(self.row_rect(row)))
     }
 
     fn resolve_col_widths(&mut self, available: i32) {
-        let mut fixed_total = 0i32;
-        let mut flex_total = 0u16;
-
-        for col in &self.columns {
-            match col.width {
-                TableColumnWidth::Fixed(px) => fixed_total += px,
-                TableColumnWidth::Flex(weight) => flex_total += weight,
-            }
-        }
-
-        let flex_space = (available - fixed_total).max(0);
-
-        self.col_widths.clear();
-        for col in &self.columns {
-            let w = match col.width {
+        let (fixed, flex) =
+            self.columns
+                .iter()
+                .fold((0, 0u16), |(fixed, flex), col| match col.width {
+                    TableColumnWidth::Fixed(px) => (fixed + px, flex),
+                    TableColumnWidth::Flex(weight) => (fixed, flex + weight),
+                });
+        let room = (available - fixed).max(0) as i64;
+        self.col_widths = self
+            .columns
+            .iter()
+            .map(|col| match col.width {
                 TableColumnWidth::Fixed(px) => px,
-                TableColumnWidth::Flex(weight) => {
-                    if flex_total > 0 {
-                        (flex_space as i64 * weight as i64 / flex_total as i64) as i32
-                    } else {
-                        0
-                    }
-                }
-            };
-            self.col_widths.push(w);
-        }
+                TableColumnWidth::Flex(_) if flex == 0 => 0,
+                TableColumnWidth::Flex(weight) => (room * weight as i64 / flex as i64) as i32,
+            })
+            .collect();
     }
 
     fn scroll_to_selected(&mut self) {
-        if let Some(sel) = self.selected {
-            let item_top = sel as i32 * self.row_height;
-            let item_bottom = item_top + self.row_height;
-            let body_h = self.body_height();
-
-            if item_top < self.scroll_offset {
-                self.scroll_offset = item_top;
-            } else if item_bottom > self.scroll_offset + body_h {
-                self.scroll_offset = item_bottom - body_h;
-            }
-
-            self.scroll_offset = self.scroll_offset.clamp(0, self.max_scroll_offset());
+        let Some(row) = self.selected else {
+            return;
+        };
+        let top = row as i32 * self.row_height;
+        let bottom = top + self.row_height;
+        let body = self.body().height;
+        if top < self.scroll_offset {
+            self.scroll_offset = top;
+        } else if bottom > self.scroll_offset + body {
+            self.scroll_offset = bottom - body;
         }
+        self.scroll_offset = self.scroll_offset.clamp(0, self.max_scroll_offset());
     }
 
-    /// Column x-offset relative to `rect.x`.
-    fn col_x_offset(&self, col_idx: usize) -> i32 {
-        self.col_widths[..col_idx].iter().sum()
-    }
-
-    /// Column containing window-space `x`.
     fn column_at_x(&self, x: i32) -> Option<usize> {
-        let rel_x = x - self.layout_rect().x;
-        let mut acc = 0;
-        for (i, &w) in self.col_widths.iter().enumerate() {
-            if rel_x >= acc && rel_x < acc + w {
-                return Some(i);
-            }
-            acc += w;
-        }
-        None
+        let mut left = self.layout_rect().x;
+        self.col_widths.iter().position(|&w| {
+            left += w;
+            x >= left - w && x < left
+        })
     }
 
     fn visible_range(&self) -> (usize, usize) {
         if self.row_height <= 0 {
             return (0, 0);
         }
-        let body_h = self.body_height();
         let start = (self.scroll_offset / self.row_height) as usize;
-        let end = ((self.scroll_offset + body_h) / self.row_height + 1).min(self.row_count() as i32)
-            as usize;
-        (start, end)
+        let end = (self.scroll_offset + self.body().height) / self.row_height + 1;
+        (start, (end as usize).min(self.rows.len()))
     }
 
-    /// Rows visible in the body, which is the PageUp/PageDown step.
+    /// Rows in view, which is how far PageUp and PageDown move.
     fn page_size(&self) -> usize {
-        if self.row_height <= 0 {
-            return 1;
-        }
-        (self.body_height() / self.row_height).max(1) as usize
+        (self.body().height / self.row_height.max(1)).max(1) as usize
     }
 
-    /// Row index at window-space `y`, or `None` outside the body rows.
     fn row_at_y(&self, y: i32) -> Option<usize> {
-        if self.row_height <= 0 {
+        let body = self.body();
+        if self.row_height <= 0 || y < body.y || y >= body.y + body.height {
             return None;
         }
-        let body_top = self.layout_rect().y + self.header_height;
-        if y < body_top {
-            return None;
-        }
-        let index = ((y - body_top + self.scroll_offset) / self.row_height) as usize;
-        (index < self.row_count()).then_some(index)
+        let index = ((y - body.y + self.scroll_offset) / self.row_height) as usize;
+        (index < self.rows.len()).then_some(index)
     }
 
-    /// Emitted by Enter and by a click on the row already chosen.
-    pub fn activating(mut self, on_activate: Option<Box<dyn Fn(usize) -> Box<dyn Any>>>) -> Self {
-        self.on_activate = on_activate;
-        self
-    }
-
-    /// Select `row` and emit, skipping the emit when it is already selected so
-    /// a repeated key or click does not churn the app's state.
+    /// Emits only a change, so a repeated key or click does not churn the
+    /// app's state.
     fn select_row(&mut self, row: usize, sink: &mut MessageSink) {
         let changed = self.selected != Some(row);
         self.selected = Some(row);
         self.scroll_to_selected();
+        self.place_cells();
         if let Some(cb) = self.on_select.as_ref().filter(|_| changed) {
             sink.emit_raw(cb(row));
         }
@@ -229,72 +294,26 @@ impl TableWidget {
         }
     }
 
-    /// Bottom-left corner of `row` in window coordinates, clamped into the body
-    /// so a partially-scrolled row still anchors a popup somewhere visible.
+    /// Where a menu for `row` opens: its bottom-left, kept in the body.
     fn row_anchor(&self, row: usize) -> (i32, i32) {
-        let rect = self.layout_rect();
-        let body_top = rect.y + self.header_height;
-        let y = body_top + row as i32 * self.row_height - self.scroll_offset + self.row_height;
-        let bottom = rect.y + rect.height;
-        (rect.x, y.clamp(body_top, bottom))
+        let body = self.body();
+        let y = self.row_top(row) + self.row_height;
+        (body.x, y.clamp(body.y, body.y + body.height))
     }
 
-    /// `(track, thumb)` for the vertical scrollbar, or `None` when every row
-    /// fits. One source for what is drawn and what a press lands on.
-    fn scrollbar_rects(&self) -> Option<(Rect, Rect)> {
-        let total_h = self.total_content_height();
-        let body_h = self.body_height();
-        if total_h <= body_h || body_h <= 0 {
-            return None;
-        }
-        let rect = self.layout_rect();
-        let sb_width = self.sb_width;
-        let track = Rect::new(
-            rect.x + rect.width - sb_width,
-            rect.y + self.header_height,
-            sb_width,
-            body_h,
-        );
-        let max_off = self.max_scroll_offset();
-        let thumb_size = if max_off > 0 {
-            ((body_h as i64 * track.height as i64) / total_h as i64) as i32
-        } else {
-            track.height
-        }
-        .max(self.thumb_min)
-        .min(track.height);
-        let thumb_pos = if max_off > 0 {
-            ((self.scroll_offset as i64 * (track.height - thumb_size) as i64) / max_off as i64)
-                as i32
-        } else {
-            0
-        };
-        let thumb = Rect::new(track.x, track.y + thumb_pos, sb_width, thumb_size);
-        Some((track, thumb))
+    fn scrollbar(&self) -> Option<Bar> {
+        let body = self.body();
+        let total = self.content_height() as i64;
+        let (shown, offset) = (body.height as i64, self.scroll_offset as i64);
+        Bar::needed(body, self.bar, self.thumb_min, shown, total, offset)
     }
 
-    /// Whether a point is on the scrollbar's column.
-    fn on_scrollbar(&self, x: i32, y: i32) -> bool {
-        self.scrollbar_rects()
-            .is_some_and(|(track, _)| x >= track.x && y >= track.y && y < track.y + track.height)
-    }
-
-    /// Scrolls so the thumb's middle sits under `y`. True when a drag is live.
-    fn scroll_to_thumb(&mut self, y: i32) -> bool {
-        let Some((track, thumb)) = self.scrollbar_rects() else {
-            return false;
-        };
-        let usable = track.height - thumb.height;
-        if usable <= 0 {
-            return false;
-        }
-        let top = (y - track.y - thumb.height / 2).clamp(0, usable);
-        let offset = ((top as i64 * self.max_scroll_offset() as i64) / usable as i64) as i32;
+    fn scroll_to_thumb(&mut self, bar: Bar, y: i32) {
+        let offset = (bar.offset_at(y) as i32).clamp(0, self.max_scroll_offset());
         if offset != self.scroll_offset {
-            self.scroll_offset = offset.clamp(0, self.max_scroll_offset());
+            self.scroll_offset = offset;
             self.place_cells();
         }
-        true
     }
 
     fn emit_context_menu(&self, row: usize, x: i32, y: i32, sink: &mut MessageSink) -> bool {
@@ -305,6 +324,64 @@ impl TableWidget {
             }
             None => false,
         }
+    }
+
+    fn place_cells(&mut self) {
+        let left = self.layout_rect().x;
+        let top = self.row_top(0);
+        for (index, row) in self.rows.iter_mut().enumerate() {
+            let y = top + index as i32 * self.row_height;
+            let mut x = left;
+            for (cell, &w) in row.iter_mut().zip(&self.col_widths) {
+                let at = Rect::new(x + CELL_PAD, y, (w - CELL_PAD * 2).max(0), self.row_height);
+                place_widget(cell.as_mut(), at);
+                x += w;
+            }
+        }
+    }
+
+    /// Answers whether the label was cut short.
+    fn paint_heading(&self, ctx: &mut PaintContext, col: &TableColumn, x: i32, width: i32) -> bool {
+        let theme = ctx.theme();
+        let top = ui::centred_top(self.layout_rect().y, self.header_height(), HEADING);
+        let icon = HEADING.style().icon;
+        let sort = col.sort_indicator.map(|sort| match sort {
+            SortIndicator::Ascending => Icon::ChevronUp,
+            SortIndicator::Descending => Icon::ChevronDown,
+        });
+        let room = width - CELL_PAD * 2 - sort.map_or(0, |_| icon + space::XS);
+        let x = x + CELL_PAD;
+        let cut = ctx.draw_text_fitted(x, top, &col.label, HEADING, room, theme.text);
+        if let Some(sort) = sort {
+            let after = x + ui::elided_width(&col.label, HEADING, room) + space::XS;
+            let y = self.layout_rect().y + (self.header_height() - icon) / 2;
+            ctx.draw_icon(sort, after, y, icon, theme.text_secondary);
+        }
+        cut
+    }
+
+    fn key(&mut self, key: Key, sink: &mut MessageSink) -> EventResponse {
+        let last = self.rows.len() - 1;
+        let target = match (key, self.selected) {
+            (Key::Named(NamedKey::Up), Some(0)) => return EventResponse::Ignored,
+            (Key::Named(NamedKey::Up), Some(row)) => row - 1,
+            (Key::Named(NamedKey::Down), Some(row)) if row >= last => {
+                return EventResponse::Ignored;
+            }
+            (Key::Named(NamedKey::Down), Some(row)) => row + 1,
+            (Key::Named(NamedKey::Up | NamedKey::Down | NamedKey::Home), _) => 0,
+            (Key::Named(NamedKey::End), _) => last,
+            (Key::Named(NamedKey::PageUp), row) => {
+                row.unwrap_or(0).saturating_sub(self.page_size())
+            }
+            (Key::Named(NamedKey::PageDown), row) => {
+                (row.unwrap_or(0) + self.page_size()).min(last)
+            }
+            (Key::Named(NamedKey::Enter), Some(row)) => return self.activate(row, sink),
+            _ => return EventResponse::Ignored,
+        };
+        self.select_row(target, sink);
+        EventResponse::Consumed
     }
 }
 
@@ -317,27 +394,22 @@ impl Widget for TableWidget {
     }
 
     fn measure(&mut self, constraints: BoxConstraints, ctx: &mut MeasureCtx) -> Size {
-        let w = constraints.max_width;
-        let h = constraints.max_height;
-        self.resolve_col_widths(w);
-        self.sb_width = ctx.style.scrollbar_width;
+        self.row_height = ctx.style.row_height;
+        self.bar = ctx.style.scrollbar_width;
         self.thumb_min = ctx.style.scrollbar_thumb_min;
-
-        // Cells are sized by their column, so layout stays pure placement.
+        let size = constraints.max_size();
+        self.resolve_col_widths(self.rows_width(size.width, size.height));
         for row in &mut self.rows {
-            for (col_idx, cell) in row.iter_mut().enumerate() {
-                let cw = self.col_widths.get(col_idx).copied().unwrap_or(0);
-                let cell_w = (cw - CELL_PADDING * 2).max(0);
-                let cell_constraints = BoxConstraints::tight(Size::new(cell_w, self.row_height));
-                measure_widget(cell.as_mut(), cell_constraints, ctx);
+            for (cell, &w) in row.iter_mut().zip(&self.col_widths) {
+                let size = Size::new((w - CELL_PAD * 2).max(0), self.row_height);
+                measure_widget(cell.as_mut(), BoxConstraints::tight(size), ctx);
             }
         }
-
-        Size::new(w, h)
+        constraints.max_size()
     }
 
     fn layout(&mut self, rect: Rect) {
-        self.resolve_col_widths(rect.width);
+        self.resolve_col_widths(self.rows_width(rect.width, rect.height));
         self.scroll_offset = self.scroll_offset.clamp(0, self.max_scroll_offset());
         self.place_cells();
     }
@@ -345,139 +417,73 @@ impl Widget for TableWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         let theme = ctx.theme();
         let rect = self.layout_rect();
+        let header = self.header_height();
 
-        ctx.fill_rect(
-            rect.x,
-            rect.y,
-            rect.width,
-            self.header_height,
-            theme.surface_raised,
-        );
-
-        let text_y = rect.y + (self.header_height - ctx.text_height()) / 2;
-        let mut hx = rect.x;
-        for (i, col) in self.columns.iter().enumerate() {
-            let cw = self.col_widths.get(i).copied().unwrap_or(0);
-            let label = match col.sort_indicator {
-                Some(SortIndicator::Ascending) => {
-                    let mut s = col.label.clone();
-                    s.push_str(" ^");
-                    s
-                }
-                Some(SortIndicator::Descending) => {
-                    let mut s = col.label.clone();
-                    s.push_str(" v");
-                    s
-                }
-                None => col.label.clone(),
-            };
-            ctx.draw_text_transparent(hx + CELL_PADDING, text_y, &label, theme.text);
-            hx += cw;
+        ctx.fill_rect(rect.x, rect.y, rect.width, header, theme.surface_raised);
+        let mut x = rect.x;
+        let headings = self.columns.iter().zip(&self.col_widths);
+        for ((col, &w), cut) in headings.zip(&self.headings_cut) {
+            cut.set(self.paint_heading(ctx, col, x, w));
+            x += w;
         }
+        ctx.fill_rect(rect.x, rect.y + header - 1, rect.width, 1, theme.border);
 
-        ctx.fill_rect(
-            rect.x,
-            rect.y + self.header_height - 1,
-            rect.width,
-            1,
-            theme.border,
-        );
-
-        let body_rect = Rect::new(
-            rect.x,
-            rect.y + self.header_height,
-            rect.width,
-            self.body_height(),
-        );
-        let (vis_start, vis_end) = self.visible_range();
-
-        ctx.with_viewport(body_rect, |ctx| {
-            for i in vis_start..vis_end.min(self.rows.len()) {
-                let y =
-                    rect.y + self.header_height + i as i32 * self.row_height - self.scroll_offset;
-
-                ctx.fill_rect(rect.x, y, rect.width, self.row_height, theme.surface);
-                let wash = if self.selected == Some(i) {
-                    Some(theme.selection)
-                } else if self.hovered_row == Some(i) {
-                    Some(theme.overlay(State::Hover))
-                } else {
-                    None
+        let (first, end) = self.visible_range();
+        let ringed = self.ringed_row();
+        ctx.with_viewport(self.body(), |ctx| {
+            for i in first..end {
+                let row = self.row_rect(i);
+                ctx.fill_rect(row.x, row.y, row.width, row.height, theme.surface);
+                let state = RowState {
+                    selected: self.selected == Some(i),
+                    hovered: ctx.lit(self.id()) == Some(i),
+                    focused: self.focused,
+                    cursor: ringed == Some(i),
                 };
-                if let Some(wash) = wash {
-                    ctx.fill_rect_blended(rect.x, y, rect.width, self.row_height, wash);
-                }
-                if self.selected == Some(i) {
-                    super::selected_edge(ctx, rect.x, y, self.row_height, self.focused);
-                }
-
+                super::paint_row(ctx, row, state);
                 for cell in &self.rows[i] {
                     cell.paint(ctx);
                 }
             }
         });
 
-        if let Some((track, thumb)) = self.scrollbar_rects() {
-            ctx.fill_rect(
-                track.x,
-                track.y,
-                track.width,
-                track.height,
-                theme.surface_sunken,
-            );
-            ctx.fill_rect(
-                thumb.x,
-                thumb.y,
-                thumb.width,
-                thumb.height,
-                theme.border_strong,
-            );
+        if let Some(bar) = self.scrollbar() {
+            bar.paint(ctx, self.id(), self.thumb_dragging);
         }
-
-        if self.focused {
-            ctx.draw_focus_ring(rect);
+        if self.focused && ringed.is_none() {
+            ctx.draw_inner_focus_ring(rect);
         }
     }
 
-    fn event(
-        &mut self,
-        event: &WidgetEvent,
-        phase: EventPhase,
-        sink: &mut MessageSink,
-    ) -> EventResponse {
-        if phase != EventPhase::Target && phase != EventPhase::Bubble {
-            return EventResponse::Ignored;
-        }
-
+    fn event(&mut self, event: &WidgetEvent, sink: &mut MessageSink) -> EventResponse {
         match event {
             WidgetEvent::PointerDown { x, y, button, .. } => {
                 let rect = self.layout_rect();
                 if !rect.contains(*x, *y) {
                     return EventResponse::Ignored;
                 }
-                // The scrollbar first: a press on it scrolls rather than
-                // selecting whatever row is behind it.
-                if *button == PointerButton::Left && self.on_scrollbar(*x, *y) {
-                    self.thumb_dragging = self.scroll_to_thumb(*y);
-                    return EventResponse::CapturePointer;
-                }
-                // A secondary click on the header addresses no row, so it opens nothing.
-                if *y < rect.y + self.header_height {
+                let bar = self.scrollbar().filter(|bar| bar.grabs(*x, *y));
+                if let Some(bar) = bar {
                     if *button != PointerButton::Left {
                         return EventResponse::Ignored;
                     }
-                    if let Some(cb) = &self.on_header_click {
-                        if let Some(col) = self.column_at_x(*x) {
-                            sink.emit_raw(cb(col));
-                        }
+                    self.thumb_dragging = true;
+                    self.scroll_to_thumb(bar, *y);
+                    return EventResponse::Consumed;
+                }
+                if *y < rect.y + self.header_height() {
+                    // A secondary click on a heading addresses no row.
+                    if *button != PointerButton::Left {
+                        return EventResponse::Ignored;
+                    }
+                    if let (Some(cb), Some(col)) = (&self.on_header_click, self.column_at_x(*x)) {
+                        sink.emit_raw(cb(col));
                     }
                     return EventResponse::Consumed;
                 }
-
                 let Some(index) = self.row_at_y(*y) else {
                     return EventResponse::Ignored;
                 };
-
                 match button {
                     PointerButton::Left if self.selected == Some(index) => {
                         self.activate(index, sink);
@@ -487,14 +493,13 @@ impl Widget for TableWidget {
                         self.select_row(index, sink);
                         EventResponse::Consumed
                     }
-                    // Secondary click selects first: the menu that opens acts on
-                    // the selection, so the two must never disagree.
+                    // Selects first: the menu acts on the selection, so the
+                    // two must never disagree.
                     PointerButton::Right => {
                         self.select_row(index, sink);
-                        if self.emit_context_menu(index, *x, *y, sink) {
-                            EventResponse::Consumed
-                        } else {
-                            EventResponse::Ignored
+                        match self.emit_context_menu(index, *x, *y, sink) {
+                            true => EventResponse::Consumed,
+                            false => EventResponse::Ignored,
                         }
                     }
                     PointerButton::Middle => EventResponse::Ignored,
@@ -503,130 +508,42 @@ impl Widget for TableWidget {
 
             WidgetEvent::PointerUp { .. } if self.thumb_dragging => {
                 self.thumb_dragging = false;
-                EventResponse::ReleasePointer
+                EventResponse::Consumed
             }
 
-            WidgetEvent::PointerMove { x: _, y } => {
-                if self.thumb_dragging {
-                    self.scroll_to_thumb(*y);
-                    return EventResponse::Consumed;
+            WidgetEvent::PointerMove { y, .. } if self.thumb_dragging => {
+                if let Some(bar) = self.scrollbar() {
+                    self.scroll_to_thumb(bar, *y);
                 }
-                let body_top = self.layout_rect().y + self.header_height;
-                let old_hover = self.hovered_row;
-                if *y >= body_top && self.row_height > 0 {
-                    let relative_y = *y - body_top + self.scroll_offset;
-                    let index = (relative_y / self.row_height) as usize;
-                    self.hovered_row = if index < self.row_count() {
-                        Some(index)
-                    } else {
-                        None
-                    };
-                } else {
-                    self.hovered_row = None;
-                }
-                if self.hovered_row != old_hover {
-                    EventResponse::Consumed
-                } else {
-                    EventResponse::Ignored
-                }
-            }
-
-            WidgetEvent::PointerLeave => {
-                if self.hovered_row.is_some() {
-                    self.hovered_row = None;
-                    EventResponse::Consumed
-                } else {
-                    EventResponse::Ignored
-                }
+                EventResponse::Consumed
             }
 
             WidgetEvent::Scroll { delta_y, .. } => {
-                if *delta_y == 0 {
+                let old = self.scroll_offset;
+                self.scroll_offset = (old + *delta_y).clamp(0, self.max_scroll_offset());
+                if self.scroll_offset == old {
                     return EventResponse::Ignored;
                 }
-                let old = self.scroll_offset;
-                self.scroll_offset =
-                    (self.scroll_offset + *delta_y).clamp(0, self.max_scroll_offset());
-
-                if self.scroll_offset != old {
-                    self.place_cells();
-                    EventResponse::Consumed
-                } else {
-                    EventResponse::Ignored
-                }
+                self.place_cells();
+                EventResponse::Consumed
             }
 
-            // Only when this widget holds the keyboard focus: a key is offered
-            // to every widget in turn until one consumes, so answering one
-            // unfocused takes it from whatever the user was actually aiming at.
-            WidgetEvent::KeyDown { key, modifiers, .. } if self.focused && !modifiers.alt => {
-                let rc = self.row_count();
-                if rc == 0 {
-                    return EventResponse::Ignored;
-                }
-
-                // The keyboard equivalents of a secondary click. Shift+F10 is
-                // the fallback for keyboards with no dedicated Menu key.
-                let context_key = matches!(key, Key::Named(NamedKey::Menu))
+            WidgetEvent::KeyDown { key, modifiers, .. }
+                if self.focused && !modifiers.alt && !self.rows.is_empty() =>
+            {
+                // Shift+F10 stands in for a keyboard without a Menu key.
+                let menu_key = matches!(key, Key::Named(NamedKey::Menu))
                     || (matches!(key, Key::Named(NamedKey::F10)) && modifiers.shift);
-                if context_key {
-                    let Some(row) = self.selected else {
-                        return EventResponse::Ignored;
-                    };
-                    let (ax, ay) = self.row_anchor(row);
-                    return if self.emit_context_menu(row, ax, ay, sink) {
-                        EventResponse::Consumed
-                    } else {
-                        EventResponse::Ignored
-                    };
+                if !menu_key {
+                    return self.key(*key, sink);
                 }
-
-                match key {
-                    Key::Named(NamedKey::Up) => match self.selected {
-                        Some(0) => EventResponse::Ignored,
-                        Some(sel) => {
-                            self.select_row(sel - 1, sink);
-                            EventResponse::Consumed
-                        }
-                        None => {
-                            self.select_row(0, sink);
-                            EventResponse::Consumed
-                        }
-                    },
-                    Key::Named(NamedKey::Down) => match self.selected {
-                        Some(sel) if sel + 1 >= rc => EventResponse::Ignored,
-                        Some(sel) => {
-                            self.select_row(sel + 1, sink);
-                            EventResponse::Consumed
-                        }
-                        None => {
-                            self.select_row(0, sink);
-                            EventResponse::Consumed
-                        }
-                    },
-                    Key::Named(NamedKey::Home) => {
-                        self.select_row(0, sink);
-                        EventResponse::Consumed
-                    }
-                    Key::Named(NamedKey::End) => {
-                        self.select_row(rc - 1, sink);
-                        EventResponse::Consumed
-                    }
-                    Key::Named(NamedKey::PageUp) => {
-                        let sel = self.selected.unwrap_or(0);
-                        self.select_row(sel.saturating_sub(self.page_size()), sink);
-                        EventResponse::Consumed
-                    }
-                    Key::Named(NamedKey::PageDown) => {
-                        let sel = self.selected.unwrap_or(0);
-                        self.select_row((sel + self.page_size()).min(rc - 1), sink);
-                        EventResponse::Consumed
-                    }
-                    Key::Named(NamedKey::Enter) => match self.selected {
-                        Some(row) => self.activate(row, sink),
-                        None => EventResponse::Ignored,
-                    },
-                    _ => EventResponse::Ignored,
+                let Some(row) = self.selected else {
+                    return EventResponse::Ignored;
+                };
+                let (ax, ay) = self.row_anchor(row);
+                match self.emit_context_menu(row, ax, ay, sink) {
+                    true => EventResponse::Consumed,
+                    false => EventResponse::Ignored,
                 }
             }
 
@@ -647,69 +564,53 @@ impl Widget for TableWidget {
         Role::List
     }
 
+    fn hover_part(&self, x: i32, y: i32) -> Option<usize> {
+        if let Some(part) = self.scrollbar().and_then(|bar| bar.hover(x, y)) {
+            return Some(part);
+        }
+        self.row_at_y(y)
+    }
+
     fn focus_policy(&self) -> FocusPolicy {
         FocusPolicy::StrongFocus
     }
 
-    /// The chosen row, as far as the body shows it.
     fn focus_rect(&self) -> Rect {
-        let rect = self.layout_rect();
-        let Some(row) = self.selected else {
-            return rect;
-        };
-        let (x, bottom) = self.row_anchor(row);
-        let top = (bottom - self.row_height).max(rect.y + self.header_height);
-        Rect::new(x, top, rect.width, bottom - top)
+        match self.ringed_row() {
+            Some(row) => self.row_rect(row),
+            None => self.layout_rect(),
+        }
     }
 
     fn tooltip(&self, x: i32, y: i32) -> Option<&str> {
-        if y < self.layout_rect().y + self.header_height {
-            return None;
+        if y < self.body().y {
+            let col = self.column_at_x(x)?;
+            return self.headings_cut[col]
+                .get()
+                .then_some(self.columns[col].label.as_str());
         }
-        let mut cells = self.rows.iter().flatten();
-        cells
-            .find(|cell| cell.layout_rect().contains(x, y))?
-            .tooltip(x, y)
+        self.rows
+            .iter()
+            .flatten()
+            .find_map(|cell| crate::tooltip::answer(cell.as_ref(), x, y))
+            .flatten()
     }
 
-    fn kept_scroll(&self) -> Option<Scrolled> {
+    fn kept(&self) -> Option<Kept> {
         let mut shows = std::hash::DefaultHasher::new();
         for column in &self.columns {
             column.label.hash(&mut shows);
         }
         self.shows.hash(&mut shows);
-        Some(Scrolled {
+        Some(Kept {
             shows: shows.finish(),
-            offset: (0, self.scroll_offset),
+            at: KeptAt::Scroll(self.scroll_offset),
         })
     }
 
-    fn keep_scroll(&mut self, (_, y): (i32, i32)) {
-        self.scroll_offset = y;
-    }
-}
-
-impl TableWidget {
-    /// The single place a cell's rect is decided.
-    fn place_cells(&mut self) {
-        let rect = self.layout_rect();
-        for (row_idx, row) in self.rows.iter_mut().enumerate() {
-            let y =
-                rect.y + self.header_height + row_idx as i32 * self.row_height - self.scroll_offset;
-            let mut col_x = rect.x;
-            for (col_idx, cell) in row.iter_mut().enumerate() {
-                let cw = self.col_widths.get(col_idx).copied().unwrap_or(0);
-                place_widget(
-                    cell.as_mut(),
-                    Rect::new(
-                        col_x + CELL_PADDING,
-                        y,
-                        (cw - CELL_PADDING * 2).max(0),
-                        self.row_height,
-                    ),
-                );
-                col_x += cw;
-            }
+    fn keep(&mut self, at: KeptAt) {
+        if let KeptAt::Scroll(y) = at {
+            self.scroll_offset = y;
         }
     }
 }

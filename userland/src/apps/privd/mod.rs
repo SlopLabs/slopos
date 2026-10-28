@@ -8,8 +8,7 @@
 //! uid, a pidfd and the program; who that uid is, the accounts record says
 //! as the request comes. Every failure on the way is a denial, and a
 //! requester whose process has exited is refused, before consent and after.
-//! A password typed in the dialog is checked by `/sbin/authcheck`, never
-//! here.
+//! A password is checked by `/sbin/authcheck`, never here.
 //!
 //! `SIGHUP` has it read the extensions' actions again, as init asks when they
 //! change; a request reads the policy as it stands when the request comes.
@@ -49,8 +48,8 @@ use slopos_abi::syscall::{
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_extension_core::declare::mount_point;
 use slopos_priv_core::consent::{
-    Ask, Dialog, EXPIRY_MS, Kind, Refusal, Secret, WRONG_PASSWORD, icon_path, named_extension,
-    valid_app,
+    Ask, EXPIRY_MS, Kind, Refusal, Secret, WRONG_PASSWORD, icon_path, named_extension,
+    password_for, valid_app,
 };
 use slopos_priv_core::policy::{Principal, REMOTED};
 use slopos_priv_core::sessions::LINKS;
@@ -71,11 +70,10 @@ use crate::syscall::process::{self, Endowment, WaitStatus};
 use crate::syscall::{OwnedFd, RawFd, SyscallError, fs, net, pidfd};
 use crate::{app_entry, init_control};
 
-/// Init's readiness notifier is fd 3. An init that keeps one desktop hands
-/// privd its one link at `CONSENT_FD`; one that keeps sessions leaves that
-/// empty, so a privd of an older base asks nobody on a screen that may be
-/// anyone's, and hands consent link `n` at `LINKS_FD + n` and past them the
-/// pair a privd started with [`SESSIONS_ARG`] hears the table on. A
+/// Init's readiness notifier is fd 3. A privd started with [`SESSIONS_ARG`]
+/// finds consent link `n` at `LINKS_FD + n` and the session table past them;
+/// one started without it takes `CONSENT_FD`, where an init that keeps one
+/// desktop hands its one link and one that keeps sessions hands nothing. A
 /// compositor holds its own link at `CONSENT_FD`.
 pub const CONSENT_FD: RawFd = 4;
 pub const LINKS_FD: RawFd = CONSENT_FD + 1;
@@ -101,14 +99,12 @@ const DEFAULTED: u64 =
 
 type Key = (u32, Option<String>);
 
-/// A connection's place among those privd serves.
 struct Admitted {
     daemon: &'static Daemon,
     key: Key,
     pooled: bool,
 }
 
-/// Where an extension's action was read from.
 struct Origin {
     action: String,
     extension: String,
@@ -116,8 +112,6 @@ struct Origin {
     login: u32,
 }
 
-/// The base's actions and the running extensions', and where each of the
-/// latter was read from.
 struct Loaded {
     policy: Policy,
     origins: Vec<Origin>,
@@ -127,7 +121,6 @@ struct Daemon {
     base: Result<Policy, String>,
     loaded: Mutex<Result<Arc<Loaded>, String>>,
     paired: bool,
-    /// One per consent link, by its number.
     consent: Vec<Broker>,
     seen: &'static Seen,
     running: Mutex<Vec<String>>,
@@ -151,7 +144,6 @@ impl Daemon {
             .clone()
     }
 
-    /// Read the extensions' actions again, the base's kept as read at start.
     fn reload(&self) {
         let fresh = self
             .base
@@ -177,9 +169,7 @@ static DAEMON: OnceLock<Daemon> = OnceLock::new();
 
 pub(super) static DRAINING: AtomicBool = AtomicBool::new(false);
 static RELOAD: AtomicBool = AtomicBool::new(false);
-/// Requests between being read and being answered.
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
-/// The write end of the pipe the accept loop polls beside the listener.
 static WAKE: AtomicI32 = AtomicI32::new(-1);
 
 extern "C" fn drain(_: i32) {
@@ -360,9 +350,8 @@ fn init_channel(at: RawFd) -> Option<OwnedFd> {
     from_init.then_some(fd)
 }
 
-/// The base's policy as it stands on this boot, refused whole when a
-/// principal of any action names a dynamically linked base program: the
-/// loader would take a library from outside the base for it while its
+/// Refused whole when a principal names a dynamically linked base program:
+/// the loader would take a library from outside the base for it while its
 /// identity still read as the base's.
 fn base_policy() -> Result<Policy, String> {
     let policy = crate::privd::whole_policy()?;
@@ -372,9 +361,8 @@ fn base_policy() -> Result<Policy, String> {
     Ok(policy.for_boot(crate::privd::on_the_medium()))
 }
 
-/// `policy` with the running extensions' actions beside it, each refused
-/// alone. An extension's own program stands as a principal only while it
-/// maps nothing from outside the base and its activation.
+/// An extension's own program needs no check here: it stands as a principal
+/// only while it maps nothing from outside the base and its activation.
 fn with_extensions(mut policy: Policy) -> Loaded {
     let mut origins = Vec::new();
     let actions = crate::activation::actions().unwrap_or_else(|why| {
@@ -446,7 +434,6 @@ struct Peer {
     pidfd: OwnedFd,
 }
 
-/// A program as the kernel attests it.
 #[derive(Clone, PartialEq, Eq)]
 enum Attested {
     Base(String),
@@ -469,7 +456,6 @@ fn fault(said: &str, why: impl std::fmt::Display) -> Reply {
     Reply::denied(said)
 }
 
-/// What the peer at `fd` runs now.
 fn attested(fd: &OwnedFd) -> Result<Attested, String> {
     // Label first: a program that stops holding never holds again, so one
     // that lapses between the two reads answers no path.
@@ -543,8 +529,6 @@ struct Conn {
     /// A request that came while another was served: a connection several
     /// processes inherited is served one request after another.
     waiting: Option<Parked>,
-    /// What the requester's person typed at its terminal, for the request
-    /// that asked.
     secret: Option<(u64, Secret)>,
     open: bool,
 }
@@ -556,9 +540,8 @@ struct Parked {
 }
 
 impl Conn {
-    /// Read what has arrived, keeping the descriptors that came with it, and
-    /// first wait for something to arrive when `wait`. `false` once the
-    /// requester has gone or sent descriptors no request carries.
+    /// `false` once the requester has gone or sent descriptors no request
+    /// carries.
     fn fill(&mut self, wait: bool) -> bool {
         let mut buf = [0u8; 4096];
         loop {
@@ -589,8 +572,7 @@ impl Conn {
         }
     }
 
-    /// The next request, its descriptors, and whether its requester withdrew
-    /// it while it waited; `None` at end of stream.
+    /// The `bool` says whether its requester withdrew it while it waited.
     fn next_request(&mut self) -> Result<Option<(Request, Vec<OwnedFd>, bool)>, String> {
         loop {
             let (payload, withdrawn) = match self.waiting.take() {
@@ -621,8 +603,8 @@ impl Conn {
         }
     }
 
-    /// Take what arrived while request `id` is served, giving the signals
-    /// sent for it; `None` once the requester has left or broken the protocol.
+    /// The signals sent for request `id`; `None` once the requester has left
+    /// or broken the protocol.
     fn signals(&mut self, id: u64) -> Option<Vec<u8>> {
         if !self.open || !self.fill(false) {
             return None;
@@ -673,9 +655,7 @@ impl Conn {
         }
     }
 
-    /// What the person typed at the requester's terminal for request `id`
-    /// once privd asked with `prompt`, a [`Reply::Prompt`], waiting as long
-    /// as the dialog would.
+    /// Waits as long as the dialog would.
     fn typed(&mut self, peer: &Peer, id: u64, prompt: Reply) -> Result<Secret, Reply> {
         self.secret = None;
         self.reply(&prompt, id);
@@ -819,7 +799,6 @@ fn handle(
     conn.reply(&reply, request.id);
 }
 
-/// A request waiting on the person at the machine.
 struct Pending<'a> {
     peer: &'a Peer,
     conn: &'a mut Conn,
@@ -960,7 +939,7 @@ fn run(
                     let runs_it = origin
                         .map(|o| named_extension(&o.extension))
                         .filter(|runs_it| ask.app.as_ref() != Some(runs_it));
-                    let headline = Dialog::new(ask).headline();
+                    let headline = ask.headline();
                     let about = match runs_it {
                         Some(runs_it) => format!("{headline} {runs_it} runs it."),
                         None => headline,
@@ -1041,17 +1020,14 @@ fn ask_about(
         app,
         icon,
         detail: action.detail.clone(),
-        verb: Some(action.verb().to_owned()),
+        verb: action.verb().to_owned(),
         destructive: action.destructive,
         extension: origin.map(|o| o.extension.clone()),
     }
 }
 
-/// What the dialog names a requester running `program`, and its icon: the
-/// base's app entry that runs it, else its file name; an extension's program
-/// as its extension, with neither a name nor an icon its own entries could
-/// borrow from another app; nothing for a program the kernel attests as none
-/// of the system's.
+/// An extension's program is named as its extension, with neither a name nor
+/// an icon its own entries could borrow from another app.
 fn named(program: &Attested) -> (Option<String>, Option<String>) {
     match program {
         Attested::Base(path) => match app_entry::of_base(path).filter(|e| valid_app(&e.name)) {
@@ -1075,9 +1051,7 @@ fn named(program: &Attested) -> (Option<String>, Option<String>) {
     }
 }
 
-/// Put `ask` to the person at the machine and hold what they answer to what
-/// it takes: a click, or the password of the person it names; the
-/// administrator who answered, for a question an administrator answers.
+/// The administrator who answered, for a question an administrator answers.
 fn answer(
     daemon: &Daemon,
     peer: &Peer,
@@ -1121,9 +1095,7 @@ fn answer(
     Ok(answer.admin)
 }
 
-/// The person's own password, typed at the requester's terminal after a line
-/// saying what it allows: a console session's question, which no dialog
-/// shows.
+/// A console session's question, which no dialog shows.
 fn typed_answer(
     daemon: &Daemon,
     peer: &Peer,
@@ -1137,8 +1109,8 @@ fn typed_answer(
     }
     let whose = &question.person.name;
     let prompt = Reply::Prompt {
-        about: Some(about.to_owned()),
-        prompt: format!("Password for {whose}: "),
+        about: about.to_owned(),
+        prompt: format!("{}: ", password_for(whose)),
     };
     let secret = conn.typed(peer, id, prompt)?;
     checked(daemon, peer, action, whose, &secret)
@@ -1170,8 +1142,6 @@ fn checked(
     }
 }
 
-/// Where the person asking is asked: their session's desktop on screen, its
-/// terminal, or nowhere, and the link that asks on screen.
 fn reach(
     daemon: &Daemon,
     peer: &Peer,
@@ -1254,17 +1224,13 @@ fn still_at(dir: &OwnedFd, path: &str) -> bool {
         && std::fs::metadata(path).is_ok_and(|m| (m.dev(), m.ino()) == (sent.st_dev, sent.st_ino))
 }
 
-/// Whom a mechanism runs as: its uid and gid, and its groups and login tag,
-/// `None` keeping privd's.
+/// `groups` and `login` at `None` keep privd's.
 struct Identity {
     ids: (u32, u32),
     groups: Option<Vec<u32>>,
     login: Option<u32>,
 }
 
-/// The requester as a mechanism run as them: their uid, their own group and
-/// `admin` while the accounts record names them an administrator, as
-/// `initgroups` gives them, and the login tag of their session.
 fn requester_identity(
     daemon: &Daemon,
     peer: &Peer,
@@ -1294,8 +1260,6 @@ fn requester_identity(
     })
 }
 
-/// Start `action`'s mechanism for the requester `uid`, as `runs_as`; an
-/// extension's sees its own `bin` on its path.
 fn spawn(
     action: &Action,
     extension: Option<&Origin>,
@@ -1359,8 +1323,7 @@ fn spawn(
     Ok(pid as u32)
 }
 
-/// Wait for the mechanism, relaying the signals its requester sends. A
-/// requester that goes away leaves it running.
+/// A requester that goes away leaves the mechanism running.
 fn wait(conn: &mut Conn, pid: u32, id: u64) -> Exit {
     let exited = pidfd::pidfd_open_owned(pid);
     let relay = |conn: &mut Conn| {
