@@ -1364,7 +1364,9 @@ names — a partition's excludes the whole disk and itself, so two partitions of
 one disk mount side by side; a write claim is exclusive, and the read claims
 read-only mounts take share with each other and keep a writer off — and
 `BLKRRPART` re-reads a table only while nothing on the disk is claimed,
-replacing its partition nodes; a node's inode is never reused, so a descriptor
+replacing its partition nodes; a disk's nodes, and a re-read's, appear only
+once its table is in place, so no claim through a fresh node meets a scan;
+a node's inode is never reused, so a descriptor
 on a replaced one fails rather than reaching another window. Every disk is an `EngineDisk` over the request engine
 (`block/engine.rs`): request slots whose preallocated pages every payload is
 staged through, a timeout that quarantines a request with its pages until the

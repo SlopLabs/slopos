@@ -29,7 +29,7 @@ use slopos_ostd::{KBox, klog_info};
 use slopos_sched::scheduler::{clear_nascent_for_test, dispatch_task_for_test};
 use slopos_sched::task::{
     TaskRef, task_clone, task_create, task_find_by_id, task_group_exit, task_group_stop,
-    task_set_parent, task_set_state, task_terminate,
+    task_reap_dispatch_pinned, task_set_parent, task_set_state, task_terminate,
 };
 use slopos_sched::task_struct::Current;
 use slopos_testing::{TestResult, assert_eq_test, assert_some, assert_test, fail, pass};
@@ -407,6 +407,44 @@ pub fn test_waitpid_without_children_is_echild() -> TestResult {
         group,
         Errno::ESRCH.as_u64(),
         "a process-group wait must be refused, not folded into wait-any"
+    );
+    pass!()
+}
+
+/// A reaped child stays registered while the CPU that ran its exit still
+/// holds it. Waiting for it again is `ECHILD`: a blocking wait would
+/// otherwise sleep on an exit that has already been reported.
+pub fn test_waitpid_for_a_reaped_child_is_echild() -> TestResult {
+    let _fixture = KernelTestScope::enter();
+    let Some(fx) = build_wait_fixture() else {
+        return fail!("could not build the wait fixture");
+    };
+
+    exit_child_normally(fx.child_id, 0);
+    let child = task_find_by_id(fx.child_id);
+    if let Some(child) = &child {
+        child.set_on_cpu(true);
+    }
+    let reaped = fx.wait(fx.child_id as i64, fx.status_addr, WNOHANG as u64);
+    let lingering = fx.child_state();
+    let again = fx.wait(fx.child_id as i64, fx.status_addr, WNOHANG as u64);
+    if let Some(child) = child {
+        child.set_on_cpu(false);
+    }
+    task_reap_dispatch_pinned();
+    let child_id = fx.child_id;
+    fx.teardown();
+
+    assert_eq_test!(reaped, child_id as u64, "the first wait must reap");
+    assert_eq_test!(
+        lingering,
+        Some(TaskStatus::Terminated),
+        "the reaped child was not left registered, so nothing was tested"
+    );
+    assert_eq_test!(
+        again,
+        Errno::ECHILD.as_u64(),
+        "a reaped child is still offered for waiting"
     );
     pass!()
 }
@@ -1838,6 +1876,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_waitpid_without_children_is_echild,
+    suite = syscall_proc_build_floor
+);
+slopos_testing::stest!(
+    name = test_waitpid_for_a_reaped_child_is_echild,
     suite = syscall_proc_build_floor
 );
 slopos_testing::stest!(

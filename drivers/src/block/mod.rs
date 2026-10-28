@@ -290,7 +290,8 @@ impl BlockDevice for DiskReader {
 }
 
 /// Register a disk a driver probed, read its partition table and publish its
-/// `/dev` nodes.
+/// `/dev` nodes once the table is in place, so a node never names a disk
+/// that refuses claims while its table is read.
 pub fn register_disk(name: DiskName, device: KArc<EngineDisk>) -> bool {
     let registered = register(device, false, |disks| {
         (!disks.iter().any(|d| d.name == name)).then_some(name)
@@ -348,20 +349,25 @@ fn register(
             return None;
         }
     };
-    if let Err(e) = devfs_register_block_node(
-        name.as_bytes(),
-        KArc::clone(&reader),
-        BlockNodeKind::Disk { partitioned: false },
-        id.clone(),
-    ) {
-        klog_info!("BLOCK: /dev/{} not published: {:?}", name, e);
-    }
     let (scheme, partitions) = scan(&name, reader.as_ref()).unwrap_or_else(|e| {
         klog_info!("BLOCK: {} partition table unusable: {:?}", name, e);
         (PartitionScheme::None, KVec::new())
     });
-    publish_partitions(&name, id.as_ref(), &reader, &partitions);
-    finish_scan(&name, generation, scheme, partitions);
+    let mut nodes = KVec::new();
+    let whole = Node {
+        name,
+        device: KArc::clone(&reader),
+        kind: BlockNodeKind::Disk {
+            partitioned: !partitions.is_empty(),
+        },
+    };
+    if nodes.push(whole).is_err() {
+        klog_info!("BLOCK: /dev/{} not published: no memory", name);
+    }
+    partition_nodes(&name, &reader, &partitions, &mut nodes);
+    if finish_scan(&name, generation, scheme, partitions) {
+        publish(&name, generation, id.as_ref(), nodes);
+    }
     Some(name)
 }
 
@@ -416,11 +422,18 @@ fn scan(
     Ok((table.scheme, partitions))
 }
 
-fn publish_partitions(
+/// A `/dev` node to publish.
+struct Node {
+    name: DiskName,
+    device: KArc<dyn BlockDevice + Send + Sync>,
+    kind: BlockNodeKind,
+}
+
+fn partition_nodes(
     name: &DiskName,
-    id: Option<&KArc<DiskId>>,
     reader: &KArc<dyn BlockDevice + Send + Sync>,
     partitions: &[Partition],
+    nodes: &mut KVec<Node>,
 ) {
     for part in partitions {
         let entry = &part.entry;
@@ -435,30 +448,53 @@ fn publish_partitions(
         let Ok(window) = KArc::try_new(window) else {
             continue;
         };
-        let window: KArc<dyn BlockDevice + Send + Sync> = window;
-        if let Err(e) = devfs_register_block_node(
-            part_name.as_bytes(),
-            window,
-            BlockNodeKind::Partition {
+        let node = Node {
+            name: part_name,
+            device: window,
+            kind: BlockNodeKind::Partition {
                 uuid: entry.uuid,
                 number: entry.number,
             },
-            id.cloned(),
-        ) {
-            klog_info!("BLOCK: /dev/{} not published: {:?}", part_name, e);
+        };
+        if nodes.push(node).is_err() {
+            klog_info!("BLOCK: /dev/{} not published: no memory", part_name);
         }
     }
 }
 
-/// Install a scanned table and let claims in again. The table it replaces
-/// drops here, with the registry unlocked; a disk taken out of the registry
-/// while its table was read keeps none of the nodes the read published.
+/// Publish the nodes of the disk `name` of `generation`, whose table is in
+/// place, and take them back if the disk left the registry before they were
+/// up: its removal withdrew only the nodes it found.
+fn publish(name: &DiskName, generation: u64, id: Option<&KArc<DiskId>>, nodes: KVec<Node>) {
+    for node in nodes.iter() {
+        if let Err(e) = devfs_register_block_node(
+            node.name.as_bytes(),
+            KArc::clone(&node.device),
+            node.kind,
+            id.cloned(),
+        ) {
+            klog_info!("BLOCK: /dev/{} not published: {:?}", node.name, e);
+        }
+    }
+    let present = disks()
+        .iter()
+        .any(|d| d.name == *name && d.generation == generation);
+    if !present {
+        for node in nodes.iter() {
+            let _ = devfs_unregister_block_node(node.name.as_bytes());
+        }
+    }
+}
+
+/// Install a scanned table and let claims in again; `false` when the disk
+/// left the registry while its table was read. Either table drops here, with
+/// the registry unlocked.
 fn finish_scan(
     name: &DiskName,
     generation: u64,
     scheme: PartitionScheme,
     partitions: KVec<Partition>,
-) {
+) -> bool {
     let installed = {
         let mut disks = disks();
         match disks
@@ -481,11 +517,11 @@ fn finish_scan(
         Ok((partitioned, replaced)) => {
             let _ = devfs_set_block_partitioned(name.as_bytes(), partitioned);
             drop(replaced);
+            true
         }
-        Err(published) => {
-            for part in published.iter() {
-                let _ = devfs_unregister_block_node(name.partition(part.entry.number).as_bytes());
-            }
+        Err(unused) => {
+            drop(unused);
+            false
         }
     }
 }
@@ -798,8 +834,11 @@ pub fn reread(name: &[u8]) -> Result<(), RereadError> {
             return Err(RereadError::Table);
         }
     };
-    publish_partitions(&whole, id.as_ref(), &reader, &partitions);
-    finish_scan(&whole, generation, scheme, partitions);
+    let mut nodes = KVec::new();
+    partition_nodes(&whole, &reader, &partitions, &mut nodes);
+    if finish_scan(&whole, generation, scheme, partitions) {
+        publish(&whole, generation, id.as_ref(), nodes);
+    }
     Ok(())
 }
 

@@ -504,6 +504,23 @@ fn is_waitable_child(child: &Task) -> bool {
     child.tgid == INVALID_TASK_ID || child.tgid == child.task_id
 }
 
+/// Whether `child` is still `caller_id`'s to wait for. A reaped child stays
+/// registered, `Terminated`, until the CPU that ran its exit lets go of it,
+/// but it is nobody's child by then.
+fn still_a_child(child: &Task, caller_id: u32) -> bool {
+    child.parent_task_id() == caller_id
+        && is_waitable_child(child)
+        && child.status() != TaskStatus::Terminated
+}
+
+/// Whether `caller_id` has a child `target` names, any child for `None`.
+fn has_child(caller_id: u32, target: Option<u32>) -> bool {
+    match target {
+        Some(id) => task_find_by_id(id).is_some_and(|child| still_a_child(&child, caller_id)),
+        None => slopos_sched::task::task_has_children(caller_id),
+    }
+}
+
 /// `target` of `None` is wait-any. Every step is a peek: nothing is claimed
 /// until `finish_wait`.
 fn scan_children(
@@ -514,7 +531,7 @@ fn scan_children(
 ) -> Option<WaitReport> {
     if let Some(id) = target {
         let child = task_find_by_id(id)?;
-        if child.parent_task_id() != caller_id || !is_waitable_child(&child) {
+        if !still_a_child(&child, caller_id) {
             return None;
         }
         return child_report(&child, wuntraced, wcontinued);
@@ -638,16 +655,8 @@ define_syscall!(syscall_wait4
     // owning reference, so a stranger's wait would leave the real parent with
     // `ECHILD`. Re-looked-up here because the id could name a different task
     // by now.
-    match target {
-        Some(id) => match task_find_by_id(id) {
-            Some(t) if t.parent_task_id() == caller_id && is_waitable_child(&t) => {}
-            _ => return Err(Errno::ECHILD),
-        },
-        None => {
-            if !slopos_sched::task::task_has_children(caller_id) {
-                return Err(Errno::ECHILD);
-            }
-        }
+    if !has_child(caller_id, target) {
+        return Err(Errno::ECHILD);
     }
 
     if wnohang {
@@ -663,7 +672,7 @@ define_syscall!(syscall_wait4
         .subscribe(event)
         .wait_event_interruptible(|| {
             latched = scan_children(caller_id, target, wuntraced, wcontinued);
-            latched.is_some()
+            latched.is_some() || !has_child(caller_id, target)
         });
     // Latch first: a predicate pass that found an event and then lost the race
     // with a signal must still deliver it rather than answer EINTR.

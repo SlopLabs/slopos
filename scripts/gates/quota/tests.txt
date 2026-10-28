@@ -12,8 +12,11 @@
 #
 # The rows that move between runs of one ISO — kernelmeta, pages,
 # residentpages, diskblocks, pinnedbytes, task — carry the largest peak
-# measured over several captures (a slow AP, or a host without KVM, peaks
+# measured over several captures (a slow AP, or a loaded KVM host, peaks
 # higher); every other row is deterministic and carries its exact peak.
+# The two kernelmeta rows after the tests are the largest of 33 KVM
+# captures, 28 of them beside other guests; captures without KVM had
+# peaked 8455 and 90858.
 
 # The peak of a kind nobody exercised is zero, and a cap derived from
 # it would bound nothing. Every listed kind must have been reached.
@@ -68,7 +71,7 @@ post-kernel-tests	commitpages	2564
 post-kernel-tests	custody	8
 post-kernel-tests	diskblocks	6
 post-kernel-tests	fdslot	256
-post-kernel-tests	kernelmeta	8455
+post-kernel-tests	kernelmeta	8680
 post-kernel-tests	objectrow	257
 post-kernel-tests	pages	539050
 post-kernel-tests	pinnedbytes	4
@@ -79,7 +82,7 @@ post-userland-tests	commitpages	193853
 post-userland-tests	custody	12
 post-userland-tests	diskblocks	7058
 post-userland-tests	fdslot	861
-post-userland-tests	kernelmeta	90858
+post-userland-tests	kernelmeta	101298
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1977053
 post-userland-tests	pinnedbytes	308
