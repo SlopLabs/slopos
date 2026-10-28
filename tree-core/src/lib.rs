@@ -95,8 +95,8 @@ pub struct Item {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     pub identity: String,
-    /// Where the tree was installed; `None` in a scan and in a manifest older
-    /// than the `at` line.
+    /// Where the tree was installed; `None` only in a scan and in an
+    /// unfinished manifest.
     pub at: Option<String>,
     pub items: Vec<Item>,
 }
@@ -132,7 +132,8 @@ impl Manifest {
                     .ok_or(ParseError { line: n + 1 })?
                     .to_string(),
             ),
-            None => None,
+            None if identity == UNFINISHED => None,
+            None => return Err(ParseError { line: 2 }),
         };
         let mut items = Vec::new();
         for (n, line) in lines {
@@ -180,11 +181,9 @@ impl Manifest {
     }
 
     /// Whether this records the tree `identity` names installed whole at
-    /// `guest`; one that names no destination is taken at its word.
+    /// `guest`.
     pub fn installs(&self, identity: &str, guest: &str) -> bool {
-        self.is_finished()
-            && self.identity == identity
-            && self.at.as_deref().is_none_or(|at| at == guest)
+        self.is_finished() && self.identity == identity && self.at.as_deref() == Some(guest)
     }
 }
 

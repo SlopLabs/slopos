@@ -7,18 +7,17 @@
 //! first write and restored on any failure; our GGTT PTEs land strictly above the
 //! firmware surface; and no lock is held across the watchdog's timer delays.
 
-use core::ffi::c_int;
 use slopos_ostd::lock_class;
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::{DisplayInfo, FramebufferData, PixelFormat};
 use slopos_kernel_services::syscall_services::scanout::{
-    self, ClaimOutcome, GpuControlFns, InstallCtx, ScanoutId, ScanoutProvider,
+    self, ClaimOutcome, FlushFn, GpuControlFns, InstallCtx, Present, ScanoutId, ScanoutProvider,
 };
-use slopos_mm::mmio::MmioRegion;
 use slopos_mm::page_alloc::free_page_frame;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_ostd::arch::x86_64::mem_fence::sfence;
+use slopos_ostd::mm::IoMem;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::util::ptr_buf;
 use slopos_ostd::{align_up_u64, klog_info, klog_warn};
@@ -46,7 +45,7 @@ const GGTT_ALIGN: u64 = 0x4_0000;
 /// State retained once a repoint commits, consulted by [`flush`] to re-issue a
 /// full plane-group flip of the primary.
 struct XeState {
-    mmio: MmioRegion,
+    mmio: IoMem,
     program: plane::PlaneProgram,
     surf_ggtt: u32,
 }
@@ -61,7 +60,7 @@ static XE_STATE: SpinLock<Option<XeState>> =
 /// restores the firmware framebuffer, releases the scanout claim and returns
 /// [`ProbeOutcome::Declined`], so the firmware scanout keeps the panel.
 pub fn run(
-    mmio: &MmioRegion,
+    mmio: &IoMem,
     cfg: XeConfig,
     platform: XePlatform,
 ) -> Result<ProbeOutcome, PciProbeError> {
@@ -193,7 +192,7 @@ pub fn run(
 
     // Tear-free double buffering when a second scan buffer can be had; the
     // single-buffer `flush` is the automatic fallback.
-    let present_flush: Option<fn(*const DamageRect, u32) -> c_int> = match setup_present(
+    let present_flush: Option<FlushFn> = match setup_present(
         mmio,
         &bank,
         program,
@@ -290,8 +289,8 @@ pub fn run(
 /// caller arms at commit; `None` frees any partial allocation. Writes no display
 /// register.
 fn setup_present(
-    mmio: &MmioRegion,
-    bank: &MmioRegion,
+    mmio: &IoMem,
+    bank: &IoMem,
     program: plane::PlaneProgram,
     primary_virt: *const u8,
     primary_ggtt: u32,
@@ -367,9 +366,9 @@ fn xe_set_mode(_width: u32, _height: u32) -> Option<FramebufferData> {
 /// flip of the primary.
 ///
 /// The committed state is snapshotted under the lock and the lock is dropped
-/// before any MMIO, so no lock is ever held across the hardware access. Returns
-/// `0` on success, or `-1` when xe owns no scanout.
-pub fn flush(_damage: *const DamageRect, _count: u32) -> c_int {
+/// before any MMIO, so no lock is ever held across the hardware access.
+/// [`Present::Failed`] when xe owns no scanout.
+pub fn flush(_damage: &[DamageRect]) -> Present {
     let held = {
         let guard = XE_STATE.lock();
         guard
@@ -377,10 +376,10 @@ pub fn flush(_damage: *const DamageRect, _count: u32) -> c_int {
             .map(|state| (state.mmio.clone(), state.program, state.surf_ggtt))
     };
     let Some((mmio, program, surf)) = held else {
-        return -1;
+        return Present::Failed;
     };
     program.flip(&mmio, surf);
-    0
+    Present::Shown
 }
 
 /// Eviction hook. xe sits at the top of the scanout priority ladder, so it is

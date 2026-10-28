@@ -1,8 +1,8 @@
 // Verus mirror of the two in-bounds properties the kernel's SlopRing buffer
 // selection (`ring/src/buffers.rs`) relies on:
 //
-//   (INV-FIXED-INDEX-BOUND) `BufferRegistry::resolve_fixed` /
-//        `check_out_fixed` accept an `Sqe.buf_index` iff it is a valid slot of
+//   (INV-FIXED-INDEX-BOUND) `BufferRegistry::check_out_fixed` /
+//        `fixed_in_bounds` accept an `Sqe.buf_index` iff it is a valid slot of
 //        the pin list, and the staged length is `len.min(pin.len())`, so the
 //        volatile `copy_out`/`copy_in` window never exceeds the selected pin.
 //
@@ -15,7 +15,7 @@ use vstd::prelude::*;
 
 verus! {
 
-/// `resolve_fixed(index)` / `check_out_fixed(index)` accept the index iff it
+/// `check_out_fixed(index)` / `fixed_in_bounds(index)` accept the index iff it
 /// is a valid slot of the `count`-long pin list.
 pub open spec fn fixed_resolve_ok(index: nat, count: nat) -> bool {
     index < count

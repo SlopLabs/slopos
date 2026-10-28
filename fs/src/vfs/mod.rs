@@ -10,9 +10,9 @@ pub mod traits;
 
 pub use canon::{CanonPath, canonicalise, canonicalise_at};
 pub use init::{
-    BlockLayerOps, EXT2_POOL_LEN, RootBacking, vfs_claim_block_device, vfs_claim_block_source,
-    vfs_ext2_mount_named, vfs_ext2_mounted_instance, vfs_ext2_pool_claim, vfs_ext2_pool_release,
-    vfs_ext2_unmount_named, vfs_init_builtin_filesystems, vfs_init_builtin_filesystems_with,
+    BlockLayerOps, EXT4_POOL_LEN, RootBacking, vfs_claim_block_device, vfs_claim_block_source,
+    vfs_ext4_mount_named, vfs_ext4_mounted_instance, vfs_ext4_pool_claim, vfs_ext4_pool_release,
+    vfs_ext4_unmount_named, vfs_init_builtin_filesystems, vfs_init_builtin_filesystems_with,
     vfs_is_initialized, vfs_register_block_layer, vfs_reread_partitions,
 };
 pub use mount::{
@@ -20,12 +20,12 @@ pub use mount::{
     under_pinned_mount, unmount, with_mount_table,
 };
 pub use ops::{
-    ListCursor, SocketName, SocketNode, TimesChange, VfsHandle, VfsOpenFlags, vfs_link,
-    vfs_link_at, vfs_list, vfs_list_from, vfs_list_from_at, vfs_make_socket_at, vfs_mkdir,
-    vfs_mkdir_at, vfs_mknod_at, vfs_open, vfs_open_flags, vfs_open_flags_at, vfs_readlink_at,
-    vfs_rename, vfs_rename_at, vfs_rmdir, vfs_rmdir_at, vfs_set_mode, vfs_set_mode_at,
-    vfs_set_owner_at, vfs_set_sealed, vfs_set_times, vfs_socket_at, vfs_stat, vfs_stat_at,
-    vfs_symlink, vfs_symlink_at, vfs_sync_all, vfs_unlink, vfs_unlink_at, vfs_utimens,
+    SocketName, SocketNode, TimesChange, VfsHandle, VfsOpenFlags, vfs_link, vfs_link_at,
+    vfs_make_socket_at, vfs_mkdir, vfs_mkdir_at, vfs_mknod_at, vfs_open, vfs_open_flags,
+    vfs_open_flags_at, vfs_readlink_at, vfs_rename, vfs_rename_at, vfs_rmdir, vfs_rmdir_at,
+    vfs_set_mode, vfs_set_mode_at, vfs_set_owner_at, vfs_set_sealed, vfs_set_times, vfs_socket_at,
+    vfs_stat, vfs_stat_at, vfs_symlink, vfs_symlink_at, vfs_sync_all, vfs_unlink, vfs_unlink_at,
+    vfs_utimens,
 };
 pub use path::{
     NameBuf, RESOLVE_FOLLOW, RESOLVE_MUST_BE_DIR, RESOLVE_NOFOLLOW_FINAL, ResolvedPath,

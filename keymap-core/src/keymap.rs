@@ -22,6 +22,13 @@ pub struct Mods {
     pub altgr: bool,
 }
 
+impl Mods {
+    /// Alt held as a chord: AltGr selects a layout level instead.
+    pub const fn alt_chord(self) -> bool {
+        self.alt && !self.altgr
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Locks {
     pub caps: bool,

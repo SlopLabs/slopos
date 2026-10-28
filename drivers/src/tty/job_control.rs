@@ -55,7 +55,7 @@ pub fn set_foreground_pgrp(idx: TtyIndex, pgid: u32) -> Result<(), TtyError> {
         }
     }
 
-    if scheduler_is_enabled() != 0 {
+    if scheduler_is_enabled() {
         // Poll waiters park on the input queue too, so one publish covers both.
         BUS.publish(tty_input_event(slot));
     }
@@ -97,7 +97,7 @@ pub fn set_foreground_pgrp_checked(
         }
     };
 
-    if changed && scheduler_is_enabled() != 0 {
+    if changed && scheduler_is_enabled() {
         BUS.publish(tty_input_event(slot));
     }
     Ok(())

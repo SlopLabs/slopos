@@ -13,8 +13,8 @@ use slopos_testing::{TestResult, fail};
 
 use super::journal::journal_image;
 use crate::blockdev::MemoryBlockDevice;
-use crate::ext2::cache::{BlockCache, CACHE_ENTRIES_MIN};
-use crate::ext2::{Ext2Fs, SyncPass};
+use crate::ext4::cache::{BlockCache, CACHE_ENTRIES_MIN};
+use crate::ext4::{Ext4Fs, SyncPass};
 
 const DIRS: usize = 3;
 const MAX_FILES: usize = 12;
@@ -70,7 +70,7 @@ fn name_of(id: u32, out: &mut [u8; NAME_MAX]) -> usize {
     len
 }
 
-pub fn test_ext2_namespace_churn_matches_the_medium() -> TestResult {
+pub fn test_ext4_namespace_churn_matches_the_medium() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -81,16 +81,16 @@ pub fn test_ext2_namespace_churn_matches_the_medium() -> TestResult {
 }
 
 /// Mount `device` and hand the handle to `body`, in a frame of its own: an
-/// `Ext2Fs` and the body's locals together outgrow the 2 KiB stack gate.
+/// `Ext4Fs` and the body's locals together outgrow the 2 KiB stack gate.
 #[inline(never)]
 fn mounted(
     device: &MemoryBlockDevice,
-    body: &mut dyn FnMut(&mut Ext2Fs<'_>) -> Result<(), &'static str>,
+    body: &mut dyn FnMut(&mut Ext4Fs<'_>) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
-    let (sb, geom) = Ext2Fs::mount_params(device).map_err(|_| "mount_params")?;
+    let (sb, geom) = Ext4Fs::mount_params(device).map_err(|_| "mount_params")?;
     let mut cache =
         BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN).map_err(|_| "cache")?;
-    let mut fs = Ext2Fs::new(device, &mut cache, sb, geom);
+    let mut fs = Ext4Fs::new(device, &mut cache, sb, geom);
     body(&mut fs)
 }
 
@@ -109,7 +109,7 @@ fn churn(device: &MemoryBlockDevice) -> Result<(), &'static str> {
 
 #[inline(never)]
 fn churn_on(
-    fs: &mut Ext2Fs<'_>,
+    fs: &mut Ext4Fs<'_>,
     device: &MemoryBlockDevice,
     model: &mut Model,
 ) -> Result<(), &'static str> {
@@ -139,7 +139,7 @@ fn churn_on(
 
 #[inline(never)]
 fn churn_step(
-    fs: &mut Ext2Fs<'_>,
+    fs: &mut Ext4Fs<'_>,
     model: &mut Model,
     pass: &mut Option<SyncPass>,
 ) -> Result<(), &'static str> {
@@ -205,7 +205,7 @@ fn churn_step(
 /// Move a name to a fresh one in a random directory, or over an existing name
 /// of another inode, which frees that inode when it was its last link.
 #[inline(never)]
-fn rename_step(fs: &mut Ext2Fs<'_>, model: &mut Model) -> Result<(), &'static str> {
+fn rename_step(fs: &mut Ext4Fs<'_>, model: &mut Model) -> Result<(), &'static str> {
     let mut old = [0u8; NAME_MAX];
     let mut new = [0u8; NAME_MAX];
     let at = model.rand(model.names.len());
@@ -250,7 +250,7 @@ fn rename_step(fs: &mut Ext2Fs<'_>, model: &mut Model) -> Result<(), &'static st
 
 /// Read every name back through a mount that has cached nothing.
 #[inline(never)]
-fn check_medium(fs: &mut Ext2Fs<'_>, model: &Model) -> Result<(), &'static str> {
+fn check_medium(fs: &mut Ext4Fs<'_>, model: &Model) -> Result<(), &'static str> {
     let mut buf = [0u8; NAME_MAX];
     for name in model.names.iter() {
         let len = name_of(name.id, &mut buf);
@@ -289,6 +289,6 @@ fn check_medium(fs: &mut Ext2Fs<'_>, model: &Model) -> Result<(), &'static str> 
 }
 
 slopos_testing::stest!(
-    name = test_ext2_namespace_churn_matches_the_medium,
+    name = test_ext4_namespace_churn_matches_the_medium,
     suite = fs
 );

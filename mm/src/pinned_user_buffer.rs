@@ -7,16 +7,16 @@
 //!
 //! Access is **volatile byte-copy only**: the pinned memory stays user-mapped
 //! and the owner may write it concurrently, so a `&[u8]`/`&mut [u8]` over the
-//! pages would be instant aliasing UB (SLOPRING § 5.3 / framekernel AD-3).
+//! pages would be instant aliasing UB (framekernel AD-3).
 //!
 //! Only **anonymous** user memory is pinnable; file- and memfd-backed pages
 //! carry a different frame meta and are rejected with
 //! [`PinError::NotAnonymous`].
 
-use slopos_abi::addr::VirtAddr;
+use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::quota::PinnedBytesAxis;
 use slopos_ostd::KVec;
-use slopos_ostd::mm::frame::{AnonymousMeta, Paddr};
+use slopos_ostd::mm::frame::AnonymousMeta;
 use slopos_ostd::mm::uframe::{KeepaliveFrames, UFrame, UFrameError};
 use slopos_ostd::mm::vmcursor::{VmReader, VmWriter};
 use slopos_ostd::process::AccountId;
@@ -106,17 +106,17 @@ impl PinnedUserBuffer {
         let mut page_va = first_page;
         for _ in 0..n_pages {
             let vaddr = VirtAddr::new(page_va);
-            if !crate::user_mappings::ostd_is_user_accessible_4kb(&vm_space, vaddr) {
+            if !crate::user_mappings::is_user_accessible_4kb(&vm_space, vaddr) {
                 return Err(PinError::NotUserAccessible);
             }
-            let pa = crate::user_mappings::ostd_virt_to_phys_4kb(&vm_space, vaddr);
+            let pa = crate::user_mappings::virt_to_phys_4kb(&vm_space, vaddr);
             if pa.as_u64() == 0 {
                 return Err(PinError::NotPresent);
             }
-            // Mask off the in-page byte offset `ostd_virt_to_phys_4kb` folds in;
+            // Mask off the in-page byte offset `virt_to_phys_4kb` folds in;
             // a UFrame owns a whole page-aligned frame.
             let page_pa = pa.as_u64() & !PAGE_MASK;
-            let frame = UFrame::<AnonymousMeta>::alias_user_paddr(Paddr::new(page_pa))
+            let frame = UFrame::<AnonymousMeta>::alias_user_paddr(PhysAddr::new(page_pa))
                 .map_err(|_| PinError::NotAnonymous)?;
             frames.push(frame).map_err(|_| PinError::OutOfMemory)?;
             page_va = page_va.wrapping_add(PAGE_SIZE as u64);

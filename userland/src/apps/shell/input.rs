@@ -6,11 +6,11 @@
 
 use core::cmp;
 
-use crate::ring::{Ring, slopfut};
 use crate::syscall::fs;
 use slopfut::signal::SignalListener;
 use slopos_abi::signal::{SIGWINCH, sig_bit};
 use slopos_abi::syscall::{LocalFlags, POLLIN};
+use slopos_rt::{Ring, slopfut};
 
 use super::buffers;
 use super::completion;

@@ -17,7 +17,7 @@ use super::service::{
     Budget, COMPOSITOR, Child, GREETER, Identity, SHELL, TERMINAL, WELCOME, runtime_dir, start,
     start_ready,
 };
-use crate::init_control::{self, DESKTOP, Tasks};
+use crate::init_control::{self, Tasks, fds};
 use crate::sessions::{self as listed, Entry};
 use crate::syscall::{OwnedFd, RawFd, fs, process, window};
 
@@ -27,11 +27,6 @@ const KILL_AFTER_MS: u64 = 5000;
 const GIVE_UP_AFTER_MS: u64 = 10_000;
 /// How long a desktop has to say it is ready.
 const STARTING_MS: u64 = 60_000;
-
-/// Where a compositor finds the consent link and the pipe init tells it
-/// whether it is in front on.
-pub const CONSENT_AT: RawFd = 4;
-pub const SESSION_AT: RawFd = 5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Then {
@@ -311,8 +306,8 @@ impl Sessions {
         Ok(tag)
     }
 
-    /// The session init's earlier image ran: a desktop it took over at
-    /// resume, its compositor running as `pid`.
+    /// A session init's earlier image ran, taken over at resume: its leader
+    /// running as `leader`, or due to start.
     #[allow(clippy::too_many_arguments)]
     pub fn adopt(
         &mut self,
@@ -571,7 +566,6 @@ impl Sessions {
                 session.class == Class::User && session.who.uid == slopos_abi::fs::SESSION_UID;
             let tags: Vec<u32> = std::iter::once(session.tag)
                 .chain(extra.iter().copied().filter(|_| first))
-                .chain((session.tag == DESKTOP).then_some(DESKTOP))
                 .collect();
             let Some(ended) = ending.termination.step(now, &tags) else {
                 continue;
@@ -787,9 +781,9 @@ fn launch(session: &mut Session, now: u64, agents: &[RawFd], behind: bool) -> St
             let Ok((pipe, end)) = fs::pipe2((O_CLOEXEC | O_NONBLOCK) as u32) else {
                 return State::Down { due: None };
             };
-            let mut fds = vec![(pipe.raw(), SESSION_AT)];
+            let mut handed = vec![(pipe.raw(), fds::COMPOSITOR_SESSION)];
             if let Some(agent) = session.link.and_then(|link| agents.get(usize::from(link))) {
-                fds.push((*agent, CONSENT_AT));
+                handed.push((*agent, fds::COMPOSITOR_CONSENT));
             }
             let service = match session.class {
                 Class::Greeter => &GREETER,
@@ -799,7 +793,7 @@ fn launch(session: &mut Session, now: u64, agents: &[RawFd], behind: bool) -> St
                 let _ = fs::write_slice(end.raw(), b"behind\n");
                 session.locked = true;
             }
-            match start_ready(service, Some(&session.who), &fds) {
+            match start_ready(service, Some(&session.who), &handed) {
                 Some((leader, ready)) => {
                     session.pipe = Some(end);
                     State::Starting {

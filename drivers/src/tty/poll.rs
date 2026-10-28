@@ -1,4 +1,4 @@
-//! TTY poll readiness and compositor focus management.
+//! TTY poll readiness.
 
 use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN, POLLOUT};
 
@@ -8,7 +8,7 @@ use slopos_ostd::sync::BUS;
 
 use super::driver::TtyDriverKind;
 use super::table::{TTY_SLOTS, tty_input_event, tty_output_event};
-use super::{MAX_TTYS, PostLockWork, TtyError, TtyFlags, TtyIndex};
+use super::{MAX_TTYS, PostLockWork, TtyFlags, TtyIndex};
 
 /// Waiters park on both queues so a readiness change in either direction wakes
 /// them.
@@ -21,46 +21,6 @@ fn poll_register_slot(slot: usize) -> bool {
 fn poll_unregister_slot(slot: usize) {
     BUS.unsubscribe_current(tty_input_event(slot));
     BUS.unsubscribe_current(tty_output_event(slot));
-}
-
-/// Sets `focused_task_id` only, which routes input; the POSIX foreground process
-/// group that gates terminal access and job-control signals is independent.
-#[must_use]
-pub fn set_compositor_focus(task_id: u32) -> Result<(), TtyError> {
-    let idx = super::active_tty();
-    let slot = idx.0 as usize;
-    if slot >= MAX_TTYS {
-        return Err(TtyError::InvalidIndex);
-    }
-    let mut found = false;
-    {
-        let mut guard = TTY_SLOTS[slot].lock();
-        if let Some(tty) = guard.as_mut() {
-            tty.session.focused_task_id = task_id;
-            found = true;
-        }
-    }
-    if !found {
-        return Err(TtyError::NotAllocated);
-    }
-    if scheduler_is_enabled() != 0 {
-        BUS.publish(tty_input_event(slot));
-    }
-    Ok(())
-}
-
-#[must_use]
-pub fn get_compositor_focus() -> Result<u32, TtyError> {
-    let idx = super::active_tty();
-    let slot = idx.0 as usize;
-    if slot >= MAX_TTYS {
-        return Err(TtyError::InvalidIndex);
-    }
-    let guard = TTY_SLOTS[slot].lock();
-    match guard.as_ref() {
-        Some(tty) => Ok(tty.session.focused_task_id),
-        None => Err(TtyError::NotAllocated),
-    }
 }
 
 /// Poll readiness for a TTY fd, after draining pending hardware input. `POLLERR`
@@ -138,7 +98,7 @@ pub fn poll_enqueue(idx: TtyIndex) -> bool {
     if slot >= MAX_TTYS {
         return false;
     }
-    if scheduler_is_enabled() == 0 {
+    if !scheduler_is_enabled() {
         return false;
     }
     poll_register_slot(slot)

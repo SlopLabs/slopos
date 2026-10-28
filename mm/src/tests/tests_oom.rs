@@ -16,9 +16,10 @@ use crate::page_alloc::{
     FrameAccounting, alloc_kernel_page_with, alloc_kernel_pages_with, frame_accounting,
     free_page_frame, get_page_allocator_stats,
 };
-use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm::{create_process_vm, destroy_process_vm, init_process_vm, process_vm_alloc};
-use crate::slab::{get_heap_stats_owned, kfree, kmalloc, kzalloc};
+use crate::slab::stats::snapshot as heap_stats;
+use crate::slab::{kfree, kmalloc};
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_ostd::mm::frame::FrameAllocOptions;
 
@@ -194,7 +195,7 @@ pub fn test_dma_allocation_exhaustion() -> TestResult {
 }
 
 pub fn test_heap_alloc_pressure() -> TestResult {
-    let _before = get_heap_stats_owned();
+    let _before = heap_stats();
 
     let mut ptrs: [*mut core::ffi::c_void; 128] = [ptr::null_mut(); 128];
     let mut count = 0usize;
@@ -387,14 +388,14 @@ pub fn test_zero_flag_under_pressure() -> TestResult {
     pass!()
 }
 
-pub fn test_kzalloc_zeroed_under_pressure() -> TestResult {
+pub fn test_kmalloc_zeroed_under_pressure() -> TestResult {
     let pollute = kmalloc(512);
     if !pollute.is_null() {
         page_io::write_bytes(pollute as *mut u8, 0xDE, 512);
         kfree(pollute);
     }
 
-    let p = kzalloc(512);
+    let p = kmalloc(512);
     if p.is_null() {
         return pass!();
     }
@@ -404,7 +405,7 @@ pub fn test_kzalloc_zeroed_under_pressure() -> TestResult {
         let val = page_io::read_byte(byte_ptr, i);
         kfree(p);
         return fail!(
-            "kzalloc returned non-zeroed memory at offset {}: {:#x}",
+            "kmalloc returned non-zeroed memory at offset {}: {:#x}",
             i,
             val
         );
@@ -480,11 +481,7 @@ pub fn test_process_heap_expansion_oom() -> TestResult {
     let mut total_size = 0u64;
 
     loop {
-        let addr = process_vm_alloc(
-            resolve_pid(pid),
-            PAGE_SIZE_4KB * 4,
-            PageFlags::WRITABLE.bits() as u32,
-        );
+        let addr = process_vm_alloc(resolve_pid(pid), PAGE_SIZE_4KB * 4, true);
         if addr == 0 {
             break;
         }
@@ -513,7 +510,7 @@ slopos_testing::stest!(name = test_heap_alloc_one_gib, suite = oom);
 slopos_testing::stest!(name = test_process_vm_creation_pressure, suite = oom);
 slopos_testing::stest!(name = test_heap_expansion_under_pressure, suite = oom);
 slopos_testing::stest!(name = test_zero_flag_under_pressure, suite = oom);
-slopos_testing::stest!(name = test_kzalloc_zeroed_under_pressure, suite = oom);
+slopos_testing::stest!(name = test_kmalloc_zeroed_under_pressure, suite = oom);
 slopos_testing::stest!(name = test_alloc_free_cycles_no_leak, suite = oom);
 slopos_testing::stest!(name = test_multiorder_alloc_failure, suite = oom);
 slopos_testing::stest!(name = test_process_heap_expansion_oom, suite = oom);

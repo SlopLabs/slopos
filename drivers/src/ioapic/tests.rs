@@ -7,8 +7,7 @@ use slopos_testing::TestResult;
 use crate::{apic, ioapic};
 
 pub fn test_ioapic_ready_state() -> TestResult {
-    let ready = ioapic::is_ready();
-    if ready == 0 {
+    if !ioapic::is_ready() {
         klog_info!("IOAPIC_TEST: WARNING - IOAPIC not ready (may be expected in some configs)");
     }
     TestResult::Pass
@@ -35,35 +34,31 @@ pub fn test_apic_id_valid() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_ioapic_legacy_irq_info_invalid() -> TestResult {
-    if ioapic::is_ready() == 0 {
+/// No MADT override names IRQ 255, so it takes the ISA default.
+pub fn test_ioapic_unoverridden_irq_routes_to_its_own_gsi() -> TestResult {
+    if !ioapic::is_ready() {
         return TestResult::Pass;
     }
 
-    let mut gsi = 0xDEADu32;
-    let mut flags = 0xBEEFu32;
-
-    let result = ioapic::legacy_irq_info(255, &mut gsi, &mut flags);
-
-    if result == 0 && gsi == 255 && flags == (IOAPIC_FLAG_POLARITY_HIGH | IOAPIC_FLAG_TRIGGER_EDGE)
-    {
-        return TestResult::Pass;
+    let route = ioapic::legacy_irq_route(255);
+    let identity = ioapic::IrqRoute {
+        gsi: 255,
+        flags: IOAPIC_FLAG_POLARITY_HIGH | IOAPIC_FLAG_TRIGGER_EDGE,
+    };
+    if route != Some(identity) {
+        klog_info!("IOAPIC_TEST: BUG - IRQ 255 routed to {:?}", route);
+        return TestResult::Fail;
     }
-
     TestResult::Pass
 }
 
-pub fn test_ioapic_legacy_irq_info_valid() -> TestResult {
-    if ioapic::is_ready() == 0 {
+pub fn test_ioapic_legacy_irq_route_valid() -> TestResult {
+    if !ioapic::is_ready() {
         return TestResult::Pass;
     }
 
-    let mut gsi = 0u32;
-    let mut flags = 0u32;
-
-    let result = ioapic::legacy_irq_info(0, &mut gsi, &mut flags);
-    if result != 0 {
-        klog_info!("IOAPIC_TEST: BUG - legacy_irq_info failed for timer IRQ");
+    if ioapic::legacy_irq_route(0).is_none() {
+        klog_info!("IOAPIC_TEST: BUG - legacy_irq_route failed for timer IRQ");
         return TestResult::Fail;
     }
 
@@ -71,12 +66,11 @@ pub fn test_ioapic_legacy_irq_info_valid() -> TestResult {
 }
 
 pub fn test_ioapic_mask_invalid_gsi() -> TestResult {
-    if ioapic::is_ready() == 0 {
+    if !ioapic::is_ready() {
         return TestResult::Pass;
     }
 
-    let result = ioapic::mask_gsi(0xFFFF_FFFF);
-    if result == 0 {
+    if ioapic::mask_gsi(0xFFFF_FFFF) {
         klog_info!("IOAPIC_TEST: BUG - mask_gsi succeeded for invalid GSI");
         return TestResult::Fail;
     }
@@ -84,12 +78,11 @@ pub fn test_ioapic_mask_invalid_gsi() -> TestResult {
 }
 
 pub fn test_ioapic_unmask_invalid_gsi() -> TestResult {
-    if ioapic::is_ready() == 0 {
+    if !ioapic::is_ready() {
         return TestResult::Pass;
     }
 
-    let result = ioapic::unmask_gsi(0xFFFF_FFFF);
-    if result == 0 {
+    if ioapic::unmask_gsi(0xFFFF_FFFF) {
         klog_info!("IOAPIC_TEST: BUG - unmask_gsi succeeded for invalid GSI");
         return TestResult::Fail;
     }
@@ -97,29 +90,26 @@ pub fn test_ioapic_unmask_invalid_gsi() -> TestResult {
 }
 
 pub fn test_ioapic_config_invalid_gsi() -> TestResult {
-    if ioapic::is_ready() == 0 {
+    if !ioapic::is_ready() {
         return TestResult::Pass;
     }
 
-    let result = ioapic::config_irq(0xFFFF_FFFF, 0x30, 0, 0);
-    if result == 0 {
+    if ioapic::config_irq(0xFFFF_FFFF, 0x30, 0, 0) {
         klog_info!("IOAPIC_TEST: BUG - config_irq succeeded for invalid GSI");
         return TestResult::Fail;
     }
     TestResult::Pass
 }
 
-pub fn test_ioapic_config_boundary_vector() -> TestResult {
-    if ioapic::is_ready() == 0 {
+pub fn test_ioapic_last_isa_irq_has_a_route() -> TestResult {
+    if !ioapic::is_ready() {
         return TestResult::Pass;
     }
 
-    let mut gsi = 0u32;
-    let mut flags = 0u32;
-    if ioapic::legacy_irq_info(15, &mut gsi, &mut flags) != 0 {
-        return TestResult::Pass;
+    if ioapic::legacy_irq_route(15).is_none() {
+        klog_info!("IOAPIC_TEST: BUG - IRQ 15 has no route");
+        return TestResult::Fail;
     }
-
     TestResult::Pass
 }
 
@@ -180,7 +170,7 @@ pub fn test_ioapic_double_init() -> TestResult {
     let result = ioapic::init();
     let after = ioapic::is_ready();
 
-    if before != 0 && result != 0 {
+    if before && !result {
         klog_info!("IOAPIC_TEST: BUG - Double init returned error when already initialized");
         return TestResult::Fail;
     }
@@ -194,14 +184,12 @@ pub fn test_ioapic_double_init() -> TestResult {
 }
 
 pub fn test_ioapic_all_legacy_irqs() -> TestResult {
-    if ioapic::is_ready() == 0 {
+    if !ioapic::is_ready() {
         return TestResult::Pass;
     }
 
     for irq in 0..16u8 {
-        let mut gsi = 0u32;
-        let mut flags = 0u32;
-        let _ = ioapic::legacy_irq_info(irq, &mut gsi, &mut flags);
+        let _ = ioapic::legacy_irq_route(irq);
     }
     TestResult::Pass
 }
@@ -214,7 +202,7 @@ pub fn test_apic_spurious_vector() -> TestResult {
 }
 
 pub fn test_ioapic_gsi_range() -> TestResult {
-    if ioapic::is_ready() == 0 {
+    if !ioapic::is_ready() {
         return TestResult::Pass;
     }
 
@@ -228,12 +216,15 @@ pub fn test_ioapic_gsi_range() -> TestResult {
 slopos_testing::stest!(name = test_ioapic_ready_state, suite = ioapic);
 slopos_testing::stest!(name = test_apic_enabled_state, suite = ioapic);
 slopos_testing::stest!(name = test_apic_id_valid, suite = ioapic);
-slopos_testing::stest!(name = test_ioapic_legacy_irq_info_invalid, suite = ioapic);
-slopos_testing::stest!(name = test_ioapic_legacy_irq_info_valid, suite = ioapic);
+slopos_testing::stest!(
+    name = test_ioapic_unoverridden_irq_routes_to_its_own_gsi,
+    suite = ioapic
+);
+slopos_testing::stest!(name = test_ioapic_legacy_irq_route_valid, suite = ioapic);
 slopos_testing::stest!(name = test_ioapic_mask_invalid_gsi, suite = ioapic);
 slopos_testing::stest!(name = test_ioapic_unmask_invalid_gsi, suite = ioapic);
 slopos_testing::stest!(name = test_ioapic_config_invalid_gsi, suite = ioapic);
-slopos_testing::stest!(name = test_ioapic_config_boundary_vector, suite = ioapic);
+slopos_testing::stest!(name = test_ioapic_last_isa_irq_has_a_route, suite = ioapic);
 slopos_testing::stest!(name = test_ioapic_flag_constants, suite = ioapic);
 slopos_testing::stest!(name = test_ioapic_register_constants, suite = ioapic);
 slopos_testing::stest!(name = test_apic_eoi_safe, suite = ioapic);

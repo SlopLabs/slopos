@@ -361,6 +361,21 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             )
             .with_tab_stop(*tab_stop),
         ),
+        Node::Picture {
+            image,
+            zoom,
+            pan,
+            grabbing,
+            focused,
+            on_input,
+        } => Box::new(widgets::picture::PictureWidget::new(
+            image.clone(),
+            *zoom,
+            *pan,
+            *grabbing,
+            *focused,
+            erase_with(*on_input),
+        )),
         Node::DragHandle {
             orientation,
             active,

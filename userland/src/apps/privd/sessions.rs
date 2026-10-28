@@ -5,25 +5,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use slopos_abi::fs::SESSION_UID;
 use slopos_abi::syscall::{POLLIN, UserPollFd};
 use slopos_priv_core::Reach;
 use slopos_priv_core::sessions::{LINKS, Table, kind};
 use slopos_remote_core::Deframer;
 
-use crate::init_control::{DESKTOP, Tasks};
 use crate::syscall::{OwnedFd, SyscallError, fs};
 
 /// How often the thread hearing the table looks for a drain.
 const TICK_MS: i64 = 250;
 
 enum Heard {
-    /// Started by an init from before the table, whose one desktop, the
-    /// first person's, carries the desktop's login tag and is always shown.
-    Legacy,
     Table(Mutex<Table>),
-    /// Told to hear the table and handed no pair init made: nobody is
-    /// reached, and who is logged in is unknown.
+    /// Handed no pair init made, or the pair ended: nobody is reached, and
+    /// who is logged in is unknown.
     Deaf,
 }
 
@@ -37,10 +32,6 @@ pub struct Seen {
 }
 
 impl Seen {
-    pub fn legacy() -> &'static Seen {
-        Seen::leak(Heard::Legacy)
-    }
-
     /// The table init writes on `fd`, read by a thread of its own until the
     /// pair ends or privd drains.
     pub fn hear(fd: Option<OwnedFd>) -> &'static Seen {
@@ -78,11 +69,10 @@ impl Seen {
     }
 
     fn leak(heard: Heard) -> &'static Seen {
-        let legacy = matches!(heard, Heard::Legacy);
         Box::leak(Box::new(Seen {
             heard,
             deaf: AtomicBool::new(false),
-            shown: std::array::from_fn(|link| Arc::new(AtomicBool::new(legacy && link == 0))),
+            shown: std::array::from_fn(|_| Arc::new(AtomicBool::new(false))),
         }))
     }
 
@@ -152,28 +142,18 @@ impl Seen {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .reach(login, uid, terminal),
-            Heard::Legacy if login == DESKTOP => (
-                Reach::Screen {
-                    theirs: uid == SESSION_UID,
-                },
-                Some(0),
-            ),
-            Heard::Legacy | Heard::Deaf => (Reach::Nowhere, None),
+            Heard::Deaf => (Reach::Nowhere, None),
         }
     }
 
     /// Everyone logged in at a desktop or a terminal.
-    pub fn logged_in(&self, tasks: Option<&Tasks>) -> Result<Vec<u32>, String> {
-        let unknown = || "who is logged in is unknown".to_owned();
+    pub fn logged_in(&self) -> Result<Vec<u32>, String> {
         match self.heard() {
             Heard::Table(table) => Ok(table
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .logged_in()),
-            Heard::Legacy => tasks
-                .map(|tasks| tasks.uids_of(&[DESKTOP]))
-                .ok_or_else(|| format!("{}: the tasks could not be listed", unknown())),
-            Heard::Deaf => Err(format!("{}: init told privd no sessions", unknown())),
+            Heard::Deaf => Err("who is logged in is unknown: init told privd no sessions".into()),
         }
     }
 }

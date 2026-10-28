@@ -19,8 +19,8 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_ostd::process::{Program, with_process_registry};
+use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::sync::kernel_io_task::{KernelIoStop, KernelIoToken, KthreadWait};
-use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::sync::{InitFlag, Mutex};
 use slopos_ostd::{klog_info, lock_class};
 

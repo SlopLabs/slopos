@@ -9,7 +9,7 @@
 //! [`should_disable_pcid`] before writing `CR4.PCIDE`, so an affected CPU
 //! never enables PCID and every CR3 write takes the legacy non-PCID path.
 
-use slopos_arch::cpu::cpuid::{cpu_brand_string, cpu_family_model_stepping};
+use slopos_ostd::arch::x86_64::cpuid::cpu_family_model_stepping;
 
 /// Family 6, model 0x97 — Alder Lake / Raptor Lake client desktop/mobile.
 const INTEL_ALDER_LAKE_MODEL: u8 = 0x97;
@@ -22,7 +22,7 @@ fn is_genuine_intel() -> bool {
     // Match the leaf-0 vendor string: the extended brand-string leaves
     // (0x8000_0002..0x8000_0004) are also populated by AMD, so they cannot
     // identify the vendor unambiguously.
-    use slopos_arch::cpu::cpuid::cpu_vendor_string;
+    use slopos_ostd::arch::x86_64::cpuid::cpu_vendor_string;
     let v = cpu_vendor_string();
     v.starts_with(b"GenuineIntel")
 }
@@ -56,10 +56,4 @@ pub fn active_erratum_tag() -> Option<&'static str> {
     } else {
         None
     }
-}
-
-/// Diagnostics only — detection uses family/model/stepping because
-/// pre-production CPUs sometimes ship with placeholder brand strings.
-pub fn brand_for_logs() -> [u8; 48] {
-    cpu_brand_string()
 }

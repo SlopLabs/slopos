@@ -56,7 +56,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn size_constants_match_legacy() {
+    fn size_constants_match_the_architecture() {
         assert_eq!(Size4Kb::BYTES, 0x1000);
         assert_eq!(Size2Mb::BYTES, 0x20_0000);
         assert_eq!(Size1Gb::BYTES, 0x4000_0000);

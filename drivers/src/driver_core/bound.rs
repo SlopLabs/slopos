@@ -7,10 +7,10 @@
 //! shadow.
 
 use slopos_abi::PhysAddr;
-use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
+use slopos_mm::mmio;
 use slopos_ostd::io::port::IoPortError;
 use slopos_ostd::irq::{IrqAllocator, IrqContext, IrqError};
-use slopos_ostd::mm::{DmaCoherent, DmaDirection, DmaError, DmaStream, IoMem};
+use slopos_ostd::mm::IoMem;
 
 use crate::driver_core::bus::{BoundDevice, Bus};
 use crate::pci::PciBus;
@@ -20,7 +20,6 @@ use crate::pci::PciBus;
 pub enum BoundError {
     /// The heap could not box the resource or grow the `Devres` bag.
     OutOfMemory,
-    Dma(DmaError),
     Irq(IrqError),
     /// Not on the certified-insensitive list, or already held.
     IoPort(IoPortError),
@@ -44,28 +43,12 @@ impl<'d, B: Bus + 'static> BoundDevice<'d, B> {
         self.res.attach(res).map_err(|_| BoundError::OutOfMemory)
     }
 
-    /// Allocate `npages` of IOMMU-mapped, cache-coherent DMA memory.
-    pub fn alloc_dma_coherent(&mut self, npages: usize) -> Result<&DmaCoherent, BoundError> {
-        let dma = DmaCoherent::alloc(npages).map_err(BoundError::Dma)?;
-        self.res.attach(dma).map_err(|_| BoundError::OutOfMemory)
-    }
-
-    /// Allocate `npages` of IOMMU-mapped streaming DMA memory in `dir`.
-    pub fn alloc_dma_stream(
-        &mut self,
-        npages: usize,
-        dir: DmaDirection,
-    ) -> Result<&DmaStream, BoundError> {
-        let dma = DmaStream::alloc(npages, dir).map_err(BoundError::Dma)?;
-        self.res.attach(dma).map_err(|_| BoundError::OutOfMemory)
-    }
-
     /// Reserve and map `[phys, phys + len)` as an uncacheable MMIO window.
     ///
     /// The returned [`IoMem`] is `Clone`: the bag cell is the leak-tracking
     /// anchor, a clone is a working copy.
     pub fn map_region(&mut self, phys: PhysAddr, len: usize) -> Result<&IoMem, BoundError> {
-        let region = MmioRegion::map(phys, len).ok_or(BoundError::MapFailed)?;
+        let region = mmio::map_uncached(phys, len).ok_or(BoundError::MapFailed)?;
         self.res.attach(region).map_err(|_| BoundError::OutOfMemory)
     }
 

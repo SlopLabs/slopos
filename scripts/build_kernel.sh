@@ -53,10 +53,11 @@ if [ "${KERNEL_RELEASE:-0}" = 1 ]; then
     esac
 fi
 
-# SafeStack: `karch::safestack_rt` supplies `__safestack_pointer_address` and
-# `_start` primes it before any instrumented code runs, so the runtime archive
-# rustc links into every safestack binary only has to exist. rustup ships none
-# for a custom target; an empty archive is the 8-byte magic.
+# SafeStack: `slopos_ostd::arch::x86_64::naked` supplies
+# `__safestack_pointer_address` and `_start` primes it before any instrumented
+# code runs, so the runtime archive rustc links into every safestack binary
+# only has to exist. rustup ships none for a custom target; an empty archive is
+# the 8-byte magic.
 if [ "${KERNEL_SAFESTACK:-1}" = 1 ]; then
     KERNEL_RUSTFLAGS="$KERNEL_RUSTFLAGS -Z sanitizer=safestack -C llvm-args=-safestack-use-pointer-address"
     libdir="$($CARGO rustc --locked -Zunstable-options --print target-libdir \

@@ -4,7 +4,8 @@
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use slopos_ostd::mm::frame::{AnonymousMeta, MetaSlot, Paddr, init_meta_slots};
+use slopos_abi::addr::PhysAddr;
+use slopos_ostd::mm::frame::{AnonymousMeta, MetaSlot, init_meta_slots};
 use slopos_ostd::mm::phys::init_phys_window;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::vmcursor::{VmReader, VmWriter};
@@ -40,7 +41,8 @@ fn frames(base_page: usize, n: usize) -> Vec<UFrame<AnonymousMeta>> {
     (0..n)
         .map(|i| {
             let pa = ((base_page + i) * PAGE_SIZE) as u64;
-            UFrame::<AnonymousMeta>::from_unused(Paddr::new(pa), AnonymousMeta::default()).unwrap()
+            UFrame::<AnonymousMeta>::from_unused(PhysAddr::new(pa), AnonymousMeta::default())
+                .unwrap()
         })
         .collect()
 }

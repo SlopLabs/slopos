@@ -2,7 +2,7 @@
 //! registers in the low half and the Global GTT page-table in the high half
 //! (16 MiB on the target silicon).
 
-use slopos_mm::mmio::MmioRegion;
+use slopos_ostd::mm::IoMem;
 
 use crate::driver_core::bound::BoundError;
 use crate::pci::BoundDevice;
@@ -12,7 +12,7 @@ use crate::xe_logic::regs;
 ///
 /// The handle is cloned to owned storage: its kernel VA lives as long as the
 /// binding's devres bag, so the clone outlives the borrow `map_bar` hands back.
-pub fn map_gttmmadr(bound: &mut BoundDevice<'_>) -> Result<MmioRegion, BoundError> {
+pub fn map_gttmmadr(bound: &mut BoundDevice<'_>) -> Result<IoMem, BoundError> {
     let bar = *bound.info().bars.first().ok_or(BoundError::NoSuchBar)?;
     if bar.is_io != 0 || bar.base == 0 || bar.size == 0 {
         return Err(BoundError::NoSuchBar);
@@ -24,7 +24,7 @@ pub fn map_gttmmadr(bound: &mut BoundDevice<'_>) -> Result<MmioRegion, BoundErro
 /// Carve the Global GTT bank — `[GTTMMADR_GGTT_OFFSET, region.size())` — out of a
 /// mapped GTTMMADR window, sharing the parent mapping rather than reserving
 /// anew. `None` if the window is too small to contain the bank.
-pub fn ggtt_bank(region: &MmioRegion) -> Option<MmioRegion> {
+pub fn ggtt_bank(region: &IoMem) -> Option<IoMem> {
     let bank_len = region.size().checked_sub(regs::GTTMMADR_GGTT_OFFSET)?;
     region.sub_region(regs::GTTMMADR_GGTT_OFFSET, bank_len)
 }

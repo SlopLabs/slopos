@@ -216,7 +216,7 @@ fn register_vnode(
         });
     }
     // Between the walk above and `open_ref` nothing held the inode: an
-    // `unlink` landing in that window frees it, and ext2's `InodeId` is a bare
+    // `unlink` landing in that window frees it, and ext4's `InodeId` is a bare
     // inode number with no generation, so this descriptor would name whatever
     // file got the number next. The re-check does not close the window — an
     // inode reallocated *and* re-bound to this same path still passes — but it

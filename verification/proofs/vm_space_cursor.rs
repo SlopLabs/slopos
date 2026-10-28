@@ -207,7 +207,7 @@ pub open spec fn step(s: PtPath, t: Step) -> PtPath {
             if s.leaf_present {
                 PtPath { pdpt_linked: true, pd_linked: true, pt_linked: true, ..s }
             } else {
-                // `map_io` is handed a bare `Paddr` and owns nothing, so there
+                // `map_io` is handed a bare `PhysAddr` and owns nothing, so there
                 // is no frame for a caller to get back either way.
                 PtPath {
                     pdpt_linked: true,

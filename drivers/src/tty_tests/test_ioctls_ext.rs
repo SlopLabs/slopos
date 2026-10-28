@@ -1397,7 +1397,7 @@ pub fn test_output_queued_invalid_index() -> TestResult {
     }
 }
 
-pub fn test_fionread_unchanged() -> TestResult {
+pub fn test_fionread_counts_queued_input() -> TestResult {
     tty::table::tty_table_init();
     let idx = TtyIndex(0);
     drain_tty_nonblock(idx);
@@ -2117,7 +2117,6 @@ pub fn test_session_fields_pub_crate_smoke() -> TestResult {
     let ok = tty::table::with_tty_ref(TtyIndex(0), |tty| {
         let _ = tty.session.session_id();
         let _ = tty.session.fg_pgrp_id();
-        let _ = tty.session.focused_task_id;
         true
     });
     if ok != Some(true) {
@@ -2365,7 +2364,10 @@ slopos_testing::stest!(
     name = test_output_queued_invalid_index,
     suite = tty_test_ioctls_ext
 );
-slopos_testing::stest!(name = test_fionread_unchanged, suite = tty_test_ioctls_ext);
+slopos_testing::stest!(
+    name = test_fionread_counts_queued_input,
+    suite = tty_test_ioctls_ext
+);
 slopos_testing::stest!(
     name = test_output_queued_vconsole,
     suite = tty_test_ioctls_ext

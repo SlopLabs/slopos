@@ -7,8 +7,8 @@
 //! activation takes its own lock and then that filesystem's, never the other
 //! way round: nothing below a disk's filesystem reads an activation.
 
+use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::sync::Mutex;
-use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::{KBox, KVec, klog_warn, lock_class};
 use slopos_verity_core::{self as verity, BLOCK, Digest, Fault, Geometry};
 

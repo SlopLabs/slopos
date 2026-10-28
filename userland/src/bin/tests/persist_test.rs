@@ -34,7 +34,7 @@ fn probe_path() -> String {
 /// Self-detecting, so one ISO serves both boots of `just test-persist`.
 fn persist_roundtrip() -> bool {
     let probe = probe_path();
-    let payload: &[u8] = b"slopos-persist-v1\n";
+    let payload: &[u8] = b"slopos-persist\n";
     match File::open(&probe) {
         Ok(mut f) => {
             let mut got = Vec::new();
@@ -101,7 +101,7 @@ fn sync_all_mounts() -> bool {
 /// re-run on a persistent image must not depend on overwriting.
 fn fsync_commits_the_written_file() -> bool {
     let path = unique_probe_path("fsync");
-    let payload = b"fsync-scope-v1\n";
+    let payload = b"fsync-scope\n";
     let mut f = match File::create(&path) {
         Ok(f) => f,
         Err(e) => {
@@ -164,7 +164,7 @@ fn o_sync_write_needs_no_fsync() -> bool {
         Ok(p) => p,
         Err(_) => return false,
     };
-    let payload = b"o-sync-v1\n";
+    let payload = b"o-sync\n";
     if let Err(e) = o_sync_write(&cpath, payload) {
         println!("OSYNC: durable write failed: {e:?}");
         return false;
@@ -286,7 +286,7 @@ fn statfs_agrees_with_fstatfs() -> bool {
 /// with a reserve the refused blocks are still free; on a disk that simply
 /// filled, nothing is. Only after that are the fillers removed. An entitled
 /// writer spending the reserve is `slopos_fs`'s
-/// `test_ext2_reserve_refuses_unprivileged_allocation`.
+/// `test_ext4_reserve_refuses_unprivileged_allocation`.
 fn the_disk_reserve_refuses_an_unprivileged_filler() -> bool {
     if !root_persists() {
         return true;

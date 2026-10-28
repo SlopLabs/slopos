@@ -23,8 +23,8 @@ const MAX_STATIC_APS: usize = 16;
 /// Processor Control Region — the single per-CPU data structure; GS_BASE points
 /// here in kernel mode.
 ///
-/// Offsets 0-24 are hard-coded in assembly: changing them requires updating
-/// `slopos-ostd/src/user/asm/user_return.s` and `core/context_switch.s`.
+/// Assembly takes each field's offset as a `const` operand; `boot/limine_entry.s`
+/// alone spells one as a number, `current_task`'s 40.
 #[repr(C, align(4096))]
 pub struct ProcessorControlRegion {
     /// Self-reference pointer for GS-based PCR access.
@@ -76,39 +76,30 @@ pub struct ProcessorControlRegion {
     /// when re-enabled).
     pub reschedule_pending: AtomicU32, // offset 60
 
-    pub context_switches: AtomicU64, // offset 64
-
-    pub interrupt_count: AtomicU64, // offset 72
-
-    pub syscall_count: AtomicU64, // offset 80
-
     /// PID of task currently in syscall (for user pointer validation).
-    pub syscall_pid: AtomicU32, // offset 88
+    pub syscall_pid: AtomicU32, // offset 64
 
-    _pad3: [u8; 4], // offset 92-95
+    _pad3: [u8; 4], // offset 68-71
 
     /// Per-CPU active `UserContext` pointer. Published by
     /// `user_mode_round_trip_asm` with interrupts off before its iretq;
     /// consumed by `__ostd_user_return` to write user state back.
-    pub user_ctx_ptr: AtomicPtr<UserContext>, // offset 96
+    pub user_ctx_ptr: AtomicPtr<UserContext>, // offset 72
 
     /// Saved kernel callee-save snapshot used by `__ostd_user_return`
     /// to unwind back to the caller of `execute_round_trip`.
-    pub kernel_return_ctx: SyncUnsafeCell<KernelReturnContext>, // offset 104
+    pub kernel_return_ctx: SyncUnsafeCell<KernelReturnContext>, // offset 80
 
     /// Per-CPU scratch slot for the user RAX value during the
     /// `__ostd_user_return` trampoline.  Spilling RAX onto the kernel stack at
     /// `kernel_rsp - 8` would collide with the next CPU-pushed IRET frame's SS
     /// slot at TSS.RSP0.
-    pub user_rax_tmp: SyncUnsafeCell<u64>, // offset 168
+    pub user_rax_tmp: SyncUnsafeCell<u64>, // offset 144
 
-    pub gdt: GdtLayout, // offset 192
-
-    // Padding to align TSS to 16 bytes.
-    _tss_align: [u8; 8],
+    pub gdt: GdtLayout, // offset 152
 
     /// TSS.rsp0 = kernel_rsp (kept in sync).
-    pub tss: Tss64,
+    pub tss: Tss64, // offset 208
 
     /// Guard page to catch stack overflow (unmapped or read-only).
     _stack_guard: [u8; 4096],
@@ -124,10 +115,9 @@ pub struct ProcessorControlRegion {
     /// walks a dedicated guard-paged per-CPU stack rather than the interrupted
     /// task's small data stack. Primed by `ist_stacks` before interrupts are
     /// enabled and re-primed by `retire_faulted_cpu`, the one exception path
-    /// that abandons without unwinding. Appended after the embedded kernel
-    /// stack so every asm-critical PCR offset (`<= 184`) and the GDT/TSS layout
-    /// stay byte-identical. The cell's inner `u64` sits at its offset 0, so
-    /// `offset_of!(PCR, ist_unsafe_sp)` is the address the asm returns.
+    /// that abandons without unwinding. The cell's inner `u64` sits at its
+    /// offset 0, so `offset_of!(PCR, ist_unsafe_sp)` is the address the asm
+    /// returns.
     pub ist_unsafe_sp: SyncUnsafeCell<u64>,
 
     /// Reliable Abort Core — per-CPU emergency SAFE-stack top (RSP).
@@ -249,12 +239,14 @@ const _: () = {
     assert!(core::mem::offset_of!(ProcessorControlRegion, bh_pending) == 37);
     assert!(core::mem::offset_of!(ProcessorControlRegion, bh_active) == 38);
     assert!(core::mem::offset_of!(ProcessorControlRegion, reschedule_pending) == 60);
-    assert!(core::mem::offset_of!(ProcessorControlRegion, syscall_pid) == 88);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, syscall_pid) == 64);
     assert!(core::mem::offset_of!(ProcessorControlRegion, current_task) == 40);
     assert!(core::mem::offset_of!(ProcessorControlRegion, idle_task) == 48);
-    assert!(core::mem::offset_of!(ProcessorControlRegion, user_ctx_ptr) == 96);
-    assert!(core::mem::offset_of!(ProcessorControlRegion, kernel_return_ctx) == 104);
-    assert!(core::mem::offset_of!(ProcessorControlRegion, user_rax_tmp) == 168);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, user_ctx_ptr) == 72);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, kernel_return_ctx) == 80);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, user_rax_tmp) == 144);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, gdt) == 152);
+    assert!(core::mem::offset_of!(ProcessorControlRegion, tss) % 16 == 0);
     assert!(core::mem::align_of::<ProcessorControlRegion>() == 4096);
 };
 
@@ -313,9 +305,6 @@ impl ProcessorControlRegion {
             online: AtomicBool::new(false),
             _pad2: [0; 3],
             reschedule_pending: AtomicU32::new(0),
-            context_switches: AtomicU64::new(0),
-            interrupt_count: AtomicU64::new(0),
-            syscall_count: AtomicU64::new(0),
             syscall_pid: AtomicU32::new(u32::MAX),
             _pad3: [0; 4],
             user_ctx_ptr: AtomicPtr::new(ptr::null_mut()),
@@ -331,7 +320,6 @@ impl ProcessorControlRegion {
             }),
             user_rax_tmp: SyncUnsafeCell::new(0),
             gdt: GdtLayout::new(),
-            _tss_align: [0; 8],
             tss: Tss64::new(),
             _stack_guard: [0; 4096],
             kernel_stack: [0; KERNEL_STACK_SIZE],
@@ -409,40 +397,28 @@ impl ProcessorControlRegion {
     }
 }
 
-/// PCR offset constants for assembly code.
+/// PCR field offsets for assembly operands.
 pub mod offsets {
-    pub const SELF_REF: usize = 0;
-    pub const USER_RSP_TMP: usize = 8;
-    pub const KERNEL_RSP: usize = 16;
-    pub const CPU_ID: usize = 24;
-    pub const APIC_ID: usize = 28;
-    pub const PREEMPT_COUNT: usize = 32;
-    pub const BH_PENDING: usize = 37;
-    pub const RESCHEDULE_PENDING: usize = 60;
-    pub const CURRENT_TASK: usize = 40;
-    pub const IDLE_TASK: usize = 48;
-    pub const SYSCALL_PID: usize = 88;
-    pub const USER_CTX_PTR: usize = 96;
-    pub const KERNEL_RETURN_CTX: usize = 104;
-    pub const USER_RAX_TMP: usize = 168;
-    pub const TSS_RSP0: usize = core::mem::offset_of!(super::ProcessorControlRegion, tss)
-        + core::mem::offset_of!(crate::arch::x86_64::gdt::Tss64, rsp0);
-    /// Computed rather than a literal: the field is appended after the 64 KiB
-    /// embedded kernel stack to keep the asm-critical offsets (`<= 184`)
-    /// byte-identical.
-    pub const IST_UNSAFE_SP: usize =
-        core::mem::offset_of!(super::ProcessorControlRegion, ist_unsafe_sp);
-    pub const PANIC_SAFE_SP: usize =
-        core::mem::offset_of!(super::ProcessorControlRegion, panic_safe_sp);
-    pub const PANIC_UNSAFE_SP: usize =
-        core::mem::offset_of!(super::ProcessorControlRegion, panic_unsafe_sp);
-    /// Computed, not pinned: no asm outside this module reads it, so it may
-    /// move as the tail grows.
-    pub const CURRENT_TASK_ID: usize =
-        core::mem::offset_of!(super::ProcessorControlRegion, current_task_id);
-    /// Computed, not pinned — same rules as [`CURRENT_TASK_ID`].
-    pub const CURRENT_TASK_PRIORITY: usize =
-        core::mem::offset_of!(super::ProcessorControlRegion, current_task_priority);
+    use super::ProcessorControlRegion as Pcr;
+    use core::mem::offset_of;
+
+    pub const SELF_REF: usize = offset_of!(Pcr, self_ref);
+    pub const KERNEL_RSP: usize = offset_of!(Pcr, kernel_rsp);
+    pub const CPU_ID: usize = offset_of!(Pcr, cpu_id);
+    pub const PREEMPT_COUNT: usize = offset_of!(Pcr, preempt_count);
+    pub const BH_PENDING: usize = offset_of!(Pcr, bh_pending);
+    pub const RESCHEDULE_PENDING: usize = offset_of!(Pcr, reschedule_pending);
+    pub const CURRENT_TASK: usize = offset_of!(Pcr, current_task);
+    pub const SYSCALL_PID: usize = offset_of!(Pcr, syscall_pid);
+    pub const USER_CTX_PTR: usize = offset_of!(Pcr, user_ctx_ptr);
+    pub const KERNEL_RETURN_CTX: usize = offset_of!(Pcr, kernel_return_ctx);
+    pub const TSS_RSP0: usize =
+        offset_of!(Pcr, tss) + offset_of!(crate::arch::x86_64::gdt::Tss64, rsp0);
+    pub const IST_UNSAFE_SP: usize = offset_of!(Pcr, ist_unsafe_sp);
+    pub const PANIC_SAFE_SP: usize = offset_of!(Pcr, panic_safe_sp);
+    pub const PANIC_UNSAFE_SP: usize = offset_of!(Pcr, panic_unsafe_sp);
+    pub const CURRENT_TASK_ID: usize = offset_of!(Pcr, current_task_id);
+    pub const CURRENT_TASK_PRIORITY: usize = offset_of!(Pcr, current_task_priority);
 }
 
 /// IST/exception safe-stack region bounds used by
@@ -707,18 +683,13 @@ pub fn current_cpu_id() -> usize {
     unsafe {
         let id: u32;
         core::arch::asm!(
-            "mov {:e}, gs:[24]",
-            out(reg) id,
+            "mov {id:e}, gs:[{off}]",
+            id = out(reg) id,
+            off = const offsets::CPU_ID,
             options(nostack, preserves_flags, readonly)
         );
         id as usize
     }
-}
-
-/// Alias for `current_cpu_id()` — preferred in most call sites.
-#[inline(always)]
-pub fn get_current_cpu() -> usize {
-    current_cpu_id()
 }
 
 /// # Safety
@@ -727,8 +698,9 @@ pub fn get_current_cpu() -> usize {
 pub unsafe fn current_pcr() -> &'static ProcessorControlRegion {
     let ptr: *mut ProcessorControlRegion;
     core::arch::asm!(
-        "mov {}, gs:[0]",
-        out(reg) ptr,
+        "mov {ptr}, gs:[{off}]",
+        ptr = out(reg) ptr,
+        off = const offsets::SELF_REF,
         options(nostack, preserves_flags, readonly)
     );
     &*ptr
@@ -741,8 +713,9 @@ pub unsafe fn current_pcr() -> &'static ProcessorControlRegion {
 pub unsafe fn current_pcr_mut() -> &'static mut ProcessorControlRegion {
     let ptr: *mut ProcessorControlRegion;
     core::arch::asm!(
-        "mov {}, gs:[0]",
-        out(reg) ptr,
+        "mov {ptr}, gs:[{off}]",
+        ptr = out(reg) ptr,
+        off = const offsets::SELF_REF,
         options(nostack, preserves_flags, readonly)
     );
     &mut *ptr
@@ -932,14 +905,14 @@ pub fn get_pcr_mut_via_token(cpu_id: usize) -> Option<&'static mut ProcessorCont
 /// required. Returns `None` if PCR init hasn't run yet.
 #[inline]
 pub fn current_pcr_local() -> Option<&'static ProcessorControlRegion> {
-    get_pcr(get_current_cpu())
+    get_pcr(current_cpu_id())
 }
 
 /// Mutable variant of [`current_pcr_local`]. Sound under Inv. 8: the
 /// caller commits to mutating only this CPU's slot.
 #[inline]
 pub fn current_pcr_local_mut() -> Option<&'static mut ProcessorControlRegion> {
-    get_pcr_mut_via_token(get_current_cpu())
+    get_pcr_mut_via_token(current_cpu_id())
 }
 
 /// Prime/re-prime the current CPU's IST/exception SafeStack data-stack
@@ -1181,13 +1154,13 @@ pub fn bh_active_clear() {
 /// Returns the previous recovery depth.
 #[inline]
 pub fn recovery_depth_enter() -> u32 {
-    recovery_depth_enter_for_cpu(get_current_cpu())
+    recovery_depth_enter_for_cpu(current_cpu_id())
 }
 
 /// Returns the previous recovery depth and saturates at zero.
 #[inline]
 pub fn recovery_depth_exit() -> u32 {
-    recovery_depth_exit_for_cpu(get_current_cpu())
+    recovery_depth_exit_for_cpu(current_cpu_id())
 }
 
 #[inline]
@@ -1267,11 +1240,6 @@ pub fn get_pcr_count() -> usize {
 }
 
 #[inline]
-pub fn is_pcr_initialized() -> bool {
-    PCR_INIT.is_set()
-}
-
-#[inline]
 pub fn get_cpu_count() -> usize {
     get_pcr_count()
 }
@@ -1293,7 +1261,7 @@ pub fn get_online_cpu_count() -> usize {
 
 #[inline]
 pub fn is_bsp() -> bool {
-    get_current_cpu() == 0
+    current_cpu_id() == 0
 }
 
 /// Online means ready to run tasks.
@@ -1660,30 +1628,6 @@ pub fn get_current_task_for(cpu_id: usize) -> *mut () {
     get_pcr(cpu_id)
         .map(|pcr| pcr.current_task.load(Ordering::Acquire))
         .unwrap_or(ptr::null_mut())
-}
-
-#[inline]
-pub fn increment_context_switches() {
-    if !GS_BASE_SET.is_set() {
-        return;
-    }
-    unsafe {
-        current_pcr()
-            .context_switches
-            .fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-#[inline]
-pub fn increment_interrupt_count() {
-    if !GS_BASE_SET.is_set() {
-        return;
-    }
-    unsafe {
-        current_pcr()
-            .interrupt_count
-            .fetch_add(1, Ordering::Relaxed);
-    }
 }
 
 pub type SendIpiToCpuFn = fn(u32, u8);

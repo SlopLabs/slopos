@@ -36,8 +36,6 @@ use slopos_abi::addr::PhysAddr;
 use crate::mm::uframe::{AnyUFrameMeta, UFrame};
 use crate::sync::BspToken;
 
-pub type Paddr = PhysAddr;
-
 /// Maximum inline byte budget for an [`AnyFrameMeta`] payload.
 pub const MAX_META_SIZE: usize = 16;
 
@@ -252,7 +250,7 @@ const _: () = assert_meta_fits::<AnonymousMeta>();
 
 /// Page-cache frame metadata: one slot per cached page of file or
 /// block-device contents, carrying the dirty bit and an opaque owner-backref
-/// key chosen by the consumer (the ext2 `BlockCache` stores the on-disk block
+/// key chosen by the consumer (the ext4 `BlockCache` stores the on-disk block
 /// number).
 ///
 /// Sized exactly at the [`MAX_META_SIZE`] cap: `AtomicU8 (1) + 7 padding +
@@ -285,7 +283,7 @@ pub struct PacketMeta {
 unsafe impl AnyFrameMeta for PacketMeta {}
 const _: () = assert_meta_fits::<PacketMeta>();
 
-/// Frame metadata for a SlopRing shared-memory region page (SLOPRING § 5.2).
+/// Frame metadata for a SlopRing shared-memory region page.
 /// A ring's SQ/CQ live in `Frame<RingMeta>`s mapped read+write into both the
 /// kernel HHDM and the owning process. `RingMeta` is *dual*: `AnyFrameMeta`
 /// (it owns a real frame, freed on last `Drop`) **and** `AnyUFrameMeta`, so
@@ -307,7 +305,7 @@ const _: () = assert_meta_fits::<RingMeta>();
 /// is registered, so test scaffolding can drop frames before
 /// `register_frame_allocator` runs.
 #[inline]
-fn return_frame_to_allocator(paddr: Paddr) {
+fn return_frame_to_allocator(paddr: PhysAddr) {
     if let Some(alloc) = crate::mm::frame_alloc::current_frame_allocator() {
         alloc.dealloc(paddr, 1);
     }
@@ -361,7 +359,7 @@ pub fn reset_meta_slots_for_test() {
 }
 
 #[inline]
-pub(crate) fn meta_slot_for(paddr: Paddr) -> Option<&'static MetaSlot> {
+pub(crate) fn meta_slot_for(paddr: PhysAddr) -> Option<&'static MetaSlot> {
     let base = META_SLOTS.base.load(Ordering::Acquire);
     if base.is_null() {
         return None;
@@ -450,7 +448,7 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
     /// exists per `paddr`, and the registered `FrameAlloc` only returns
     /// paddrs for currently unused physical memory, so a successful return is
     /// never aliased to another live OSTD object.
-    pub fn from_unused(paddr: Paddr, meta: M) -> Result<Self, FrameError> {
+    pub fn from_unused(paddr: PhysAddr, meta: M) -> Result<Self, FrameError> {
         const {
             assert_meta_fits::<M>();
         }
@@ -510,7 +508,7 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
     /// The caller's `paddr` must point to a live slot (`ref_count` in
     /// `1..=REF_COUNT_MAX`) with the same `M`; mismatches return
     /// [`FrameError::StateMismatch`].
-    pub fn from_in_use(paddr: Paddr) -> Result<Self, FrameError> {
+    pub fn from_in_use(paddr: PhysAddr) -> Result<Self, FrameError> {
         let slot = meta_slot_for(paddr).ok_or(FrameError::OutOfRange)?;
         // Type-identity gate: compare the `TypeId` *value* the slot's vtable
         // carries, never the vtable *pointer* — a `const`-promoted vtable has
@@ -554,7 +552,7 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
 
     /// Physical address of the underlying frame, derived from the
     /// slot's index in `META_SLOTS`.
-    pub fn paddr(&self) -> Paddr {
+    pub fn paddr(&self) -> PhysAddr {
         let base = META_SLOTS.base.load(Ordering::Acquire);
         let idx = (self.ptr as usize - base as usize) / size_of::<MetaSlot>();
         PhysAddr::new((idx * PAGE_SIZE) as u64)
@@ -581,7 +579,7 @@ fn live_ref_count(raw: u32) -> u32 {
 /// Peek at the META_SLOTS refcount for `paddr` without constructing a
 /// `Frame<M>` (no inc / dec). Returns `0` for paddrs whose slot is UNUSED,
 /// BUSY, or out of range.
-pub fn reference_count_at(paddr: Paddr) -> u32 {
+pub fn reference_count_at(paddr: PhysAddr) -> u32 {
     let Some(slot) = meta_slot_for(paddr) else {
         return 0;
     };
@@ -602,7 +600,7 @@ pub fn reference_count_at(paddr: Paddr) -> u32 {
 /// lifetime and every `mmap` adds a ref via [`Frame::from_in_use`], so the
 /// page returns to the allocator exactly once. This removes the second,
 /// MetaSlot-bypassing free path a raw allocator-level free would create.
-pub fn claim_owned_anon_page(paddr: Paddr) -> bool {
+pub fn claim_owned_anon_page(paddr: PhysAddr) -> bool {
     match Frame::<AnonymousMeta>::from_unused(paddr, AnonymousMeta) {
         Ok(frame) => {
             // Leak the ref into bare `paddr` ownership; `from_raw_at`
@@ -622,7 +620,7 @@ pub fn claim_owned_anon_page(paddr: Paddr) -> bool {
 ///
 /// Returns `false` if the slot was not live (already released / never
 /// claimed) — a caller bug, never a silent retry.
-pub fn release_owned_anon_page(paddr: Paddr) -> bool {
+pub fn release_owned_anon_page(paddr: PhysAddr) -> bool {
     // SAFETY: `claim_owned_anon_page` leaked exactly one `AnonymousMeta`
     // ref for `paddr` via `into_raw` and the caller (the memfd registry,
     // under its lock) releases it at most once; the meta type matches.
@@ -652,7 +650,6 @@ pub enum SlotMetaKind {
     Packet,
     Ring,
     DmaCoherent,
-    DmaStream,
     /// Live (non-sentinel `ref_count`) but the vtable's `TypeId` matches none
     /// of the known built-in metas — a sign of slot corruption.
     Unknown,
@@ -678,7 +675,7 @@ pub struct SlotSnapshot {
 /// [`SlotMetaKind`]. Compares `TypeId` *values*, so it agrees with
 /// `from_in_use`'s identity gate.
 fn classify_vtable_typeid(vt: *const MetaVtable) -> SlotMetaKind {
-    use crate::mm::dma::{DmaCoherentMeta, DmaStreamMeta};
+    use crate::mm::dma::DmaCoherentMeta;
     if vt.is_null() {
         return SlotMetaKind::Unknown;
     }
@@ -699,8 +696,6 @@ fn classify_vtable_typeid(vt: *const MetaVtable) -> SlotMetaKind {
         SlotMetaKind::Ring
     } else if tid == TypeId::of::<DmaCoherentMeta>() {
         SlotMetaKind::DmaCoherent
-    } else if tid == TypeId::of::<DmaStreamMeta>() {
-        SlotMetaKind::DmaStream
     } else {
         SlotMetaKind::Unknown
     }
@@ -708,7 +703,7 @@ fn classify_vtable_typeid(vt: *const MetaVtable) -> SlotMetaKind {
 
 /// Capture a read-only [`SlotSnapshot`] for `paddr`. Cheap; intended for
 /// cold diagnostic paths only.
-pub fn slot_snapshot(paddr: Paddr) -> SlotSnapshot {
+pub fn slot_snapshot(paddr: PhysAddr) -> SlotSnapshot {
     if META_SLOTS.base.load(Ordering::Acquire).is_null() {
         return SlotSnapshot {
             in_range: false,
@@ -803,7 +798,7 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
     ///    `into_raw` and has not been reclaimed since,
     /// 2. `M` matches the metadata type that produced the leaked
     ///    `Frame`.
-    pub unsafe fn from_raw_at(paddr: Paddr) -> Result<Self, FrameError> {
+    pub unsafe fn from_raw_at(paddr: PhysAddr) -> Result<Self, FrameError> {
         let slot = meta_slot_for(paddr).ok_or_else(|| {
             if META_SLOTS.base.load(Ordering::Acquire).is_null() {
                 FrameError::NotInitialised
@@ -852,13 +847,14 @@ impl Frame<KernelMeta, init_state::Zeroed> {
     }
 
     /// Allocate a fresh zeroed `Frame<KernelMeta>` and immediately release
-    /// its `MetaSlot` to `UNUSED`, returning the raw `Paddr` for handoff to
-    /// legacy raw-paddr free paths. Returns [`Paddr::null`] on failure.
+    /// its `MetaSlot` to `UNUSED`, returning the raw `PhysAddr` for a caller that
+    /// programs it into a device or a page table by address. Returns
+    /// [`PhysAddr::NULL`] on failure.
     ///
-    /// Caller takes ownership of the returned `Paddr` and is solely
+    /// Caller takes ownership of the returned `PhysAddr` and is solely
     /// responsible for eventual deallocation via
     /// `slopos_mm::page_alloc::free_page_frame`.
-    pub fn alloc_release_phys(opts: FrameAllocOptions) -> Paddr {
+    pub fn alloc_release_phys(opts: FrameAllocOptions) -> PhysAddr {
         match Self::alloc(opts) {
             Some(f) => {
                 // SAFETY: `f` is the sole `Frame` handle for the slot —
@@ -867,7 +863,7 @@ impl Frame<KernelMeta, init_state::Zeroed> {
                 // sole-owner invariant holds.
                 unsafe { f.into_phys_release() }
             }
-            None => Paddr::NULL,
+            None => PhysAddr::NULL,
         }
     }
 }
@@ -976,7 +972,7 @@ impl<S: init_state::InitState> Frame<KernelMeta, S> {
     /// outstanding ref; the caller is responsible for either re-wrapping
     /// it via [`Frame::from_raw_at`] or releasing the page another way.
     #[inline]
-    pub fn into_phys(self) -> Paddr {
+    pub fn into_phys(self) -> PhysAddr {
         let paddr = self.paddr();
         let _slot = self.into_raw();
         paddr
@@ -985,27 +981,27 @@ impl<S: init_state::InitState> Frame<KernelMeta, S> {
     /// Consume the handle, **release** the underlying [`MetaSlot`] to
     /// `UNUSED` (drops the inline metadata in place, resets the refcount),
     /// and return the raw physical address. The page is **not** returned to
-    /// the buddy allocator — the caller takes ownership of the raw `Paddr`
+    /// the buddy allocator — the caller takes ownership of the raw `PhysAddr`
     /// and is responsible for freeing it via `free_page_frame` or
     /// transferring ownership to a non-`Frame` consumer.
     ///
     /// # Safety
     ///
     /// **Caller's invariant**: no other `Frame` handle exists for the
-    /// returned `Paddr` at the moment of this call. The typestate alone
+    /// returned `PhysAddr` at the moment of this call. The typestate alone
     /// is *not* sufficient to guarantee this — [`Frame::from_in_use`]
     /// can produce additional handles aliasing the same slot via a
     /// conditional ref-count CAS. Callers must therefore preserve the
     /// "sole owner" property by other means (e.g. by holding the only
     /// reference returned from `Frame::alloc` and never publishing the
-    /// `Paddr` to a `from_in_use` consumer).
+    /// `PhysAddr` to a `from_in_use` consumer).
     ///
     /// After this call, no [`MetaSlot`] reservation tracks the page.
     /// The caller becomes solely responsible for eventual deallocation
     /// (typically via `slopos_mm::page_alloc::free_page_frame`). A
     /// missed free leaks the page; a double-free corrupts the buddy
     /// allocator.
-    pub unsafe fn into_phys_release(self) -> Paddr {
+    pub unsafe fn into_phys_release(self) -> PhysAddr {
         let paddr = self.paddr();
         // SAFETY: the caller asserted `self` is the sole `Frame` handle, so
         // ref_count == 1 (the debug_assert traps test-time misuse). BUSY
@@ -1295,12 +1291,12 @@ impl<M: AnyFrameMeta, S: init_state::InitState> core::fmt::Debug for Frame<M, S>
 impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
     /// Give up this reference and, if it was the last, the page the
     /// allocator is owed — for the caller to return rather than this.
-    pub(crate) fn release(self) -> Option<Paddr> {
+    pub(crate) fn release(self) -> Option<PhysAddr> {
         core::mem::ManuallyDrop::new(self).release_ref()
     }
 
     /// The body of `drop`, up to returning the page.
-    fn release_ref(&self) -> Option<Paddr> {
+    fn release_ref(&self) -> Option<PhysAddr> {
         // SAFETY: `ptr` points at a live `MetaSlot` for as long as
         // `ref_count > 0`, which is true while this `Frame` is alive.
         let slot = unsafe { &*self.ptr };
@@ -1347,14 +1343,14 @@ const RETURN_BATCH_PAGES: usize = 8;
 /// `dealloc` each. A page is returned no earlier than dropping its frame
 /// would have, and no later than the batch's own drop.
 pub struct FrameReturnBatch {
-    pages: [Paddr; RETURN_BATCH_PAGES],
+    pages: [PhysAddr; RETURN_BATCH_PAGES],
     len: usize,
 }
 
 impl FrameReturnBatch {
     pub const fn new() -> Self {
         Self {
-            pages: [Paddr::NULL; RETURN_BATCH_PAGES],
+            pages: [PhysAddr::NULL; RETURN_BATCH_PAGES],
             len: 0,
         }
     }
@@ -1439,12 +1435,12 @@ impl FrameAllocOptions {
 }
 
 pub trait FrameAlloc: Send + Sync + 'static {
-    fn alloc(&self, opts: FrameAllocOptions) -> Option<Paddr>;
-    fn dealloc(&self, paddr: Paddr, size_pages: usize);
+    fn alloc(&self, opts: FrameAllocOptions) -> Option<PhysAddr>;
+    fn dealloc(&self, paddr: PhysAddr, size_pages: usize);
 
     /// Return each of `pages`, single pages all, as `dealloc` would: one call
     /// for a batch lets the allocator take its lock once.
-    fn dealloc_batch(&self, pages: &[Paddr]) {
+    fn dealloc_batch(&self, pages: &[PhysAddr]) {
         for &paddr in pages {
             self.dealloc(paddr, 1);
         }

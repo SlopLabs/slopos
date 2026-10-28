@@ -15,6 +15,10 @@ const PM1_SCI_EN: u16 = 1 << 0;
 /// ACPI GAS `AddressSpaceId` for System I/O.
 const ACPI_ADDR_SPACE_IO: u8 = 1;
 
+/// The PM1A control ports emulators take a soft-off on, each with the value it
+/// wants: the standard port, Bochs and QEMU's, and VirtualBox's.
+const POWEROFF_PORTS: [(u16, u16); 3] = [(0x604, 0x2000), (0xB004, 0x2000), (0x4004, 0x3400)];
+
 /// Quiesce the COM1 transmitter: poll the LSR until "transmitter empty"
 /// (0x40) latches, or `max_retries` expires — shutdown must not hang on a
 /// wedged UART.
@@ -35,17 +39,17 @@ pub fn drain_serial_tx(pause: impl Fn(), max_retries: u32) {
 /// Drive every known ACPI PM1A_CNT power-off port with the suspend-state
 /// magic: each hypervisor / firmware reads only one of them.
 pub fn acpi_poweroff_broadcast() {
-    let acpi = IoPortRegistry::reserve::<u16>(0x604).expect("ACPI PM1A_CNT port");
-    let acpi_bochs = IoPortRegistry::reserve::<u16>(0xB004).expect("Bochs ACPI PM1A_CNT port");
-    let acpi_vbox = IoPortRegistry::reserve::<u16>(0x4004).expect("VBox ACPI PM1A_CNT port");
-    // SAFETY: each port is a registered ACPI PM1A_CNT slot whose
-    // write semantics are "request soft-off"; the three are documented
-    // as the trio every modern hypervisor honours. The unsafe writes
-    // are centralised here.
-    unsafe {
-        acpi.write(0x2000);
-        acpi_bochs.write(0x2000);
-        acpi_vbox.write(0x3400);
+    let ports = POWEROFF_PORTS.map(|(port, value)| {
+        let reserved = IoPortRegistry::reserve::<u16>(port)
+            .unwrap_or_else(|_| panic!("ACPI PM1A_CNT port {port:#x} is not reserved"));
+        (reserved, value)
+    });
+    for (port, value) in ports {
+        // SAFETY: each port is a registered ACPI PM1A_CNT slot whose
+        // write semantics are "request soft-off"; the three are documented
+        // as the trio every modern hypervisor honours. The unsafe writes
+        // are centralised here.
+        unsafe { port.write(value) };
     }
 }
 

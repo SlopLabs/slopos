@@ -277,7 +277,8 @@ fn decom_toggle() {
     assert!(!parser.origin_mode);
 }
 
-/// The `>` used to abort the sequence, printing a literal `c` into the grid.
+/// The `>` of `CSI > c` is a private marker, not the end of the sequence, so
+/// no literal `c` reaches the grid.
 #[test]
 fn device_attributes_primary_and_secondary() {
     let mut parser = VtParser::new();
@@ -354,8 +355,8 @@ fn a_private_marker_does_not_leak_into_sgr() {
     assert!(parser.take_pending().is_none());
 }
 
-/// The old dispatch consulted the marker for `h`/`l` and nothing else, so
-/// `CSI ? 5 m` reached the SGR handler.
+/// The DEC private marker applies to every final byte, not only `h`/`l`, so
+/// `CSI ? 5 m` never reaches the SGR handler.
 #[test]
 fn a_dec_private_marker_does_not_leak_into_sgr() {
     let mut parser = VtParser::new();

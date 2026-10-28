@@ -1,9 +1,9 @@
-//! `ring_setup` / `ring_enter` implementation (SLOPRING § 6, § 7, § 8).
+//! `ring_setup` / `ring_enter` implementation.
 //!
-//! Submit and CQE-post bookkeeping run under the per-ring serialization lock
-//! (SLOPRING § 6.3); the harvest *block* runs outside it, registering the
-//! calling task on each in-flight fd's resource queue (SLOPRING § 7.1). The
-//! registry-table lock is never held across the fileio probe or the block.
+//! Submit and CQE-post bookkeeping run under the per-ring serialization lock;
+//! the harvest *block* runs outside it, registering the calling task on each
+//! in-flight fd's resource queue. The registry-table lock is never held across
+//! the fileio probe or the block.
 
 use slopos_abi::Errno;
 use slopos_abi::ring::{
@@ -42,9 +42,9 @@ fn eno(e: Errno) -> i32 {
     e.raw()
 }
 
-/// `ring_setup(entries, params*)` core (SLOPRING § 6.1). Returns the ring fd
-/// (`>= 0`) or a negated errno; `out_params` receives the populated
-/// `RingParams` so the syscall layer owns the user-copy.
+/// `ring_setup(entries, params*)` core. Returns the ring fd (`>= 0`) or a
+/// negated errno; `out_params` receives the populated `RingParams` so the
+/// syscall layer owns the user-copy.
 pub fn ring_setup(
     table: FdTable,
     entries: u32,
@@ -112,12 +112,9 @@ pub fn ring_setup(
         sq_head: 0,
         cq_tail: 0,
         inflight: InFlightVec::with_capacity(cq_cap),
-        user_addr,
         owner: table,
-        // Fixed here and never widened. Today every classified opcode is
-        // permitted; the point is that the set is a property of the ring
-        // rather than of the dispatch code, so narrowing it later needs no
-        // new mechanism.
+        // Fixed here and never widened: the set is a property of the ring
+        // rather than of the dispatch code.
         allowed_ops: crate::opcode::OpcodeSet::all(),
         cq_overflow: 0,
         buffers,
@@ -143,8 +140,8 @@ pub fn ring_setup(
         );
         return eno(Errno::ENFILE);
     };
-    // Process-private (SLOPRING § 14): the SQ/CQ is SPSC and the user mapping is
-    // not inherited, so neither `fork` nor `exec` carries the descriptor forward.
+    // Process-private: the SQ/CQ is SPSC and the user mapping is not
+    // inherited, so neither `fork` nor `exec` carries the descriptor forward.
     let fd = slopos_fs::fileio_open_fd_with_ops(
         table,
         &file_ops::RING_FILE_OPS,
@@ -227,16 +224,20 @@ impl Submitter<'static> {
     };
 }
 
-/// `ring_enter(ring_fd, to_submit, min_complete, flags)` core (SLOPRING § 6.2).
-/// Returns the submission count (`>= 0`) or a negated errno.
+/// `ring_enter(ring_fd, to_submit, min_complete, flags)` core.
+/// Returns the submission count (`>= 0`) or a negated errno; no flag is
+/// defined, so any bit in `flags` is `EINVAL`.
 pub fn ring_enter(
     table: FdTable,
     raw_handle: usize,
     to_submit: u32,
     min_complete: u32,
-    _flags: u32,
+    flags: u32,
     who: &Submitter<'_>,
 ) -> i32 {
+    if flags != 0 {
+        return eno(Errno::EINVAL);
+    }
     // Contains a foreign or stale ring; holds for every alias of the fd,
     // including intra-process `dup`s.
     if !registry::owner_is(raw_handle, table) {
@@ -257,8 +258,7 @@ pub fn ring_enter(
 
     if min_complete > 0 {
         let rc = harvest(table, raw_handle, min_complete, who);
-        // Never discard a submission (SLOPRING § 6.2): EINTR only when nothing
-        // was submitted.
+        // Never discard a submission: EINTR only when nothing was submitted.
         if rc == eno(Errno::EINTR) && n_submitted == 0 {
             return eno(Errno::EINTR);
         }
@@ -268,7 +268,7 @@ pub fn ring_enter(
 }
 
 /// Submit phase: consume up to `to_submit` SQEs, clamped by the SQ occupancy
-/// and `sq_entries` (SLOPRING § 7, § 13.6).
+/// and `sq_entries`.
 fn submit(table: FdTable, ring: &mut Ring, to_submit: u32, who: &Submitter<'_>) -> u32 {
     let sq_tail = match ring.read_sq_tail() {
         Ok(t) => t,
@@ -313,7 +313,7 @@ fn process_sqe(table: FdTable, ring: &mut Ring, sqe: &Sqe, who: &Submitter<'_>) 
         }
         OP_TIMEOUT => {
             // The deadline bounds the next harvest block; the harvest posts
-            // -ETIME on expiry (SLOPRING § 12).
+            // -ETIME on expiry.
             let deadline = get_time_ms().wrapping_add(sqe.off / 1_000_000); // ns → ms
             if !ring
                 .inflight
@@ -339,8 +339,8 @@ fn process_sqe(table: FdTable, ring: &mut Ring, sqe: &Sqe, who: &Submitter<'_>) 
         None
     };
 
-    // Reserve a CQE slot before the side effect (SLOPRING § 11): a full CQ must
-    // never orphan an fd or lose data.
+    // Reserve a CQE slot before the side effect: a full CQ must never orphan
+    // an fd or lose data.
     if opcode::is_ownership_op(sqe.opcode) {
         let cq_head = match ring.read_cq_head() {
             Ok(h) => h,
@@ -357,7 +357,7 @@ fn process_sqe(table: FdTable, ring: &mut Ring, sqe: &Sqe, who: &Submitter<'_>) 
     let sel = opcode::buf_sel(sqe);
 
     // Even when ready now, a multishot row is recorded in-flight so the F_MORE
-    // bookkeeping and drain loop live only in `harvest_step` (SLOPRING §1.2).
+    // bookkeeping and drain loop live only in `harvest_step`.
     let is_multishot =
         sqe.sqe_flags2 & SLOPRING_SQE_MULTISHOT != 0 && multishot_supported(sqe.opcode);
     if is_multishot {
@@ -433,8 +433,8 @@ fn release_fixed_row(ring: &mut Ring, row: &InFlight) {
     }
 }
 
-/// Opcodes that honour `SLOPRING_SQE_MULTISHOT` (SLOPRING § 1.1); any other
-/// opcode ignores the flag and runs oneshot.
+/// Opcodes that honour `SLOPRING_SQE_MULTISHOT`; any other opcode ignores the
+/// flag and runs oneshot.
 fn multishot_supported(opcode: u8) -> bool {
     matches!(
         opcode,
@@ -456,7 +456,7 @@ pub fn harvest_step_for_test(table: FdTable, ring: &mut Ring, min_complete: u32)
 }
 
 /// `OP_CANCEL`: remove the in-flight rows matching `Sqe.addr`, posting
-/// `-ECANCELED` for each, then the cancel SQE's own result (SLOPRING § 10).
+/// `-ECANCELED` for each, then the cancel SQE's own result.
 fn do_cancel(ring: &mut Ring, sqe: &Sqe) {
     let target = sqe.addr;
     let cancel_all = sqe.op_flags & SLOPRING_ASYNC_CANCEL_ALL != 0;
@@ -467,7 +467,7 @@ fn do_cancel(ring: &mut Ring, sqe: &Sqe) {
         };
         if let Some(row) = ring.inflight.remove_at(i) {
             // Multishot rows cancel identically: one terminal -ECANCELED with
-            // F_MORE clear (SLOPRING §1.3 trigger 4).
+            // F_MORE clear.
             let _ = ring.post_cqe(row.user_data, eno(Errno::ECANCELED), 0);
             release_fixed_row(ring, &row);
             reap_row(ring, row);
@@ -482,8 +482,8 @@ fn do_cancel(ring: &mut Ring, sqe: &Sqe) {
 }
 
 /// Complete phase: block the calling task on the in-flight set until
-/// `min_complete` CQEs are available, a signal arrives, or a deadline elapses
-/// (SLOPRING § 7.1, § 8.3). Returns 0 on progress, `-EINTR` on signal.
+/// `min_complete` CQEs are available, a signal arrives, or a deadline elapses.
+/// Returns 0 on progress, `-EINTR` on signal.
 fn harvest(table: FdTable, raw_handle: usize, min_complete: u32, who: &Submitter<'_>) -> i32 {
     // Armed across every iteration: `register_files` below must find a live
     // token, and it must outlast `unregister`. See `PollWaiter`'s module docs.
@@ -499,9 +499,9 @@ fn harvest(table: FdTable, raw_handle: usize, min_complete: u32, who: &Submitter
             Err(_) => return eno(Errno::EBADF),
         };
 
-        // Register before the re-probe (SLOPRING § 7.1): register-then-recheck
-        // closes the lost-wakeup window, since a producer publishing after this
-        // point has already enqueued our wait node.
+        // Register before the re-probe: register-then-recheck closes the
+        // lost-wakeup window, since a producer publishing after this point has
+        // already enqueued our wait node.
         let tokens = register_files(&files);
 
         let step = registry::with_ring(raw_handle, |ring| {
@@ -616,8 +616,8 @@ fn harvest_step(table: FdTable, ring: &mut Ring, min_complete: u32, who: &Submit
             continue;
         }
 
-        // A reprobe that installs an fd into a full CQ would orphan it
-        // (SLOPRING § 11); leave the row in flight until userspace drains.
+        // A reprobe that installs an fd into a full CQ would orphan it; leave
+        // the row in flight until userspace drains.
         if opcode::is_ownership_op(row.opcode) {
             let cq_head = ring.read_cq_head().unwrap_or(0);
             if ring.cq_full(cq_head) {
@@ -657,11 +657,11 @@ fn harvest_step(table: FdTable, ring: &mut Ring, min_complete: u32, who: &Submit
 }
 
 /// Drain an armed consuming-multishot row (OP_ACCEPT / OP_RECVMSG) in one
-/// harvest pass (SLOPRING §1.2): each reprobe posts an interim `F_MORE` CQE
-/// and keeps the row armed, `WouldBlock` self-limits the drain against a CQ
-/// flood, and a real error or EOF posts a terminal CQE. The ownership-op
-/// CQE-slot reserve (SLOPRING § 11) is re-checked before *each* post, so a
-/// full CQ leaves the row armed rather than consuming-without-a-slot.
+/// harvest pass: each reprobe posts an interim `F_MORE` CQE and keeps the row
+/// armed, `WouldBlock` self-limits the drain against a CQ flood, and a real
+/// error or EOF posts a terminal CQE. The ownership-op CQE-slot reserve is
+/// re-checked before *each* post, so a full CQ leaves the row armed rather
+/// than consuming-without-a-slot.
 fn harvest_consuming_multishot(
     table: FdTable,
     ring: &mut Ring,
@@ -709,9 +709,9 @@ fn harvest_consuming_multishot(
     }
 }
 
-/// Re-arm an armed OP_POLL_ADD multishot row on the readiness-transition edge
-/// (SLOPRING §1.2): a CQE fires only when the masked-ready bitset *changes*,
-/// which suppresses the level flood caller-as-waiter would otherwise produce.
+/// Re-arm an armed OP_POLL_ADD multishot row on the readiness-transition edge:
+/// a CQE fires only when the masked-ready bitset *changes*, which suppresses
+/// the level flood caller-as-waiter would otherwise produce.
 /// `POLLERR`/`POLLHUP` post one terminal CQE and retire the row.
 fn harvest_poll_multishot(ring: &mut Ring, row: &InFlight) {
     let revents = opcode::probe_poll_revents(row);

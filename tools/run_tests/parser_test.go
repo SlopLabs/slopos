@@ -582,9 +582,9 @@ func TestBareKernelAbortBannerStillEmitsOnFlush(t *testing.T) {
 	}
 }
 
-// The recorded case: the abort was CPU 1 only and the BSP produced thousands
-// of further results. A result line arriving straight after the banner must
-// still parse, and the abort must still be reported.
+// An abort of one CPU leaves the others producing results: a result line
+// arriving straight after the banner must still parse, and the abort must
+// still be reported.
 func TestKernelAbortDoesNotDisturbKtapParsing(t *testing.T) {
 	p := NewKtapParser()
 	events := feedAll(p, []string{

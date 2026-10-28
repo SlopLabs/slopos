@@ -1,4 +1,4 @@
-//! Per-ring registered / provided buffer registry (SLOPRING § 13, ABI v2).
+//! Per-ring registered / provided buffer registry.
 //!
 //! Two io_uring-parity buffer mechanisms, both selected from an SQE and both
 //! backed by [`PinnedUserBuffer`]:
@@ -98,8 +98,6 @@ struct ProvidedBufRing {
     mask: u32,
     /// Kernel-owned consumer cursor (peek reads at `head`, commit advances it).
     head: u32,
-    #[allow(dead_code)]
-    flags: u16,
 }
 
 impl ProvidedBufRing {
@@ -196,11 +194,6 @@ impl BufferRegistry {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.fixed.is_none() && self.provided.is_empty()
-    }
-
     /// Pin and register the fixed-buffer set. Rejects a double-register, an
     /// empty / oversized count, or any non-anonymous / unmapped iovec.
     pub fn register_fixed(
@@ -294,12 +287,6 @@ impl BufferRegistry {
         let pin = set.pins.get(index as usize).ok_or(Errno::EINVAL)?;
         let cap = pin.len();
         pin.writer(0, cap).ok_or(Errno::EFAULT)
-    }
-
-    /// Cap on a fixed buffer's usable length.
-    pub fn fixed_len_of(&self, index: u16) -> Result<usize, Errno> {
-        let set = self.fixed.as_ref().ok_or(Errno::EINVAL)?;
-        Ok(set.pins.get(index as usize).ok_or(Errno::EINVAL)?.len())
     }
 
     /// Coalesced physical `(paddr, len)` runs over the first `len` bytes of
@@ -403,7 +390,7 @@ impl BufferRegistry {
         process: slopos_ostd::process::ProcessId,
         cmd: &RegisterBufRingCmd,
     ) -> Result<(), Errno> {
-        if cmd.buf_group == 0 || cmd.buf_group > SLOPRING_MAX_BUF_GROUPS {
+        if cmd.buf_group == 0 || cmd.buf_group > SLOPRING_MAX_BUF_GROUPS || cmd.flags != 0 {
             return Err(Errno::EINVAL);
         }
         if cmd.ring_entries == 0
@@ -424,7 +411,6 @@ impl BufferRegistry {
                 ring_pin,
                 mask: cmd.ring_entries - 1,
                 head: 0,
-                flags: cmd.flags,
             })
             .map_err(|_| Errno::ENOMEM)?;
         Ok(())
@@ -436,11 +422,6 @@ impl BufferRegistry {
         let idx = self.provided_idx(group).ok_or(Errno::EINVAL)?;
         let _ = self.provided.swap_remove(idx);
         Ok(())
-    }
-
-    /// `true` iff `group` names a registered provided ring.
-    pub fn provided_exists(&self, group: u16) -> bool {
-        self.provided_idx(group).is_some()
     }
 
     /// Peek the next published buffer for `group` without consuming it.
@@ -498,7 +479,6 @@ impl BufferRegistry {
             ring_pin,
             mask: entries - 1,
             head: 0,
-            flags: 0,
         });
     }
 }

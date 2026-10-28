@@ -109,7 +109,7 @@ fn wait_output_idle(idx: TtyIndex) -> Result<(), TtyError> {
         }
     }
 
-    if scheduler_is_enabled() != 0 {
+    if scheduler_is_enabled() {
         loop {
             // Subscribed before the flush, so the event the flush publishes
             // cannot land in the gap between flushing and parking.

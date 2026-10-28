@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Ensure the pinned Rust nightly toolchain, its required components and
-# targets, and the owned `slopos` sysroot are all present.
+# Ensure the pinned Rust nightly toolchain, its required components and the
+# owned `slopos` sysroot are all present.
 # Reads the channel from rust-toolchain.toml in the repository root.
 #
 # `--no-sysroot` stops before the owned sysroot, for a job that only ever builds
@@ -43,18 +43,13 @@ if ! rustup toolchain list | grep -q "^${RUST_CHANNEL}"; then
 fi
 
 # `rust-src` is where `-Zbuild-std` and the owned sysroot both get the standard
-# library from, so a toolchain that predates this script must gain it too — the
-# install above only runs when the toolchain is absent entirely.
+# library from; the install above runs only when the toolchain is absent.
 if ! rustup component list --installed --toolchain "$RUST_CHANNEL" | grep -q "^rust-src"; then
     rustup component add rust-src --toolchain "$RUST_CHANNEL"
 fi
 
 if [ "$WANT_SYSROOT" -eq 0 ]; then
     exit 0
-fi
-
-if ! rustup target list --toolchain "$RUST_CHANNEL" --installed | grep -q "^x86_64-unknown-none"; then
-    rustup target add x86_64-unknown-none --toolchain "$RUST_CHANNEL"
 fi
 
 # The userland target is built by `cargo +slopos`, not by `cargo +$channel`:

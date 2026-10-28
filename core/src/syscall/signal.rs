@@ -14,7 +14,6 @@ use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE, TaskExitReason, Tas
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
 };
-use slopos_mm::user_ptr::{UserBytes, UserPtr as MmUserPtr};
 use slopos_ostd::authority::Capability;
 use slopos_ostd::irq::InterruptFrame;
 use slopos_ostd::process::Cred;
@@ -23,6 +22,7 @@ use slopos_ostd::task::sigqueue::DequeuedSignal;
 use slopos_ostd::user::context::{
     USER_RFLAGS_FORCED, USER_RFLAGS_PERMITTED, UserContext, UserRegs,
 };
+use slopos_ostd::user::ptr::{UserBytes, UserPtr as OstdUserPtr};
 
 use crate::syscall::args::{Signum, UserPtr};
 use crate::syscall::process_handlers::{read_timeout, timespec_to_ms};
@@ -230,7 +230,7 @@ define_syscall!(syscall_rt_sigaction
     let idx = (signum - 1) as usize;
 
     if old_act_ptr != 0 {
-        let old_ptr = MmUserPtr::<UserSigaction>::try_new(old_act_ptr).map_err(|_| Errno::EFAULT)?;
+        let old_ptr = OstdUserPtr::<UserSigaction>::try_new(old_act_ptr).map_err(|_| Errno::EFAULT)?;
         // `Signum` already bounded this; the checked read keeps the bound structural.
         let current = task_ref.signal_action(idx).ok_or(Errno::EINVAL)?;
         let old_action = action_to_user(&current);
@@ -241,7 +241,7 @@ define_syscall!(syscall_rt_sigaction
         if (sig_bit(signum) & SIG_UNCATCHABLE) != 0 {
             return Err(Errno::EINVAL);
         }
-        let new_ptr = MmUserPtr::<UserSigaction>::try_new(new_act_ptr).map_err(|_| Errno::EFAULT)?;
+        let new_ptr = OstdUserPtr::<UserSigaction>::try_new(new_act_ptr).map_err(|_| Errno::EFAULT)?;
         let new_action = copy_from_user(new_ptr).map_err(|_| Errno::EFAULT)?;
         if new_action.sa_handler != SIG_DFL
             && new_action.sa_handler != SIG_IGN
@@ -268,12 +268,12 @@ define_syscall!(syscall_rt_sigprocmask
     let task_ref = ctx.task();
 
     if oldset_ptr != 0 {
-        let old_ptr = MmUserPtr::<SigSet>::try_new(oldset_ptr).map_err(|_| Errno::EFAULT)?;
+        let old_ptr = OstdUserPtr::<SigSet>::try_new(oldset_ptr).map_err(|_| Errno::EFAULT)?;
         copy_to_user(old_ptr, &task_ref.signal_blocked()).map_err(|_| Errno::EFAULT)?;
     }
 
     if set_ptr != 0 {
-        let new_ptr = MmUserPtr::<SigSet>::try_new(set_ptr).map_err(|_| Errno::EFAULT)?;
+        let new_ptr = OstdUserPtr::<SigSet>::try_new(set_ptr).map_err(|_| Errno::EFAULT)?;
         let set = copy_from_user(new_ptr).map_err(|_| Errno::EFAULT)?;
 
         let mut blocked = task_ref.signal_blocked();
@@ -539,7 +539,7 @@ pub(crate) fn sender_pid(task: &Task) -> u32 {
 /// process is `EPERM`; `si_pid`/`si_uid` are always the kernel's.
 #[inline(never)]
 fn queued_info(caller: &Task, uid: u32, uinfo: u64, target_tgid: u32) -> Result<SigInfo, Errno> {
-    let ptr = MmUserPtr::<UserSiginfo>::try_new(uinfo).map_err(|_| Errno::EFAULT)?;
+    let ptr = OstdUserPtr::<UserSiginfo>::try_new(uinfo).map_err(|_| Errno::EFAULT)?;
     let user = copy_from_user(ptr).map_err(|_| Errno::EFAULT)?;
     let sender = sender_pid(caller);
     if (user.si_code >= 0 || user.si_code == SI_TKILL) && target_tgid != sender {
@@ -618,7 +618,7 @@ define_syscall!(syscall_rt_tgsigqueueinfo
 });
 
 fn read_signal_frame(rsp: u64) -> Option<SignalFrame> {
-    let ptr = MmUserPtr::<SignalFrame>::try_new(rsp).ok()?;
+    let ptr = OstdUserPtr::<SignalFrame>::try_new(rsp).ok()?;
     copy_from_user(ptr).ok()
 }
 
@@ -1054,7 +1054,7 @@ fn claim_pending_signal(task_ref: &Task) -> SignalDisposition {
 /// frame, not in a delivery frame already near the 2 KiB ceiling.
 #[inline(never)]
 fn push_siginfo(addr: u64, signum: u8, info: &SigInfo, fault: Option<(i32, u64)>) -> bool {
-    let Ok(ptr) = MmUserPtr::<UserSiginfo>::try_new(addr) else {
+    let Ok(ptr) = OstdUserPtr::<UserSiginfo>::try_new(addr) else {
         return false;
     };
     let siginfo = match fault {
@@ -1075,7 +1075,7 @@ fn push_ucontext(
     on_altstack: bool,
     si_addr: u64,
 ) -> bool {
-    let Ok(ptr) = MmUserPtr::<UserUcontext>::try_new(addr) else {
+    let Ok(ptr) = OstdUserPtr::<UserUcontext>::try_new(addr) else {
         return false;
     };
     let mut uc = UserUcontext {
@@ -1159,7 +1159,7 @@ fn force_death_on_frame_fault(task_ref: &Task) {
         .store(128 + SIGSEGV as u32, Ordering::Release);
     task_ref.set_exit_signal(SIGSEGV);
     let task_id = task_ref.task_id;
-    if task_terminate(task_id) == 0 {
+    if task_terminate(task_id) {
         schedule();
     }
 }
@@ -1173,8 +1173,8 @@ fn force_death_on_frame_fault(task_ref: &Task) {
 /// nesting, interrupts on — unless under a preemption pin.
 #[inline(never)]
 fn populate_sigframe_range(task_ref: &Task, frame_addr: u64) -> bool {
-    use slopos_arch::cpu;
     use slopos_mm::page_fault::FileIo;
+    use slopos_ostd::cpu::x86_64 as cpu;
     use slopos_ostd::cpu::x86_64::pcr::{
         interrupt_nesting_depth, interrupt_nesting_enter, interrupt_nesting_exit,
     };
@@ -1262,13 +1262,13 @@ fn deliver_pending_signal_core(
                 // userland; the mark is deliberately not a signal. This frame
                 // returns to CPL3 off an exception stack and owns no Rust
                 // value, so abandoning it across the switch leaks nothing.
-                if task_ref.is_killed() && task_terminate(task_ref.task_id) == 0 {
+                if task_ref.is_killed() && task_terminate(task_ref.task_id) {
                     schedule();
                 }
             }
             SignalDisposition::Terminate(task_id) => {
                 let _ = task_group_fatal_signal(task_id, task_ref.exit_signal());
-                if task_terminate(task_id) == 0 {
+                if task_terminate(task_id) {
                     schedule();
                 }
             }
@@ -1316,7 +1316,7 @@ fn push_handler(
         // it dies of the kill, not of the push.
         if task_ref.is_killed() {
             let task_id = task_ref.task_id;
-            if task_terminate(task_id) == 0 {
+            if task_terminate(task_id) {
                 schedule();
             }
             return;
@@ -1337,7 +1337,7 @@ fn push_handler(
         return;
     }
 
-    let restorer_ptr = match MmUserPtr::<u64>::try_new(frame_addr) {
+    let restorer_ptr = match OstdUserPtr::<u64>::try_new(frame_addr) {
         Ok(p) => p,
         Err(_) => {
             refuse(task_ref);
@@ -1416,7 +1416,7 @@ fn push_handler(
 /// for the same frame-size reason as [`push_siginfo`].
 #[inline(never)]
 fn push_signal_frame(addr: u64, signum: u8, regs: &UserRegs, saved_mask: SigSet) -> bool {
-    let Ok(ptr) = MmUserPtr::<SignalFrame>::try_new(addr) else {
+    let Ok(ptr) = OstdUserPtr::<SignalFrame>::try_new(addr) else {
         return false;
     };
     let frame = SignalFrame {

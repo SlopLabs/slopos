@@ -8,7 +8,7 @@ use slopos_abi::fs::{ADMIN_GID, GREETER_NAME, GREETER_UID, SESSION_HOME, SESSION
 use slopos_abi::syscall::O_CLOEXEC;
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 
-use crate::init_control::{self, REMOTE};
+use crate::init_control::{self, PAIRING, REMOTE};
 use crate::readiness::NOTIFIER_FD;
 use crate::syscall::process::{self, Endowment};
 use crate::syscall::{OwnedFd, RawFd, SyscallError, fs, pidfd};
@@ -33,7 +33,7 @@ pub struct Service {
 pub const PRIVD: Service = Service {
     path: "/sbin/privd",
     reads: &["/usr/share/slopos/privd/", PAIRING],
-    args: &[crate::apps::privd::SESSIONS_ARG],
+    args: &[],
     caps: slopos_priv_core::PRIVD_CAPS,
     priority: TaskPriority::Normal,
     login: Some(init_control::PRIVD),
@@ -44,7 +44,7 @@ pub const PRIVD: Service = Service {
 pub const COMPOSITOR: Service = Service {
     path: init_control::COMPOSITOR,
     reads: &[],
-    args: &["--desktop"],
+    args: &[],
     caps: DISPLAY_SEAT | INPUT_SEAT,
     priority: TaskPriority::High,
     login: None,
@@ -52,7 +52,7 @@ pub const COMPOSITOR: Service = Service {
 };
 
 pub const GREETER: Service = Service {
-    args: &["--greeter"],
+    args: &[crate::apps::compositor::GREETER_ARG],
     ..COMPOSITOR
 };
 
@@ -115,10 +115,6 @@ pub const LOGIN: Service = Service {
 };
 
 pub const RUN_TESTS: &str = "--run-tests";
-
-/// A paired base's pairing, which remoted dials with and privd's `paired`
-/// principal depends on.
-pub const PAIRING: &str = "/usr/share/slopos/remote/";
 
 /// A copy of init that runs the userland tests and exits with their verdict,
 /// so init goes on serving while they run.

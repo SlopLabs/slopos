@@ -5,7 +5,6 @@
 //! [`crate::early_console`]; the driver then registers itself as the backend.
 
 use crate::lock_class;
-use core::ffi::c_int;
 use core::fmt;
 use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
@@ -36,7 +35,7 @@ impl KlogLevel {
 static CURRENT_LEVEL: AtomicU8 = AtomicU8::new(KlogLevel::Info as u8);
 
 #[inline(always)]
-fn is_enabled(level: KlogLevel) -> bool {
+pub fn is_enabled(level: KlogLevel) -> bool {
     level as u8 <= CURRENT_LEVEL.load(Ordering::Relaxed)
 }
 
@@ -253,14 +252,6 @@ pub fn klog_set_level(level: KlogLevel) {
 
 pub fn klog_get_level() -> KlogLevel {
     KlogLevel::from_raw(CURRENT_LEVEL.load(Ordering::Relaxed))
-}
-
-pub fn klog_is_enabled(level: KlogLevel) -> c_int {
-    if is_enabled(level) { 1 } else { 0 }
-}
-
-pub fn is_enabled_level(level: KlogLevel) -> bool {
-    is_enabled(level)
 }
 
 /// Emit a formatted log line at the given level.

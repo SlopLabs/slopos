@@ -1,12 +1,12 @@
 //! Shared helpers for the TCP test suites: reset, handshake drivers, segment
-//! injection, transmit draining, matchers and mock-clock timer dispatch.
+//! injection, transmit polling and matchers.
 
 use slopos_ostd::KVec;
 
 use crate::socket;
 use crate::tcp::{
-    self, Actions, ConnId, TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH, TCP_FLAG_RST, TCP_FLAG_SYN,
-    TcpHeader, TcpOutSegment, TcpTuple,
+    self, Actions, ConnId, TCP_FLAG_ACK, TCP_FLAG_RST, TCP_FLAG_SYN, TcpHeader, TcpOutSegment,
+    TcpTuple,
 };
 
 /// RFC 5737 TEST-NET-1, matching [`crate::tests::net_scope`].
@@ -119,20 +119,6 @@ pub fn inject(
     tcp::input(src_ip, dst_ip, &hdr, &[], payload, tcp::clock::now_ms())
 }
 
-/// Inject a payload-carrying ACK from the peer of an established connection.
-pub fn inject_data(conn: &EstablishedConn, seq: u32, ack: u32, data: &[u8]) -> Actions {
-    inject(
-        REMOTE_IP,
-        LOCAL_IP,
-        REMOTE_PORT,
-        conn.local_port,
-        seq,
-        ack,
-        TCP_FLAG_ACK | TCP_FLAG_PSH,
-        data,
-    )
-}
-
 pub fn inject_ack(conn: &EstablishedConn, seq: u32, ack: u32) -> Actions {
     inject(
         REMOTE_IP,
@@ -142,32 +128,6 @@ pub fn inject_ack(conn: &EstablishedConn, seq: u32, ack: u32) -> Actions {
         seq,
         ack,
         TCP_FLAG_ACK,
-        &[],
-    )
-}
-
-pub fn inject_fin(conn: &EstablishedConn, seq: u32, ack: u32) -> Actions {
-    inject(
-        REMOTE_IP,
-        LOCAL_IP,
-        REMOTE_PORT,
-        conn.local_port,
-        seq,
-        ack,
-        TCP_FLAG_FIN | TCP_FLAG_ACK,
-        &[],
-    )
-}
-
-pub fn inject_rst(conn: &EstablishedConn, seq: u32, ack: u32) -> Actions {
-    inject(
-        REMOTE_IP,
-        LOCAL_IP,
-        REMOTE_PORT,
-        conn.local_port,
-        seq,
-        ack,
-        TCP_FLAG_RST | TCP_FLAG_ACK,
         &[],
     )
 }
@@ -334,15 +294,6 @@ pub fn poll_once(id: ConnId) -> Option<(TcpOutSegment, KVec<u8>)> {
     })
 }
 
-/// Drain `tcp_poll_transmit` until it returns `None`.
-pub fn drain_transmit(id: ConnId) -> KVec<(TcpOutSegment, KVec<u8>)> {
-    let mut out: KVec<(TcpOutSegment, KVec<u8>)> = KVec::new();
-    while let Some(item) = poll_once(id) {
-        let _ = out.push(item);
-    }
-    out
-}
-
 /// `with_data_state!`'s three failure arms, out of line: their format-args
 /// state is charged to the caller's frame at opt-level 0.
 #[cold]
@@ -428,13 +379,6 @@ impl<'a> SegmentMatcher<'a> {
         self
     }
 
-    pub fn flags_eq(mut self, f: u8) -> Self {
-        if self.seg.flags != f {
-            let _ = self.failures.push("flags mismatch");
-        }
-        self
-    }
-
     pub fn has_flag(mut self, f: u8) -> Self {
         if (self.seg.flags & f) == 0 {
             let _ = self.failures.push("required flag missing");
@@ -477,41 +421,4 @@ impl<'a> SegmentMatcher<'a> {
             None => Ok(()),
         }
     }
-}
-
-/// Advance the mock clock by `ms` milliseconds then dispatch any expired
-/// timers. Returns the number of timers dispatched.
-#[cfg(feature = "test-hooks")]
-pub fn tick_ms(ms: u64) -> usize {
-    tcp::clock::MockClock::advance(ms);
-    dispatch_fired_timers()
-}
-
-/// Drive the net timer wheel once and dispatch every expired TCP timer through
-/// its real callback. Mirrors the production dispatcher in `net/src/timer.rs`.
-///
-/// `timer::wheel()`, not `NET_TIMER_WHEEL`: under a scope a `schedule` lands in
-/// the test wheel, so draining the live one would fire the wrong set.
-#[cfg(feature = "test-hooks")]
-pub fn dispatch_fired_timers() -> usize {
-    use crate::timer::TimerKind;
-
-    let fired = crate::timer::wheel().process_due();
-    let mut count = 0usize;
-    for timer in fired {
-        match timer.kind {
-            TimerKind::TcpRetransmit => {
-                let _ = tcp::on_retransmit(timer.key);
-            }
-            TimerKind::TcpKeepalive => {
-                let _ = tcp::on_keepalive(timer.key);
-            }
-            TimerKind::TcpTimeWait => {
-                tcp::on_time_wait_expire(timer.key);
-            }
-            _ => {}
-        }
-        count += 1;
-    }
-    count
 }

@@ -15,7 +15,8 @@ use slopos_acpi::hpet::Hpet;
 use slopos_acpi::tables::AcpiTables;
 use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
-use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
+use slopos_mm::mmio;
+use slopos_ostd::mm::IoMem;
 use slopos_ostd::sync::{InitFlag, OnceLock, StateFlag};
 use slopos_ostd::{klog_debug, klog_info};
 
@@ -46,7 +47,7 @@ static PERIOD_FS: AtomicU32 = AtomicU32::new(0);
 
 /// [`OnceLock`] so the `read_counter` lookup stays lock-free after a single
 /// `Acquire` load.
-static MMIO_REGION: OnceLock<MmioRegion> = OnceLock::new();
+static MMIO_REGION: OnceLock<IoMem> = OnceLock::new();
 
 /// Returns `0` on success, `-1` on failure.
 pub fn init() -> i32 {
@@ -113,16 +114,10 @@ pub fn period_femtoseconds() -> u32 {
     PERIOD_FS.load(Ordering::Relaxed)
 }
 
-// TODO(tech-debt): identical to `period_femtoseconds` — collapse to one name.
-#[inline]
-pub fn period_fs() -> u32 {
-    PERIOD_FS.load(Ordering::Relaxed)
-}
-
 /// `None` when the HPET is unavailable.
 #[inline]
 pub fn ms_to_ticks(ms: u32) -> Option<u64> {
-    let period = period_fs() as u128;
+    let period = period_femtoseconds() as u128;
     if period == 0 {
         return None;
     }
@@ -152,7 +147,7 @@ fn init_inner() -> i32 {
 
     let info = hpet_acpi.info();
 
-    let Some(mmio) = MmioRegion::map(PhysAddr::new(info.base_phys), HPET_REGION_SIZE) else {
+    let Some(mmio) = mmio::map_uncached(PhysAddr::new(info.base_phys), HPET_REGION_SIZE) else {
         klog_info!("HPET: Failed to map MMIO region at 0x{:x}", info.base_phys);
         return -1;
     };
@@ -238,7 +233,7 @@ pub(crate) fn poll_wait(condition: &dyn Fn() -> bool, timeout_ms: u32) -> bool {
     };
 
     let start = read_counter();
-    let allow_hlt = slopos_arch::pcr::get_current_cpu() == 0;
+    let allow_hlt = slopos_ostd::cpu::x86_64::pcr::current_cpu_id() == 0;
 
     loop {
         slopos_ostd::cpu::x86_64::interrupts::disable_interrupts();

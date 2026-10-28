@@ -11,8 +11,8 @@ use slopos_fs::fileio::{
 
 use slopos_mm::user_copy::copy_bytes_to_user;
 use slopos_mm::user_io_buf::{UserIovecBuf, UserReadBuf, UserWriteBuf, stage_iovec};
-use slopos_mm::user_ptr::UserBytes as MmUserBytes;
 use slopos_ostd::KVec;
+use slopos_ostd::user::ptr::UserBytes as OstdUserBytes;
 
 use crate::syscall::args::{Fd, UserBytes, UserSlice};
 use crate::syscall::common::errno_from_neg;
@@ -115,7 +115,7 @@ define_syscall!(syscall_getdents64
     if written == 0 {
         return Ok(0);
     }
-    let user = MmUserBytes::try_new(buf.base_u64(), written).map_err(|_| Errno::EFAULT)?;
+    let user = OstdUserBytes::try_new(buf.base_u64(), written).map_err(|_| Errno::EFAULT)?;
     copy_bytes_to_user(user, &staging[..written]).map_err(|_| Errno::EFAULT)?;
     // Committed only once the bytes are out: a cursor advanced before a
     // faulting copy-out loses the whole batch, which is not re-readable.

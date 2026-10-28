@@ -46,7 +46,7 @@ pub fn stdio_init() {
         reset(&raw mut STDOUT_FILE, FILE_FLAG_WRITABLE);
         reset(&raw mut STDERR_FILE, FILE_FLAG_WRITABLE);
 
-        STDOUT_FILE.mode = if crate::io::shim::isatty(1) != 0 {
+        STDOUT_FILE.mode = if crate::io::misc::is_terminal(1) {
             BufferMode::Line
         } else {
             BufferMode::Full

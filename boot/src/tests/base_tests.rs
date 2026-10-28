@@ -177,7 +177,9 @@ pub fn test_base_unused_pages_are_usable_memory() -> TestResult {
         "a page of the unused base is no usable memory"
     );
     for page in [frames.start, frames.end - 4096] {
-        assert_test!(slopos_mm::page_alloc::page_frame_is_tracked(PhysAddr::new(page)) != 0);
+        assert_test!(slopos_mm::page_alloc::page_frame_is_tracked(PhysAddr::new(
+            page
+        )));
     }
     TestResult::Pass
 }

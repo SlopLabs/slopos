@@ -39,11 +39,6 @@ pub fn quiesce_end() {
     });
 }
 
-#[cfg(feature = "test-hooks")]
-pub fn quiesce_depth() -> u32 {
-    QUIESCE_DEPTH.load(Ordering::Relaxed)
-}
-
 /// A test that panics never runs its `Drop`, and a shut gate kills networking for the boot.
 #[cfg(feature = "test-hooks")]
 pub fn quiesce_clear() {

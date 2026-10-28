@@ -2,7 +2,6 @@
 //! tasks are all killed is already dying, a process the writer could not
 //! signal is never taken, and a kill is the kill flag.
 
-use core::ffi::c_char;
 use core::ptr;
 
 use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE};
@@ -38,7 +37,7 @@ const WRITE_USER_ABSENT: u64 = 0x06;
 
 fn create_user_task_holding(caps: u64) -> u32 {
     let id = task_create(
-        b"OomVictim\0".as_ptr() as *const c_char,
+        b"OomVictim",
         slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
         ptr::null_mut(),
         1,
@@ -55,7 +54,7 @@ fn create_user_task() -> u32 {
 }
 
 pub fn test_oom_spares_init_and_passes_over_the_dying() -> TestResult {
-    let _scope = KernelTestScope::new();
+    let _scope = KernelTestScope::enter();
 
     let task_id = create_user_task();
     if task_id == INVALID_TASK_ID {
@@ -173,7 +172,7 @@ fn touch_fresh_pages(process: ProcessId, task_id: u32, pages: u64) -> bool {
 
 /// The killer runs with the heap dry, so it must not need a task snapshot.
 pub fn test_oom_kills_the_hog_without_a_task_snapshot() -> TestResult {
-    let _scope = KernelTestScope::new();
+    let _scope = KernelTestScope::enter();
 
     let task_id = create_user_task();
     if task_id == INVALID_TASK_ID {
@@ -275,8 +274,8 @@ impl Drop for Member {
 /// A memfd of `pages` sized on `account`, as `ftruncate` sizes one, closed
 /// when its backing drops.
 fn sized_memfd(account: AccountId, pages: usize) -> Option<(usize, KArc<dyn FileBacking>)> {
-    let (handle, _ops, backing) = memfd_create(0, account)?;
-    (memfd_ftruncate(handle, pages * PAGE_SIZE_4KB as usize, account) == 0)
+    let (handle, _ops, backing) = memfd_create(account)?;
+    (memfd_ftruncate(handle, pages * PAGE_SIZE_4KB as usize, account).is_ok())
         .then_some((handle, backing))
 }
 
@@ -286,7 +285,7 @@ fn sized_memfd(account: AccountId, pages: usize) -> Option<(usize, KArc<dyn File
 pub fn test_oom_takes_the_holder_not_the_mapper() -> TestResult {
     const HOARD: usize = 48;
     const SURFACE: usize = 64;
-    let _scope = KernelTestScope::new();
+    let _scope = KernelTestScope::enter();
 
     let (Some(holder), Some(mapper)) = (Member::spawn(ORDINARY), Member::spawn(ORDINARY)) else {
         return fail!("could not create the two user tasks");
@@ -350,7 +349,7 @@ slopos_testing::stest!(
 pub fn test_oom_never_takes_a_process_the_writer_may_not_signal() -> TestResult {
     const OWN: usize = 16;
     const PRIVATE: u64 = 64;
-    let _scope = KernelTestScope::new();
+    let _scope = KernelTestScope::enter();
 
     let (Some(writer), Some(privileged)) = (Member::spawn(ORDINARY), Member::spawn(PRIVILEGED))
     else {
@@ -430,7 +429,7 @@ slopos_testing::stest!(
 /// privileged holder left the holder is taken rather than init failing.
 pub fn test_oom_init_takes_a_holder_it_could_not_signal() -> TestResult {
     const PRIVATE: u64 = 64;
-    let _scope = KernelTestScope::new();
+    let _scope = KernelTestScope::enter();
 
     let (Some(init), Some(privileged)) = (Member::spawn(ORDINARY), Member::spawn(PRIVILEGED))
     else {

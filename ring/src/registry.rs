@@ -1,4 +1,4 @@
-//! Global ring registry (SLOPRING § 9, § 13.5).
+//! Global ring registry.
 //!
 //! Rings live in a single generation-counter [`HandleTable`] (AD-11), the
 //! [`Handle`] packed losslessly into the open-file `handle: usize`; resolution
@@ -10,7 +10,7 @@ use slopos_fs::fileio::FdTable;
 use slopos_ostd::KArc;
 use slopos_ostd::handle::{Handle, HandleError, HandleTable};
 use slopos_ostd::lock_class;
-use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
+use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, Mutex, SpinLock};
 
 use crate::ring_obj::Ring;
@@ -24,9 +24,9 @@ const MAX_RINGS: usize = 256;
 /// never wraps in any realistic uptime.
 const SLOT_BITS: u32 = 12;
 
-/// One registry slot: a reference-counted, individually-locked ring
-/// (SLOPRING § 6.3, § 9). The [`KArc`] keeps the ring alive for a `with_ring`
-/// caller even if a concurrent `close` removes it from the table.
+/// One registry slot: a reference-counted, individually-locked ring. The
+/// [`KArc`] keeps the ring alive for a `with_ring` caller even if a concurrent
+/// `close` removes it from the table.
 ///
 /// A **sleeping [`Mutex`]**, not a `SpinLock`: the submit and harvest closures
 /// run opcode probes inline under it, and a filesystem opcode descends into the
@@ -72,8 +72,8 @@ pub fn insert(ring: Ring) -> Option<usize> {
 /// handle, holding **only the per-ring lock** for the closure. Returns
 /// `Err(HandleError)` for a stale / out-of-range / foreign handle.
 ///
-/// Two threads racing `ring_enter` on one fd serialize here (SLOPRING § 6.3);
-/// distinct rings proceed concurrently. The harvest *block* must run outside
+/// Two threads racing `ring_enter` on one fd serialize here; distinct rings
+/// proceed concurrently. The harvest *block* must run outside
 /// the per-ring lock; the caller drops it before sleeping (see `enter.rs`).
 pub fn with_ring<R>(raw_handle: usize, f: impl FnOnce(&mut Ring) -> R) -> Result<R, HandleError> {
     let slot = slot_for(raw_handle)?;
@@ -85,8 +85,8 @@ pub fn with_ring<R>(raw_handle: usize, f: impl FnOnce(&mut Ring) -> R) -> Result
     Ok(f(&mut ring))
 }
 
-/// Remove a ring from the table (last fd closed — SLOPRING § 14). Drops only
-/// the **table's** [`KArc`], so a concurrent `with_ring` that already cloned
+/// Remove a ring from the table (last fd closed). Drops only the **table's**
+/// [`KArc`], so a concurrent `with_ring` that already cloned
 /// the slot keeps the ring alive until it finishes. No-op on a stale handle.
 ///
 /// The removed slot is dropped **after** the table lock is released: a last

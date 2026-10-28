@@ -12,8 +12,8 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use slopos_abi::task::{INVALID_TASK_ID, TaskPriority};
 
 use crate::sync::BspToken;
+use crate::sync::lock_graph::LOCK_LEVEL_REGISTRY;
 use crate::sync::lock_graph::LockClassKey;
-use crate::sync::lock_tracking::LOCK_LEVEL_REGISTRY;
 use crate::sync::spin::SpinLock;
 use crate::sync::wait_queue::{WaitAbort, WaitQueue};
 use crate::task::{SpawnError, SpawnedTaskId};
@@ -295,7 +295,7 @@ pub fn disarm_kernel_io_hold_for_test(displaced: &KernelIoTaskIds) {
 /// Cooperative stop signal for one kernel-I/O thread.
 ///
 /// Kernel tasks take no signals and are not killable: they need a stop they
-/// can *finish* on — the ext2 flusher's last act is a full sync, which a kill
+/// can *finish* on — the ext4 flusher's last act is a full sync, which a kill
 /// would discard. The queue lives inside the signal so the park, the stop-wake
 /// and the freeze gate cannot drift onto separate queues.
 pub struct KernelIoStop {

@@ -1,9 +1,8 @@
 //! Single-holder seats for the display and the input sink.
 //!
-//! `fb_flip` and `input_poll_batch` used to stamp the caller as the owner on
-//! every call, at frame rate — a re-arm, not an acquire, so whoever acted last
-//! owned the screen. Ownership is now announced by the arbiter and never
-//! conferred by presenting a frame.
+//! Ownership is announced by the arbiter and never conferred by presenting a
+//! frame: a `fb_flip` or `input_poll_batch` that stamped its caller as the
+//! owner would re-arm at frame rate, handing the screen to whoever acted last.
 //!
 //! Three properties are load-bearing:
 //!

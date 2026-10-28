@@ -155,25 +155,9 @@ impl<E: fmt::Display> From<VolumeError<E>> for ImageError {
     }
 }
 
-/// Whether `source` holds an archive of the form extensions took before
-/// they were images on disk, which no install takes now.
-pub fn archive_form<S: Source>(source: &mut S) -> bool {
-    let mut magic = [0u8; 6];
-    source.len().is_ok_and(|len| len >= 6)
-        && source.read_at(0, &mut magic).is_ok()
-        && &magic == b"070701"
-}
-
 /// The geometry of the image `source` holds and its root, the digest of its
-/// tree's top block. An archive of the form extensions took before is
-/// refused for what it is.
+/// tree's top block.
 pub fn root_of<S: Source>(source: &mut S) -> Result<(Geometry, Digest), ImageError> {
-    if archive_form(source) {
-        return Err(ImageError::Format(
-            "an archive of the form extensions took before they were images on disk; install it again from an image `extctl build` makes"
-                .into(),
-        ));
-    }
     let read = |e: S::Error| ImageError::Damaged(e.to_string());
     let len = source.len().map_err(read)?;
     let geometry = Geometry::of_image(len).ok_or_else(|| {

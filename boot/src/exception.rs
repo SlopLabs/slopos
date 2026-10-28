@@ -1,9 +1,9 @@
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::task::TaskFaultReason;
-use slopos_arch::InterruptFrame;
-use slopos_arch::cpu;
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_mm::process_vm;
+use slopos_ostd::cpu::x86_64 as cpu;
+use slopos_ostd::irq::interrupt_frame::InterruptFrame;
 use slopos_ostd::task::TaskDiag;
 use slopos_ostd::{kdiag_dump_interrupt_frame, kdiag_stack_word_at, klog_info};
 
@@ -12,19 +12,21 @@ use crate::user_fault::*;
 
 /// Per-CPU reason the last user page fault could not be serviced. Without it a
 /// wild-pointer kill and an out-of-memory kill share one `waitpid` status.
-static PENDING_FAULT_REASON: [core::sync::atomic::AtomicU16; slopos_arch::pcr::MAX_CPUS] =
-    [const { core::sync::atomic::AtomicU16::new(0) }; slopos_arch::pcr::MAX_CPUS];
+static PENDING_FAULT_REASON: [core::sync::atomic::AtomicU16;
+    slopos_ostd::cpu::x86_64::pcr::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU16::new(0) }; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS];
 
 /// The CR2 that went with it, biased by one so zero means "nothing recorded".
 ///
 /// A user fault resolves with interrupts on, so by the time the fatal tail runs
 /// CR2 can name another task's fault — and the tail classifies the guard pages
 /// off it, turning a task kill into a kernel panic.
-static PENDING_FAULT_ADDR: [core::sync::atomic::AtomicU64; slopos_arch::pcr::MAX_CPUS] =
-    [const { core::sync::atomic::AtomicU64::new(0) }; slopos_arch::pcr::MAX_CPUS];
+static PENDING_FAULT_ADDR: [core::sync::atomic::AtomicU64;
+    slopos_ostd::cpu::x86_64::pcr::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS];
 
 pub(crate) fn record_fault(reason: TaskFaultReason, fault_addr: u64) {
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     if let Some(slot) = PENDING_FAULT_REASON.get(cpu) {
         slot.store(reason.as_u16(), core::sync::atomic::Ordering::Relaxed);
     }
@@ -39,7 +41,7 @@ pub(crate) fn record_fault(reason: TaskFaultReason, fault_addr: u64) {
 /// Consuming rather than peeking: a stale reason would attribute the *next*
 /// wild pointer on this CPU to an out-of-memory condition.
 fn take_fault_reason() -> TaskFaultReason {
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let raw = PENDING_FAULT_REASON.get(cpu).map_or(0, |slot| {
         slot.swap(0, core::sync::atomic::Ordering::Relaxed)
     });
@@ -48,7 +50,7 @@ fn take_fault_reason() -> TaskFaultReason {
 
 /// The recorded CR2, or `None` when this #PF never reached the resolver.
 fn take_fault_addr() -> Option<u64> {
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let raw = PENDING_FAULT_ADDR.get(cpu).map_or(0, |slot| {
         slot.swap(0, core::sync::atomic::Ordering::Relaxed)
     });
@@ -131,7 +133,7 @@ pub(crate) fn frame_exception_name(frame: *mut InterruptFrame) -> &'static str {
         Some(f) => (f.vector & 0xFF) as u8,
         None => return "<null frame>",
     };
-    slopos_arch::arch::exception::get_exception_name(vector)
+    slopos_ostd::arch::x86_64::exception::get_exception_name(vector)
 }
 
 pub(crate) fn exception_invalid_opcode(frame: *mut InterruptFrame) {
@@ -305,13 +307,13 @@ pub(crate) fn exception_page_fault(frame: *mut InterruptFrame) {
 
         if let Some(diag) = diag.as_ref() {
             klog_info!(
-                "Current task: id={} name='{}' kstack=0x{:x}..0x{:x} flags=0x{:x} ctx_cr3=0x{:x}",
+                "Current task: id={} name='{}' kstack=0x{:x}..0x{:x} flags=0x{:x} cr3=0x{:x}",
                 diag.id,
                 diag.name_str(),
                 diag.kernel_stack_base,
                 diag.kernel_stack_top,
                 diag.flags,
-                diag.context_cr3
+                diag.cr3
             );
             if !diag.stack_contains(frame_ref.rsp) {
                 klog_info!(
@@ -337,8 +339,6 @@ pub(crate) fn log_user_page_fault_diagnostics(frame_ref: &InterruptFrame, fault_
     let mut fault_phys = PhysAddr::NULL;
     let mut rsp_phys = PhysAddr::NULL;
     let mut rip_phys = PhysAddr::NULL;
-    let mut ctx_rip = 0u64;
-    let mut ctx_rsp = 0u64;
 
     let task_ref = resolve_user_fault_task();
     if let Some(task_ref) = task_ref {
@@ -353,8 +353,6 @@ pub(crate) fn log_user_page_fault_diagnostics(frame_ref: &InterruptFrame, fault_
             && let Some(faulting) = faulting
         {
             pid = task_pid;
-            ctx_rip = task_ref.context_rip();
-            ctx_rsp = task_ref.context_rsp();
             cr3 = process_vm::process_vm_get_ostd_pml4_paddr(faulting);
             if cr3 != 0 {
                 fault_phys = PhysAddr::new(process_vm::process_vm_user_va_to_paddr(
@@ -404,13 +402,4 @@ pub(crate) fn log_user_page_fault_diagnostics(frame_ref: &InterruptFrame, fault_
         rip_phys.as_u64(),
         rsp_phys.as_u64()
     );
-    klog_info!(
-        "User PF context snapshot: rip=0x{:x} rsp=0x{:x}",
-        ctx_rip,
-        ctx_rsp
-    );
-}
-
-pub(crate) fn is_critical_exception_internal(vector: u8) -> bool {
-    slopos_arch::arch::exception::exception_is_critical(vector)
 }

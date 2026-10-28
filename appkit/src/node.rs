@@ -15,6 +15,7 @@ use super::widgets::drag_handle::DragInput;
 use super::widgets::editor_tabs::{EditorTab, TabInput};
 use super::widgets::line_edit::LineEditInput;
 use super::widgets::menu_bar::MenuBarInput;
+use super::widgets::picture::PictureInput;
 use super::widgets::slider::{SliderGrab, SliderInput};
 use super::widgets::tree_view::{TreeInput, TreeRow};
 
@@ -322,6 +323,20 @@ pub enum Node<M> {
         /// Reached by Tab, and reports `Focus` and `Blur`.
         tab_stop: bool,
         on_input: Option<fn(LineEditInput) -> M>,
+    },
+    /// A picture at `zoom` times its size, centred and moved by `pan`, over
+    /// the checks its transparent pixels are judged against; every gesture
+    /// over it comes back as a [`PictureInput`].
+    Picture {
+        image: ImageData,
+        zoom: f64,
+        pan: (i32, i32),
+        /// A drag is live, from the press to the release, since the tree is
+        /// rebuilt between them.
+        grabbing: bool,
+        /// Typed characters come to it.
+        focused: bool,
+        on_input: Option<fn(PictureInput) -> M>,
     },
     /// A draggable divider; reports the start, the pointer's absolute position
     /// and the end of a drag.

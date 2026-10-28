@@ -3,7 +3,7 @@
 Source: *CortenMM: Efficient Memory Management with Strong Correctness
 Guarantees*, Junyang Zhang et al., Peking University / Ant Group / UCLA,
 SOSP '25 — <http://web.cs.ucla.edu/~tamir/papers/sosp25.pdf>. Prior art for
-Phase 3D (`slopos_ostd::mm::vm_space::Cursor`).
+`slopos_ostd::mm::vm_space::Cursor`.
 
 These notes capture only what is load-bearing for the SlopOS proof; they are
 not a full paper summary.
@@ -110,13 +110,8 @@ it.
 The one **deliberate divergence**: SlopOS's concurrency control is the Rust
 borrow checker, not CortenMM's per-PT-page locks + RCU. `CursorMut<'a>` holds
 `&'a mut VmSpace`, so the type system guarantees **at most one mutator per
-`VmSpace` at a time** — the coarse *lock-per-`VmSpace`* model. This is the
-fallback Phase 3D.3 explicitly sanctions:
-
-> "Falling back to a coarser lock-per-`VmSpace` proof is acceptable if the
-> fine-grained one doesn't close — document the gap."
-
-We take that fallback by construction. The consequences:
+`VmSpace` at a time** — the coarse *lock-per-`VmSpace`* model, and the gap it
+leaves against the fine-grained one is documented below. The consequences:
 
 - **CortenMM's hardest proof obligation — P1 mutual exclusion across
   fine-grained PT-page locks + RCU stale-retry — does not arise in SlopOS.**
@@ -135,14 +130,14 @@ We take that fallback by construction. The consequences:
   (it forbids strictly more concurrency), so every state reachable under it is
   reachable under CortenMM's looser model, and the well-formedness invariant
   we prove is therefore *a fortiori* valid. Re-attempt the fine-grained,
-  range-disjoint parallel version on each Verus bump (3A.4) if SlopOS ever
+  range-disjoint parallel version on each Verus bump if SlopOS ever
   grows per-PT-page locking; until then the coarse model is the honest and
   sufficient one. Recorded in `STATUS.md`.
 
-## 6. The invariants we adapt (3D.2)
+## 6. The invariants we adapt
 
 Translating CortenMM's Figure-12 well-formedness + the SlopOS ref-count
-discipline into the three Phase-3D obligations:
+discipline into the cursor proof's three obligations:
 
 1. **PT well-formedness** — "Cursor operations preserve page-table
    well-formedness: no dangling intermediate frames; every present entry

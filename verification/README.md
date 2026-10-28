@@ -77,15 +77,14 @@ services, or the future io_uring-style `ring/` crate — may contain an
    `async` branch.
 3. Update `verus.toml`: `release`, `commit`, `version`, `rust_toolchain`,
    `[asset].url`, and `[asset].sha256` (the new asset's digest — release
-   assets are immutable, so this is a stable integrity anchor). Mirror the
-   `version` / `commit` constants in `src/lib.rs`.
+   assets are immutable, so this is a stable integrity anchor).
 4. `rm -rf third_party/verus` and re-run `just ensure-verus` to fetch the
    new build.
 5. `just verify` must pass clean. If a proof breaks on the new Verus,
    either fix the proof on the topic branch or revert the bump — **never**
    weaken an invariant to make a bump go green.
 6. Update `STATUS.md`'s "pinned Verus SHA" line and re-attempt any
-   proof that previously fell back to a coarser model (e.g. the
+   proof that uses a coarser model than the code it mirrors (e.g. the
    `VmSpace::cursor` fine-grained concurrent proof).
 7. Land the topic branch only after CI is green.
 

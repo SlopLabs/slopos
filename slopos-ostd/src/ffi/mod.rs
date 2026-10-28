@@ -128,8 +128,8 @@ macro_rules! extern_c_entry {
 
 /// Declarative wrapper around `#[unsafe(no_mangle)] $vis static FOO: T = …`.
 ///
-/// For `static` symbols that need the unmangled C-linkage name (e.g. the
-/// `SYSCALL_CPU_DATA_PTR` slot consumed by the asm syscall trampoline).
+/// For `static` symbols that need the unmangled C-linkage name, such as the
+/// bootstrap task slots `task/bootstrap.rs` hands assembly.
 #[macro_export]
 #[allow_internal_unsafe]
 macro_rules! no_mangle_static {

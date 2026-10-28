@@ -31,24 +31,24 @@ set -euo pipefail
 #   FS_LABEL      - volume label (`mke2fs -L`); a preserved image is
 #                   relabelled with `tune2fs -L`. `mount=LABEL=<label>:<path>`
 #                   on the kernel cmdline and `mount(2)` find a volume by it.
-#   VERITY        - `on` (default) appends a v1 integrity trailer, which makes
-#                   the kernel mount the image read-only; `rw` appends a v2
-#                   trailer, which leaves the image writable (a write
-#                   un-attests the blocks it touches); `off` leaves the image
-#                   unverified, for images the test suite writes to.
+#   VERITY        - `on` (default) appends a protected integrity trailer,
+#                   which makes the kernel mount the image read-only; `rw`
+#                   appends an attested trailer, which leaves the image
+#                   writable (a write un-attests the blocks it touches); `off`
+#                   leaves the image unverified, for images the test suite
+#                   writes to.
 #   PRESERVE_FS_IMAGE - `1` refreshes the binaries of an existing writable
 #                   image in place instead of running mkfs, so a developer
 #                   iterating on the kernel keeps whatever the guest wrote.
 #                   Ignored when no image exists. When an image *does* exist
 #                   and cannot be kept — damaged, left dirty by a killed boot,
-#                   or carrying a write-protecting v1 trailer — this script
-#                   REFUSES and names the fix rather than deleting it.
+#                   short of the profile, or carrying a protected trailer —
+#                   this script REFUSES and names the fix rather than
+#                   deleting it.
 #                   FS_IMAGE_SIZE is a minimum: a larger one grows the image
-#                   in place and a smaller one leaves it as it is. A v2
+#                   in place and a smaller one leaves it as it is. An attested
 #                   trailer is recomputed at the end of the run, so it does
-#                   not block a refresh. An image short of the profile is
-#                   converted in place, or the build refuses and names
-#                   `just reset root`.
+#                   not block a refresh.
 #   FS_HOST_TREES - `<host dir>:<guest dir>[:<name>]`, space-separated: trees
 #                   the host owns, installed whenever the host directory
 #                   exists and replaced when it changes (scripts/fs_tree.py).
@@ -75,10 +75,10 @@ shift 2
 BINS=("$@")
 
 FS_IMAGE_SIZE="${FS_IMAGE_SIZE:-32M}"
-# Derived from the volume, not frozen: a log is sized by how much metadata one
-# writeback window may hold, which scales with the filesystem it protects. 1/64
-# of the image, floored at the 4M a 32M appliance root used and capped at the
-# 64M past which the kernel's per-slot arrays stop paying for themselves.
+# A log is sized by how much metadata one writeback window may hold, which
+# scales with the filesystem it protects: 1/64 of the image, floored at 4M and
+# capped at the 64M past which the kernel's per-slot arrays stop paying for
+# themselves.
 default_journal_size() {
     local image_bytes want
     image_bytes="$(numfmt --from=iec "$FS_IMAGE_SIZE")"
@@ -164,7 +164,8 @@ VERITY_RECORD="$HOST_STATE/verity"
 PRESERVE_FS_IMAGE="${PRESERVE_FS_IMAGE:-0}"
 STAMP_PATH="${IMAGE_PATH}.stamp"
 FRESH=0
-# The blocks a preserved v2 image's guest owns, which its seal must not attest.
+# The blocks a preserved attested image's guest owns, which its seal must not
+# attest.
 TAINT_PATH=""
 CLEANUP=()
 trap 'rm -f -- "${CLEANUP[@]:-}"' EXIT
@@ -216,8 +217,9 @@ image_carries_verity_trailer() {
     [ "$magic" = "54525653" ]
 }
 
-verity_trailer_version() {
-    tail -c 32 "$1" | od -An -tu4 -j4 -N4 | tr -d ' \n'
+# The header's `kind` field: 1 protected, 2 attested.
+verity_trailer_attested() {
+    [ "$(tail -c 32 "$1" | od -An -tu4 -j4 -N4 | tr -d ' \n')" = "2" ]
 }
 
 # How big the *filesystem* is, which is what a size check asks: the file is
@@ -329,104 +331,10 @@ journal_mib() {
     echo $(( $(numfmt --from=iec "$FS_JOURNAL_SIZE") / 1024 / 1024 ))
 }
 
-CONVERT_LOG=""
-
-convert_run() {
-    echo "\$ $*" >>"$CONVERT_LOG"
-    "$@" >>"$CONVERT_LOG" 2>&1
-}
-
-# e2fsck exits 1 or 2 after a repair; only 4 and up mean it could not.
-convert_fsck() {
-    local rc=0
-    convert_run e2fsck "$@" || rc=$?
-    [ "$rc" -lt 4 ]
-}
-
-legacy_log_in() {
-    local stat flags
-    stat="$(debugfs -R "stat /.journal" "$1" 2>/dev/null)"
-    echo "$stat" | grep -q 'Type: regular' || return 1
-    flags="$(echo "$stat" | sed -n 's/.*Flags: \(0x[0-9a-f]*\).*/\1/p' | head -n 1)"
-    [ $(( ${flags:-0} & IMMUTABLE_FL )) -ne 0 ]
-}
-
-# Ordered by e2fsprogs' preconditions: `tune2fs -I` refuses a flex_bg volume,
-# and 64-bit descriptors precede the checksums over them. `ext_attr` stays, as
-# tune2fs cannot clear it; the journal is fit_journal's.
-convert_steps() {
-    local img="$1" add=() want inode_size size have
-    if ext4_ext2_era "$img" && legacy_log_in "$img"; then
-        convert_run debugfs -w -R "sif /.journal flags 0" "$img" &&
-            convert_run debugfs -w -R "rm /.journal" "$img" || return 1
-    fi
-    # Every tune2fs step below refuses a volume mounted since its last check.
-    convert_fsck -fy "$img" || return 1
-    inode_size="$(ext4_profile_value inode_size)"
-    size="$(dumpe2fs -h "$img" 2>/dev/null | sed -n 's/^Inode size:[[:space:]]*//p')"
-    if [ "$size" -gt "$inode_size" ]; then
-        echo "its ${size}-byte inodes are larger than the profile's ${inode_size}, which tune2fs cannot shrink" >>"$CONVERT_LOG"
-        return 1
-    fi
-    if [ "$size" -lt "$inode_size" ]; then
-        convert_run tune2fs -f -I "$inode_size" "$img" || return 1
-    fi
-    have=" $(dumpe2fs -h "$img" 2>/dev/null | sed -n 's/^Filesystem features:[[:space:]]*//p') "
-    for want in $(ext4_profile_value features | tr ',' ' '); do
-        case "$want" in 64bit|metadata_csum|has_journal) continue ;; esac
-        case "$have" in *" $want "*) ;; *) add+=("$want") ;; esac
-    done
-    if [ "${#add[@]}" -gt 0 ]; then
-        convert_run tune2fs -O "$(IFS=,; echo "${add[*]}")" "$img" || return 1
-    fi
-    convert_fsck -fy "$img" || return 1
-    case "$have" in *" 64bit "*) ;; *) convert_run resize2fs -b "$img" || return 1 ;; esac
-    case "$have" in
-        *" metadata_csum "*) ;;
-        *) convert_run tune2fs -O metadata_csum "$img" || return 1 ;;
-    esac
-    convert_fsck -fyD "$img" || return 1
-    for want in dir_index resize_inode; do
-        case ",$(ext4_profile_value features)," in *",$want,"*) continue ;; esac
-        case "$have" in *" $want "*) convert_run tune2fs -O "^$want" "$img" || return 1 ;; esac
-    done
-    convert_fsck -fyD "$img" || return 1
-    convert_run e2fsck -fn "$img" || return 1
-    [ -z "$(ext4_unrest "$img")" ] || { echo "not at rest: $(ext4_unrest "$img")" >>"$CONVERT_LOG"; return 1; }
-    ext4_meets_profile "$img" has_journal ||
-        { echo "the result still falls short of ext4-core/profile" >>"$CONVERT_LOG"; return 1; }
-}
-
 taint_what_moved() {
     python3 "${SCRIPT_DIR}/gen_verity.py" --taint-moved "$TAINT_PATH" "$1" "$IMAGE_PATH" ||
         refuse "gen_verity.py could not read what the image allocates" "e2fsck -fy '$IMAGE_PATH'"
     rm -f "$1"
-}
-
-# On a copy, so a step e2fsprogs refuses leaves the image as it was; the copy
-# stops at the filesystem, whose trailer is rebuilt at the end of the run.
-convert_to_profile() {
-    local target work
-    command -v tune2fs >/dev/null 2>&1 && command -v resize2fs >/dev/null 2>&1 ||
-        refuse "converting the image to the ext4 profile needs tune2fs and resize2fs" \
-               "install e2fsprogs"
-    target="$(realpath -- "$IMAGE_PATH")"
-    work="$(mktemp "$(dirname "$target")/convert.XXXXXX")"
-    CONVERT_LOG="$(mktemp "$(dirname "$target")/convert-log.XXXXXX")"
-    CLEANUP+=("$work" "$CONVERT_LOG")
-    cp --reflink=auto --sparse=always "$target" "$work"
-    chmod --reference="$target" "$work"
-    truncate -s "$(fs_extent_bytes "$target")" "$work"
-    if ! convert_steps "$work"; then
-        rm -f "$work"
-        echo "preserve: the last steps of the conversion:" >&2
-        tail -n 15 "$CONVERT_LOG" | sed 's/^/  /' >&2
-        refuse "the image could not be converted to the ext4 profile (it is unchanged)" \
-               "what the last step says above; for the persistent root, \`just reset root\` discards it"
-    fi
-    mv "$work" "$target"
-    rm -f "$STAMP_PATH"
-    echo "preserve: converted $IMAGE_PATH to the ext4 profile, keeping its contents"
 }
 
 # Remade when its size is not FS_JOURNAL_SIZE: tune2fs adds a journal only to
@@ -461,28 +369,26 @@ preserve_or_refuse() {
     if [ "$have" = "0" ]; then
         refuse "there is no superblock in the image" "e2fsck -fy '$IMAGE_PATH'"
     fi
-    # A v1 trailer's hashes cover the bytes a refresh would rewrite; a v2
-    # trailer is recomputed at the end of this run.
-    if image_carries_verity_trailer "$IMAGE_PATH" &&
-       { [ "$VERITY" != "rw" ] || [ "$(verity_trailer_version "$IMAGE_PATH")" != "2" ]; }; then
-        refuse "the image carries a write-protecting v1 trailer, whose hashes cover the bytes a refresh rewrites" \
-               "build this image with VERITY=rw"
+    # A protected trailer's hashes cover the bytes a refresh would rewrite; an
+    # attested one is recomputed at the end of this run.
+    if image_carries_verity_trailer "$IMAGE_PATH"; then
+        verity_trailer_attested "$IMAGE_PATH" ||
+            refuse "the image carries a protected trailer, whose hashes cover the bytes a refresh rewrites" \
+                   "\`just reset root\` for the persistent root"
+        [ "$VERITY" = "rw" ] ||
+            refuse "the image carries an attested trailer, which VERITY=$VERITY would not keep" \
+                   "build this image with VERITY=rw"
     fi
     if ! "${SCRIPT_DIR}/check_fs_image.sh" "$IMAGE_PATH"; then
-        if ext4_ext2_era "$IMAGE_PATH" && [ -n "$(ext4_unrest "$IMAGE_PATH")" ]; then
-            refuse "a root from before ext4 was left mid-write, and only the kernel before ext4 replays its log" \
-                   "boot it once on that kernel; e2fsck -fy '$IMAGE_PATH' instead discards what the log held"
-        fi
         refuse "the image is damaged, or a boot left it dirty (see above)" \
                "e2fsck -fy '$IMAGE_PATH'"
     fi
-    # Grown before the guest's blocks are measured, since a grow moves blocks,
-    # and before a conversion, whose steps need room.
+    meets_profile ||
+        refuse "the image falls short of ext4-core/profile" "\`just reset root\` for the persistent root"
+    # Grown before the guest's blocks are measured, since a grow moves blocks.
     if [ "$want" -gt "$have" ]; then
         grow_image "$have" "$want"
     fi
-    ensure_room "$(numfmt --from=iec "$FS_FREE_FLOOR")"
-    meets_profile || convert_to_profile
     fit_journal
     ensure_room "$(numfmt --from=iec "$FS_FREE_FLOOR")"
     if [ "$VERITY" = "rw" ]; then
@@ -562,31 +468,19 @@ lay_out_root() {
 }
 
 # What the guest's record says its first person holds, read where nothing the
-# guest made can redirect it; one this cannot read grants nothing. Without one,
-# a root with accounts may hold two people, which this cannot count, so its
-# /usr/local goes in as uid 0's, which init hands back if they name one.
+# guest made can redirect it; one that is missing or unreadable grants nothing.
 read_owners() {
-    local record status=0
-    record="$("${FS_TREE[@]}" read "$IMAGE_PATH" "$OWNERS_RECORD")" || status=$?
-    case "$status" in
-    0)
+    local record
+    if record="$("${FS_TREE[@]}" read "$IMAGE_PATH" "$OWNERS_RECORD")"; then
         root_layout_read_record <<<"$record"
         root_layout_holds /usr/local || HOME_MODE=0700
-        ;;
-    4)
-        if "${FS_TREE[@]}" exists "$IMAGE_PATH" "$ACCOUNTS_STORE"; then
-            HELD_TREES=("${PERSON_TREES[0]}" "${PERSON_TREES[1]}")
-        fi
-        ;;
-    *)
-        echo "build_fs_image: installing as uid 0's, as an unread $OWNERS_RECORD leaves everything" >&2
+    else
+        echo "build_fs_image: installing as uid 0's, as a missing or unread $OWNERS_RECORD grants nothing" >&2
         HELD_TREES=()
-        ;;
-    esac
+    fi
 }
 
-# A new image holds the first person's trees as theirs from the start, so
-# init has nothing to hand over on it.
+# A new image records the first person's trees as theirs.
 record_owners() {
     local record
     record="$(mktemp "${IMAGE_DIR}/owners.XXXXXX")"
@@ -802,18 +696,7 @@ install_base() {
     fi
 
     mkdir_p /usr/share/slopos
-    mkdir_p /usr/share/slopos/doc
     mkdir_p /usr/share/slopos/wallpapers
-
-    # Documentation the shipped programs open from their own Help menus.
-    DOCS_DIR="${REPO_ROOT}/assets/docs"
-    if [ -d "$DOCS_DIR" ]; then
-        for doc in "$DOCS_DIR"/*.md; do
-            [ -f "$doc" ] || continue
-            install_file "$doc" "/usr/share/slopos/doc/$(basename "$doc")"
-            echo "Installed doc: /usr/share/slopos/doc/$(basename "$doc")"
-        done
-    fi
 
     mkdir_p /usr/share/slopos/apps
     mkdir_p /usr/share/slopos/icons
@@ -911,7 +794,10 @@ install_trees() {
         case "$rc" in
             0) echo "Installed $TREE_HOST at $TREE_GUEST as $TREE_NAME" ;;
             3) echo "build_fs_image: left $TREE_NAME at $TREE_GUEST as it was; the next build tries again" >&2 ;;
-            *) exit 1 ;;
+            *)
+                echo "build_fs_image: $TREE_NAME could not be installed; \`just reset root\` rebuilds a preserved root" >&2
+                exit 1
+                ;;
         esac
     done
     for spec in "${seeds[@]}"; do
@@ -936,15 +822,15 @@ if [ "$VERITY" = "off" ]; then
 elif command -v python3 >/dev/null 2>&1; then
     if [ "$VERITY" = "rw" ]; then
         mkdir -p "$HOST_STATE"
-        python3 "${SCRIPT_DIR}/gen_verity.py" --version 2 ${TAINT_PATH:+--taint "$TAINT_PATH"} \
+        python3 "${SCRIPT_DIR}/gen_verity.py" --kind attested ${TAINT_PATH:+--taint "$TAINT_PATH"} \
             --record "$VERITY_RECORD" "$IMAGE_PATH"
         rm -f "$TAINT_PATH"
     else
-        python3 "${SCRIPT_DIR}/gen_verity.py" --version 1 "$IMAGE_PATH"
+        python3 "${SCRIPT_DIR}/gen_verity.py" --kind protected "$IMAGE_PATH"
     fi
 else
     # Not a warning: a build that silently produced a writable image where a
-    # verified one was asked for is the fail-open this trailer exists to end.
+    # verified one was asked for is the fail-open this trailer exists to prevent.
     echo "gen_verity: python3 is required to build a verified image (or pass VERITY=off)" >&2
     exit 1
 fi

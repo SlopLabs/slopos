@@ -30,8 +30,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-        with:
-          submodules: recursive
 
       - name: Install just
         uses: extractions/setup-just@v4
@@ -155,10 +153,9 @@ jobs:
           just _build-run-tests
           builddir/run_tests --raw --no-color 2>&1 | tee ci-test.log
 
-      # Both boot-based ratchets parse the capture above rather than booting
-      # again: three QEMU boots for one question each is two boots wasted, and a
-      # second boot could disagree with the one that was actually graded.
-      # The tests kernel is the only variant whose allowlist carries
+      # The ratchets below parse the capture above rather than booting again:
+      # a boot per question costs a boot each, and a second boot could disagree
+      # with the one that was graded. The tests kernel is the only variant whose allowlist carries
       # `run_userland_tests` — it powers the machine off to end the run. Gated
       # here rather than from `check_kernel_elf_gates.sh` because the walk disassembles
       # the whole ELF (~8 s), which does not belong on the interactive loop.
@@ -171,12 +168,10 @@ jobs:
       - name: Lockdep headroom ratchet
         run: scripts/check_lockdep_headroom.sh --log ci-test.log
 
-      # The invariant here is not a measured ceiling but a structural one: a CPU
-      # that is online must be eligible for task placement. It shipped broken —
-      # the scheduler boot step reset the runqueues of three APs that were
-      # already running, and the machine spent every boot placing 100 % of forks
-      # and wakeups on CPU 0 while the other three scavenged by work stealing.
-      # Nothing else on the wire says so.
+      # Not a measured ceiling but a structural invariant: a CPU that is online
+      # is eligible for task placement. One that is not still dispatches what
+      # work stealing hands it, so the suite passes while one core takes every
+      # fork and wakeup; nothing else on the wire says so.
       - name: SMP placement-eligibility gate
         run: scripts/check_sched_spread.sh --log ci-test.log
 
@@ -261,13 +256,10 @@ jobs:
           RUSTC_WRAPPER: sccache
         run: just build-kernel-only
 
-      # Delegates to the justfile so the gate list has one home. This
-      # step used to inline the list and had already drifted — it was
-      # missing check_wait_predicate_purity.sh, which `check-framekernel`
-      # has run for some time. `check-framekernel-gates` is the scripts
-      # only; the fmt / KernMiri / Verus steps that `check-framekernel`
-      # also runs are covered by the `Check formatting` step of the boot lane
-      # and by the `ostd-verify` job below.
+      # Delegates to the justfile so the gate list has one home.
+      # `check-framekernel-gates` is the scripts only; the fmt / KernMiri /
+      # Verus steps that `check-framekernel` also runs are the boot lane's
+      # `Check formatting` step and the `ostd-verify` job below.
       - name: Framekernel gates (vendor pin + unsafe/async/alloc/Drop/stack + wait purity + task ownership + TCB ratio)
         run: just check-framekernel-gates
 

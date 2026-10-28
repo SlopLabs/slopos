@@ -3,11 +3,11 @@
 use slopos_abi::fs::{EXT2_SUPER_MAGIC, RAMFS_MAGIC};
 use slopos_ostd::KVec;
 use slopos_ostd::lock_class;
-use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
+use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_testing::TestResult;
 
-use crate::ext2::Ext2Fs;
-use crate::ext2_vfs::ext2_stats_of;
+use crate::ext4::Ext4Fs;
+use crate::ext4_vfs::ext4_stats_of;
 use crate::ramfs::RamFs;
 use crate::vfs::traits::same_filesystem;
 use crate::vfs::{
@@ -24,19 +24,19 @@ const PROBE_RESERVE: u32 = 5;
 
 /// The counts come off the image's own superblock, and `blocks_available`
 /// leaves the reserve the allocator enforces out of the answer.
-pub fn test_statfs_ext2_matches_the_image_superblock() -> TestResult {
+pub fn test_statfs_ext4_matches_the_image_superblock() -> TestResult {
     let Some(device) = build_minimal_ext2_image(IMAGE_BLOCKS, IMAGE_INODES) else {
         return TestResult::Skipped;
     };
-    let (superblock, geom) = match Ext2Fs::mount_params(&device) {
+    let (superblock, geom) = match Ext4Fs::mount_params(&device) {
         Ok(v) => v,
         Err(e) => return slopos_testing::fail!("the fixture did not mount: {:?}", e),
     };
     let block_size = geom.block_size();
 
-    let stats = ext2_stats_of(&superblock, block_size, PROBE_RESERVE, false);
+    let stats = ext4_stats_of(&superblock, block_size, PROBE_RESERVE, false);
     if stats.magic != EXT2_SUPER_MAGIC {
-        return slopos_testing::fail!("magic {:#x}, want ext2's", stats.magic);
+        return slopos_testing::fail!("magic {:#x}, want ext4's", stats.magic);
     }
     if stats.block_size != block_size {
         return slopos_testing::fail!(
@@ -96,7 +96,7 @@ fn block_payload(len: usize) -> Option<KVec<u8>> {
 
 /// A `statfs` that never moves is indistinguishable from a constant: a create
 /// and a one-block write must show in both counts.
-pub fn test_statfs_ext2_free_counts_follow_a_write() -> TestResult {
+pub fn test_statfs_ext4_free_counts_follow_a_write() -> TestResult {
     let Some(device) = build_minimal_ext2_image(IMAGE_BLOCKS, IMAGE_INODES) else {
         return TestResult::Skipped;
     };
@@ -111,14 +111,14 @@ pub fn test_statfs_ext2_free_counts_follow_a_write() -> TestResult {
         return TestResult::Skipped;
     };
 
-    let before = ext2_stats_of(&fs.superblock(), block_size, 0, false);
+    let before = ext4_stats_of(&fs.superblock(), block_size, 0, false);
     let Ok(ino) = fs.create_file(2, b"statfs.bin") else {
         return slopos_testing::fail!("create failed on a healthy fixture");
     };
     if let Err(e) = fs.write_file(ino, 0, &payload) {
         return slopos_testing::fail!("write failed on a healthy fixture: {:?}", e);
     }
-    let after = ext2_stats_of(&fs.superblock(), block_size, 0, false);
+    let after = ext4_stats_of(&fs.superblock(), block_size, 0, false);
 
     if after.blocks_free >= before.blocks_free {
         return slopos_testing::fail!(
@@ -286,7 +286,7 @@ pub fn test_statfs_name_limit_is_the_one_creation_enforces() -> TestResult {
 /// [`same_filesystem`], which compares addresses only.
 ///
 /// These three number their inodes independently — devfs's 1-6 collide with
-/// ext2's reserved inodes — so an alias would make the open-vnode table, the
+/// ext4's reserved inodes — so an alias would make the open-vnode table, the
 /// cross-device rename check and re-resolution take one filesystem's inode
 /// for another's.
 pub fn test_statfs_mounted_filesystems_are_distinct_instances() -> TestResult {
@@ -331,8 +331,8 @@ pub fn test_statfs_mounted_filesystems_are_distinct_instances() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::stest!(name = test_statfs_ext2_matches_the_image_superblock);
-slopos_testing::stest!(name = test_statfs_ext2_free_counts_follow_a_write);
+slopos_testing::stest!(name = test_statfs_ext4_matches_the_image_superblock);
+slopos_testing::stest!(name = test_statfs_ext4_free_counts_follow_a_write);
 slopos_testing::stest!(name = test_statfs_ramfs_reports_inode_totals);
 slopos_testing::stest!(name = test_statfs_devfs_refuses);
 slopos_testing::stest!(name = test_statfs_read_only_mount_reports_the_flag);

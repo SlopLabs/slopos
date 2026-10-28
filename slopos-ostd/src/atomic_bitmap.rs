@@ -2,7 +2,7 @@
 //!
 //! Query methods (`find_*`, `count_ones`) return **point-in-time snapshots**
 //! that may be stale under contention; [`alloc`](AtomicBitmap::alloc) /
-//! [`free`](AtomicBitmap::free) is the linearizable allocate-or-fail pair.
+//! [`clear`](AtomicBitmap::clear) is the linearizable allocate-or-fail pair.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -62,12 +62,6 @@ impl<const W: usize> AtomicBitmap<W> {
         debug_assert!(bit < Self::CAPACITY);
         let (word, mask) = Self::word_mask(bit);
         (self.words[word].fetch_and(!mask, Ordering::AcqRel) & mask) != 0
-    }
-
-    /// Alias for [`clear`](Self::clear).
-    #[inline]
-    pub fn free(&self, bit: usize) {
-        self.clear(bit);
     }
 
     /// Lock-free find-first-zero-and-set over `[0 .. nbits)`; `None` if all set.

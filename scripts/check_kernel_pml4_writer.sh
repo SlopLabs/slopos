@@ -1,130 +1,180 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-# Single-writer gate for the kernel master PML4.
+# Hold the kernel master's page tables to one writer.
 #
 # Every kernel-half page-table write goes through
-# `slopos_ostd::mm::vm_space::CursorMut` under the `KERNEL_VM_SPACE`
-# lock, reached from `slopos_mm::kernel_mappings`. A second writer over
-# the same physical PML4 — a raw descent that allocates its own
-# intermediates and stores its own entries — cannot be serialised
-# against the cursor, because the cursor's exclusivity comes from the
-# borrow checker over one `VmSpace` object and a raw descent names no
-# object at all. Two such writers racing lose leaves and leak the tables
-# that held them; a CPU whose page then resolves to nothing takes a
-# fault it cannot service.
+# `slopos_ostd::mm::vm_space::CursorMut` under the `KERNEL_VM_SPACE` lock, and
+# `slopos_mm::kernel_mappings` is the one module outside OSTD that takes that
+# cursor. The cursor's exclusivity comes from the borrow checker over one
+# `VmSpace` object; a second module driving it, or a second handle on the
+# static, is a writer the review of that one module does not cover.
+# `verification/STATUS.md`'s tier-2 argument for `vm_space` rests on this.
 #
-# So the gate is a name check, not a behaviour check: if these symbols
-# come back, the discipline is gone whether or not the reintroduced code
-# happens to be correct today.
+# Outside `slopos-ostd`, which owns the tables and is audited as the TCB:
 #
-# Runs from `just build` (cheap: a handful of greps over `*.rs`) and
-# from `just check-framekernel-gates`.
+#   static  `KERNEL_VM_SPACE` itself is named only where it is defined
+#           (`kernel-services/src/kernel_vm_space.rs`) and installed once at
+#           boot (`boot/src/boot_memory.rs`). Everything else reaches it
+#           through the `kernel_vm_space()` accessors.
+#   writer  A file that names the space (`kernel_vm_space`, `KERNEL_VM_SPACE`)
+#           and takes a mutating cursor (`cursor_mut`, `CursorMut`) is
+#           `mm/src/kernel_mappings.rs`. Reads (`cursor`, `pml4_paddr`) and
+#           CR3 loads (`activate_*`) are allowed anywhere.
+#   store   A file that reaches a page-table word through
+#           `ptr_buf::with_atomic_u64_in_page` only loads it.
+#   floor   `mm/src/kernel_mappings.rs` does both, so the check cannot pass on
+#           a writer that moved or was renamed.
+#
+# Comments are stripped before matching. Runs on every kernel build from
+# `check_kernel_elf_gates.sh` (a few greps) and from
+# `just check-framekernel-gates`.
 #
 # Usage:
 #     scripts/check_kernel_pml4_writer.sh
 #     scripts/check_kernel_pml4_writer.sh --self-test
 
+set -euo pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$REPO_ROOT"
+# shellcheck source=lib/gate_common.sh
+. "$SCRIPT_DIR/lib/gate_common.sh"
+gate_parse_args check_kernel_pml4_writer "$@"
 
-# Kernel crates only. Userland, slibc and the host-side tooling are out
-# of scope for the framekernel discipline.
-KERNEL_CRATES=(
-    abi acpi boot core drivers font fs gfx hermetic karch kernel kernel-services
-    mm net pidfd ring sched service-core signalfd slopos-ostd slopos-rt video
-    windowing ktesting
-)
+WRITER=mm/src/kernel_mappings.rs
+STATIC_HOMES='kernel-services/src/kernel_vm_space.rs boot/src/boot_memory.rs'
 
-fail=0
-
-report() {
-    echo "check_kernel_pml4_writer: FAIL — $1" >&2
-    fail=1
+code_of() {
+    sed 's|//.*$||' "$1"
 }
 
-# Search every kernel crate's Rust sources for $1, printing file:line.
-scan() {
-    local pattern="$1"
-    local dir
-    for dir in "${KERNEL_CRATES[@]}"; do
-        [ -d "$dir" ] || continue
-        grep -rn --include='*.rs' -E "$pattern" "$dir" 2>/dev/null || true
+in_list() {
+    local needle="$1" item
+    shift
+    for item in "$@"; do
+        [ "$item" = "$needle" ] && return 0
     done
+    return 1
 }
 
-# ---------------------------------------------------------------------------
-# 1. `mm::paging` exports no kernel-half mapping surface.
-#
-# `paging` is the read side: `virt_to_phys`, `is_mapped`,
-# `get_page_size`, `kernel_pml4_phys`, `walk_phys`. A `map_page_4kb` or
-# `unmap_page` there is a second writer by construction — it descends
-# the master with no lock and allocates its own intermediates.
-# ---------------------------------------------------------------------------
-hits="$(scan '\b(map_page_4kb|map_page_4kb_in|unmap_page|unmap_page_4kb_in|prune_empty_tables|alloc_page_table|split_pdpt_huge|split_pd_huge)\b' | grep -v '^slopos-ostd/' || true)"
-if [ -n "$hits" ]; then
-    report "a raw kernel-half mapping symbol is back outside slopos-ostd:"
-    printf '%s\n' "$hits" >&2
-    echo "      Kernel-half writes go through slopos_mm::kernel_mappings," >&2
-    echo "      which drives CursorMut under the KERNEL_VM_SPACE lock." >&2
-fi
-
-# ---------------------------------------------------------------------------
-# 2. `page_table_defs` exports no page-table write accessor.
-#
-# `entry_at` reads one entry as a relaxed atomic and is shared by the
-# walker. A `set_entry_at` / `zero_table_at` / `unlink_child` beside it
-# is a raw store into an arbitrary HHDM-reachable frame, available to
-# every `#![forbid(unsafe_code)]` consumer in the tree.
-# ---------------------------------------------------------------------------
-hits="$(scan '\b(set_entry_at|zero_table_at|table_empty_at)\b' || true)"
-# `unlink_child` is also the name of an unrelated task-family helper in
-# sched, so scope that one to the module it would come back in.
-hits="$hits$(grep -rn --include='*.rs' -E '\bunlink_child\b' mm/src/paging 2>/dev/null || true)"
-if [ -n "$hits" ]; then
-    report "a page-table write accessor is back in mm::paging::page_table_defs:"
-    printf '%s\n' "$hits" >&2
-fi
-
-# ---------------------------------------------------------------------------
-# 3. The kernel-master generation protocol stays deleted.
-#
-# All 256 kernel-half PML4 entries are linked at boot
-# (`prepopulate_kernel_half`), so a top-level entry can never appear
-# after `VmSpace::new`, and the one-shot `copy_kernel_half` at
-# construction is correct forever. Reintroducing a generation counter
-# would put an atomic load and a 2 KiB memcpy back on the context-switch
-# path to track a transition that cannot happen.
-# ---------------------------------------------------------------------------
-hits="$(scan '\b(KERNEL_MASTER_GEN|bump_kernel_master_gen|resync_kernel_half_if_stale)\b' || true)"
-if [ -n "$hits" ]; then
-    report "the kernel-master generation protocol is back:"
-    printf '%s\n' "$hits" >&2
-    echo "      prepopulate_kernel_half makes it unnecessary; see vm_space.rs." >&2
-fi
-
-# ---------------------------------------------------------------------------
-# Self-test: the gate has to be able to fail. Plant each banned symbol
-# in a scratch kernel-crate file and confirm the scan finds it.
-# ---------------------------------------------------------------------------
-if [ "${1:-}" = "--self-test" ]; then
-    probe="mm/src/__pml4_gate_self_test.rs"
-    trap 'rm -f "$REPO_ROOT/$probe"' EXIT INT TERM
-    for sym in map_page_4kb set_entry_at bump_kernel_master_gen; do
-        printf 'fn %s() {}\n' "$sym" > "$probe"
-        if ! scan "\\b$sym\\b" | grep -q "$probe"; then
-            echo "check_kernel_pml4_writer: SELF-TEST FAIL — scan missed $sym" >&2
-            exit 1
+run_scan() {
+    local root="$1" files file code found_writer=0
+    files="$(gate_collect_rs_files "$root" |
+        grep -vE '^(slopos-ostd|slopos-ostd-derive|verification|vendor|third_party|builddir)/' || true)"
+    gate_require_nonempty check_kernel_pml4_writer "$root" "$files"
+    # shellcheck disable=SC2086
+    set -- $STATIC_HOMES
+    # Only files that name the space at all, comments included, are read again.
+    while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        code="$(code_of "$root/$file")"
+        if printf '%s\n' "$code" | grep -qE '(^|[^A-Za-z0-9_])KERNEL_VM_SPACE([^A-Za-z0-9_]|$)' &&
+            ! in_list "$file" "$@"; then
+            printf 'static\t%s\n' "$file"
         fi
-    done
-    rm -f "$probe"
-    trap - EXIT INT TERM
-    echo "check_kernel_pml4_writer: self-test OK (all three scans detect a planted symbol)"
+        if printf '%s\n' "$code" | grep -q 'with_atomic_u64_in_page' &&
+            printf '%s\n' "$code" | grep -qE '\.(store|swap|compare_exchange(_weak)?|fetch_[a-z]+)\('; then
+            printf 'store\t%s\n' "$file"
+        fi
+        printf '%s\n' "$code" | grep -qE '(^|[^A-Za-z0-9_])((try_)?kernel_vm_space|KERNEL_VM_SPACE)([^A-Za-z0-9_]|$)' ||
+            continue
+        printf '%s\n' "$code" | grep -qE '(^|[^A-Za-z0-9_])(cursor_mut|CursorMut)([^A-Za-z0-9_]|$)' ||
+            continue
+        if [ "$file" = "$WRITER" ]; then
+            found_writer=1
+        else
+            printf 'writer\t%s\n' "$file"
+        fi
+    done < <(cd "$root" && printf '%s\n' "$files" | tr '\n' '\0' |
+        xargs -0 grep -lE 'KERNEL_VM_SPACE|kernel_vm_space|with_atomic_u64_in_page' 2>/dev/null || true)
+    if [ "$found_writer" -eq 0 ]; then
+        printf 'floor\t%s takes no kernel_vm_space() cursor_mut\n' "$WRITER"
+    fi
+}
+
+if [ "$GATE_SELF_TEST" -eq 1 ]; then
+    gate_selftest_begin check_kernel_pml4_writer
+
+    cat >"$(gate_fixture "$WRITER")" <<'RS'
+use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
+pub fn map_kernel_page() {
+    let mut guard = kernel_vm_space().lock();
+    let mut cursor = guard.cursor_mut(range).unwrap();
+}
+RS
+    cat >"$(gate_fixture kernel-services/src/kernel_vm_space.rs)" <<'RS'
+pub static KERNEL_VM_SPACE: OnceLock<SpinLock<VmSpace>> = OnceLock::new();
+pub fn kernel_vm_space() -> &'static SpinLock<VmSpace> { KERNEL_VM_SPACE.get().unwrap() }
+RS
+    cat >"$(gate_fixture slopos-ostd/src/mm/vm_space.rs)" <<'RS'
+fn ostd_owns_the_tables() { KERNEL_VM_SPACE; kernel_vm_space(); let c: CursorMut; }
+RS
+    # A second module taking the kernel space's mutating cursor.
+    cat >"$(gate_fixture drivers/src/second_writer.rs)" <<'RS'
+fn remap() {
+    let mut guard = slopos_kernel_services::kernel_vm_space::kernel_vm_space().lock();
+    let cursor = guard.cursor_mut(range);
+}
+RS
+    # A second handle on the static.
+    cat >"$(gate_fixture net/src/second_handle.rs)" <<'RS'
+fn peek() -> bool { slopos_kernel_services::kernel_vm_space::KERNEL_VM_SPACE.get().is_some() }
+RS
+    # A static home driving the cursor through the static.
+    cat >"$(gate_fixture boot/src/boot_memory.rs)" <<'RS'
+fn install() { KERNEL_VM_SPACE.call_once(|| SpinLock::new(space)); }
+fn remap() { KERNEL_VM_SPACE.get().unwrap().lock().cursor_mut(range); }
+RS
+    # A store through a page-table word outside OSTD.
+    cat >"$(gate_fixture mm/src/paging/table_store.rs)" <<'RS'
+fn set(phys: u64, i: usize, v: u64) {
+    with_atomic_u64_in_page(base(phys), i, |slot| slot.store(v, Ordering::Release));
+}
+RS
+    cat >"$(gate_fixture mm/src/paging/table_load.rs)" <<'RS'
+fn get(phys: u64, i: usize) -> u64 {
+    with_atomic_u64_in_page(base(phys), i, |slot| slot.load(Ordering::Acquire))
+}
+RS
+    # Reads, CR3 loads and comments, which must stay silent.
+    cat >"$(gate_fixture core/src/reader.rs)" <<'RS'
+fn read_side() {
+    let guard = kernel_vm_space().lock();
+    let cur = guard.cursor(range);
+    kernel_vm_space().lock().activate_kernel_master();
+}
+RS
+    cat >"$(gate_fixture boot/src/commented.rs)" <<'RS'
+// Every kernel_vm_space() write goes through CursorMut in kernel_mappings;
+// KERNEL_VM_SPACE is installed by boot_memory.
+fn nothing() {}
+RS
+    GATE_FINDINGS="$(run_scan "$GATE_FIXTURE_ROOT")"
+    gate_expect writer 2 "a second module, or a static home, driving the kernel space's CursorMut"
+    gate_expect store 1 "a page-table word stored outside OSTD"
+    gate_expect static 1 "a second handle on KERNEL_VM_SPACE"
+    gate_expect floor 0 "the writer is where it should be"
+    gate_expect_silent 'reader\.rs|commented\.rs|slopos-ostd|kernel_vm_space\.rs|table_load\.rs' \
+        "reads, loads, CR3 loads, comments, OSTD and the static's definition"
+
+    printf 'fn moved() {}\n' >"$GATE_FIXTURE_ROOT/$WRITER"
+    GATE_FINDINGS="$(run_scan "$GATE_FIXTURE_ROOT")"
+    gate_expect floor 1 "kernel_mappings takes no cursor"
+
+    gate_selftest_end
 fi
 
-if [ "$fail" -ne 0 ]; then
+GATE_FINDINGS="$(run_scan "$REPO_ROOT")"
+if [ -n "$GATE_FINDINGS" ]; then
+    echo "check_kernel_pml4_writer: FAIL — the kernel master's page tables have one writer:" >&2
+    printf '%s\n' "$GATE_FINDINGS" | sed 's/^/  /' >&2
+    cat >&2 <<'MSG'
+
+  Kernel-half writes go through slopos_mm::kernel_mappings, which takes
+  CursorMut under the KERNEL_VM_SPACE lock; reach it through the
+  kernel_vm_space() accessors, and add a kernel mapping helper there rather
+  than a cursor anywhere else.
+MSG
     exit 1
 fi
 
-echo "check_kernel_pml4_writer: OK — the kernel master PML4 has one writer"
+echo "check_kernel_pml4_writer: OK — the kernel master's page tables have one writer"

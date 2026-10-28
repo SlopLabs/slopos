@@ -14,7 +14,7 @@
 
 use core::fmt;
 use slopos_ostd::lock_class;
-use slopos_ostd::sync::lock_tracking::LockClassKey;
+use slopos_ostd::sync::LockClassKey;
 
 use bitflags::bitflags;
 use slopos_ostd::mm::uframe::KeepaliveFrames;
@@ -597,23 +597,5 @@ impl NetDeviceRegistry {
 
     pub fn stats_by_index(&self, index: DevIndex) -> Option<NetDeviceStats> {
         Some(self.device_at(index)?.stats())
-    }
-
-    pub fn carrier_by_index(&self, index: DevIndex) -> Option<bool> {
-        Some(self.device_at(index)?.carrier())
-    }
-
-    /// Poll RX packets from a device by index. Returns an empty Vec if the
-    /// device is not registered.
-    pub fn poll_rx_by_index(
-        &self,
-        index: DevIndex,
-        budget: usize,
-        pool: &'static super::pool::PacketPool,
-    ) -> KVec<PacketBuf> {
-        match self.device_at(index) {
-            Some(dev) => dev.poll_rx(budget, pool),
-            None => KVec::new(),
-        }
     }
 }

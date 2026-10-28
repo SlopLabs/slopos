@@ -10,7 +10,7 @@
 //! connection carries one request and is then closed:
 //!
 //! ```text
-//! agent  HELLO{token, proto, host, version, tag, base_tag, boot, uptime_ms}
+//! agent  HELLO{token, proto, host, version, tag, base_tag, boot, uptime_ms, pid}
 //! broker WELCOME                  idle: either side PINGs, the other PONGs
 //! broker EXEC{arg.., cwd?, env.. (K=V), stdin?, timeout_ms?}
 //!   agent  ACCEPT{pid} | ERROR{msg}

@@ -1,10 +1,9 @@
 use slopos_abi::Canvas;
 use slopos_gfx::RenderSurface;
-use slopos_protocol::types::Event as ProtocolEvent;
 
 use slopos_windowing::Event;
+use slopos_windowing::Window;
 use slopos_windowing::connection;
-use slopos_windowing::{EVENT_BUF_LEN, Window};
 
 use super::constraints::Size;
 use super::event::{
@@ -19,6 +18,9 @@ use super::sender::AppSender;
 use super::style::StyleSheet;
 use super::traits::{Widget, WidgetId};
 use super::tree;
+
+/// The events one pass takes before it draws.
+const EVENTS_PER_PASS: usize = 16;
 
 /// Runs `app` in a window as [`App::window`] describes it.
 pub fn run_app<A: App>(mut app: A) -> ! {
@@ -53,11 +55,6 @@ pub fn run_app<A: App>(mut app: A) -> ! {
     tree::layout_tree(root.as_mut(), window_size, &style);
     let _ = focus.rebuild_tab_chain(root.as_ref());
 
-    let mut proto_events: [ProtocolEvent; EVENT_BUF_LEN] =
-        core::array::from_fn(|_| ProtocolEvent::FrameDone {
-            surface: slopos_protocol::types::SurfaceId::NONE,
-            timestamp_ms: 0,
-        });
     let mut last_tick_ms: u64 = slopos_windowing::get_time_ms();
     let mut modifiers = Modifiers::default();
     let mut tip = Tip::default();
@@ -69,16 +66,15 @@ pub fn run_app<A: App>(mut app: A) -> ! {
         handle.flush_pending_destroys();
         handle.drain_ui_queue();
 
-        let count = win.poll_protocol_events(&mut proto_events);
         let mut unhandled_keys: Vec<(Key, Modifiers)> = Vec::new();
         let mut sink = MessageSink::new();
 
-        for i in 0..count {
-            let ev = match Event::from_protocol(&proto_events[i]) {
-                Some(e) => e,
-                None => continue,
+        let mut taken = 0;
+        while taken < EVENTS_PER_PASS {
+            let Some(ev) = win.next_event() else {
+                break;
             };
-            win.track_pointer(&ev);
+            taken += 1;
 
             match &ev {
                 Event::PointerLeave => {
@@ -86,7 +82,7 @@ pub fn run_app<A: App>(mut app: A) -> ! {
                     needs_repaint |= tip.clear() | hovered.take().is_some();
                     continue;
                 }
-                Event::PointerMotion { .. } => inside = true,
+                Event::PointerEnter { .. } | Event::PointerMotion { .. } => inside = true,
                 Event::CloseRequest => {
                     let (accept, action) = app.on_close_request();
                     if accept {
@@ -314,9 +310,9 @@ pub fn run_app<A: App>(mut app: A) -> ! {
 
         let timeout_ms: i64 = if needs_repaint || needs_rebuild {
             0
-        } else if count == proto_events.len() {
-            // The batch filled the buffer, so the connection still holds
-            // decoded events; blocking now would sleep with them in hand.
+        } else if taken == EVENTS_PER_PASS {
+            // The connection may hold decoded events already, which a wait
+            // on the socket would sleep over.
             0
         } else if let Some(interval) = app.tick_interval_ms() {
             let now = slopos_windowing::get_time_ms();

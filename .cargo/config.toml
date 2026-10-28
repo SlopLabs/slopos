@@ -1,25 +1,9 @@
 [build]
 target-dir = "builddir/target"
 
-# NOTE: build-std and default target are intentionally NOT set here.
-# Build scripts (scripts/build_kernel.sh, scripts/build_userland.sh) pass
-# -Zbuild-std and --target explicitly. Keeping them out of config.toml
-# allows `cargo test` to work on the host without conflicts.
+# build-std and the target are not set here: the build scripts pass
+# -Zbuild-std and --target, so `cargo test` builds for the host. The
+# kernel's codegen flags are its target JSON's, and build_kernel.sh's RUSTFLAGS.
 
 [unstable]
 json-target-spec = true
-
-[target."targets/x86_64-slos.json"]
-linker = "rust-lld"
-rustflags = [
-  "-C", "link-arg=-Tlink.ld",
-  "-C", "force-frame-pointers=yes",
-  "-C", "code-model=kernel",
-  "-C", "relocation-model=static",
-  "-C", "target-cpu=x86-64",
-  "-C", "target-feature=-mmx,-sse,-sse2,-sse3,-ssse3,-sse4.1,-sse4.2,-avx,-avx2,+soft-float",
-  "-C", "no-redzone=yes",
-  "-Z", "unstable-options",
-  "-Z", "relro-level=off",
-  "-Z", "emit-stack-sizes"
-]

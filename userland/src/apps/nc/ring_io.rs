@@ -4,10 +4,10 @@
 //! [`slopfut::select3`]: an `OP_READ` on stdin or the `OP_WRITE` sending what
 //! it read, an `OP_READ` on the socket, and a periodic `OP_TIMEOUT` tick that
 //! bounds the wait so the inactivity timeout is enforced. Multiplexing is the
-//! kernel's caller-as-waiter harvest (SLOPRING § 7.1/§ 8.3).
+//! kernel's caller-as-waiter harvest.
 //!
-//! `connect`/`listen`/`accept`/`shutdown` stay regular syscalls, outside the
-//! nine-opcode data plane (SLOPRING § 12).
+//! `connect`/`listen`/`accept`/`shutdown` are regular syscalls; only the data
+//! transfer goes through the ring.
 //!
 //! Each read stays in flight until it completes, across however many turns
 //! the other one wins: cancelling a read the kernel has already completed
@@ -17,15 +17,14 @@ use std::time::Instant;
 
 use super::tcp::TcpConn;
 use super::{NcConfig, StdinResult, verbose_bytes, verbose_msg};
-use crate::ring::{Ring, slopfut};
+use slopos_rt::{Ring, slopfut};
 
 const STDIN_FD: i32 = 0;
 const TTY_CAP: usize = 64;
 const PIPE_CAP: usize = 64 * 1024;
 const SOCK_CAP: usize = 64 * 1024;
 /// Periodic timer tick (ns). Bounds an otherwise I/O-only `select` so the
-/// inactivity timeout is checked even while no data flows
-/// (SLOPRING § 12 OP_TIMEOUT note).
+/// inactivity timeout is checked even while no data flows.
 const TIMER_TICK_NS: u64 = 200_000_000;
 
 pub(super) enum Ended {

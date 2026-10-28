@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
 """Append a SlopOS block-integrity ("verity") trailer to a raw ext2/ext4 image.
 
-Layout (little-endian), appended after the existing image content:
+Two kinds of trailer, named by the header's `kind` field:
 
-    v1  [ image: N full blocks ][ pad ][ hash array: N × u32 ][ 32-byte header ]
-    v2  [ image: N full blocks ][ pad ][ hash array: N × u32 ]
-        [ attested bitmap: ceil(N/8) ][ 32-byte header ]
+    protected (1)  [ image: N full blocks ][ pad ][ hash array: N × u32 ]
+                   [ 32-byte header ]
+    attested  (2)  [ image: N full blocks ][ pad ][ hash array: N × u32 ]
+                   [ attested bitmap: ceil(N/8) ][ 32-byte header ]
 
-The 32-byte header is the LAST 32 bytes of the file, so the kernel locates the
-trailer from the block device's capacity alone — no filesystem parsing. Each
-entry of the hash array is the CRC-32 (IEEE/zlib, the same `zlib.crc32` used
-here) of the corresponding 4 KiB data block; the header's `root` field is the
-CRC-32 of the whole hash array, so a corrupt array is self-detecting.
+Little-endian, appended after the image content. The 32-byte header is the
+LAST 32 bytes of the file, so the kernel locates the trailer from the block
+device's capacity alone — no filesystem parsing. Each entry of the hash array
+is the CRC-32 (IEEE/zlib, the same `zlib.crc32` used here) of the
+corresponding 4 KiB data block; the header's `root` field is the CRC-32 of the
+whole hash array, so a corrupt array is self-detecting.
 
-Version 2 adds the attested bitmap and spends the header's `reserved` u32 on
-its CRC-32: a set bit means the block holds what this host wrote and its hash
-entry is that content's CRC; a clear bit's entry is zero and the kernel reads
-the block unverified. A v2 image is a writable root; a v1 image is
-write-protected outright and every one of its blocks is hashed.
+A protected image is write-protected outright and every one of its blocks is
+hashed. An attested image is a writable root: its trailer carries the attested
+bitmap, whose CRC-32 is the header's `reserved` u32. A set bit means the block
+holds what this host wrote and its hash entry is that content's CRC; a clear
+bit's entry is zero and the kernel reads the block unverified.
 
-A v2 seal attests the blocks the block bitmaps allocate, less the
+An attested seal covers the blocks the block bitmaps allocate, less the
 superblock's (the kernel rewrites it on every mount) and less the guest's
 taint, and with `--record FILE` keeps what it attested — the bitmap and every
 block's hash — in FILE on the host. The guest can write every byte of the
@@ -27,22 +29,22 @@ image, trailer included, so the next build's `--taint-out` takes its measure
 from that record alone: the guest's blocks are the allocated ones that are not
 attested there with the content recorded still in place. A missing or foreign
 record vouches for nothing. `--taint-out` runs before a preserved image is
-refreshed, once any conversion or grow is done, and the seal takes its answer
-with `--taint`: a block the guest wrote is never re-blessed, and one it freed
-is the host's again. A resize between the two moves blocks, the guest's among
-them, onto ones that were free, so `--taint-moved` adds every block the resize
+refreshed, once any grow is done, and the seal takes its answer with
+`--taint`: a block the guest wrote is never re-blessed, and one it freed is the
+host's again. A resize between the two moves blocks, the guest's among them,
+onto ones that were free, so `--taint-moved` adds every block the resize
 allocated. Only attested blocks are read, so a run costs what the host wrote,
 not the image's size.
 
 The pad makes the finished file a whole number of 512-byte sectors. A block
-device reports its capacity in sectors, so an unpadded trailer whose header
-straddled the last partial sector would sit *beyond* the reported capacity and
-the kernel would never see it (SLOPOS-2026-0053). The pad goes before the
-hash array, never after the header, so the header stays the last 32 bytes, and
-neither the hash array nor the bitmap describes it.
+device reports its capacity in sectors, so a header straddling the last
+partial sector would sit beyond the reported capacity, where the kernel never
+looks. The pad goes before the hash array, never after the header, so the
+header stays the last 32 bytes, and neither the hash array nor the bitmap
+describes it.
 
 Kernel side: fs/src/verity.rs (must keep the header layout + CRC in sync). A
-v1 trailer-carrying device is write-protected there: verification and
+device carrying a protected trailer is write-protected there: verification and
 writability are one decision, as in dm-verity.
 
 This is an INTEGRITY check (detects accidental corruption / tampering loudly at
@@ -63,14 +65,18 @@ from ext4_profile import mkfs_args as profile_mkfs_args  # noqa: E402
 
 MAGIC = 0x53565254  # 'TVRS' LE — SlopOS verity
 ALGO_CRC32 = 1
-HEADER_FMT = "<IIIIQII"  # magic, version, algo, block_size, block_count(u64), root, reserved
+HEADER_FMT = "<IIIIQII"  # magic, kind, algo, block_size, block_count(u64), root, reserved
 HEADER_SIZE = 32
+# The header's `kind` field.
+PROTECTED = 1
+ATTESTED = 2
+KINDS = {"protected": PROTECTED, "attested": ATTESTED}
 SECTOR_SIZE = 512
 READ_CHUNK = 1 << 20
 
-EXT2_SUPERBLOCK_OFFSET = 1024
-EXT2_SUPERBLOCK_LEN = 1024
-EXT2_MAGIC = 0xEF53
+EXT4_SUPERBLOCK_OFFSET = 1024
+EXT4_SUPERBLOCK_LEN = 1024
+EXT4_MAGIC = 0xEF53
 
 INCOMPAT_META_BG = 0x10
 INCOMPAT_64BIT = 0x80
@@ -101,9 +107,9 @@ class Volume:
     image."""
 
     def __init__(self, f):
-        f.seek(EXT2_SUPERBLOCK_OFFSET)
-        sb = f.read(EXT2_SUPERBLOCK_LEN)
-        if len(sb) < EXT2_SUPERBLOCK_LEN or struct.unpack_from("<H", sb, 0x38)[0] != EXT2_MAGIC:
+        f.seek(EXT4_SUPERBLOCK_OFFSET)
+        sb = f.read(EXT4_SUPERBLOCK_LEN)
+        if len(sb) < EXT4_SUPERBLOCK_LEN or struct.unpack_from("<H", sb, 0x38)[0] != EXT4_MAGIC:
             raise SystemExit("gen_verity: not an ext2 or ext4 image")
         incompat = struct.unpack_from("<I", sb, 0x60)[0]
         ro_compat = struct.unpack_from("<I", sb, 0x64)[0]
@@ -199,8 +205,8 @@ def trailer_of(f, size: int):
         return None, fs_bytes
     f.seek(size - HEADER_SIZE)
     fields = struct.unpack(HEADER_FMT, f.read(HEADER_SIZE))
-    magic, version, algo, block_size, block_count, _root, _reserved = fields
-    if magic != MAGIC or version not in (1, 2) or algo != ALGO_CRC32:
+    magic, kind, algo, block_size, block_count, _root, _reserved = fields
+    if magic != MAGIC or kind not in (PROTECTED, ATTESTED) or algo != ALGO_CRC32:
         return None, fs_bytes
     if block_size * block_count != fs_bytes:
         return None, fs_bytes
@@ -239,8 +245,8 @@ def read_record(path: str | None):
 
 
 def superblock_blocks(block_size: int) -> range:
-    first = EXT2_SUPERBLOCK_OFFSET // block_size
-    last = (EXT2_SUPERBLOCK_OFFSET + EXT2_SUPERBLOCK_LEN - 1) // block_size
+    first = EXT4_SUPERBLOCK_OFFSET // block_size
+    last = (EXT4_SUPERBLOCK_OFFSET + EXT4_SUPERBLOCK_LEN - 1) // block_size
     return range(first, last + 1)
 
 
@@ -314,7 +320,7 @@ def attested_blocks(bitmap: bytes, n: int):
         yield run_start, n - run_start
 
 
-def seal(path: str, version: int, taint_bits: bytes | None, record_path: str | None = None) -> str:
+def seal(path: str, kind: int, taint_bits: bytes | None, record_path: str | None = None) -> str:
     size = os.path.getsize(path)
     with open(path, "rb") as f:
         _fields, fs_bytes = trailer_of(f, size)
@@ -323,7 +329,7 @@ def seal(path: str, version: int, taint_bits: bytes | None, record_path: str | N
         if fs_bytes % block_size != 0:
             raise SystemExit(f"gen_verity: image size {fs_bytes} is not a multiple of {block_size}")
         n = fs_bytes // block_size
-        if version == 2:
+        if kind == ATTESTED:
             bitmap = bytearray((n + 7) // 8)
             allocated = fs.allocated()
             bitmap[: len(allocated)] = allocated[: len(bitmap)]
@@ -353,15 +359,15 @@ def seal(path: str, version: int, taint_bits: bytes | None, record_path: str | N
             hashed += count
 
     root = zlib.crc32(bytes(hashes)) & 0xFFFFFFFF
-    if version == 2:
+    if kind == ATTESTED:
         bitmap_bytes = bytes(bitmap)
         reserved = zlib.crc32(bitmap_bytes) & 0xFFFFFFFF
     else:
         bitmap_bytes = b""
         reserved = 0
-    if version == 2 and record_path:
+    if kind == ATTESTED and record_path:
         write_record(record_path, block_size, bitmap_bytes, bytes(hashes))
-    header = struct.pack(HEADER_FMT, MAGIC, version, ALGO_CRC32, block_size, n, root, reserved)
+    header = struct.pack(HEADER_FMT, MAGIC, kind, ALGO_CRC32, block_size, n, root, reserved)
     unpadded = fs_bytes + len(hashes) + len(bitmap_bytes) + len(header)
     pad = (-unpadded) % SECTOR_SIZE
     # `r+b` plus truncate, not `ab`: a re-run replaces the stripped trailer
@@ -375,9 +381,10 @@ def seal(path: str, version: int, taint_bits: bytes | None, record_path: str | N
         f.truncate()
     total = unpadded + pad
     assert total % SECTOR_SIZE == 0
-    attested = f", {hashed}/{n} blocks attested (crc 0x{reserved:08x})" if version == 2 else ""
+    attested = f", {hashed}/{n} blocks attested (crc 0x{reserved:08x})" if kind == ATTESTED else ""
+    name = "attested" if kind == ATTESTED else "protected"
     return (
-        f"verity: appended v{version} trailer for {n} blocks ({block_size}B),"
+        f"verity: appended {name} trailer for {n} blocks ({block_size}B),"
         f" root crc 0x{root:08x}{attested}, {pad}B pad, {total} bytes total"
     )
 
@@ -460,7 +467,7 @@ def _self_test(work: str) -> None:
     with open(payload, "wb") as f:
         f.write(os.urandom(64 << 10))
     debugfs(f'write "{payload}" host')
-    seal(image, 2, None, record)
+    seal(image, ATTESTED, None, record)
     fields, hashes, bitmap = trailer()
     host = blocks_of("host")
     with open(image, "rb") as f:
@@ -494,7 +501,7 @@ def _self_test(work: str) -> None:
         f.truncate(32 << 20)
     run("resize2fs", image)
     debugfs(f'write "{payload}" refreshed')
-    seal(image, 2, guest_owned, record)
+    seal(image, ATTESTED, guest_owned, record)
     fields, hashes, bitmap = trailer()
     check("a grown image re-attested the guest's block", not attested(bitmap, guest_block))
     check("a refresh left a block it wrote unattested", all(attested(bitmap, b) for b in blocks_of("refreshed")))
@@ -509,7 +516,7 @@ def _self_test(work: str) -> None:
     image = moving
     moving_record = os.path.join(work, "moving-record")
     debugfs(f'write "{payload}" host')
-    seal(image, 2, None, moving_record)
+    seal(image, ATTESTED, None, moving_record)
     with open(payload, "wb") as f:
         f.write(os.urandom(48 << 20))
     debugfs(f'write "{payload}" guest')
@@ -528,7 +535,7 @@ def _self_test(work: str) -> None:
     owned = taint_moved(owned, before, allocated_of(image))
     check("a block the resize moved the guest's file onto is not the guest's",
           all(attested(owned, b) for b in guest_after))
-    seal(image, 2, owned, moving_record)
+    seal(image, ATTESTED, owned, moving_record)
     _fields, _hashes, bitmap = trailer()
     check("a seal after a resize attested a block it moved the guest's file onto",
           not any(attested(bitmap, b) for b in guest_after))
@@ -584,15 +591,15 @@ def _self_test(work: str) -> None:
     fs_size = os.path.getsize(image)
     with open(image, "r+b") as f:
         f.seek(fs_size - HEADER_SIZE)
-        f.write(struct.pack(HEADER_FMT, MAGIC, 2, ALGO_CRC32, 4096, 1, 0, 0))
+        f.write(struct.pack(HEADER_FMT, MAGIC, ATTESTED, ALGO_CRC32, 4096, 1, 0, 0))
     with open(image, "rb") as f:
         check("a header inside the filesystem passed for a trailer", trailer_of(f, fs_size)[0] is None)
     with open(image, "ab") as f:
-        f.write(struct.pack(HEADER_FMT, MAGIC, 2, ALGO_CRC32, 4096, 999999, 0, 0))
+        f.write(struct.pack(HEADER_FMT, MAGIC, ATTESTED, ALGO_CRC32, 4096, 999999, 0, 0))
     with open(image, "rb") as f:
         check("a header past the filesystem that does not describe it passed for a trailer",
               trailer_of(f, os.path.getsize(image)) == (None, fs_size))
-    seal(image, 2, taint(image, record), record)
+    seal(image, ATTESTED, taint(image, record), record)
     with open(image, "rb") as f:
         check("a seal cut the filesystem at a forged header",
               trailer_of(f, os.path.getsize(image))[1] == fs_size)
@@ -601,15 +608,16 @@ def _self_test(work: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="append a SlopOS verity trailer")
     parser.add_argument("image", nargs="?", help="raw ext4 image to seal in place")
-    parser.add_argument("--version", type=int, choices=(1, 2), default=1,
-                        help="1 = write-protected, every block hashed (default); 2 = writable, allocated blocks attested")
-    parser.add_argument("--taint", metavar="FILE", help="v2: blocks never to attest, as --taint-out wrote them")
+    parser.add_argument("--kind", choices=tuple(KINDS), default="protected",
+                        help="protected = write-protected, every block hashed (default);"
+                        " attested = writable, allocated blocks attested")
+    parser.add_argument("--taint", metavar="FILE", help="attested: blocks never to attest, as --taint-out wrote them")
     parser.add_argument("--taint-out", metavar="FILE", help="write the guest's blocks of IMAGE and seal nothing")
     parser.add_argument("--allocated-out", metavar="FILE", help="write IMAGE's allocated blocks and seal nothing")
     parser.add_argument("--taint-moved", nargs=2, metavar=("TAINT", "BEFORE"),
                         help="add to TAINT every block IMAGE allocates that BEFORE, an --allocated-out, did not, and seal nothing")
     parser.add_argument("--record", metavar="FILE",
-                        help="v2: where the host keeps what a seal attested, which --taint-out measures against")
+                        help="attested: where the host keeps what a seal attested, which --taint-out measures against")
     parser.add_argument("--self-test", action="store_true", help="prove a seal attests what it should")
     args = parser.parse_args()
     if args.self_test:
@@ -635,13 +643,14 @@ def main() -> int:
         with open(taint_path, "wb") as f:
             f.write(moved)
         return 0
-    if (args.taint or args.record) and args.version != 2:
-        parser.error("--taint and --record are for a v2 seal")
+    kind = KINDS[args.kind]
+    if (args.taint or args.record) and kind != ATTESTED:
+        parser.error("--taint and --record are for an attested seal")
     taint_bits = None
     if args.taint:
         with open(args.taint, "rb") as f:
             taint_bits = f.read()
-    print(seal(args.image, args.version, taint_bits, args.record))
+    print(seal(args.image, kind, taint_bits, args.record))
     return 0
 
 

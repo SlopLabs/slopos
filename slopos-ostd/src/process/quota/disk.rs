@@ -1,6 +1,6 @@
 //! The per-principal disk-block ledger.
 //!
-//! ext2 records no owner for a block, so there is no on-disk object to hold a
+//! ext4 records no owner for a block, so there is no on-disk object to hold a
 //! linear token: the charge lives in a `.bss` slot keyed by the account it was
 //! made against, grown when the allocator hands a block out and shrunk when
 //! one is given back. [`account_release`](super::arena::account_release)
@@ -9,7 +9,7 @@
 //! Read the ceiling for what it is: a bound on a principal's **outstanding**
 //! allocations, not a persistent disk quota. A block outlives the process that
 //! allocated it and the medium does not say whose it was, so what the ceiling
-//! stops is one live process taking every block above ext2's own reserve.
+//! stops is one live process taking every block above ext4's own reserve.
 
 use slopos_abi::quota::DiskBlocksAxis;
 

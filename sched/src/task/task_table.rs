@@ -1,4 +1,3 @@
-use core::ffi::c_int;
 use core::ops::{ControlFlow, Deref};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +12,6 @@ use slopos_ostd::{klog_debug, klog_info};
 
 use super::{INVALID_TASK_ID, MAX_TASKS, Task, TaskStatus, task_put};
 use crate::exit_info::ExitInfo;
-use crate::scheduler;
 
 /// The kernel's owning task handle — outside OSTD, the only one.
 ///
@@ -28,9 +26,9 @@ use crate::scheduler;
 /// [`super::task_put`], which `Drop` below routes every release through, and
 /// not asked by `KArc`'s own `Drop`.
 ///
-/// The raw pointer escape ([`Self::as_ptr`]) is transitional scheduler plumbing
-/// and remains valid for exactly the lifetime of this guard (or of another
-/// owning reference).
+/// [`Self::as_ptr`] gives the task's address to the placement and PCR
+/// primitives that take a task by pointer; it is valid for exactly the
+/// lifetime of this guard (or of another owning reference).
 pub struct TaskRef {
     arc: Option<KArc<Task>>,
 }
@@ -346,16 +344,6 @@ pub(super) fn with_task_manager<R>(f: impl FnOnce(&mut TaskManagerInner) -> R) -
     f(&mut guard)
 }
 
-#[inline]
-pub(super) fn try_with_task_manager<R>(f: impl FnOnce(&mut TaskManagerInner) -> R) -> Option<R> {
-    let mut guard = TASK_MANAGER.lock();
-    if guard.initialized {
-        Some(f(&mut guard))
-    } else {
-        None
-    }
-}
-
 /// Allocate the registry spine outside the manager lock and install it if
 /// absent. A spine that loses the install race is dropped off-lock.
 fn ensure_registry_allocated() -> bool {
@@ -514,25 +502,22 @@ pub(crate) fn task_reap(id: u32) -> bool {
 
 /// Idempotent: a second call must not disturb a machine that has been running
 /// kernel-I/O threads since the drivers phase.
-pub fn ensure_task_manager_initialized() -> c_int {
+pub fn ensure_task_manager_initialized() -> bool {
     if !ensure_registry_allocated() {
-        return -1;
+        return false;
     }
     if with_task_manager(|mgr| mgr.initialized) {
-        return 0;
+        return true;
     }
     with_task_manager(|mgr| mgr.initialized = true);
     TASK_MANAGER.clear_poison();
-    if !crate::sleep::ensure_sleep_queue_allocated() {
-        return -1;
-    }
-    0
+    crate::sleep::ensure_sleep_queue_allocated()
 }
 
 /// Test-fixture only; the token witnesses intent, the scope's hold keeps threads off.
-pub fn task_registry_reset(freeze: &crate::task::KernelIoFreeze) -> c_int {
-    if ensure_task_manager_initialized() != 0 {
-        return -1;
+pub fn task_registry_reset(freeze: &crate::task::KernelIoFreeze) -> bool {
+    if !ensure_task_manager_initialized() {
+        return false;
     }
     match freeze.outcome() {
         crate::task::FreezeOutcome::Complete => {}
@@ -546,7 +531,7 @@ pub fn task_registry_reset(freeze: &crate::task::KernelIoFreeze) -> c_int {
 
     let mut retire = match KVec::with_capacity(MAX_TASKS) {
         Ok(ids) => ids,
-        Err(_) => return -1,
+        Err(_) => return false,
     };
     // Off-lock: the stop registry and the task registry share a lock level.
     let kernel_io = slopos_ostd::sync::kernel_io_task::kernel_io_task_ids();
@@ -585,7 +570,7 @@ pub fn task_registry_reset(freeze: &crate::task::KernelIoFreeze) -> c_int {
     // Retiring the previous generation may have parked their final references;
     // drain so a fixture never starts with the previous run's corpses.
     super::task_graveyard_drain();
-    0
+    true
 }
 
 /// Whether `task_id` was ever handed out by the allocator. Ids are monotonic
@@ -639,7 +624,7 @@ pub fn task_find_by_cr3(cr3: u64) -> Option<TaskRef> {
             if matches!(status, TaskStatus::Invalid | TaskStatus::Terminated) {
                 continue;
             }
-            let task_cr3 = task.context_cr3() & !0xFFF;
+            let task_cr3 = task.cr3() & !0xFFF;
             if task_cr3 != target {
                 continue;
             }
@@ -882,10 +867,6 @@ pub fn task_peek_exit_info(task_id: u32) -> Option<ExitInfo> {
     } else {
         None
     }
-}
-
-pub fn task_get_current_id() -> u32 {
-    scheduler::current_task_id()
 }
 
 /// Visit every registered task that is neither `Invalid` nor id-less.

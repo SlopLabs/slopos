@@ -256,7 +256,7 @@ fn register_cascade(gsi: u32, edge: bool, active_low: bool) -> bool {
     };
     use slopos_ostd::irq::{IrqAllocator, IrqContext};
 
-    if !crate::apic::is_enabled() || crate::ioapic::is_ready() == 0 {
+    if !crate::apic::is_enabled() || !crate::ioapic::is_ready() {
         return false;
     }
     let line = match IrqAllocator::alloc() {
@@ -276,7 +276,7 @@ fn register_cascade(gsi: u32, edge: bool, active_low: bool) -> bool {
     } else {
         IOAPIC_FLAG_POLARITY_HIGH
     };
-    if crate::ioapic::config_irq(gsi, vector, lapic_id, flags) != 0 {
+    if !crate::ioapic::config_irq(gsi, vector, lapic_id, flags) {
         return false;
     }
     let handle = match line.register_callback(|_ctx: &IrqContext<'_>| {
@@ -290,7 +290,7 @@ fn register_cascade(gsi: u32, edge: bool, active_low: bool) -> bool {
     // Forget the handle before the line: it borrows `line`.
     core::mem::forget(handle);
     core::mem::forget(line);
-    crate::ioapic::unmask_gsi(gsi);
+    let _ = crate::ioapic::unmask_gsi(gsi);
     true
 }
 

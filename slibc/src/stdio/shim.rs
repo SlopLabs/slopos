@@ -2,12 +2,7 @@
 
 use crate::pal::{Pal, Sys};
 
-use super::{FILE, chars, file, streams};
-
-unsafe extern "C" {
-    fn snprintf(buf: *mut u8, n: usize, fmt: *const u8, ...) -> i32;
-    fn sscanf(buf: *const u8, fmt: *const u8, ...) -> i32;
-}
+use super::{FILE, chars, file};
 
 /// A handle to an open stdio stream.
 ///
@@ -27,16 +22,6 @@ impl Stream {
             Some(Stream(raw))
         }
     }
-}
-
-/// The process's standard output stream.
-pub fn stdout() -> Stream {
-    Stream(streams::stdout_file())
-}
-
-/// The process's standard input stream.
-pub fn stdin() -> Stream {
-    Stream(streams::stdin_file())
 }
 
 /// `fopen(path, mode)`. Both slices must be NUL-terminated.
@@ -67,11 +52,6 @@ pub fn fflush_all() -> i32 {
 /// `fwrite(data, 1, data.len(), stream)` — returns bytes written.
 pub fn fwrite(stream: Stream, data: &[u8]) -> usize {
     unsafe { file::fwrite(data.as_ptr(), 1, data.len(), stream.0) }
-}
-
-/// `fread(out, 1, out.len(), stream)` — returns bytes read.
-pub fn fread(stream: Stream, out: &mut [u8]) -> usize {
-    unsafe { file::fread(out.as_mut_ptr(), 1, out.len(), stream.0) }
 }
 
 /// `fputc(c, stream)`.
@@ -106,24 +86,9 @@ pub fn fputs(stream: Stream, s: &[u8]) -> i32 {
     unsafe { chars::fputs(s.as_ptr(), stream.0) }
 }
 
-/// `ungetc(c, stream)`.
-pub fn ungetc(c: u8, stream: Stream) -> i32 {
-    unsafe { chars::ungetc(c as i32, stream.0) }
-}
-
 /// `fseek(stream, offset, whence)`.
 pub fn fseek(stream: Stream, offset: i64, whence: i32) -> i32 {
     unsafe { file::fseek(stream.0, offset, whence) }
-}
-
-/// `ftell(stream)`.
-pub fn ftell(stream: Stream) -> i64 {
-    unsafe { file::ftell(stream.0) }
-}
-
-/// `feof(stream)`.
-pub fn feof(stream: Stream) -> i32 {
-    unsafe { file::feof(stream.0) }
 }
 
 /// `ferror(stream)`.
@@ -158,11 +123,6 @@ pub fn funlockfile(stream: Stream) {
     unsafe { file::funlockfile(stream.0) }
 }
 
-/// `ftrylockfile(stream)` — 0 if the lock was taken.
-pub fn ftrylockfile(stream: Stream) -> i32 {
-    unsafe { file::ftrylockfile(stream.0) }
-}
-
 /// `open(path, O_RDWR|O_CREAT|O_TRUNC, 0666)` — a bare descriptor for
 /// `fdopen` to adopt. `path` must be NUL-terminated. Returns -1 on failure.
 pub fn open_rw_create(path: &[u8]) -> i32 {
@@ -180,52 +140,4 @@ pub fn read_fd(fd: i32, out: &mut [u8]) -> isize {
         Ok(n) => n as isize,
         Err(_) => -1,
     }
-}
-
-/// `snprintf(buf, fmt)` — fmt-only, no further args.
-pub fn snprintf_fmt_only(buf: &mut [u8], fmt: &[u8]) -> i32 {
-    unsafe { snprintf(buf.as_mut_ptr(), buf.len(), fmt.as_ptr()) }
-}
-
-/// `snprintf(buf, fmt, i32)`.
-pub fn snprintf_d(buf: &mut [u8], fmt: &[u8], v: i32) -> i32 {
-    unsafe { snprintf(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), v) }
-}
-
-/// `snprintf(buf, fmt, u32)`.
-pub fn snprintf_u(buf: &mut [u8], fmt: &[u8], v: u32) -> i32 {
-    unsafe { snprintf(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), v) }
-}
-
-/// `snprintf(buf, fmt, *const u8)` for `%s`.
-pub fn snprintf_s(buf: &mut [u8], fmt: &[u8], s: *const u8) -> i32 {
-    // SAFETY: passing null is the documented `(null)` path for `%s`.
-    unsafe { snprintf(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), s) }
-}
-
-/// `snprintf(buf, fmt, *const u8, i32)` for `%s=%d`-style.
-pub fn snprintf_sd(buf: &mut [u8], fmt: &[u8], s: *const u8, v: i32) -> i32 {
-    unsafe { snprintf(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), s, v) }
-}
-
-/// `snprintf(buf_with_capped_len, fmt, i32)` — `cap` may be smaller than
-/// `buf.len()` to exercise truncation.
-pub fn snprintf_d_with_cap(buf: &mut [u8], cap: usize, fmt: &[u8], v: i32) -> i32 {
-    assert!(cap <= buf.len());
-    unsafe { snprintf(buf.as_mut_ptr(), cap, fmt.as_ptr(), v) }
-}
-
-/// `sscanf(buf, fmt, &mut i32)`.
-pub fn sscanf_d(buf: &[u8], fmt: &[u8], out: &mut i32) -> i32 {
-    unsafe { sscanf(buf.as_ptr(), fmt.as_ptr(), out as *mut i32) }
-}
-
-/// `sscanf(buf, fmt, &mut [u8; _])` for `%s`. Writes up to a NUL.
-pub fn sscanf_s(buf: &[u8], fmt: &[u8], out: &mut [u8]) -> i32 {
-    unsafe { sscanf(buf.as_ptr(), fmt.as_ptr(), out.as_mut_ptr()) }
-}
-
-/// `sscanf(buf, fmt, &mut i32, &mut i32)`.
-pub fn sscanf_dd(buf: &[u8], fmt: &[u8], a: &mut i32, b: &mut i32) -> i32 {
-    unsafe { sscanf(buf.as_ptr(), fmt.as_ptr(), a as *mut i32, b as *mut i32) }
 }

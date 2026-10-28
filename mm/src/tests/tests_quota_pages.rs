@@ -88,7 +88,7 @@ pub fn test_quota_pages_mmap_charges_exactly() -> TestResult {
         charged
     );
 
-    process_vm_munmap(resolve_pid(scratch.pid), addr, PAGES * PAGE_SIZE_4KB);
+    let _ = process_vm_munmap(resolve_pid(scratch.pid), addr, PAGES * PAGE_SIZE_4KB);
     let after = scratch.used();
     assert_test!(
         after == before,
@@ -115,7 +115,7 @@ pub fn test_quota_pages_split_refunds_only_the_hole() -> TestResult {
     let addr = scratch.mmap(PAGES);
     assert_test!(addr != 0, "mmap failed");
 
-    process_vm_munmap(
+    let _ = process_vm_munmap(
         resolve_pid(scratch.pid),
         addr + HOLE_AT * PAGE_SIZE_4KB,
         HOLE_PAGES * PAGE_SIZE_4KB,
@@ -132,7 +132,7 @@ pub fn test_quota_pages_split_refunds_only_the_hole() -> TestResult {
         want
     );
 
-    process_vm_munmap(resolve_pid(scratch.pid), addr, PAGES * PAGE_SIZE_4KB);
+    let _ = process_vm_munmap(resolve_pid(scratch.pid), addr, PAGES * PAGE_SIZE_4KB);
     assert_test!(
         scratch.used() == before,
         "unmapping both remnants did not return the charge to baseline"
@@ -166,8 +166,8 @@ pub fn test_quota_pages_merge_does_not_double_charge() -> TestResult {
         want
     );
 
-    process_vm_munmap(resolve_pid(scratch.pid), first, PAGES * PAGE_SIZE_4KB);
-    process_vm_munmap(resolve_pid(scratch.pid), second, PAGES * PAGE_SIZE_4KB);
+    let _ = process_vm_munmap(resolve_pid(scratch.pid), first, PAGES * PAGE_SIZE_4KB);
+    let _ = process_vm_munmap(resolve_pid(scratch.pid), second, PAGES * PAGE_SIZE_4KB);
     assert_test!(
         scratch.used() == before,
         "the merged mapping did not fully refund"
@@ -204,7 +204,7 @@ pub fn test_quota_pages_ceiling_refuses_and_leaves_no_debit() -> TestResult {
     // address space.
     let granted = scratch.mmap(HEADROOM as u64);
     assert_test!(granted != 0, "an mmap within the ceiling was refused");
-    process_vm_munmap(
+    let _ = process_vm_munmap(
         resolve_pid(scratch.pid),
         granted,
         (HEADROOM as u64) * PAGE_SIZE_4KB,
@@ -321,7 +321,7 @@ pub fn test_quota_pages_audit_catches_a_drifted_charge() -> TestResult {
         used
     );
 
-    process_vm_munmap(resolve_pid(scratch.pid), addr, 8 * PAGE_SIZE_4KB);
+    let _ = process_vm_munmap(resolve_pid(scratch.pid), addr, 8 * PAGE_SIZE_4KB);
     pass!()
 }
 

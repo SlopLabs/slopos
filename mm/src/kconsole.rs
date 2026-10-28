@@ -93,7 +93,7 @@ fn run_memory(kc: &mut KConsole<'_>) {
         (pages.free as u64) * 4
     );
 
-    let heap = crate::slab::compat::get_heap_stats_owned();
+    let heap = crate::slab::stats::snapshot();
     kline!(
         kc,
         "heap: {}/{} bytes in {}/{} blocks, {} allocs {} frees",

@@ -59,7 +59,7 @@ pub const EXT_BANK_FIELD: u8 = 0x87;
 pub const REGION_SYSTEM_MEMORY: u8 = 0x00;
 
 #[inline]
-fn is_lead_name_char(b: u8) -> bool {
+pub(crate) fn is_lead_name_char(b: u8) -> bool {
     b == b'_' || b.is_ascii_uppercase()
 }
 

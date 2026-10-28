@@ -35,12 +35,6 @@ pub struct TestRunSummary {
     pub elapsed_ms: u32,
 }
 
-impl TestRunSummary {
-    pub fn all_passed(&self) -> bool {
-        self.failed == 0 && self.panics == 0
-    }
-}
-
 static CACHED_CYCLES_PER_MS: AtomicU64 = AtomicU64::new(0);
 
 fn monotonic_ns() -> Option<u64> {
@@ -67,7 +61,7 @@ pub fn estimate_cycles_per_ms() -> u64 {
     let Some(start_ns) = monotonic_ns() else {
         return 0;
     };
-    let start_tsc = slopos_arch::tsc::rdtsc();
+    let start_tsc = slopos_ostd::arch::x86_64::tsc::rdtsc();
     let mut elapsed_ns = 0u64;
     while elapsed_ns < CALIBRATION_NS {
         core::hint::spin_loop();
@@ -76,7 +70,7 @@ pub fn estimate_cycles_per_ms() -> u64 {
         };
         elapsed_ns = now_ns.saturating_sub(start_ns);
     }
-    let cycles = slopos_arch::tsc::rdtsc().wrapping_sub(start_tsc);
+    let cycles = slopos_ostd::arch::x86_64::tsc::rdtsc().wrapping_sub(start_tsc);
 
     let cycles_per_ms = ((cycles as u128 * 1_000_000) / elapsed_ns as u128) as u64;
     CACHED_CYCLES_PER_MS.store(cycles_per_ms, Ordering::Relaxed);

@@ -383,10 +383,6 @@ impl TcpSendState {
         self.rto_deadline_ms
     }
 
-    pub fn set_rto_deadline_ms(&mut self, deadline: u64) {
-        self.rto_deadline_ms = deadline;
-    }
-
     pub fn effective_capacity(&self) -> usize {
         self.effective_capacity
     }
@@ -569,24 +565,12 @@ impl TcpBufferPair {
         &self.send
     }
 
-    pub fn send_mut(&mut self) -> &mut TcpSendState {
-        &mut self.send
-    }
-
     pub fn recv(&self) -> &TcpRecvState {
         &self.recv
     }
 
-    pub fn recv_mut(&mut self) -> &mut TcpRecvState {
-        &mut self.recv
-    }
-
     pub fn ooo(&self) -> &super::reasm::Assembler {
         &self.ooo
-    }
-
-    pub fn ooo_mut(&mut self) -> &mut super::reasm::Assembler {
-        &mut self.ooo
     }
 }
 

@@ -52,7 +52,6 @@ fn make_ring(entries: u32) -> Ring {
         sq_head: 0,
         cq_tail: 0,
         inflight: InFlightVec::with_capacity(layout.cq_entries as usize),
-        user_addr: 0,
         owner: FdTable::Kernel,
         allowed_ops: crate::opcode::OpcodeSet::all(),
         cq_overflow: 0,
@@ -461,7 +460,7 @@ fn set_last_revents_updates_live_row() -> TestResult {
 stest!(name = set_last_revents_updates_live_row, suite = slopring);
 
 /// Cancelling an armed multishot row removes it and posts exactly one terminal
-/// CQE with `-ECANCELED` and **F_MORE clear** (SLOPRING §1.3 trigger 4).
+/// CQE with `-ECANCELED` and **F_MORE clear**.
 fn multishot_cancel_clears_more() -> TestResult {
     let mut ring = make_ring(8);
     let mut row = inflight(0xabcd, OP_ACCEPT);
@@ -502,7 +501,7 @@ fn multishot_cancel_clears_more() -> TestResult {
 }
 stest!(name = multishot_cancel_clears_more, suite = slopring);
 
-/// ABI v2: `SLOPRING_SQE_MULTISHOT` survives the SQE byte round-trip in
+/// `SLOPRING_SQE_MULTISHOT` survives the SQE byte round-trip in
 /// `sqe_flags2`, and `inflight_from` reads it back as `is_multishot`.
 fn sqe_multishot_flag_round_trips() -> TestResult {
     let mut sqe = Sqe::ZERO;
@@ -512,7 +511,7 @@ fn sqe_multishot_flag_round_trips() -> TestResult {
     sqe.user_data = 0xfeed;
     let round = Sqe::from_bytes(&sqe.to_bytes());
     if round != sqe {
-        return slopos_testing::fail!("SQE v2 round-trip mismatch");
+        return slopos_testing::fail!("SQE round-trip mismatch");
     }
     let row = crate::opcode::inflight_from(&round, 0, None);
     if row.is_multishot && row.last_revents == 0 {

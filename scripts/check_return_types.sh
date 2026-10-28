@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Audit kernel `pub fn` / `pub(crate) fn` return types for value-returns
-# of large structs that would re-introduce the stack-frame bug class.
+# of large structs, which put the struct on the caller's stack frame.
 #
 # Heuristic-based (regex over .rs files, not full AST):
 #   - Skip return types matched by SAFE_RETURN_RE: `Result`, `Option`,
@@ -9,9 +9,9 @@
 #     known small newtypes / enums.
 #   - List everything else for human review.
 #
-# Advisory — pin-init + KBox structurally forbid the pattern in
-# migrated subsystems; this script catches new regressions before the
-# ELF stack-sizes gate has a chance to.
+# Advisory — `KBox::try_init` and the in-place `Init` construction keep
+# large structs off the stack; this script flags a by-value return before
+# the ELF stack-sizes gate sees the frame it makes.
 #
 # Exit code is informational: the script does not fail on hits because
 # many are obvious small newtypes (tuples of integers, single-field
@@ -35,13 +35,11 @@ KERNEL_DIRS=(
     "$REPO_ROOT/fs/src"
     "$REPO_ROOT/gfx/src"
     "$REPO_ROOT/kernel/src"
-    "$REPO_ROOT/karch/src"
     "$REPO_ROOT/kernel-services/src"
     "$REPO_ROOT/mm/src"
     "$REPO_ROOT/net/src"
     "$REPO_ROOT/sched/src"
     "$REPO_ROOT/slopos-ostd/src"
-    "$REPO_ROOT/sync/src"
     "$REPO_ROOT/video/src"
 )
 

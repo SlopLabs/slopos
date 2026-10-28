@@ -18,7 +18,7 @@
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use slopos_arch::pcr::{MAX_CPUS, get_current_cpu};
+use slopos_ostd::cpu::x86_64::pcr::{MAX_CPUS, current_cpu_id};
 use slopos_ostd::panic::AbortOnUnwind;
 use slopos_ostd::sync::cpu_local::{CacheAligned, CpuLocal};
 use slopos_ostd::sync::{ByteChain, IrqPreemptGuard, LockClassKey, RawLink, SpinLock};
@@ -105,7 +105,7 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
         // pathological re-entry.
         if super::HEAP_CACHES_ENABLED.load(Ordering::Acquire) && !self.inner.is_locked() {
             let _pin = IrqPreemptGuard::new();
-            let cpu = get_current_cpu();
+            let cpu = current_cpu_id();
             let mag = self.magazines.get_pinned_mut(cpu);
             if let Some(ptr) = mag.pop() {
                 self.stats.alloc_count.fetch_add(1, Ordering::Relaxed);
@@ -145,7 +145,7 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
     pub(crate) fn dealloc_one(&self, ptr: NonNull<u8>) {
         if super::HEAP_CACHES_ENABLED.load(Ordering::Acquire) && !self.inner.is_locked() {
             let _pin = IrqPreemptGuard::new();
-            let cpu = get_current_cpu();
+            let cpu = current_cpu_id();
             let mag = self.magazines.get_pinned_mut(cpu);
             // A duplicate here would let the magazine hand one pointer to two
             // callers.
@@ -168,16 +168,6 @@ impl<const SIZE: usize> SlabAllocator<SIZE> {
             self.stats.free_count.fetch_add(1, Ordering::Relaxed);
             self.stats.free_objects.fetch_add(1, Ordering::Relaxed);
         }
-    }
-
-    /// Drain every per-CPU magazine for this class — push every
-    /// cached object back into the global slab pool.
-    pub(crate) fn drain_magazines(&self) {
-        self.magazines.for_each_mut_at_shutdown(|_cpu, mag| {
-            while let Some(ptr) = mag.pop() {
-                let _ = self.with_class_locked(|state| self.push_to_slab(state, ptr));
-            }
-        });
     }
 
     /// Run `f` under the class lock with an unwind-abort guard armed: every

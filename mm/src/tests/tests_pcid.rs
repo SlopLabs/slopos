@@ -1,10 +1,7 @@
 //! PCID assignment must never hand a live address space another one's cached
-//! translations.
-//!
-//! The implementation this replaced took PCIDs from a global monotonic counter
-//! masked to the architectural 12 bits, and set the NOFLUSH bit on every CR3
-//! write. Address-space creation 4096 therefore received a tag still holding
-//! address space 1's translations, and used them without a flush.
+//! translations. A tag taken from a global counter masked to the architectural
+//! 12 bits, loaded with NOFLUSH, would give address space 4096 a tag still
+//! holding address space 1's translations, used without a flush.
 
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, pass};
@@ -48,8 +45,7 @@ fn selection(cpu: usize, ctx_raw: u64, tlb_gen: u64) -> (u16, bool) {
 /// what each tag currently holds — never from a counter that aliases.
 ///
 /// Cycling more contexts than the pool has slots must reuse tags, and every
-/// reuse must be a flushing load. Under the old counter this test's second
-/// half was the bug: a reused tag arrived with NOFLUSH set.
+/// reuse must be a flushing load, never one with NOFLUSH set.
 pub fn test_pcid_reuse_always_flushes() -> TestResult {
     if !crate::mmu::asid::pcid_enabled() {
         // PCID is off (unsupported, or errata-disabled): every load is a
@@ -60,8 +56,8 @@ pub fn test_pcid_reuse_always_flushes() -> TestResult {
     let contexts = DYN_ASIDS_PER_CPU as u64 + 1;
 
     // Masked throughout: a context switch here could evict the slot under test.
-    slopos_arch::cpu::IrqDisabled::with(|_irq| {
-        let cpu = slopos_arch::pcr::get_current_cpu();
+    slopos_ostd::cpu::x86_64::IrqDisabled::with(|_irq| {
+        let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
         for i in 0..contexts {
             let ctx = 1_000 + i;
@@ -100,8 +96,8 @@ pub fn test_stale_generation_forces_a_flush() -> TestResult {
     let ctx = 2_000u64;
 
     // One sequence over one CPU's pool; a switch would re-bind the slot.
-    slopos_arch::cpu::IrqDisabled::with(|_irq| {
-        let cpu = slopos_arch::pcr::get_current_cpu();
+    slopos_ostd::cpu::x86_64::IrqDisabled::with(|_irq| {
+        let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
         let (pcid_a, _) = selection(cpu, ctx, 1);
         let (pcid_b, no_flush_b) = selection(cpu, ctx, 1);
@@ -124,14 +120,14 @@ pub fn test_stale_generation_forces_a_flush() -> TestResult {
     })
 }
 
-/// PCID 0 is the kernel's. No user address space may be issued it, which is
-/// exactly what `4096 & 0x0FFF == 0` did under the old counter.
+/// PCID 0 is the kernel's. No user address space may be issued it, as a
+/// counter masked to 12 bits would at `4096 & 0x0FFF == 0`.
 pub fn test_kernel_pcid_is_never_issued_to_a_user_context() -> TestResult {
     if !crate::mmu::asid::pcid_enabled() {
         return pass!();
     }
 
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     for i in 0..(DYN_ASIDS_PER_CPU as u64 * 4) {
         let (pcid, _) = selection(cpu, 3_000 + i, 1);
         assert_test!(
@@ -161,8 +157,8 @@ slopos_testing::stest!(
 /// not issue, and must not set NOFLUSH on a tag it did not just validate.
 ///
 /// This is the test that sees the whole path — `VmSpace::activate`, the hook,
-/// and the pool. A hook that ignored the pool and derived a tag itself (the
-/// wrapping counter this fix removed) is caught here and nowhere else.
+/// and the pool. A hook that ignored the pool and derived a tag itself, as a
+/// wrapping counter would, is caught here and nowhere else.
 pub fn test_activate_loads_a_pool_issued_pcid() -> TestResult {
     use slopos_ostd::cpu::x86_64::control_regs::read_cr3;
 
@@ -186,7 +182,7 @@ pub fn test_activate_loads_a_pool_issued_pcid() -> TestResult {
 
     // Activating and restoring both happen with interrupts disabled, so no
     // dispatch can observe the borrowed address space.
-    let observed = slopos_arch::cpu::IrqDisabled::with(|_irq| {
+    let observed = slopos_ostd::cpu::x86_64::IrqDisabled::with(|_irq| {
         let kernel_cr3 = read_cr3();
         vm_space.activate_at_context_switch();
         let user_cr3 = read_cr3();

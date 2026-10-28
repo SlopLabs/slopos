@@ -1,4 +1,4 @@
-use crate::kernel_mappings::{kernel_is_mapped, kernel_map_io_4kb};
+use crate::kernel_mappings::kernel_map_io_4kb;
 use crate::memory_layout::{init_kernel_bounds, kernel_image_bounds};
 use crate::memory_layout_defs::HHDM_VIRT_BASE;
 use crate::memory_reservations::{
@@ -10,27 +10,21 @@ use crate::memory_reservations::{
     mm_reservations_total_bytes,
 };
 use crate::page_alloc::{BUDDY_ALLOCATOR, page_allocator_descriptor_size};
-use crate::paging::init_paging;
-use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use crate::paging::{init_paging, is_mapped};
+use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm::init_process_vm;
-use core::ffi::{c_char, c_int};
 use core::ops::Range;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::lock_class;
 
 use slopos_abi::DisplayInfo;
-use slopos_arch::cpu;
-use slopos_arch::cpu::apic_msr::ApicBaseMsr;
-use slopos_arch::cpu::cpuid::{CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES};
-use slopos_arch::cpu::msr::Msr;
-use slopos_ostd::boot_info::{LimineMemmapResponse, limine_memmap_iter};
+use slopos_ostd::arch::x86_64::cpuid::{CPUID_FEAT_EDX_APIC, CPUID_LEAF_FEATURES, cpuid};
+use slopos_ostd::arch::x86_64::msr::{Msr, read_msr};
+use slopos_ostd::boot_info::{MemoryRegion, MemoryRegionKind};
+use slopos_ostd::cpu::x86_64::apic_msr::ApicBaseMsr;
+use slopos_ostd::mm::page_property::PageProperty;
 use slopos_ostd::sync::{BspToken, InitFlag, LOCK_LEVEL_RESOURCE, OnceLock, SpinLock};
 use slopos_ostd::{align_down_u64, align_up_u64, klog_debug, klog_info};
-
-const LIMINE_MEMMAP_USABLE: u64 = 0;
-const LIMINE_MEMMAP_ACPI_RECLAIMABLE: u64 = 2;
-const LIMINE_MEMMAP_ACPI_NVS: u64 = 3;
-const LIMINE_MEMMAP_FRAMEBUFFER: u64 = 7;
 
 const BOOT_REGION_STATIC_CAP: usize = 4096;
 const LOW_MEMORY_END: u64 = 0x10_0000;
@@ -90,11 +84,9 @@ static FRAMEBUFFER_RESERVATION: SpinLock<Option<FramebufferReservation>> = SpinL
     lock_class!("FRAMEBUFFER_RESERVATION", LOCK_LEVEL_RESOURCE),
 );
 
-/// Carries the pre-typestate step's Limine arguments across to the
-/// post-typestate step. `memmap_ptr` is a `usize` so the static is `Send +
-/// Sync`.
+/// Carries the pre-typestate step's HHDM offset across to the post-typestate
+/// step.
 struct MemoryInitCtx {
-    memmap_ptr: usize,
     hhdm_offset: u64,
 }
 
@@ -104,10 +96,10 @@ fn framebuffer_reservation() -> Option<FramebufferReservation> {
     *FRAMEBUFFER_RESERVATION.lock()
 }
 
-fn configure_region_store(memmap: *const LimineMemmapResponse) {
+fn configure_region_store(memmap: impl Iterator<Item = MemoryRegion>) {
     // The store's capacity is fixed at the type level, so the entry count only
     // ever feeds a warning.
-    let entry_count = limine_memmap_iter(memmap).count();
+    let entry_count = memmap.count();
     if entry_count > BOOT_REGION_STATIC_CAP {
         klog_info!(
             "MM: region map saw {} entries; clamping to capacity {}",
@@ -123,36 +115,33 @@ fn add_reservation_or_panic(
     length: u64,
     type_: MmReservationType,
     flags: u32,
-    label: *const c_char,
+    label: &str,
 ) {
-    if mm_region_reserve(base, length, type_, flags, label) != 0 {
+    if !mm_region_reserve(base, length, type_, flags, label) {
         panic!("MM: Failed to record reserved region");
     }
 }
 
-fn add_usable_or_panic(base: u64, length: u64, label: *const c_char) {
-    if mm_region_add_usable(base, length, label) != 0 {
+fn add_usable_or_panic(base: u64, length: u64, label: &str) {
+    if !mm_region_add_usable(base, length, label) {
         panic!("MM: Failed to record usable region");
     }
 }
 
-fn record_memmap_usable(memmap: *const LimineMemmapResponse) {
-    if memmap.is_null() {
-        panic!("MM: Missing Limine memmap for usable regions");
-    }
+fn record_memmap_usable(memmap: impl Iterator<Item = MemoryRegion>) {
     {
         let mut stats = INIT_STATS.lock();
         stats.total_memory_bytes = 0;
     }
     let mut total: u64 = 0;
     let mut saw_any = false;
-    for entry in limine_memmap_iter(memmap) {
+    for entry in memmap {
         saw_any = true;
         if entry.length == 0 {
             continue;
         }
         total = total.saturating_add(entry.length);
-        if entry.typ != LIMINE_MEMMAP_USABLE {
+        if !entry.kind.is_usable() {
             continue;
         }
         let base = align_up_u64(entry.base, PAGE_SIZE_4KB);
@@ -160,7 +149,7 @@ fn record_memmap_usable(memmap: *const LimineMemmapResponse) {
         if end <= base {
             continue;
         }
-        add_usable_or_panic(base, end - base, b"usable\0".as_ptr() as *const c_char);
+        add_usable_or_panic(base, end - base, "usable");
     }
     if !saw_any {
         panic!("MM: Missing Limine memmap for usable regions");
@@ -176,20 +165,14 @@ fn record_unused_base(frames: Range<u64>) {
         return;
     }
     let bytes = frames.end - frames.start;
-    if mm_region_add_usable(
-        frames.start,
-        bytes,
-        b"unused base\0".as_ptr() as *const c_char,
-    ) != 0
-    {
+    if !mm_region_add_usable(frames.start, bytes, "unused base") {
         klog_info!("MM: no room to record the unused base; its memory stays out");
         return;
     }
     klog_info!("MM: {} KiB of the unused base are usable", bytes / 1024);
 }
 
-fn compute_memory_stats(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
-    let _ = memmap;
+fn compute_memory_stats(hhdm_offset: u64) {
     // Snapshot the region store before acquiring INIT_STATS: both locks are
     // LOCK_LEVEL_RESOURCE, and the lock walker rejects nesting two of those.
     let memory_regions_count = mm_region_count();
@@ -229,7 +212,7 @@ fn record_kernel_core_reservations(phys_base: u64, virt_base: u64) {
         LOW_MEMORY_END,
         MmReservationType::FirmwareOther,
         MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
-        b"Low memory\0".as_ptr() as *const c_char,
+        "Low memory",
     );
 
     let (_, kend) = kernel_image_bounds();
@@ -242,25 +225,21 @@ fn record_kernel_core_reservations(phys_base: u64, virt_base: u64) {
         kend - virt_base,
         MmReservationType::FirmwareOther,
         MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS | MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
-        b"Kernel image\0".as_ptr() as *const c_char,
+        "Kernel image",
     );
 }
 
-/// Limine revision 3 no longer maps ACPI-reclaimable regions itself, so the
+/// Limine does not map ACPI-reclaimable regions itself, so the
 /// table parsers need them brought into the HHDM here. They go in through the
 /// no-ownership entry point: an owning leaf would hand firmware memory back to
 /// the buddy the day something unmapped it. A VA that already resolves is left
 /// alone — re-installing an identical translation would demote whatever huge
 /// leaf covers it for nothing.
-fn map_acpi_regions(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
-    if memmap.is_null() {
-        return;
-    }
-    let flags = PageFlags::KERNEL_RW.bits();
+fn map_acpi_regions(memmap: impl Iterator<Item = MemoryRegion>, hhdm_offset: u64) {
     let mut mapped_count = 0u32;
     let mut present_count = 0u32;
-    for entry in limine_memmap_iter(memmap) {
-        if entry.length == 0 || entry.typ != LIMINE_MEMMAP_ACPI_RECLAIMABLE {
+    for entry in memmap {
+        if entry.length == 0 || entry.kind != MemoryRegionKind::AcpiReclaimable {
             continue;
         }
         let aligned_base = align_down_u64(entry.base, PAGE_SIZE_4KB);
@@ -268,9 +247,10 @@ fn map_acpi_regions(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
         let mut phys = aligned_base;
         while phys < aligned_end {
             let virt = VirtAddr::new(phys + hhdm_offset);
-            if kernel_is_mapped(virt) {
+            if is_mapped(virt) {
                 present_count += 1;
-            } else if kernel_map_io_4kb(virt, PhysAddr::new(phys), flags) == 0 {
+            } else if kernel_map_io_4kb(virt, PhysAddr::new(phys), PageProperty::KERNEL_RW).is_ok()
+            {
                 mapped_count += 1;
             }
             phys += PAGE_SIZE_4KB;
@@ -285,37 +265,34 @@ fn map_acpi_regions(memmap: *const LimineMemmapResponse, hhdm_offset: u64) {
     }
 }
 
-fn record_memmap_reservations(memmap: *const LimineMemmapResponse) {
-    if memmap.is_null() {
-        return;
-    }
-    for entry in limine_memmap_iter(memmap) {
+fn record_memmap_reservations(memmap: impl Iterator<Item = MemoryRegion>) {
+    for entry in memmap {
         if entry.length == 0 {
             continue;
         }
-        match entry.typ {
-            LIMINE_MEMMAP_ACPI_RECLAIMABLE => add_reservation_or_panic(
+        match entry.kind {
+            MemoryRegionKind::AcpiReclaimable => add_reservation_or_panic(
                 entry.base,
                 entry.length,
                 MmReservationType::AcpiReclaimable,
                 MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
-                b"ACPI reclaimable\0".as_ptr() as *const c_char,
+                "ACPI reclaimable",
             ),
-            LIMINE_MEMMAP_ACPI_NVS => add_reservation_or_panic(
+            MemoryRegionKind::AcpiNvs => add_reservation_or_panic(
                 entry.base,
                 entry.length,
                 MmReservationType::AcpiNvs,
                 MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS,
-                b"ACPI NVS\0".as_ptr() as *const c_char,
+                "ACPI NVS",
             ),
-            LIMINE_MEMMAP_FRAMEBUFFER => add_reservation_or_panic(
+            MemoryRegionKind::Framebuffer => add_reservation_or_panic(
                 entry.base,
                 entry.length,
                 MmReservationType::Framebuffer,
                 MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS
                     | MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT
                     | MM_RESERVATION_FLAG_MMIO,
-                b"Framebuffer\0".as_ptr() as *const c_char,
+                "Framebuffer",
             ),
             _ => {}
         }
@@ -348,16 +325,16 @@ fn record_framebuffer_reservation() {
         MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS
             | MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT
             | MM_RESERVATION_FLAG_MMIO,
-        b"Framebuffer\0".as_ptr() as *const c_char,
+        "Framebuffer",
     );
 }
 
 fn record_apic_reservation() {
-    let (_a, _b, _c, d) = cpu::cpuid(CPUID_LEAF_FEATURES);
+    let (_a, _b, _c, d) = cpuid(CPUID_LEAF_FEATURES);
     if (d & CPUID_FEAT_EDX_APIC) == 0 {
         return;
     }
-    let apic_base_msr = cpu::read_msr(Msr::APIC_BASE);
+    let apic_base_msr = read_msr(Msr::APIC_BASE);
     let apic_phys = apic_base_msr & ApicBaseMsr::ADDR_MASK;
     if apic_phys == 0 {
         return;
@@ -367,7 +344,7 @@ fn record_apic_reservation() {
         0x1000,
         MmReservationType::Apic,
         MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS | MM_RESERVATION_FLAG_MMIO,
-        b"Local APIC\0".as_ptr() as *const c_char,
+        "Local APIC",
     );
 }
 
@@ -389,10 +366,7 @@ fn select_allocator_window(reserved_bytes: u64) -> u64 {
     0
 }
 
-fn plan_allocator_metadata(
-    _memmap: *const LimineMemmapResponse,
-    hhdm_offset: u64,
-) -> AllocatorPlan {
+fn plan_allocator_metadata(hhdm_offset: u64) -> AllocatorPlan {
     let tracked_frames = INIT_STATS.lock().tracked_page_frames;
     if tracked_frames == 0 {
         panic!("MM: No tracked frames available for allocator sizing");
@@ -411,7 +385,7 @@ fn plan_allocator_metadata(
         aligned_bytes,
         MmReservationType::AllocatorMetadata,
         MM_RESERVATION_FLAG_EXCLUDE_ALLOCATORS | MM_RESERVATION_FLAG_ALLOW_MM_PHYS_TO_VIRT,
-        b"Allocator metadata\0".as_ptr() as *const c_char,
+        "Allocator metadata",
     );
     AllocatorPlan {
         buffer: (phys_base + hhdm_offset) as *mut u8,
@@ -509,17 +483,18 @@ fn display_memory_summary() {
 }
 /// Runs at memory-phase priority 2, before `META_SLOTS` is installed (5) and
 /// the OSTD `FrameAlloc` shim is registered (6), so nothing here may use the
-/// typestate `Frame<_>` alloc path. `unused_base` is the page range of a boot
-/// module the kernel will never read, which joins usable memory.
+/// typestate `Frame<_>` alloc path. `memmap` is the bootloader's memory map;
+/// `unused_base` is the page range of a boot module the kernel will never
+/// read, which joins usable memory.
 pub fn init_memory_system_pre_typestate(
-    memmap: *const LimineMemmapResponse,
+    memmap: impl Iterator<Item = MemoryRegion> + Clone,
     hhdm_offset: u64,
     hhdm_available: bool,
     framebuffer: Option<(u64, &DisplayInfo)>,
     kernel_phys_base: u64,
     kernel_virt_base: u64,
     unused_base: Option<Range<u64>>,
-) -> c_int {
+) {
     klog_debug!("========== SlopOS Memory System Initialization ==========");
     klog_debug!("Initializing complete memory management system...");
 
@@ -540,17 +515,13 @@ pub fn init_memory_system_pre_typestate(
         }
     }
 
-    if memmap.is_null() {
-        panic!("MM: Missing Limine memory map");
-    }
-
     init_kernel_bounds();
     if !crate::hhdm::is_available() {
         panic!("MM: HHDM unavailable; cannot translate physical addresses");
     }
 
-    configure_region_store(memmap);
-    record_memmap_usable(memmap);
+    configure_region_store(memmap.clone());
+    record_memmap_usable(memmap.clone());
     if let Some(frames) = unused_base {
         record_unused_base(frames);
     }
@@ -559,10 +530,10 @@ pub fn init_memory_system_pre_typestate(
     record_framebuffer_reservation();
     record_apic_reservation();
 
-    compute_memory_stats(memmap, hhdm_offset);
-    let allocator_plan = plan_allocator_metadata(memmap, hhdm_offset);
+    compute_memory_stats(hhdm_offset);
+    let allocator_plan = plan_allocator_metadata(hhdm_offset);
 
-    compute_memory_stats(memmap, hhdm_offset);
+    compute_memory_stats(hhdm_offset);
     finalize_reserved_regions();
 
     EARLY_PAGING_INIT.mark_set();
@@ -577,25 +548,21 @@ pub fn init_memory_system_pre_typestate(
     init_paging();
     crate::pat::pat_init();
 
-    MEMORY_INIT_CTX.call_once(|| MemoryInitCtx {
-        memmap_ptr: memmap as usize,
-        hhdm_offset,
-    });
-
-    0
+    MEMORY_INIT_CTX.call_once(|| MemoryInitCtx { hhdm_offset });
 }
 
 /// Runs at memory-phase priority 10, after `META_SLOTS` (5) and the OSTD
 /// `FrameAlloc` shim (6), so allocations here take the typestate
 /// `Frame::<KernelMeta>::alloc` path rather than the bootstrap one.
-pub fn init_memory_system_post_typestate<'brand>(token: &BspToken<'brand>) -> c_int {
+pub fn init_memory_system_post_typestate<'brand>(
+    token: &BspToken<'brand>,
+    memmap: impl Iterator<Item = MemoryRegion>,
+) {
     let ctx = MEMORY_INIT_CTX
         .get()
         .expect("init_memory_system_post_typestate before init_memory_system_pre_typestate");
-    let memmap = ctx.memmap_ptr as *const LimineMemmapResponse;
-    let hhdm_offset = ctx.hhdm_offset;
 
-    map_acpi_regions(memmap, hhdm_offset);
+    map_acpi_regions(memmap, ctx.hhdm_offset);
 
     crate::slab::init_kernel_slab(token);
     crate::global_allocator_use_kernel_slab(token);
@@ -609,19 +576,17 @@ pub fn init_memory_system_post_typestate<'brand>(token: &BspToken<'brand>) -> c_
     // re-entry is bounded to a single size class.
     crate::slab::enable_heap_caches();
 
-    if init_process_vm() != 0 {
-        panic!("MM: Process VM initialization failed");
-    }
+    init_process_vm();
 
     MEMORY_SYSTEM_INIT.mark_set();
     display_memory_summary();
 
     klog_info!("MM: Complete memory system initialization successful!");
     klog_debug!("MM: Ready for scheduler and video subsystem initialization");
-    0
 }
-pub fn is_memory_system_initialized() -> c_int {
-    MEMORY_SYSTEM_INIT.is_set() as c_int
+
+pub fn is_memory_system_initialized() -> bool {
+    MEMORY_SYSTEM_INIT.is_set()
 }
 pub fn get_memory_statistics(
     total_memory_out: &mut u64,

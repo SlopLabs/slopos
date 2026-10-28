@@ -978,13 +978,8 @@ impl EditorApp {
             selected,
         } = &mut self.prompt
         {
-            let needle = input.text.clone();
-            let mut scored: Vec<(Command, i32)> = PALETTE_COMMANDS
-                .iter()
-                .filter_map(|c| search::fuzzy_score(c.label(), &needle).map(|s| (*c, s)))
-                .collect();
-            scored.sort_by(|a, b| b.1.cmp(&a.1));
-            *results = scored.into_iter().map(|(c, _)| c).collect();
+            *results =
+                search::fuzzy_filter(PALETTE_COMMANDS.iter().copied(), &input.text, |c| c.label());
             *selected = (*selected).min(results.len().saturating_sub(1));
         }
         self.sync_overlay_scroll();
@@ -999,14 +994,8 @@ impl EditorApp {
             selected,
         } = &mut self.prompt
         {
-            let needle = input.text.as_str();
-            let mut scored: Vec<(&str, i32)> = paths
-                .iter()
-                .filter_map(|p| search::fuzzy_score(p, needle).map(|s| (p.as_str(), s)))
-                .collect();
-            scored.sort_by(|a, b| b.1.cmp(&a.1));
-            scored.truncate(FINDER_RESULTS);
-            *results = scored.into_iter().map(|(p, _)| p.to_string()).collect();
+            let found = search::fuzzy_filter(paths, &input.text, |p| p.as_str());
+            *results = found.into_iter().take(FINDER_RESULTS).cloned().collect();
             *selected = (*selected).min(results.len().saturating_sub(1));
         }
         self.sync_overlay_scroll();
@@ -1274,14 +1263,10 @@ impl EditorApp {
                     self.fail(said::NOT_SAVED_YET);
                 }
             }
-            Command::KeyboardShortcuts => {
-                let path = String::from(files::DOC_PATH);
-                if files::is_file(&path) {
-                    self.open_path(&path);
-                } else {
-                    self.fail(said::no_manual());
-                }
-            }
+            Command::KeyboardShortcuts => match files::manual() {
+                Some(path) => self.open_path(&path),
+                None => self.fail(said::no_manual()),
+            },
             Command::About => self.dialog = Some(Dialog::About),
         }
     }

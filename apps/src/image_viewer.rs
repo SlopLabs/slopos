@@ -4,15 +4,12 @@ use std::env;
 use std::io::ErrorKind;
 use std::path::Path;
 
-mod checker;
-
-use slopos_abi::damage::DamageRect;
-use slopos_appkit::embed::Embedded;
-use slopos_appkit::{EmptyState, Icon, Node, Rect, StatusBar, Surface, document_title};
-use slopos_gfx::DrawBuffer;
-use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
-use slopos_image::{DecodeOptions, Image, ImageError, PngError};
-use slopos_windowing::{ControlFlow, Event, Window, WindowedApp};
+use slopos_appkit::widgets::picture::scaled;
+use slopos_appkit::{
+    Action, App, EmptyState, Icon, ImageData, Node, PictureInput, StatusBar, Surface, WindowSpec,
+    column, document_title,
+};
+use slopos_image::{DecodeOptions, ImageError, PngError};
 
 pub const NAME: &str = "Image Viewer";
 
@@ -61,60 +58,79 @@ fn unshown(name: &str, error: &ImageError) -> Unshown {
     Unshown { title, body }
 }
 
-fn embed(fb: &mut DrawBuffer<'_>, node: &Node<()>, rect: Rect) {
-    Embedded::new(node, rect).paint(fb, rect);
+const WINDOW: WindowSpec = WindowSpec::new(900, 640);
+const ZOOM_STEP: f64 = 1.2;
+
+#[derive(Clone)]
+pub enum Msg {
+    Picture(PictureInput),
 }
 
 struct ImageViewer {
     path: String,
-    loaded: Result<Image, Unshown>,
+    loaded: Result<ImageData, Unshown>,
+    /// The window's size; the picture's view is all of it but the status bar.
+    window: (i32, i32),
     fit_mode: bool,
     zoom: f64,
     pan_x: i32,
     pan_y: i32,
-    dragging: bool,
+    grabbing: bool,
+    /// Where the pointer last was over the view, which the keys zoom around.
     last_x: i32,
     last_y: i32,
 }
 
 impl ImageViewer {
     fn new(path: String) -> Self {
-        let loaded = slopos_image::load_path(&path, DecodeOptions::default()).map_err(|e| {
-            eprintln!("image_viewer: {path}: {e}");
-            unshown(file_name(&path), &e)
-        });
+        let loaded = slopos_image::load_path(&path, DecodeOptions::default())
+            .map_err(|e| {
+                eprintln!("image_viewer: {path}: {e}");
+                unshown(file_name(&path), &e)
+            })
+            .and_then(|image| {
+                ImageData::new(image.width, image.height, image.pixels).ok_or_else(|| Unshown {
+                    title: "This picture is damaged",
+                    body: format!(
+                        "{} is incomplete or damaged. Open another copy of it.",
+                        file_name(&path)
+                    ),
+                })
+            });
         Self {
             path,
             loaded,
+            window: (WINDOW.size.width, WINDOW.size.height),
             fit_mode: true,
             zoom: 1.0,
             pan_x: 0,
             pan_y: 0,
-            dragging: false,
+            grabbing: false,
             last_x: 0,
             last_y: 0,
         }
     }
 
-    fn view_height(height: u32) -> i32 {
-        (height as i32 - StatusBar::HEIGHT).max(1)
+    fn view_size(&self) -> (i32, i32) {
+        (
+            self.window.0.max(1),
+            (self.window.1 - StatusBar::HEIGHT).max(1),
+        )
     }
 
-    fn fit_zoom_for(&self, view_w: i32, view_h: i32) -> f64 {
+    fn fit_zoom(&self) -> f64 {
         let Ok(image) = self.loaded.as_ref() else {
             return 1.0;
         };
-        if image.width == 0 || image.height == 0 || view_w <= 0 || view_h <= 0 {
-            return 1.0;
-        }
+        let (view_w, view_h) = self.view_size();
         let zx = view_w as f64 / image.width as f64;
         let zy = view_h as f64 / image.height as f64;
         zx.min(zy).clamp(MIN_ZOOM, MAX_ZOOM)
     }
 
-    fn active_zoom(&self, view_w: i32, view_h: i32) -> f64 {
+    fn active_zoom(&self) -> f64 {
         if self.fit_mode {
-            self.fit_zoom_for(view_w, view_h)
+            self.fit_zoom()
         } else {
             self.zoom.clamp(MIN_ZOOM, MAX_ZOOM)
         }
@@ -133,41 +149,77 @@ impl ImageViewer {
         self.pan_y = 0;
     }
 
-    fn zoom_around(&mut self, px: i32, py: i32, view_w: i32, view_h: i32, factor: f64) {
+    /// Zooms by `factor`, keeping the pixel under `(px, py)` there.
+    fn zoom_around(&mut self, px: i32, py: i32, factor: f64) {
+        let old_zoom = self.active_zoom();
+        let (view_w, view_h) = self.view_size();
         let Ok(image) = self.loaded.as_ref() else {
             return;
         };
-        let old_zoom = self.active_zoom(view_w, view_h);
+        let (width, height) = (image.width, image.height);
         if self.fit_mode {
             self.zoom = old_zoom;
             self.pan_x = 0;
             self.pan_y = 0;
             self.fit_mode = false;
         }
-        let old_w = scaled_len(image.width, old_zoom);
-        let old_h = scaled_len(image.height, old_zoom);
-        let old_x = (view_w - old_w) / 2 + self.pan_x;
-        let old_y = (view_h - old_h) / 2 + self.pan_y;
+        let old_x = (view_w - scaled(width, old_zoom)) / 2 + self.pan_x;
+        let old_y = (view_h - scaled(height, old_zoom)) / 2 + self.pan_y;
         let image_x = (px - old_x) as f64 / old_zoom;
         let image_y = (py - old_y) as f64 / old_zoom;
 
         self.zoom = (old_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
-        let new_w = scaled_len(image.width, self.zoom);
-        let new_h = scaled_len(image.height, self.zoom);
-        let base_x = (view_w - new_w) / 2;
-        let base_y = (view_h - new_h) / 2;
+        let base_x = (view_w - scaled(width, self.zoom)) / 2;
+        let base_y = (view_h - scaled(height, self.zoom)) / 2;
         self.pan_x = px - base_x - (image_x * self.zoom).round() as i32;
         self.pan_y = py - base_y - (image_y * self.zoom).round() as i32;
     }
 
-    fn status_text(&self, zoom: f64) -> String {
+    fn picture(&mut self, input: PictureInput) -> Action {
+        match input {
+            PictureInput::Pointer { x, y } => {
+                let moved = (x - self.last_x, y - self.last_y);
+                (self.last_x, self.last_y) = (x, y);
+                if !self.grabbing {
+                    return Action::None;
+                }
+                self.fit_mode = false;
+                self.pan_x += moved.0;
+                self.pan_y += moved.1;
+            }
+            PictureInput::Grab { x, y } => {
+                self.grabbing = true;
+                (self.last_x, self.last_y) = (x, y);
+                return Action::None;
+            }
+            PictureInput::Release => self.grabbing = false,
+            PictureInput::Wheel { x, y, delta } => {
+                let factor = if delta > 0 {
+                    ZOOM_STEP
+                } else {
+                    1.0 / ZOOM_STEP
+                };
+                self.zoom_around(x, y, factor);
+            }
+            PictureInput::Text('f' | 'F') => self.reset_fit(),
+            PictureInput::Text('0') => self.reset_actual(),
+            PictureInput::Text('+' | '=') => self.zoom_around(self.last_x, self.last_y, ZOOM_STEP),
+            PictureInput::Text('-' | '_') => {
+                self.zoom_around(self.last_x, self.last_y, 1.0 / ZOOM_STEP)
+            }
+            PictureInput::Text(_) => return Action::None,
+        }
+        Action::Rebuild
+    }
+
+    fn status_text(&self) -> String {
         match &self.loaded {
             Ok(image) => format!(
                 "{} · {} × {} · {}%",
                 file_name(&self.path),
                 image.width,
                 image.height,
-                (zoom * 100.0).round() as i32
+                (self.active_zoom() * 100.0).round() as i32
             ),
             Err(_) => String::from(file_name(&self.path)),
         }
@@ -181,127 +233,67 @@ fn file_name(path: &str) -> &str {
         .unwrap_or(path)
 }
 
-impl WindowedApp for ImageViewer {
-    fn init(&mut self, win: &mut Window) {
-        win.set_title(&document_title(file_name(&self.path), NAME));
-        win.set_app_id("org.slopos.image-viewer");
-        win.request_redraw();
+impl App for ImageViewer {
+    type Message = Msg;
+
+    fn view(&self) -> Node<Msg> {
+        let shown = match &self.loaded {
+            Ok(image) => Node::Picture {
+                image: image.clone(),
+                zoom: self.active_zoom(),
+                pan: (self.pan_x, self.pan_y),
+                grabbing: self.grabbing,
+                focused: true,
+                on_input: Some(Msg::Picture),
+            },
+            Err(unshown) => Node::Background {
+                surface: Surface::Base,
+                child: Box::new(
+                    EmptyState::new(Icon::Image, unshown.title)
+                        .body(unshown.body.clone())
+                        .into(),
+                ),
+            },
+        };
+        column(
+            0,
+            vec![
+                Node::Expand {
+                    weight: 1,
+                    child: Box::new(shown),
+                },
+                StatusBar::new(self.status_text()).into(),
+            ],
+        )
     }
 
-    fn on_event(&mut self, win: &mut Window, event: Event) -> ControlFlow {
-        let view_w = win.width() as i32;
-        let view_h = Self::view_height(win.height());
-        match event {
-            Event::CloseRequest => ControlFlow::Exit,
-            Event::Configure { .. } => {
-                win.request_redraw();
-                ControlFlow::Continue
-            }
-            Event::PointerMotion { x, y } => {
-                if self.dragging {
-                    self.fit_mode = false;
-                    self.pan_x += x - self.last_x;
-                    self.pan_y += y - self.last_y;
-                    win.request_redraw();
-                }
-                self.last_x = x;
-                self.last_y = y;
-                ControlFlow::Continue
-            }
-            Event::PointerPress { .. } => {
-                let (x, y) = win.pointer();
-                self.dragging = true;
-                self.last_x = x;
-                self.last_y = y;
-                ControlFlow::Continue
-            }
-            Event::PointerRelease { .. } => {
-                self.dragging = false;
-                ControlFlow::Continue
-            }
-            Event::PointerAxis { value_v120, .. } => {
-                let (x, y) = win.pointer();
-                let factor = if value_v120 > 0 { 1.2 } else { 1.0 / 1.2 };
-                self.zoom_around(x, y.min(view_h - 1), view_w, view_h, factor);
-                win.request_redraw();
-                ControlFlow::Continue
-            }
-            Event::KeyPress { codepoint, .. } => {
-                match char::from_u32(codepoint) {
-                    Some('f' | 'F') => self.reset_fit(),
-                    Some('0') => self.reset_actual(),
-                    Some('+' | '=') => {
-                        let (x, y) = win.pointer();
-                        self.zoom_around(x, y.min(view_h - 1), view_w, view_h, 1.2);
-                    }
-                    Some('-' | '_') => {
-                        let (x, y) = win.pointer();
-                        self.zoom_around(x, y.min(view_h - 1), view_w, view_h, 1.0 / 1.2);
-                    }
-                    _ => {}
-                }
-                win.request_redraw();
-                ControlFlow::Continue
-            }
-            _ => ControlFlow::Continue,
+    fn update(&mut self, msg: Msg) -> Action {
+        match msg {
+            Msg::Picture(input) => self.picture(input),
         }
     }
 
-    fn draw(&mut self, fb: &mut DrawBuffer<'_>) {
-        let view_h = Self::view_height(fb.height());
-        let view_w = fb.width() as i32;
-        let zoom = self.active_zoom(view_w, view_h);
-        checker::draw(fb, view_h);
+    fn on_resize(&mut self, width: u32, height: u32) -> Action {
+        self.window = (width as i32, height as i32);
+        Action::None
+    }
 
-        match self.loaded {
-            Ok(ref image) => {
-                if let Some(bitmap) = BitmapRef::new(image.width, image.height, &image.pixels) {
-                    let target_w = scaled_len(image.width, zoom);
-                    let target_h = scaled_len(image.height, zoom);
-                    let x = (view_w - target_w) / 2 + self.pan_x;
-                    let y = (view_h - target_h) / 2 + self.pan_y;
-                    let clip = DamageRect {
-                        x0: 0,
-                        y0: 0,
-                        x1: view_w - 1,
-                        y1: view_h - 1,
-                    };
-                    slopos_gfx::image::draw_image_clipped(
-                        fb,
-                        bitmap,
-                        x,
-                        y,
-                        target_w,
-                        target_h,
-                        ImageFit::Stretch,
-                        ImageSampling::for_resize(image.width, image.height, target_w, target_h),
-                        &clip,
-                    );
-                }
-            }
-            Err(ref unshown) => {
-                let state =
-                    EmptyState::<()>::new(Icon::Image, unshown.title).body(unshown.body.clone());
-                let state = Node::Background {
-                    surface: Surface::Base,
-                    child: Box::new(state.into()),
-                };
-                embed(fb, &state, Rect::new(0, 0, view_w, view_h));
-            }
-        }
+    fn title(&self) -> String {
+        document_title(file_name(&self.path), NAME)
+    }
 
-        let status: Node<()> = StatusBar::new(self.status_text(zoom)).into();
-        embed(fb, &status, Rect::new(0, view_h, view_w, StatusBar::HEIGHT));
+    fn app_id(&self) -> &str {
+        "org.slopos.image-viewer"
+    }
+
+    fn window(&self) -> WindowSpec {
+        WINDOW
     }
 }
 
-pub fn image_viewer_main() {
+pub fn image_viewer_main() -> ! {
     let path = env::args()
         .nth(1)
         .unwrap_or_else(|| String::from(DEFAULT_IMAGE));
-    slopos_windowing::run(ImageViewer::new(path), 900, 640);
-}
-
-fn scaled_len(value: u32, zoom: f64) -> i32 {
-    ((value as f64 * zoom).round() as i32).max(1)
+    slopos_appkit::run_app(ImageViewer::new(path))
 }

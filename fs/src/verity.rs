@@ -1,22 +1,24 @@
-//! Read-time block-integrity verification for an attested ext2 image.
+//! Read-time block-integrity verification for an attested ext4 image.
 //!
 //! `scripts/gen_verity.py` appends the trailer at the very END of the image,
 //! sector-aligned, so the kernel locates it from `device.capacity()` alone.
 //!
-//! Two trailer versions differ in writability:
+//! Two kinds of trailer, named by the header's `kind` field, differ in
+//! writability:
 //!
-//! * **v1** — the device is **write-protected**, as dm-verity is read-only by
-//!   design: a write would leave a block no trailer describes, and so a false
-//!   integrity failure on the next boot.
-//! * **v2** — the trailer also carries a persisted per-block *attested*
-//!   bitmap; a set bit means the block still matches its build-time hash. A
-//!   write un-attests every block it touches, partial coverage included, and
-//!   then goes through. [`BlockDevice::checkpoint`] persists the bitmap and
-//!   the filesystem marks the image clean only after that, so a crash
-//!   degrades into "nothing attested" rather than a false integrity failure.
+//! * **protected** (1) — the device is **write-protected**, as dm-verity is
+//!   read-only by design: a write would leave a block no trailer describes,
+//!   and so a false integrity failure on the next boot.
+//! * **attested** (2) — the trailer also carries a persisted per-block
+//!   *attested* bitmap; a set bit means the block still matches its build-time
+//!   hash. A write un-attests every block it touches, partial coverage
+//!   included, and then goes through. [`BlockDevice::checkpoint`] persists
+//!   the bitmap and the filesystem marks the image clean only after that, so
+//!   a crash degrades into "nothing attested" rather than a false integrity
+//!   failure.
 //!
-//! The block the ext2 superblock lives in is permanently unattested in v2:
-//! the mount stamp rewrites it on every boot.
+//! The block the ext4 superblock lives in is permanently unattested in an
+//! attested trailer: the mount stamp rewrites it on every boot.
 //!
 //! The filesystem's own extent decides whether the device's tail *is* a
 //! trailer: on a writable image the last filesystem block is ordinary data a
@@ -42,22 +44,25 @@ use slopos_ostd::{KBox, KVec, klog_info, lock_class};
 use crate::blockdev::{BlockDevice, BlockDeviceError, WriteTicket};
 
 // On-disk trailer (little-endian, appended at the end of the image):
-//   v1: [ ext2 region ][ pad to sector ][ hash array: N×u32 ][ 32-byte header ]
-//   v2: [ ext2 region ][ pad to sector ][ hash array: N×u32 ]
-//       [ attested bitmap: ceil(N/8) ][ 32-byte header ]
-//                                                     ^ capacity() - 32
-// Three places must agree byte for byte: scripts/gen_verity.py writes it, this
-// file parses it, and fs/src/tests/verity_rw.rs hand-encodes it.
+//   protected: [ ext4 region ][ pad to sector ][ hash array: N×u32 ]
+//              [ 32-byte header ]
+//   attested:  [ ext4 region ][ pad to sector ][ hash array: N×u32 ]
+//              [ attested bitmap: ceil(N/8) ][ 32-byte header ]
+//                                              ^ capacity() - 32
+// Every place must agree byte for byte: scripts/gen_verity.py writes it, this
+// file parses it, scripts/build_fs_image.sh reads its kind, and
+// fs/src/tests.rs and fs/src/tests/verity_rw.rs hand-encode it.
 const VERITY_MAGIC: u32 = 0x5356_5254; // 'TVRS' LE — SlopOS verity
-const VERITY_VERSION_PROTECTED: u32 = 1;
-const VERITY_VERSION_ATTESTED: u32 = 2;
+const VERITY_KIND_PROTECTED: u32 = 1;
+const VERITY_KIND_ATTESTED: u32 = 2;
 const VERITY_ALGO_CRC32: u32 = 1;
 const HEADER_SIZE: u64 = 32;
-/// The header's `reserved` u32, which v2 spends on the bitmap's CRC-32.
+/// The header's `reserved` u32, which an attested trailer spends on the
+/// bitmap's CRC-32.
 const HEADER_BITMAP_CRC_OFF: u64 = 28;
-/// The ext2 superblock: 1024 bytes at byte 1024, whichever block that is.
-const EXT2_SUPERBLOCK_OFFSET: u64 = 1024;
-const EXT2_SUPERBLOCK_LEN: u64 = 1024;
+/// The ext4 superblock: 1024 bytes at byte 1024, whichever block that is.
+const EXT4_SUPERBLOCK_OFFSET: u64 = 1024;
+const EXT4_SUPERBLOCK_LEN: u64 = 1024;
 /// Staging window for [`AttestBitmap::write_bits`]: the bitmap is copied out
 /// of the lock in pieces, because no spinning lock may span a device write.
 const PERSIST_CHUNK: usize = 512;
@@ -73,8 +78,7 @@ const BITMAP_CHUNK: usize = 1 << BITMAP_CHUNK_SHIFT;
 /// trailer's hash array and attested bitmap.
 const RESIDENT_SHARE: u64 = 8;
 /// Ceiling for a machine whose page allocator is not seeded yet: what a 1 GiB
-/// image of 4 KiB blocks costs, which is the largest that mounted at all
-/// before the hash array was chunked.
+/// image of 4 KiB blocks costs.
 const RESIDENT_FLOOR_BYTES: u64 = 256 * 1024 * 4 + 256 * 1024 / 8;
 
 /// The byte range the filesystem claims, from its own superblock. A trailer
@@ -91,7 +95,7 @@ impl FsExtent {
     }
 }
 
-/// Whether this boot may trust a v2 trailer's persisted bitmap.
+/// Whether this boot may trust an attested trailer's persisted bitmap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttestTrust {
     /// The image was marked clean, so the bitmap on disk is current.
@@ -107,10 +111,10 @@ pub enum AttestTrust {
 pub enum VerityStatus {
     /// No trailer: the image was built `VERITY=off`, and mounts writable.
     Absent,
-    /// A valid v1 trailer covers `blocks` blocks; the device is
+    /// A valid protected trailer covers `blocks` blocks; the device is
     /// write-protected.
     Verified { blocks: u64, block_size: u32 },
-    /// A valid v2 trailer covers `blocks` blocks, of which `attested` still
+    /// A valid attested trailer covers `blocks` blocks, of which `attested` still
     /// match their build-time hash; the device accepts writes.
     VerifiedWritable {
         blocks: u64,
@@ -214,7 +218,7 @@ impl AttestBits {
     }
 }
 
-/// The blocks a v2 trailer still attests. Bits only ever clear: a write
+/// The blocks an attested trailer still attests. Bits only ever clear: a write
 /// un-attests, and nothing re-attests short of rebuilding the image.
 struct AttestBitmap {
     bits: SpinLock<AttestBits>,
@@ -313,14 +317,13 @@ pub struct VerifiedBlockDevice {
     block_size: u32,
     /// Build-time CRC of every block `0..N`; immutable after mount.
     hashes: HashArray,
-    /// `None` on a v1 trailer, where no write is ever accepted.
+    /// `None` on a protected trailer, where no write is ever accepted.
     attested: Option<AttestBitmap>,
 }
 
 impl VerifiedBlockDevice {
-    /// Only blocks fully contained in the read are verified: sub-block direct
-    /// reads (the superblock at byte 1024) keep their own sanity checks
-    /// (documented gap G1).
+    /// Only blocks fully contained in the read are verified: a sub-block read
+    /// (the superblock at byte 1024) relies on its own sanity checks.
     #[inline(never)]
     fn verify_blocks(
         &self,
@@ -480,7 +483,7 @@ pub fn build_verified(
     build_verified_trusting(device, fs, AttestTrust::Persisted)
 }
 
-/// As [`build_verified`], but the caller states whether a v2 trailer's
+/// As [`build_verified`], but the caller states whether an attested trailer's
 /// persisted bitmap may be trusted this boot: an image never seen marked
 /// clean passes [`AttestTrust::NoneThisBoot`].
 pub fn build_verified_trusting(
@@ -493,7 +496,7 @@ pub fn build_verified_trusting(
     };
 
     let hashes = load_hashes(&*device, &header)?;
-    let (attested, status) = if header.version == VERITY_VERSION_ATTESTED {
+    let (attested, status) = if header.kind == VERITY_KIND_ATTESTED {
         let map = load_bitmap(&*device, &header, trust)?;
         let status = VerityStatus::VerifiedWritable {
             blocks: header.block_count,
@@ -531,7 +534,7 @@ fn wrap_device(
 }
 
 struct TrailerHeader {
-    version: u32,
+    kind: u32,
     block_size: u32,
     block_count: u64,
     root: u32,
@@ -540,7 +543,7 @@ struct TrailerHeader {
 
 impl TrailerHeader {
     fn bitmap_bytes(&self) -> u64 {
-        if self.version == VERITY_VERSION_ATTESTED {
+        if self.kind == VERITY_KIND_ATTESTED {
             self.block_count.div_ceil(8)
         } else {
             0
@@ -569,7 +572,7 @@ fn read_header(
     if magic != VERITY_MAGIC {
         return Ok(None);
     }
-    let version = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+    let kind = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
     let algo = u32::from_le_bytes([hdr[8], hdr[9], hdr[10], hdr[11]]);
     let block_size = u32::from_le_bytes([hdr[12], hdr[13], hdr[14], hdr[15]]);
     let block_count = u64::from_le_bytes([
@@ -578,11 +581,11 @@ fn read_header(
     let root = u32::from_le_bytes([hdr[24], hdr[25], hdr[26], hdr[27]]);
     let bitmap_crc = u32::from_le_bytes([hdr[28], hdr[29], hdr[30], hdr[31]]);
 
-    let known_version = version == VERITY_VERSION_PROTECTED || version == VERITY_VERSION_ATTESTED;
-    if !known_version || algo != VERITY_ALGO_CRC32 || block_size == 0 {
+    let known_kind = kind == VERITY_KIND_PROTECTED || kind == VERITY_KIND_ATTESTED;
+    if !known_kind || algo != VERITY_ALGO_CRC32 || block_size == 0 {
         klog_info!(
-            "verity: unsupported trailer (version {} algo {} block_size {})",
-            version,
+            "verity: unsupported trailer (kind {} algo {} block_size {})",
+            kind,
             algo,
             block_size,
         );
@@ -590,7 +593,7 @@ fn read_header(
     }
 
     let header = TrailerHeader {
-        version,
+        kind,
         block_size,
         block_count,
         root,
@@ -737,8 +740,8 @@ fn load_bitmap(
     // Cleared here too, not only by `gen_verity.py`: a bitmap the kernel
     // writes back must never claim the superblock's block.
     map.un_attest(
-        EXT2_SUPERBLOCK_OFFSET,
-        EXT2_SUPERBLOCK_LEN,
+        EXT4_SUPERBLOCK_OFFSET,
+        EXT4_SUPERBLOCK_LEN,
         header.block_size as u64,
     );
     map.dirty.store(false, Ordering::Release);

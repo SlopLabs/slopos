@@ -2,7 +2,7 @@ use super::fixtures::*;
 
 pub fn test_session_new_empty() -> TestResult {
     let s = TtySession::new();
-    if s.session_id() != 0 || s.fg_pgrp_id() != 0 || s.focused_task_id != 0 {
+    if s.session_id() != 0 || s.fg_pgrp_id() != 0 {
         klog_info!("TTY_TEST: BUG - new TtySession has non-zero fields");
         return TestResult::Fail;
     }
@@ -154,7 +154,6 @@ pub fn test_session_check_read_replaces_task_has_access_background() -> TestResu
     let scope = SessionScope::new(10, 10);
     let mut s = TtySession::new();
     scope.attach_to(&mut s);
-    s.focused_task_id = 0;
     match s.check_read(99, 10) {
         ForegroundCheck::BackgroundRead => TestResult::Pass,
         other => {
@@ -343,3 +342,69 @@ pub fn test_tty_set_fg_pgrp_checked() -> TestResult {
     }
     TestResult::Pass
 }
+
+slopos_testing::stest!(name = test_session_new_empty, suite = tty_test_session);
+slopos_testing::stest!(name = test_session_attach, suite = tty_test_session);
+slopos_testing::stest!(name = test_session_detach, suite = tty_test_session);
+slopos_testing::stest!(
+    name = test_session_check_read_foreground,
+    suite = tty_test_session
+);
+slopos_testing::stest!(
+    name = test_session_check_read_background,
+    suite = tty_test_session
+);
+slopos_testing::stest!(
+    name = test_session_check_read_no_session,
+    suite = tty_test_session
+);
+slopos_testing::stest!(
+    name = test_session_check_read_kernel_task,
+    suite = tty_test_session
+);
+slopos_testing::stest!(
+    name = test_session_check_write_no_tostop,
+    suite = tty_test_session
+);
+slopos_testing::stest!(
+    name = test_session_check_write_tostop_background,
+    suite = tty_test_session
+);
+slopos_testing::stest!(
+    name = test_session_check_read_replaces_task_has_access_foreground,
+    suite = tty_test_session
+);
+slopos_testing::stest!(
+    name = test_session_check_read_replaces_task_has_access_background,
+    suite = tty_test_session
+);
+slopos_testing::stest!(
+    name = test_session_check_read_replaces_task_has_access_permissive,
+    suite = tty_test_session
+);
+slopos_testing::stest!(
+    name = test_session_set_fg_pgrp_checked_allowed,
+    suite = tty_test_session
+);
+slopos_testing::stest!(
+    name = test_session_set_fg_pgrp_checked_denied,
+    suite = tty_test_session
+);
+slopos_testing::stest!(
+    name = test_session_set_fg_pgrp_checked_no_session,
+    suite = tty_test_session
+);
+slopos_testing::stest!(
+    name = test_tty_get_session_id_default,
+    suite = tty_test_session
+);
+slopos_testing::stest!(name = test_tty_attach_session, suite = tty_test_session);
+slopos_testing::stest!(name = test_tty_detach_session, suite = tty_test_session);
+slopos_testing::stest!(
+    name = test_tty_detach_session_by_id,
+    suite = tty_test_session
+);
+slopos_testing::stest!(
+    name = test_tty_set_fg_pgrp_checked,
+    suite = tty_test_session
+);

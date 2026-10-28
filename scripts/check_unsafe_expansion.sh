@@ -133,7 +133,6 @@ crate_configs() {
     case "$1" in
         boot) echo ""; echo "--features tests" ;;
         fs) echo ""; echo "--features tests" ;;
-        hermetic) echo ""; echo "--features tests" ;;
         ktesting) echo ""; echo "--features tests" ;;
         core | drivers | mm | net | ring | sched)
             echo ""; echo "--features test-hooks" ;;
@@ -165,10 +164,9 @@ PY
 # expansion has two very different causes that otherwise look identical: a
 # crate that genuinely expands to nothing, and a crate that failed to compile
 # — most often because something it depends on is mid-edit. Reporting only
-# "expansion produced no output" sends the reader looking at the wrong crate,
-# which is exactly what happened once: nine dependent configurations were
-# reported and every one of them was a single unrelated crate failing to
-# build. One line of the real error points straight at the cause.
+# "expansion produced no output" sends the reader looking at the wrong crate:
+# one crate failing to build empties every configuration that depends on it.
+# One line of the real error points straight at the cause.
 expand_first_error() {
     [ -s "$EXPAND_STDERR" ] || return 0
     grep -m1 -E "^error" "$EXPAND_STDERR" 2>/dev/null || true

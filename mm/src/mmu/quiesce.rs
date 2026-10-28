@@ -21,7 +21,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use slopos_arch::pcr::MAX_CPUS;
+use slopos_ostd::cpu::x86_64::pcr::MAX_CPUS;
 
 use super::asid;
 
@@ -108,7 +108,8 @@ pub fn all_acked_after(epoch: u64) -> bool {
         return false;
     }
     (0..MAX_CPUS).all(|cpu| {
-        !slopos_arch::pcr::is_cpu_online(cpu) || CPU_ACKED[cpu].load(Ordering::Acquire) > epoch
+        !slopos_ostd::cpu::x86_64::pcr::is_cpu_online(cpu)
+            || CPU_ACKED[cpu].load(Ordering::Acquire) > epoch
     })
 }
 
@@ -125,7 +126,7 @@ pub fn tick() {
     if !is_active() {
         return;
     }
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     if cpu >= MAX_CPUS {
         return;
     }
@@ -159,7 +160,7 @@ pub fn ack_now() {
 /// frames that became safe.
 fn try_close(epoch: u64) -> bool {
     for cpu in 0..MAX_CPUS {
-        if !slopos_arch::pcr::is_cpu_online(cpu) {
+        if !slopos_ostd::cpu::x86_64::pcr::is_cpu_online(cpu) {
             continue;
         }
         if CPU_ACKED[cpu].load(Ordering::Acquire) < epoch {
@@ -200,7 +201,7 @@ pub fn force_close_epoch_for_test() -> Option<u64> {
     for _ in 0..MAX_CPUS {
         let epoch = EPOCH.load(Ordering::Acquire);
         for cpu in 0..MAX_CPUS {
-            if slopos_arch::pcr::is_cpu_online(cpu) {
+            if slopos_ostd::cpu::x86_64::pcr::is_cpu_online(cpu) {
                 CPU_ACKED[cpu].fetch_max(epoch, Ordering::AcqRel);
             }
         }

@@ -11,7 +11,7 @@ slopos_ostd::extern_c_entry! {
 }
 
 slopos_ostd::extern_c_entry! {
-    pub fn common_exception_handler(frame: *mut slopos_arch::InterruptFrame) {
+    pub fn common_exception_handler(frame: *mut slopos_ostd::irq::interrupt_frame::InterruptFrame) {
         crate::idt::common_exception_handler_impl(frame);
     }
 }

@@ -1,40 +1,13 @@
-use slopos_arch::arch::gdt::IstSlot;
-use slopos_arch::pcr::{MAX_CPUS, get_current_cpu};
 use slopos_hermetic::KernelStackTop;
-use slopos_ostd::arch::x86_64::msr::{Msr, install_syscall_msrs, star_from_selectors, write_msr};
-use slopos_ostd::arch::x86_64::per_cpu_gdt;
+use slopos_ostd::arch::x86_64::gdt::IstSlot;
+use slopos_ostd::arch::x86_64::msr::{install_syscall_msrs, star_from_selectors};
+use slopos_ostd::cpu::x86_64::pcr::{MAX_CPUS, current_cpu_id};
 use slopos_ostd::klog_debug;
 
-pub fn gdt_init() {
-    gdt_init_for_cpu(0);
-}
-
-pub fn gdt_init_for_cpu(cpu_id: usize) {
-    if cpu_id >= MAX_CPUS {
-        return;
-    }
-
-    if slopos_arch::pcr::is_pcr_initialized() {
-        klog_debug!("GDT: Skipped - using PCR-based GDT for CPU {}", cpu_id);
-        return;
-    }
-
-    klog_debug!("GDT: Initializing descriptor tables for CPU {}", cpu_id);
-
-    if cpu_id == 0 {
-        per_cpu_gdt::set_kernel_rsp0(
-            cpu_id,
-            slopos_ostd::arch::x86_64::linker::kernel_stack_top() as u64,
-        );
-    }
-    per_cpu_gdt::init_and_install(cpu_id);
-
-    klog_debug!("GDT: Initialized with TSS loaded for CPU {}", cpu_id);
-}
 /// The round trip owns `RSP0` once a task runs; this is the gdt tests' probe.
 #[cfg(feature = "test-hooks")]
 pub fn gdt_set_kernel_rsp0(rsp0: u64) {
-    let cpu_id = get_current_cpu();
+    let cpu_id = current_cpu_id();
     gdt_set_kernel_rsp0_for_cpu(cpu_id, rsp0);
 }
 
@@ -43,8 +16,7 @@ fn gdt_set_kernel_rsp0_for_cpu(cpu_id: usize, rsp0: u64) {
     if cpu_id >= MAX_CPUS {
         return;
     }
-    per_cpu_gdt::set_kernel_rsp0(cpu_id, rsp0);
-    if let Some(pcr) = slopos_arch::pcr::get_pcr_mut_via_token(cpu_id) {
+    if let Some(pcr) = slopos_ostd::cpu::x86_64::pcr::get_pcr_mut_via_token(cpu_id) {
         pcr.kernel_rsp = rsp0;
         pcr.sync_tss_rsp0();
     }
@@ -59,7 +31,7 @@ pub fn gdt_set_ist<'b, K: slopos_hermetic::CpuInitKind>(
     slot: IstSlot,
     stack_top: KernelStackTop<'_>,
 ) {
-    let cpu_id = get_current_cpu();
+    let cpu_id = current_cpu_id();
     gdt_set_ist_for_cpu(_ctx, cpu_id, slot, stack_top);
 }
 
@@ -73,17 +45,15 @@ pub fn gdt_set_ist_for_cpu<'b, K: slopos_hermetic::CpuInitKind>(
         return;
     }
     let addr = stack_top.as_u64();
-    let offset = slot.as_tss_offset();
-    per_cpu_gdt::set_ist(cpu_id, offset, addr);
-    if let Some(pcr) = slopos_arch::pcr::get_pcr_mut_via_token(cpu_id) {
+    if let Some(pcr) = slopos_ostd::cpu::x86_64::pcr::get_pcr_mut_via_token(cpu_id) {
         pcr.set_ist(slot.as_index(), addr);
     }
 }
 
-/// Program the SYSCALL/SYSRET MSRs (`STAR`, `LSTAR`, `SFMASK`) and the per-CPU
-/// GS_BASE syscall-scratch wiring. The witness gates it to a boot-init scope.
+/// Program the SYSCALL/SYSRET MSRs (`STAR`, `LSTAR`, `SFMASK`). The witness
+/// gates it to a boot-init scope.
 pub fn syscall_msr_init<W: slopos_ostd::sync::CpuInitWitness>(witness: &W) {
-    use slopos_arch::arch::gdt::SegmentSelector;
+    use slopos_ostd::arch::x86_64::gdt::SegmentSelector;
 
     klog_debug!("SYSCALL: Initializing MSRs for fast syscall path");
 
@@ -98,31 +68,5 @@ pub fn syscall_msr_init<W: slopos_ostd::sync::CpuInitWitness>(witness: &W) {
         star_value,
         lstar_value,
         sfmask_value
-    );
-
-    syscall_gs_base_init();
-}
-
-fn syscall_gs_base_init() {
-    if slopos_arch::pcr::is_pcr_initialized() {
-        klog_debug!("SYSCALL: Skipped GS_BASE init - using PCR");
-        return;
-    }
-    let cpu_id = get_current_cpu();
-    syscall_gs_base_init_for_cpu(cpu_id);
-}
-
-fn syscall_gs_base_init_for_cpu(cpu_id: usize) {
-    if cpu_id >= MAX_CPUS {
-        return;
-    }
-    let rsp0 = per_cpu_gdt::rsp0(cpu_id);
-    per_cpu_gdt::set_syscall_kernel_rsp(cpu_id, rsp0);
-    let cpu_data_ptr = per_cpu_gdt::syscall_data_ptr(cpu_id);
-    write_msr(Msr::KERNEL_GS_BASE, cpu_data_ptr);
-    klog_debug!(
-        "SYSCALL: CPU {} KERNEL_GS_BASE=0x{:016x}",
-        cpu_id,
-        cpu_data_ptr
     );
 }

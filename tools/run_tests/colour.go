@@ -43,14 +43,13 @@ func VisibleLen(s string) int {
 }
 
 // UseColour decides whether to emit colour codes. Honours the conventional
-// `NO_COLOR` env var (https://no-color.org). `mode` is one of `"auto"`,
-// `"always"`, `"never"`.
-func UseColour(mode string, fd uintptr) bool {
-	switch mode {
-	case "always":
-		return true
-	case "never":
+// `NO_COLOR` env var (https://no-color.org) unless `mode` is `"always"`.
+func UseColour(mode string, never bool, fd uintptr) bool {
+	switch {
+	case never:
 		return false
+	case mode == "always":
+		return true
 	}
 	if _, ok := os.LookupEnv("NO_COLOR"); ok {
 		return false

@@ -1,11 +1,11 @@
 //! Active-pipe discovery and scanline sampling.
 
-use slopos_mm::mmio::MmioRegion;
+use slopos_ostd::mm::IoMem;
 
 use crate::xe_logic::regs::{self, Pipe};
 
 /// The first enabled pipe driving live output, or `None` if every pipe is off.
-pub fn find_active(mmio: &MmioRegion) -> Option<Pipe> {
+pub fn find_active(mmio: &IoMem) -> Option<Pipe> {
     for pipe in Pipe::ALL {
         if mmio.read::<u32>(regs::pipe_conf(pipe)) & regs::PIPECONF_ENABLE != 0 {
             return Some(pipe);
@@ -14,7 +14,7 @@ pub fn find_active(mmio: &MmioRegion) -> Option<Pipe> {
     None
 }
 
-pub fn scanline(mmio: &MmioRegion, pipe: Pipe) -> u32 {
+pub fn scanline(mmio: &IoMem, pipe: Pipe) -> u32 {
     mmio.read::<u32>(regs::pipe_dsl(pipe))
 }
 
@@ -26,7 +26,7 @@ pub fn scanline(mmio: &MmioRegion, pipe: Pipe) -> u32 {
 /// then reads a linear surface with the X-tile (512-byte) `PLANE_STRIDE` unit
 /// instead of the linear (64-byte) one, an 8x vertical replication. Callers that
 /// flip twice in succession must wait here between them.
-pub fn wait_for_vblank(mmio: &MmioRegion, pipe: Pipe) {
+pub fn wait_for_vblank(mmio: &IoMem, pipe: Pipe) {
     // One 60 Hz frame (~16.7 ms) plus margin.
     const VBLANK_TIMEOUT_MS: u32 = 25;
     let mut prev = scanline(mmio, pipe);

@@ -13,7 +13,7 @@ use slopos_abi::unicode::is_double_width;
 use slopos_font::atlas::{self, blend_coverage_u32};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
-use super::vtparser::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
+use slopos_vt::{Direction, EraseMode, SgrAttr, VtAction, VtParser};
 
 pub(crate) const VCONSOLE_MAX_COLS: usize = 240;
 pub(crate) const VCONSOLE_MAX_ROWS: usize = 80;
@@ -305,10 +305,6 @@ impl ScrollbackBuf {
         if self.count < SCROLLBACK_LINES {
             self.count += 1;
         }
-    }
-
-    fn line_count(&self) -> usize {
-        self.count
     }
 
     fn get_row(&self, offset_from_bottom: usize) -> Option<&[Cell]> {
@@ -1745,7 +1741,7 @@ pub fn write(data: &[u8]) {
 
     let mut state = VCONSOLE_STATE.lock();
     if state.fb.is_none() {
-        // Deliberately no serial fallback: `tty::driver::write_driver_unlocked`
+        // Deliberately no serial fallback: `tty::output::write_to_driver`
         // already mirrors to COM1 under the klog ticket lock, so emitting here
         // would duplicate every TTY write lock-free and corrupt concurrent klog.
         return;
@@ -1910,10 +1906,6 @@ pub fn set_serial_mirror(enabled: bool) {
 
 pub fn serial_mirror_enabled() -> bool {
     SERIAL_MIRROR_ENABLED.load(Ordering::Relaxed)
-}
-
-pub fn scrollback_line_count() -> usize {
-    SCROLLBACK.lock().as_ref().map_or(0, |sb| sb.line_count())
 }
 
 #[cfg(feature = "test-hooks")]

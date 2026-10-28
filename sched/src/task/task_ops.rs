@@ -16,18 +16,18 @@ pub use slopos_ostd::task::ops::{
 use super::task_table::task_find_by_id;
 
 /// Establish `parent_task_id` as the parent of `task_id`, parking one owning
-/// reference in the parent's children list. Returns 0 on success, -1 if either
-/// task cannot be located.
-pub fn task_set_parent(task_id: u32, parent_task_id: u32) -> core::ffi::c_int {
+/// reference in the parent's children list. `false` if either task cannot be
+/// located.
+pub fn task_set_parent(task_id: u32, parent_task_id: u32) -> bool {
     let Some(child) = task_find_by_id(task_id) else {
-        return -1;
+        return false;
     };
     let Some(parent) = task_find_by_id(parent_task_id) else {
-        return -1;
+        return false;
     };
     let Some(child_nn) = core::ptr::NonNull::new(child.as_ptr()) else {
-        return -1;
+        return false;
     };
     super::link_child(&parent, child_nn);
-    0
+    true
 }

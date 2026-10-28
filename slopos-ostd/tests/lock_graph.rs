@@ -685,7 +685,7 @@ fn held_lock_names_are_reported() {
     assert_eq!(local, ["held_name_a", "held_name_b"]);
 
     // Read the way a peer CPU reads it during the timeout report.
-    let cpu = slopos_ostd::cpu::x86_64::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let mut remote = Vec::new();
     for_each_held_lock_name_for_cpu(cpu, |name| remote.push(name));
     assert_eq!(remote, local);

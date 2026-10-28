@@ -10,14 +10,14 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use slopos_ostd::lock_class;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_arch::pcr::MAX_CPUS;
+use slopos_ostd::cpu::x86_64::pcr::MAX_CPUS;
+use slopos_ostd::mm::page_property::PageProperty;
 use slopos_ostd::sync::cpu_local::{CacheAligned, CpuLocal};
 use slopos_ostd::sync::{LOCK_LEVEL_ALLOCATOR, PreemptGuard, SpinLock};
 
 use crate::kernel_mappings::kernel_map_4kb;
 use crate::page_alloc::alloc_kernel_page;
 use crate::paging_defs::PAGE_SIZE_2MB;
-use crate::paging_defs::PageFlags;
 use crate::stack_region::StackRegion;
 
 /// One entry returned by batch alloc / consumed by batch release.  The
@@ -460,7 +460,7 @@ pub fn pcp_flush_current_impl<
     pcp: &PcpArray<R, CAP>,
 ) {
     let _no_migrate = PreemptGuard::new();
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let cache = pcp.cache(cpu);
     while cache.count > 0 {
         let n = cache.count as usize;
@@ -490,7 +490,7 @@ pub fn slot_pop_impl<R: StackRegion, const WORDS: usize, const CAP: usize, const
     pcp: &PcpArray<R, CAP>,
 ) -> Option<SlotEntry> {
     let _no_migrate = PreemptGuard::new();
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let cache = pcp.cache(cpu);
 
     if cache.count == 0 {
@@ -518,7 +518,7 @@ pub fn slot_push_impl<R: StackRegion, const WORDS: usize, const CAP: usize, cons
     entry: SlotEntry,
 ) {
     let _no_migrate = PreemptGuard::new();
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let cache = pcp.cache(cpu);
 
     if cache.count as usize >= CAP {
@@ -552,7 +552,6 @@ fn install_pt_sentinels<R: StackRegion, const WORDS: usize>(
 ) {
     let slots_per_chunk = (PAGE_SIZE_2MB / R::STRIDE) as u32;
     let chunk_count = ((R::VA_END - R::VA_BASE) / PAGE_SIZE_2MB) as u32;
-    let flags = R::PAGE_FLAGS;
 
     for chunk in 0..chunk_count {
         let sentinel_slot = chunk * slots_per_chunk;
@@ -567,7 +566,7 @@ fn install_pt_sentinels<R: StackRegion, const WORDS: usize>(
             );
         }
         let va = VirtAddr::new(R::VA_BASE + sentinel_slot as u64 * R::STRIDE);
-        if kernel_map_4kb(va, pa, flags) != 0 {
+        if kernel_map_4kb(va, pa, R::PAGE_PROPERTY).is_err() {
             panic!(
                 "stack_va::{}::init: failed to map sentinel at {:#x}",
                 R::NAME,
@@ -620,7 +619,7 @@ pub const fn pcp_capacity<R: StackRegion>() -> usize {
 const REGION_PCP_CAPACITY: usize = 16;
 const REGION_PCP_REFILL_BATCH: usize = 8;
 const REGION_PCP_SPILL_BATCH: usize = 8;
-const REGION_PAGE_FLAGS: u64 = PageFlags::KERNEL_RW.bits() | PageFlags::NO_EXECUTE.bits();
+const REGION_PAGE_PROPERTY: PageProperty = PageProperty::KERNEL_RW;
 
 mod kstack {
     use super::*;
@@ -666,7 +665,7 @@ mod kstack {
         const PCP_CAPACITY: usize = REGION_PCP_CAPACITY;
         const PCP_REFILL_BATCH: usize = REGION_PCP_REFILL_BATCH;
         const PCP_SPILL_BATCH: usize = REGION_PCP_SPILL_BATCH;
-        const PAGE_FLAGS: u64 = REGION_PAGE_FLAGS;
+        const PAGE_PROPERTY: PageProperty = REGION_PAGE_PROPERTY;
 
         fn _slot_pop() -> Option<SlotEntry> {
             slot_pop_impl::<KstackRegion, BITMAP_WORDS, REGION_PCP_CAPACITY, REGION_PCP_REFILL_BATCH>(
@@ -756,7 +755,7 @@ mod ustack {
         const PCP_CAPACITY: usize = REGION_PCP_CAPACITY;
         const PCP_REFILL_BATCH: usize = REGION_PCP_REFILL_BATCH;
         const PCP_SPILL_BATCH: usize = REGION_PCP_SPILL_BATCH;
-        const PAGE_FLAGS: u64 = REGION_PAGE_FLAGS;
+        const PAGE_PROPERTY: PageProperty = REGION_PAGE_PROPERTY;
 
         fn _slot_pop() -> Option<SlotEntry> {
             slot_pop_impl::<UstackRegion, BITMAP_WORDS, REGION_PCP_CAPACITY, REGION_PCP_REFILL_BATCH>(

@@ -171,7 +171,7 @@ pub struct DequeuedSignal {
 
 /// The one lock class of every pending set. A leaf: nothing is acquired under
 /// it, and a post publishes its wake only after releasing it.
-const SIGQUEUE_CLASS: &crate::sync::lock_tracking::LockClassKey =
+const SIGQUEUE_CLASS: &crate::sync::lock_graph::LockClassKey =
     crate::lock_class!("Task.sigqueue", LOCK_LEVEL_RESOURCE);
 
 /// One pending set: bit `n - 1` for signal `n`, and the records behind it.

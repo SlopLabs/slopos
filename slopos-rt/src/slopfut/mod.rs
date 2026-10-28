@@ -7,9 +7,8 @@
 //! (Notify/channels), [`signal`] (ctrl_c via signalfd), and [`process`]
 //! (Child::wait via pidfd).
 //!
-//! SLOPRING §7.1: deferred completions progress only inside a blocking
-//! `ring_enter`, so the runtime is single-threaded and its only sleep is the
-//! reactor's `park`.
+//! Deferred completions progress only inside a blocking `ring_enter`, so the
+//! runtime is single-threaded and its only sleep is the reactor's `park`.
 
 use super::Ring;
 

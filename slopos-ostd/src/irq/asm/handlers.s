@@ -123,12 +123,6 @@ isr18: INTERRUPT_HANDLER 18, 0    # Machine Check
 .global isr19
 isr19: INTERRUPT_HANDLER 19, 0    # SIMD FP Exception
 
-# Syscall trap-gate stub (vector 0x80). Vestigial: the SYSCALL fast path
-# (LSTAR) is the production entry, but the IDT slot must still be populated
-# in case userland issues `int 0x80` directly.
-.global isr128
-isr128: INTERRUPT_HANDLER 128, 0
-
 # Legacy IRQ handlers (vectors 32-47, IOAPIC RTE 0-15).
 .global irq0
 irq0:  INTERRUPT_HANDLER 32, 0    # Timer

@@ -15,8 +15,8 @@ use slopos_verity_core::{BLOCK, Builder, Geometry};
 
 use crate::basefs::{BaseFs, generation_of, program_of, program_path};
 use crate::blockdev::MemoryBlockDevice;
-use crate::ext2::cache::{BlockCache, CACHE_ENTRIES_MIN};
-use crate::ext2::{Ext2Fs, NewInode};
+use crate::ext4::cache::{BlockCache, CACHE_ENTRIES_MIN};
+use crate::ext4::{Ext4Fs, NewInode};
 use crate::extension::{
     self, ActivateError, IndexError, OpenError, POOL, deactivate, is_activation, label_of,
 };
@@ -97,21 +97,21 @@ fn mark_read_only(sb: &mut [u8]) {
 }
 
 /// `device` mounted for `body`, in a frame of its own: the superblock, cache
-/// and `Ext2Fs` leave the body no room under the 2 KiB stack gate.
+/// and `Ext4Fs` leave the body no room under the 2 KiB stack gate.
 #[inline(never)]
 fn mounted(
     device: &MemoryBlockDevice,
-    body: &mut dyn FnMut(&mut Ext2Fs<'_>) -> Option<()>,
+    body: &mut dyn FnMut(&mut Ext4Fs<'_>) -> Option<()>,
 ) -> Option<()> {
-    let (sb, geom) = Ext2Fs::mount_params(device).ok()?;
+    let (sb, geom) = Ext4Fs::mount_params(device).ok()?;
     let mut cache = BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN).ok()?;
-    let mut fs = Ext2Fs::new(device, &mut cache, sb, geom);
+    let mut fs = Ext4Fs::new(device, &mut cache, sb, geom);
     body(&mut fs)?;
     fs.sync().ok()
 }
 
 #[inline(never)]
-fn put(fs: &mut Ext2Fs<'_>, path: &str, mode: u32, data: &[u8]) -> Option<()> {
+fn put(fs: &mut Ext4Fs<'_>, path: &str, mode: u32, data: &[u8]) -> Option<()> {
     let path = path.trim_start_matches('/');
     let (dirs, name) = path.rsplit_once('/').unwrap_or(("", path));
     let mut parent = 2;

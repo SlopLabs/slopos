@@ -2,10 +2,11 @@ use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
 
 use crate::demand::{can_satisfy_fault, is_demand_fault};
-use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm::{process_vm_alloc, process_vm_get_region};
 use crate::tests::test_fixtures::ProcessVmGuard;
 use crate::vma_region::{Protection, RegionBacking, RegionPurpose, VmaRegion};
+use slopos_ostd::mm::page_property::PageProperty;
 
 fn anon_region(prot: Protection) -> VmaRegion {
     VmaRegion::new(prot, RegionBacking::Anonymous, true, RegionPurpose::General)
@@ -22,10 +23,10 @@ pub fn test_demand_fault_present_page() -> TestResult {
         return fail!("create VM");
     };
 
-    let addr = process_vm_alloc(vm.process, PAGE_SIZE_4KB, PageFlags::WRITABLE.bits() as u32);
+    let addr = process_vm_alloc(vm.process, PAGE_SIZE_4KB, true);
     assert_test!(addr != 0, "process_vm_alloc failed");
 
-    let Some(_phys) = vm.map_test_page(addr, PageFlags::USER_RW.bits()) else {
+    let Some(_phys) = vm.map_test_page(addr, PageProperty::USER_RW) else {
         return fail!("map test page");
     };
 
@@ -59,7 +60,7 @@ pub fn test_demand_fault_lazy_anon_vma() -> TestResult {
         return fail!("create VM");
     };
 
-    let addr = process_vm_alloc(vm.process, PAGE_SIZE_4KB, PageFlags::WRITABLE.bits() as u32);
+    let addr = process_vm_alloc(vm.process, PAGE_SIZE_4KB, true);
     assert_test!(addr != 0, "process_vm_alloc failed");
 
     let region = process_vm_get_region(vm.process, addr);
@@ -182,7 +183,7 @@ pub fn test_demand_read_of_a_prot_none_mapping_is_fatal() -> TestResult {
     let packed = crate::process_vm::pack_process_vm_handle(handle);
 
     // 0x04: user read against an absent page — the one shape whose access
-    // bits name nothing `can_satisfy_fault` used to look at.
+    // bits name none of the write, exec or reserved-bit checks.
     let outcome = crate::page_fault::try_resolve_user_fault(addr, 0x04, packed, 1);
     assert_test!(
         outcome

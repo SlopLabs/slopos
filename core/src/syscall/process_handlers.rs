@@ -5,7 +5,7 @@ use slopos_abi::signal::{
 };
 use slopos_abi::spawn::{
     SPAWN_MAX_FD_ACTIONS, SPAWN_SET_ALL, SPAWN_SET_GID, SPAWN_SET_GROUPS, SPAWN_SET_LOGIN,
-    SPAWN_SET_UID, SpawnAttrs, SpawnFdAction, SpawnFdActionKind, SpawnLoginAttrs,
+    SPAWN_SET_UID, SpawnAttrs, SpawnFdAction, SpawnFdActionKind,
 };
 use slopos_abi::syscall::{
     ARCH_GET_FS, ARCH_SET_FS, FUTEX_BITSET_MATCH_ANY, FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK,
@@ -21,10 +21,10 @@ use slopos_fs::fileio::FdTable;
 use slopos_fs::vfs::canon::{CanonPath, canonicalise_at};
 use slopos_fs::vfs::path::RESOLVE_MUST_BE_DIR;
 use slopos_fs::vfs::traits::VfsError;
-use slopos_ostd::KVec;
 use slopos_ostd::authority::Capability;
 use slopos_ostd::process::cred::NGROUPS_MAX;
 use slopos_ostd::task::{ExitInfo, new_group_in_session, new_session_group};
+use slopos_ostd::{KBox, KVec};
 use slopos_sched::futex::{self, FutexKey};
 use slopos_sched::scheduler::task_apply_affinity;
 use slopos_sched::task::{
@@ -33,9 +33,9 @@ use slopos_sched::task::{
 };
 use slopos_sched::task_struct::{Current, Task};
 
-use slopos_arch::cpu;
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
-use slopos_mm::user_ptr::UserPtr as MmUserPtr;
+use slopos_ostd::cpu::x86_64 as cpu;
+use slopos_ostd::user::ptr::UserPtr as OstdUserPtr;
 
 use crate::exec;
 use crate::syscall::args::{Fd, UserBytes, UserPath, UserPtr};
@@ -51,7 +51,7 @@ fn read_user_ptr_array_terminated(base_ptr: u64, max_count: usize) -> Result<KVe
         let slot_addr = base_ptr
             .checked_add((idx * core::mem::size_of::<u64>()) as u64)
             .ok_or(())?;
-        let user_slot = MmUserPtr::<u64>::try_new(slot_addr).map_err(|_| ())?;
+        let user_slot = OstdUserPtr::<u64>::try_new(slot_addr).map_err(|_| ())?;
         let value = copy_from_user(user_slot).map_err(|_| ())?;
         if value == 0 {
             return Ok(out);
@@ -77,7 +77,7 @@ fn read_user_ptr_array_count(
         let slot_addr = base_ptr
             .checked_add((idx * core::mem::size_of::<u64>()) as u64)
             .ok_or(())?;
-        let user_slot = MmUserPtr::<u64>::try_new(slot_addr).map_err(|_| ())?;
+        let user_slot = OstdUserPtr::<u64>::try_new(slot_addr).map_err(|_| ())?;
         let value = copy_from_user(user_slot).map_err(|_| ())?;
         if value == 0 {
             break;
@@ -147,7 +147,7 @@ fn read_user_spawn_actions(attrs: &SpawnAttrs) -> Result<KVec<exec::FdAction>, E
             .checked_add((idx * core::mem::size_of::<SpawnFdAction>()) as u64)
             .ok_or(Errno::EFAULT)?;
         let user_slot =
-            MmUserPtr::<SpawnFdAction>::try_new(slot_addr).map_err(|_| Errno::EFAULT)?;
+            OstdUserPtr::<SpawnFdAction>::try_new(slot_addr).map_err(|_| Errno::EFAULT)?;
         let raw = copy_from_user(user_slot).map_err(|_| Errno::EFAULT)?;
         let action = match SpawnFdActionKind::from_u32(raw.kind).ok_or(Errno::EINVAL)? {
             SpawnFdActionKind::CloneFd => exec::FdAction::Clone {
@@ -256,7 +256,7 @@ fn spawn_groups(attrs: &SpawnAttrs) -> Result<Option<KVec<u32>>, Errno> {
             .groups_ptr
             .checked_add((idx * core::mem::size_of::<u32>()) as u64)
             .ok_or(Errno::EFAULT)?;
-        let user = MmUserPtr::<u32>::try_new(slot).map_err(|_| Errno::EFAULT)?;
+        let user = OstdUserPtr::<u32>::try_new(slot).map_err(|_| Errno::EFAULT)?;
         let gid = copy_from_user(user).map_err(|_| Errno::EFAULT)?;
         groups.push(gid).map_err(|_| Errno::ENOMEM)?;
     }
@@ -267,18 +267,12 @@ fn spawn_id(attrs: &SpawnAttrs, which: u32, id: u32) -> Option<u32> {
     (attrs.set & which != 0).then_some(id)
 }
 
-/// The login tag past `attrs` at `attrs_ptr`, read only when asked for: a
-/// caller built against interface 1 passes no more than [`SpawnAttrs`].
+/// The caller's [`SpawnAttrs`], boxed: the handler's frame is at the 2 KiB gate.
 #[inline(never)]
-fn spawn_login(attrs: &SpawnAttrs, attrs_ptr: u64) -> Result<Option<u32>, Errno> {
-    if attrs.set & SPAWN_SET_LOGIN == 0 {
-        return Ok(None);
-    }
-    let at = attrs_ptr
-        .checked_add(core::mem::offset_of!(SpawnLoginAttrs, login) as u64)
-        .ok_or(Errno::EFAULT)?;
-    let user = MmUserPtr::<u32>::try_new(at).map_err(|_| Errno::EFAULT)?;
-    copy_from_user(user).map(Some).map_err(|_| Errno::EFAULT)
+fn read_spawn_attrs(attrs_ptr: u64) -> Result<KBox<SpawnAttrs>, Errno> {
+    let user = OstdUserPtr::<SpawnAttrs>::try_new(attrs_ptr).map_err(|_| Errno::EFAULT)?;
+    let attrs = copy_from_user(user).map_err(|_| Errno::EFAULT)?;
+    KBox::try_new(attrs).map_err(|_| Errno::ENOMEM)
 }
 
 /// Stage the program path off the caller's buffer. Length-delimited rather
@@ -310,8 +304,7 @@ define_syscall!(syscall_spawn_path
         return Err(Errno::EFAULT);
     }
 
-    let attrs_user = MmUserPtr::<SpawnAttrs>::try_new(attrs_ptr).map_err(|_| Errno::EFAULT)?;
-    let attrs = copy_from_user(attrs_user).map_err(|_| Errno::EFAULT)?;
+    let attrs = read_spawn_attrs(attrs_ptr)?;
 
     let flags = validate_spawn_flags(attrs.flags)?;
     if attrs.caps & !slopos_ostd::authority::CAP_MASK_ALL != 0 || attrs.set & !SPAWN_SET_ALL != 0 {
@@ -376,7 +369,6 @@ define_syscall!(syscall_spawn_path
         priority,
         flags,
         &attrs,
-        attrs_ptr,
         groups.as_deref(),
         actions.as_slice(),
         child_cwd.as_bytes(),
@@ -399,12 +391,10 @@ fn spawn_as_asked(
     priority: TaskPriority,
     flags: u16,
     attrs: &SpawnAttrs,
-    attrs_ptr: u64,
     groups: Option<&[u32]>,
     actions: &[exec::FdAction],
     cwd: &[u8],
 ) -> Result<u32, Errno> {
-    let login = spawn_login(attrs, attrs_ptr)?;
     // The spawner's own table, so the child's fd actions clone from the process
     // that asked rather than from whoever holds its number by then.
     exec::spawn_program_with_cwd(
@@ -418,7 +408,7 @@ fn spawn_as_asked(
             uid: spawn_id(attrs, SPAWN_SET_UID, attrs.uid),
             gid: spawn_id(attrs, SPAWN_SET_GID, attrs.gid),
             groups,
-            login,
+            login: spawn_id(attrs, SPAWN_SET_LOGIN, attrs.login),
         }),
         actions,
         attrs.sigdefault_mask,
@@ -783,7 +773,7 @@ define_syscall!(syscall_execve
     match exec_result {
         Ok(exec) => {
             if tls_tp != 0 {
-                let user_tp = match MmUserPtr::<u64>::try_new(tls_tp) {
+                let user_tp = match OstdUserPtr::<u64>::try_new(tls_tp) {
                     Ok(ptr) => ptr,
                     Err(_) => return SyscallResult::Err(Errno::EFAULT),
                 };
@@ -815,7 +805,7 @@ define_syscall!(syscall_execve
                 let t = ctx.task();
                 t.set_fs_base(tls_tp);
             }
-            slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, tls_tp);
+            slopos_ostd::arch::x86_64::msr::write_msr(slopos_ostd::arch::x86_64::msr::Msr::FS_BASE, tls_tp);
             enter_image(ctx.user_ctx(), entry_point, stack_ptr);
 
             // The new image must never see the previous program's vector
@@ -865,7 +855,7 @@ const AFFINITY_MASK_BYTES: usize = core::mem::size_of::<u32>();
 /// One bit per online CPU. `Task::cpu_affinity` stores 0 for "any CPU", and
 /// this is the set that means.
 fn online_cpu_mask() -> u32 {
-    let count = slopos_arch::pcr::get_cpu_count();
+    let count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     if count >= u32::BITS as usize {
         u32::MAX
     } else {
@@ -898,7 +888,7 @@ define_syscall!(syscall_getcpu
     -> Result<(), Errno>
 {
     if let Some(out) = cpu {
-        let id = slopos_arch::pcr::get_current_cpu() as u32;
+        let id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id() as u32;
         copy_to_user(out.inner(), &id).map_err(|_| Errno::EFAULT)?;
     }
     // No NUMA topology is discovered, so every CPU sits on node 0.
@@ -944,7 +934,7 @@ define_syscall!(syscall_sched_getaffinity
 {
     // A buffer that cannot name every online CPU is refused rather than
     // answered with a truncated set the caller would read as complete.
-    if cpusetsize.saturating_mul(8) < slopos_arch::pcr::get_cpu_count() as u64 {
+    if cpusetsize.saturating_mul(8) < slopos_ostd::cpu::x86_64::pcr::get_cpu_count() as u64 {
         return Err(Errno::EINVAL);
     }
     let task_ref = affinity_target(pid, task_id, process_id)?;
@@ -1193,7 +1183,7 @@ define_syscall!(syscall_arch_prctl
             }
             let t = ctx.task();
             t.fs_base.store(addr, Ordering::Release);
-            slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, addr);
+            slopos_ostd::arch::x86_64::msr::write_msr(slopos_ostd::arch::x86_64::msr::Msr::FS_BASE, addr);
             Ok(())
         }
         ARCH_GET_FS => {
@@ -1202,7 +1192,7 @@ define_syscall!(syscall_arch_prctl
             }
             let t = ctx.task();
             let fs_base_val = t.fs_base.load(Ordering::Acquire);
-            let user_ptr = MmUserPtr::<u64>::try_new(addr).map_err(|_| Errno::EFAULT)?;
+            let user_ptr = OstdUserPtr::<u64>::try_new(addr).map_err(|_| Errno::EFAULT)?;
             copy_to_user(user_ptr, &fs_base_val).map_err(|_| Errno::EFAULT)?;
             Ok(())
         }
@@ -1242,7 +1232,7 @@ define_syscall!(syscall_clone
 });
 
 pub(crate) fn read_timeout(addr: u64) -> Result<Timespec, Errno> {
-    let ptr = MmUserPtr::<Timespec>::try_new(addr).map_err(|_| Errno::EFAULT)?;
+    let ptr = OstdUserPtr::<Timespec>::try_new(addr).map_err(|_| Errno::EFAULT)?;
     let ts = copy_from_user(ptr).map_err(|_| Errno::EFAULT)?;
     if ts.tv_sec < 0 || !(0..1_000_000_000).contains(&ts.tv_nsec) {
         return Err(Errno::EINVAL);
@@ -1310,7 +1300,7 @@ define_syscall!(syscall_futex
         return Err(Errno::EINVAL);
     }
 
-    let user_word = MmUserPtr::<u32>::try_new(uaddr).map_err(|_| Errno::EFAULT)?;
+    let user_word = OstdUserPtr::<u32>::try_new(uaddr).map_err(|_| Errno::EFAULT)?;
     if copy_from_user(user_word).is_err() {
         return Err(Errno::EFAULT);
     }
@@ -1348,7 +1338,7 @@ define_syscall!(syscall_futex
             if (uaddr2 & 0x3) != 0 || uaddr2 == uaddr {
                 return Err(Errno::EINVAL);
             }
-            let second = MmUserPtr::<u32>::try_new(uaddr2).map_err(|_| Errno::EFAULT)?;
+            let second = OstdUserPtr::<u32>::try_new(uaddr2).map_err(|_| Errno::EFAULT)?;
             if copy_from_user(second).is_err() {
                 return Err(Errno::EFAULT);
             }
@@ -1419,7 +1409,7 @@ define_syscall!(syscall_prlimit64
     // Read before write, so a call that both queries and sets reports what was
     // in force when it was made rather than what it just installed.
     if old_ptr != 0 {
-        let out = MmUserPtr::<RLimit64>::try_new(old_ptr).map_err(|_| Errno::EFAULT)?;
+        let out = OstdUserPtr::<RLimit64>::try_new(old_ptr).map_err(|_| Errno::EFAULT)?;
         // Soft and hard are the same number: there is no privileged path to
         // raise one above the other, so reporting them apart would imply
         // headroom that cannot be claimed.
@@ -1429,7 +1419,7 @@ define_syscall!(syscall_prlimit64
     }
 
     if new_ptr != 0 {
-        let src = MmUserPtr::<RLimit64>::try_new(new_ptr).map_err(|_| Errno::EFAULT)?;
+        let src = OstdUserPtr::<RLimit64>::try_new(new_ptr).map_err(|_| Errno::EFAULT)?;
         let want = copy_from_user(src).map_err(|_| Errno::EFAULT)?;
         if want.rlim_cur > want.rlim_max {
             return Err(Errno::EINVAL);

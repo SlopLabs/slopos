@@ -2,12 +2,11 @@
 //! wire layouts, opcodes and flag constants shared by the kernel `ring` crate
 //! and the userland SlopRing runtime.
 
-/// Maximum SQ entries a single `ring_setup` may request (SLOPRING § 6.1);
-/// power of two.
+/// Maximum SQ entries a single `ring_setup` may request; a power of two.
 pub const SLOPRING_MAX_ENTRIES: u32 = 4096;
 
 /// CQ headroom multiplier over the SQ (`cq_entries = SQ_TO_CQ * sq_entries`),
-/// matching Linux io_uring's default (SLOPRING § 4.3).
+/// matching Linux io_uring's default.
 pub const SLOPRING_SQ_TO_CQ: u32 = 2;
 
 /// No-op; completes immediately with `res = 0`.
@@ -37,7 +36,7 @@ pub const OP_CLOSE: u8 = 11;
 /// + `Sqe.buf_index`): the result CQE carries [`SLOPRING_CQE_F_MORE`] and a
 /// later terminal [`SLOPRING_CQE_F_NOTIF`] one signals the pin is dropped.
 /// Sound only for single-transmit datagrams (UDP/raw); other families fall
-/// back to the single-copy `OP_SEND` path (SLOPRING § 13).
+/// back to the single-copy `OP_SEND` path.
 pub const OP_SEND_ZC: u8 = 12;
 
 /// `connect(fd, sockaddr)` — `addr` is the user VA of a
@@ -57,10 +56,6 @@ pub const SLOPRING_CQE_F_MORE: u32 = 1 << 0;
 /// A kernel-picked provided-buffer id is valid in the high 16 bits of `flags`
 /// ([`SLOPRING_CQE_BUFFER_SHIFT`]).
 pub const SLOPRING_CQE_F_BUFFER: u32 = 1 << 1;
-
-/// Incremental provided-buffer consumption: the rest of the buffer comes back
-/// in a later CQE. Reserved; not yet emitted.
-pub const SLOPRING_CQE_F_BUF_MORE: u32 = 1 << 2;
 
 /// Terminal CQE of an `OP_SEND_ZC`, posted once the kernel has released its
 /// last reference to the pinned send buffer: userland may reuse it.
@@ -111,30 +106,13 @@ pub const SLOPRING_MAX_BUF_GROUPS: u16 = 64;
 /// io_uring's `IOU_PBUF_RING` cap so a `u16` tail/head never wraps mid-ring).
 pub const SLOPRING_PBUF_RING_MAX_ENTRIES: u32 = 32768;
 
-/// `RegisterBufRingCmd.flags`: incremental buffer consumption — the remainder
-/// comes back in a later CQE carrying [`SLOPRING_CQE_F_BUF_MORE`].
-pub const SLOPRING_PBUF_RING_INC: u16 = 1 << 0;
-
 /// Byte offset of the user-owned producer `tail` (`u16`) within a registered
 /// provided buffer ring. Overlaps `bufs[0].resv`, exactly like Linux's
 /// `io_uring_buf_ring` union, so `bufs[0]` is still a usable buffer slot.
 pub const SLOPRING_PBUF_RING_TAIL_OFFSET: usize = 14;
 
-/// The whole ring region is a single mapping (the only mode today).
-pub const SLOPRING_FEAT_SINGLE_MMAP: u32 = 1 << 0;
-
-/// The kernel honours [`SLOPRING_SQE_MULTISHOT`]; userland gates on this bit.
-pub const SLOPRING_FEAT_MULTISHOT: u32 = 1 << 1;
-
-/// The kernel implements `ring_register` provided/fixed buffers; userland
-/// gates on this bit.
-pub const SLOPRING_FEAT_REG_BUFFERS: u32 = 1 << 2;
-
-/// Reserved: wait for events even when nothing was submitted.
-pub const SLOPRING_ENTER_GETEVENTS: u32 = 1 << 0;
-
 /// One submission, 64 bytes. SQ slot `i` *is* SQE `i` — a direct array, no
-/// indirection (SLOPRING § 4.1).
+/// indirection.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sqe {
@@ -348,7 +326,7 @@ pub struct RegisterBufRingCmd {
     pub ring_entries: u32,
     /// Target group id (`1..=SLOPRING_MAX_BUF_GROUPS`).
     pub buf_group: u16,
-    /// [`SLOPRING_PBUF_RING_INC`], or 0.
+    /// Zero.
     pub flags: u16,
 }
 
@@ -431,9 +409,8 @@ pub struct RingParams {
     pub sq_entries: u32,
     /// CQ slot count (`= SLOPRING_SQ_TO_CQ * sq_entries`).
     pub cq_entries: u32,
-    /// Negotiated feature bits ([`SLOPRING_FEAT_SINGLE_MMAP`]).
-    pub flags: u32,
-    pub _pad0: u32,
+    /// Zero.
+    pub _resv: u64,
 
     /// Offset of the SQ `head` index (kernel-owned producer cursor read).
     pub sq_off_head: u32,
@@ -465,7 +442,7 @@ const _: () = assert!(core::mem::size_of::<RingParams>() % 8 == 0);
 
 // Userland reads back what the kernel copied as a `#[repr(C)]` struct, so the
 // wire image must equal the in-memory layout — including the 4 bytes of
-// implicit padding before the first `u64`.
+// implicit padding before `region_addr`.
 const _: () = assert!(core::mem::size_of::<RingParams>() == 80);
 const _: () = assert!(core::mem::offset_of!(RingParams, region_addr) == 64);
 const _: () = assert!(core::mem::offset_of!(RingParams, region_bytes) == 72);
@@ -478,8 +455,7 @@ impl RingParams {
     pub const ZERO: Self = Self {
         sq_entries: 0,
         cq_entries: 0,
-        flags: 0,
-        _pad0: 0,
+        _resv: 0,
         sq_off_head: 0,
         sq_off_tail: 0,
         sq_off_mask: 0,
@@ -508,8 +484,7 @@ impl RingParams {
         }
         put!(sq_entries);
         put!(cq_entries);
-        put!(flags);
-        put!(_pad0);
+        put!(_resv);
         put!(sq_off_head);
         put!(sq_off_tail);
         put!(sq_off_mask);
@@ -552,8 +527,7 @@ impl RingParams {
         Self {
             sq_entries: get32!(sq_entries),
             cq_entries: get32!(cq_entries),
-            flags: get32!(flags),
-            _pad0: get32!(_pad0),
+            _resv: get64!(_resv),
             sq_off_head: get32!(sq_off_head),
             sq_off_tail: get32!(sq_off_tail),
             sq_off_mask: get32!(sq_off_mask),
@@ -575,7 +549,7 @@ const U32: u32 = 4;
 
 /// Computed offsets and sizes for a ring with `sq_entries` SQ slots. Kernel and
 /// userland both derive the region layout from this one function, so they
-/// cannot disagree (SLOPRING § 4.1).
+/// cannot disagree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RingLayout {
     pub sq_entries: u32,
@@ -667,8 +641,7 @@ impl RingLayout {
         RingParams {
             sq_entries: self.sq_entries,
             cq_entries: self.cq_entries,
-            flags: SLOPRING_FEAT_SINGLE_MMAP | SLOPRING_FEAT_MULTISHOT | SLOPRING_FEAT_REG_BUFFERS,
-            _pad0: 0,
+            _resv: 0,
             sq_off_head: self.sq_off_head,
             sq_off_tail: self.sq_off_tail,
             sq_off_mask: self.sq_off_mask,
@@ -713,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn sqe_v2_layout_round_trips() {
+    fn sqe_layout_round_trips() {
         let mut s = Sqe::ZERO;
         s.sqe_flags2 = 0x0102;
         s.buf_group = 0x0304;
@@ -774,10 +747,7 @@ mod tests {
         assert_eq!(p.cq_entries, 64);
         assert_eq!(p.sq_off_array, l.sqe_array_off);
         assert_eq!(p.cq_off_array, l.cqe_array_off);
-        assert_eq!(
-            p.flags,
-            SLOPRING_FEAT_SINGLE_MMAP | SLOPRING_FEAT_MULTISHOT | SLOPRING_FEAT_REG_BUFFERS
-        );
+        assert_eq!(p._resv, 0);
     }
 
     #[test]
@@ -796,7 +766,7 @@ mod tests {
             ring_addr: 0xdead_beef_0bad_f00d,
             ring_entries: 4096,
             buf_group: 7,
-            flags: SLOPRING_PBUF_RING_INC,
+            flags: 0x0102,
         };
         assert_eq!(RegisterBufRingCmd::from_bytes(&c.to_bytes()), c);
         let b = c.to_bytes();
@@ -845,8 +815,7 @@ mod tests {
         let p2 = RingParams {
             sq_entries: 0x0102_0304,
             cq_entries: 0x0506_0708,
-            flags: 0x090a_0b0c,
-            _pad0: 0x0d0e_0f10,
+            _resv: 0x0d0e_0f10_090a_0b0c,
             sq_off_head: 0x1112_1314,
             sq_off_tail: 0x1516_1718,
             sq_off_mask: 0x191a_1b1c,

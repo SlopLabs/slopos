@@ -92,6 +92,7 @@ impl Medium {
             layout::MEDIUM_LOADER,
             layout::MEDIUM_LOADER_LICENSE,
             layout::MEDIUM_LOADER_NOTICES,
+            layout::MEDIUM_NOTICE,
             layout::MEDIUM_APPS,
         ] {
             if !medium.has(file) {

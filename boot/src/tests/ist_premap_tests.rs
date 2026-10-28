@@ -2,12 +2,12 @@
 //! rather than reporting anything, so the mappings are checked here.
 
 use slopos_abi::addr::VirtAddr;
-use slopos_arch::get_cpu_count;
 use slopos_mm::memory_layout_defs::{
     EMERGENCY_DSTACK_PAGES, EMERGENCY_SAFE_STACK_PAGES, EXC_DSTACK_PAGES, EXCEPTION_STACK_PAGES,
 };
 use slopos_mm::paging::{is_mapped, virt_to_phys};
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
+use slopos_ostd::cpu::x86_64::pcr::get_cpu_count;
 use slopos_testing::{TestResult, assert_test};
 
 use crate::ist_stacks::{
@@ -30,7 +30,7 @@ fn check_guarded_region(
     for page in 0..guard_pages {
         let addr = VirtAddr::new(guard_start + page * PAGE_SIZE_4KB);
         assert_test!(
-            is_mapped(addr) == 0,
+            !is_mapped(addr),
             "CPU{} {} guard page 0x{:x} is mapped",
             cpu_id,
             what,

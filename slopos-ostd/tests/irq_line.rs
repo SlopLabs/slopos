@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use slopos_ostd::irq::line::{
     self, ALLOC_VECTOR_BASE, ALLOC_VECTOR_END, IrqAllocator, IrqContext, IrqError, dispatch,
-    register_irq_reserved, reset_for_test, shutdown,
+    reset_for_test, shutdown,
 };
 
 static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
@@ -25,20 +25,6 @@ fn alloc_returns_distinct_vectors_in_range() {
     assert_ne!(a.vector(), b.vector());
     for v in [a.vector(), b.vector()] {
         assert!((ALLOC_VECTOR_BASE..ALLOC_VECTOR_END).contains(&v));
-    }
-}
-
-#[test]
-fn reserved_vectors_are_excluded() {
-    let _g = serial();
-    let reserved: &[u8] = &[ALLOC_VECTOR_BASE, ALLOC_VECTOR_BASE + 5, 0xEC, 0x80];
-    slopos_ostd::sync::run_bsp_init_for_test(|t| {
-        register_irq_reserved(t, reserved);
-    });
-    for _ in 0..50 {
-        let line = IrqAllocator::alloc().expect("alloc");
-        let v = line.vector();
-        assert!(!reserved.contains(&v), "alloc returned reserved {}", v);
     }
 }
 

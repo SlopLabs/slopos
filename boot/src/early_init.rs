@@ -1,14 +1,10 @@
-use core::{
-    ffi::{CStr, c_char},
-    ptr,
-};
+use core::ffi::CStr;
 use slopos_ostd::lock_class;
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use slopos_drivers::serial;
 use slopos_ostd::klog::{self, KlogLevel};
-use slopos_ostd::sync::KernelSync;
-use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
+use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::sync::spin::SpinLock;
 use slopos_ostd::wl_currency;
 use slopos_ostd::{klog_debug, klog_info, klog_set_level};
@@ -180,10 +176,6 @@ pub const fn boot_init_priority(val: u32) -> u32 {
 }
 
 struct BootRuntimeContext {
-    /// Points at bootloader-published data that is immutable for the kernel's
-    /// lifetime. `KernelSync` satisfies the enclosing `SpinLock`'s `Sync` bound
-    /// without a hand-written `unsafe impl Send`.
-    memmap: KernelSync<*const limine_protocol::LimineMemmapResponse>,
     hhdm_offset: u64,
     cmdline: Option<&'static str>,
 }
@@ -191,7 +183,6 @@ struct BootRuntimeContext {
 impl BootRuntimeContext {
     const fn new() -> Self {
         Self {
-            memmap: KernelSync::new(ptr::null()),
             hhdm_offset: 0,
             cmdline: None,
         }
@@ -202,7 +193,6 @@ static BOOT_RUNTIME: SpinLock<BootRuntimeContext> = SpinLock::new(
     BootRuntimeContext::new(),
     lock_class!("BOOT_RUNTIME", LOCK_LEVEL_RESOURCE),
 );
-static BOOT_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 static BOOT_TOTAL_STEPS: AtomicUsize = AtomicUsize::new(0);
 static BOOT_DONE_STEPS: AtomicUsize = AtomicUsize::new(0);
@@ -214,16 +204,16 @@ fn bytes_to_str(bytes: &[u8]) -> &str {
         .unwrap_or("<invalid>")
 }
 
-fn boot_info(msg: &'static [u8]) {
-    klog_info!("{}", bytes_to_str(msg));
+fn boot_info(msg: &str) {
+    klog_info!("{}", msg);
 }
 
-fn boot_debug(msg: &'static [u8]) {
-    klog_debug!("{}", bytes_to_str(msg));
+fn boot_debug(msg: &str) {
+    klog_debug!("{}", msg);
 }
 
 fn boot_init_report_phase(level: KlogLevel, prefix: &[u8], value: Option<&[u8]>) {
-    if !klog::is_enabled_level(level) {
+    if !klog::is_enabled(level) {
         return;
     }
     let prefix_str = bytes_to_str(prefix);
@@ -235,7 +225,7 @@ fn boot_init_report_phase(level: KlogLevel, prefix: &[u8], value: Option<&[u8]>)
 }
 
 fn boot_init_report_step(level: KlogLevel, label: &[u8], value: Option<&[u8]>) {
-    if !klog::is_enabled_level(level) {
+    if !klog::is_enabled(level) {
         return;
     }
     let label_str = bytes_to_str(label);
@@ -322,7 +312,7 @@ fn boot_run_step<'b>(
         let optional = (step.flags & BOOT_INIT_FLAG_OPTIONAL) != 0;
         boot_init_report_failure(phase_name, Some(step.name));
         if optional {
-            boot_info(b"Optional boot step failed, continuing...\0");
+            boot_info("Optional boot step failed, continuing...");
             boot_init_report_progress(step);
             return 0;
         }
@@ -396,44 +386,12 @@ pub fn boot_init_run_all<'b>(ctx: &mut BootCtx<'b, BspInit>) -> i32 {
     0
 }
 
-pub fn boot_get_memmap() -> *const limine_protocol::LimineMemmapResponse {
-    *BOOT_RUNTIME.lock().memmap
-}
-
 pub fn boot_get_hhdm_offset() -> u64 {
     BOOT_RUNTIME.lock().hhdm_offset
 }
 
-pub fn boot_get_cmdline() -> *const c_char {
-    BOOT_RUNTIME
-        .lock()
-        .cmdline
-        .map(|s| s.as_ptr() as *const c_char)
-        .unwrap_or(ptr::null())
-}
-
-pub fn boot_mark_initialized() {
-    BOOT_INITIALIZED.store(true, Ordering::Release);
-}
-
-pub fn is_kernel_initialized() -> i32 {
-    BOOT_INITIALIZED.load(Ordering::Acquire) as i32
-}
-
-pub fn get_initialization_progress() -> i32 {
-    if BOOT_INITIALIZED.load(Ordering::Acquire) {
-        100
-    } else {
-        50
-    }
-}
-
-pub fn report_kernel_status() {
-    if BOOT_INITIALIZED.load(Ordering::Acquire) {
-        boot_info(b"SlopOS: Kernel status - INITIALIZED\0");
-    } else {
-        boot_info(b"SlopOS: Kernel status - INITIALIZING\0");
-    }
+pub fn boot_get_cmdline() -> Option<&'static str> {
+    BOOT_RUNTIME.lock().cmdline
 }
 
 use slopos_sched::scheduler::enter_scheduler;
@@ -446,36 +404,29 @@ fn boot_step_serial_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     serial::write_line("BOOT: serial step -> klog backend registered by serial::init");
 
     slopos_drivers::serial::write_line("SERIAL: init ok");
-    boot_debug(b"Serial console ready on COM1\0");
+    boot_debug("Serial console ready on COM1");
 }
 
 fn boot_step_boot_banner_fn(_ctx: &mut BootCtx<'_, BspInit>) {
-    boot_info(b"SlopOS Kernel Started!\0");
-    boot_info(b"Booting via Limine Protocol...\0");
+    boot_info("SlopOS Kernel Started!");
+    boot_info("Booting via Limine Protocol...");
 }
 
 fn boot_step_limine_protocol_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
-    boot_debug(b"Initializing Limine protocol interface...\0");
-    if limine_protocol::init_limine_protocol() != 0 {
-        boot_info(b"ERROR: Limine protocol initialization failed\0");
+    boot_debug("Initializing Limine protocol interface...");
+    if !limine_protocol::init_limine_protocol() {
+        boot_info("ERROR: Limine protocol initialization failed");
         return -1;
     }
-    boot_info(b"Limine protocol interface ready.\0");
+    boot_info("Limine protocol interface ready.");
 
-    if limine_protocol::is_memory_map_available() == 0 {
-        boot_info(b"ERROR: Limine did not provide a memory map\0");
-        return -1;
-    }
-
-    let memmap = limine_protocol::limine_get_memmap_response();
-    if memmap.is_null() {
-        boot_info(b"ERROR: Limine memory map response pointer is NULL\0");
+    if !limine_protocol::is_memory_map_available() {
+        boot_info("ERROR: Limine did not provide a memory map");
         return -1;
     }
 
     {
         let mut state = BOOT_RUNTIME.lock();
-        state.memmap = KernelSync::new(memmap);
         state.hhdm_offset = limine_protocol::get_hhdm_offset();
         state.cmdline = limine_protocol::kernel_cmdline_str();
     }
@@ -494,7 +445,7 @@ pub(crate) fn parse_mount_option(spec: &str) -> Option<(&str, &str)> {
     Some((source, path))
 }
 
-/// The unset default is `root=auto`: a writable ext2 disk when there is one,
+/// The unset default is `root=auto`: a writable ext4 disk when there is one,
 /// otherwise the initramfs. Anything but a mode names the root device, in any
 /// spelling a mount source takes, and the last `root=` is the one that counts.
 /// See `boot_services::boot_step_rootfs_init`.
@@ -511,19 +462,19 @@ fn apply_root_option(cmdline: &'static str) {
         return;
     };
     match spec {
-        "auto" => boot_info(b"Boot option: root=auto\0"),
+        "auto" => boot_info("Boot option: root=auto"),
         "initramfs" => {
             crate::boot_services::set_root_mode(crate::boot_services::ROOT_INITRAMFS);
-            boot_info(b"Boot option: root=initramfs\0");
+            boot_info("Boot option: root=initramfs");
         }
         "disk" => {
             crate::boot_services::set_root_mode(crate::boot_services::ROOT_DISK);
-            boot_info(b"Boot option: root=disk\0");
+            boot_info("Boot option: root=disk");
         }
-        "" => boot_info(b"Boot option: root= ignored (want a mode or a device)\0"),
+        "" => boot_info("Boot option: root= ignored (want a mode or a device)"),
         _ => {
             crate::boot_services::set_root_block_device(spec);
-            boot_info(b"Boot option: root=<block device>\0");
+            boot_info("Boot option: root=<block device>");
         }
     }
 }
@@ -539,15 +490,15 @@ fn apply_panic_options(cmdline: &str) {
         match token {
             "panic=reboot" => {
                 crate::panic::set_reboot_on_panic();
-                boot_info(b"Boot option: panic=reboot\0");
+                boot_info("Boot option: panic=reboot");
             }
             "panic.boot=on" => {
                 PANIC_AFTER_BOOT.store(PANIC_BOOT_PANIC, core::sync::atomic::Ordering::Relaxed);
-                boot_info(b"Boot option: panic.boot=on\0");
+                boot_info("Boot option: panic.boot=on");
             }
             "panic.boot=abort" => {
                 PANIC_AFTER_BOOT.store(PANIC_BOOT_ABORT, core::sync::atomic::Ordering::Relaxed);
-                boot_info(b"Boot option: panic.boot=abort\0");
+                boot_info("Boot option: panic.boot=abort");
             }
             _ => {}
         }
@@ -562,9 +513,9 @@ static PANIC_AFTER_BOOT: core::sync::atomic::AtomicU8 = core::sync::atomic::Atom
 /// a test run.
 #[inline(never)]
 fn apply_prof_option(cmdline: &str) {
-    if cmdline.split_whitespace().any(|t| t == "prof=on") {
+    if switch_values(cmdline, "prof").fold(false, |asked, on| asked | on) {
         slopos_sched::profile::enable();
-        boot_info(b"Boot option: prof=on\0");
+        boot_info("Boot option: prof=on");
     }
 }
 
@@ -577,13 +528,13 @@ fn apply_cpufreq_option(cmdline: &str) {
     let config = Config::parse(cmdline);
     slopos_sched::cpufreq::configure(config);
     if config.rejected & Config::BAD_POLICY != 0 {
-        boot_info(b"Boot option: cpufreq= ignored (want hwp|firmware)\0");
+        boot_info("Boot option: cpufreq= ignored (want hwp|firmware)");
     }
     if config.rejected & Config::BAD_EPP != 0 {
-        boot_info(b"Boot option: cpufreq.epp= ignored (want a name or 0-255)\0");
+        boot_info("Boot option: cpufreq.epp= ignored (want a name or 0-255)");
     }
     if config.rejected & Config::BAD_PLACEMENT != 0 {
-        boot_info(b"Boot option: sched.hybrid= ignored (want on|off)\0");
+        boot_info("Boot option: sched.hybrid= ignored (want on|off)");
     }
 }
 
@@ -598,77 +549,145 @@ fn apply_mem_commit_option(cmdline: &str) {
             Ok(percent) => {
                 slopos_mm::commit::set_commit_percent(percent);
                 if percent == 0 {
-                    boot_info(b"Boot option: mem.commit=0 (no commit ceiling)\0");
+                    boot_info("Boot option: mem.commit=0 (no commit ceiling)");
                 } else {
-                    boot_info(b"Boot option: mem.commit set\0");
+                    boot_info("Boot option: mem.commit set");
                 }
             }
-            Err(_) => boot_info(b"Boot option: mem.commit ignored (want a percentage)\0"),
+            Err(_) => boot_info("Boot option: mem.commit ignored (want a percentage)"),
         }
     }
 }
 
-/// `extensions=off`. Out of line so the boot-config step's frame stays
-/// under the 2 KiB gate.
+/// `extensions=off`, which no later `extensions=on` takes back. Out of line
+/// so the boot-config step's frame stays under the 2 KiB gate.
 #[inline(never)]
 fn apply_extension_options(cmdline: &str) {
-    if cmdline
-        .split_whitespace()
-        .any(|token| token == "extensions=off")
-    {
+    if switch_values(cmdline, "extensions").fold(false, |off, on| off | !on) {
         slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_EXTENSIONS_OFF);
-        boot_info(b"Boot option: extensions=off (none is activated)\0");
+        boot_info("Boot option: extensions=off (none is activated)");
+    }
+}
+
+/// The value the last `<key>=on` or `<key>=off` gives; any other value is
+/// logged as ignored, since it leaves the default in place.
+fn switch_option(cmdline: &str, key: &str) -> Option<bool> {
+    switch_values(cmdline, key).last()
+}
+
+/// Every `<key>=on` and `<key>=off` in order, logging any other value.
+fn switch_values<'a>(cmdline: &'a str, key: &'a str) -> impl Iterator<Item = bool> + 'a {
+    cmdline.split_whitespace().filter_map(move |token| {
+        let value = token.strip_prefix(key)?.strip_prefix('=')?;
+        match value {
+            "on" => Some(true),
+            "off" => Some(false),
+            _ => {
+                klog_info!("Boot option: {}={} ignored (want on or off)", key, value);
+                None
+            }
+        }
+    })
+}
+
+/// `boot.debug=`, `panic.on_oops=`, `panic.recover_smoke=`, `watchdog=` and
+/// `watchdog.panic=`. Out of line so the boot-config step's frame stays under
+/// the 2 KiB gate.
+#[inline(never)]
+fn apply_switch_options(cmdline: &str) {
+    match switch_option(cmdline, "boot.debug") {
+        Some(true) => {
+            klog_set_level(KlogLevel::Debug);
+            boot_info("Boot option: debug logging enabled");
+        }
+        Some(false) => {
+            klog_set_level(KlogLevel::Info);
+            boot_debug("Boot option: debug logging disabled");
+        }
+        None => {}
+    }
+
+    if switch_option(cmdline, "panic.on_oops") == Some(true) {
+        slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_PANIC_ON_OOPS);
+        boot_info("Boot option: panic.on_oops enabled");
+    }
+
+    if switch_option(cmdline, "panic.recover_smoke") == Some(true) {
+        slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_PANIC_RECOVER_SMOKE);
+        boot_info("Boot option: panic recovery smoke enabled");
+    }
+
+    if let Some(on) = switch_option(cmdline, "watchdog") {
+        slopos_ostd::watchdog::set_enabled(on);
+        if !on {
+            boot_info("Boot option: watchdog disabled");
+        }
+    }
+
+    if let Some(on) = switch_option(cmdline, "watchdog.panic") {
+        slopos_ostd::watchdog::set_panic_enabled(on);
+        if !on {
+            boot_info("Boot option: watchdog.panic disabled");
+        }
+    }
+}
+
+/// `kconsole*`, through OSTD's typed parser, so a malformed value degrades to
+/// the shipped policy instead of to a disabled console.
+#[inline(never)]
+fn apply_kconsole_options(cmdline: &str) {
+    use slopos_ostd::kconsole::config::Parsed;
+
+    let parsed = slopos_ostd::kconsole::config::parse(cmdline);
+    slopos_ostd::kconsole::install(parsed.config);
+    if parsed.config.mask == 0 {
+        boot_info("Boot option: kconsole=off");
+    }
+    for (bit, line) in [
+        (
+            Parsed::BAD_MASK,
+            "Boot option: kconsole= ignored (want on, off or a hex mask)",
+        ),
+        (
+            Parsed::BAD_SERIAL,
+            "Boot option: kconsole.serial= ignored (want on or off)",
+        ),
+        (
+            Parsed::BAD_ARM_MS,
+            "Boot option: kconsole.arm_ms= ignored (want 0-65535)",
+        ),
+        (
+            Parsed::BAD_MAX_LINES,
+            "Boot option: kconsole.max_lines= ignored (want 0-65535)",
+        ),
+        (
+            Parsed::BAD_PROBE_MS,
+            "Boot option: kconsole.probe_ms= ignored (want 0-65535)",
+        ),
+    ] {
+        if parsed.rejected & bit != 0 {
+            boot_info(line);
+        }
     }
 }
 
 fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     let cmdline = BOOT_RUNTIME.lock().cmdline.unwrap_or_default();
-    let enable_debug = cmdline.contains("boot.debug=on")
-        || cmdline.contains("boot.debug=1")
-        || cmdline.contains("boot.debug=true")
-        || cmdline.contains("bootdebug=on");
-    let disable_debug = cmdline.contains("boot.debug=off")
-        || cmdline.contains("boot.debug=0")
-        || cmdline.contains("boot.debug=false")
-        || cmdline.contains("bootdebug=off");
-
-    if enable_debug {
-        klog_set_level(KlogLevel::Debug);
-        boot_info(b"Boot option: debug logging enabled\0");
-    } else if disable_debug {
-        klog_set_level(KlogLevel::Info);
-        boot_debug(b"Boot option: debug logging disabled\0");
-    }
+    apply_switch_options(cmdline);
 
     if cmdline.contains("roulette=skip") {
         slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_ROULETTE_SKIP);
-        boot_info(b"Boot option: roulette skip enabled\0");
+        boot_info("Boot option: roulette skip enabled");
     }
 
     if cmdline.contains("tests=on") {
         slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_TESTS_ENABLED);
-        boot_info(b"Boot option: userland test mode enabled\0");
+        boot_info("Boot option: userland test mode enabled");
     } else {
         // The Wheel of Fate's reboot is armed for an interactive boot only. A
         // test image must expose no user-reachable path that power-cycles the
         // machine mid-run -- the same reasoning that gates `test_panic`.
         slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_FATE_REBOOT);
-    }
-
-    if cmdline.contains("panic.on_oops=on")
-        || cmdline.contains("panic.on_oops=1")
-        || cmdline.contains("panic.on_oops=true")
-    {
-        slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_PANIC_ON_OOPS);
-        boot_info(b"Boot option: panic.on_oops enabled\0");
-    }
-
-    if cmdline.contains("panic.recover_smoke=on")
-        || cmdline.contains("panic.recover_smoke=1")
-        || cmdline.contains("panic.recover_smoke=true")
-    {
-        slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_PANIC_RECOVER_SMOKE);
-        boot_info(b"Boot option: panic recovery smoke enabled\0");
     }
 
     // Budget of recovered production panics per boot; reaching it makes the
@@ -677,9 +696,9 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         if let Some(value) = token.strip_prefix("panic.oops_limit=") {
             if let Ok(limit) = value.parse::<u64>() {
                 slopos_ostd::panic_recovery::set_oops_limit(limit);
-                boot_info(b"Boot option: panic.oops_limit set\0");
+                boot_info("Boot option: panic.oops_limit set");
             } else {
-                boot_info(b"Boot option: panic.oops_limit ignored (not a u64)\0");
+                boot_info("Boot option: panic.oops_limit ignored (not a u64)");
             }
         }
     }
@@ -691,49 +710,18 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
         if let Some(value) = token.strip_prefix("lockdep=") {
             match value {
                 "off" => {
-                    slopos_ostd::sync::set_lockdep_mode(
-                        slopos_ostd::sync::lock_tracking::LockdepMode::Off,
-                    );
-                    boot_info(b"Boot option: lockdep=off (ordering checks disabled)\0");
+                    slopos_ostd::sync::set_lockdep_mode(slopos_ostd::sync::LockdepMode::Off);
+                    boot_info("Boot option: lockdep=off (ordering checks disabled)");
                 }
                 "warn" => {
-                    slopos_ostd::sync::set_lockdep_mode(
-                        slopos_ostd::sync::lock_tracking::LockdepMode::Warn,
-                    );
-                    boot_info(b"Boot option: lockdep=warn (report, do not panic)\0");
+                    slopos_ostd::sync::set_lockdep_mode(slopos_ostd::sync::LockdepMode::Warn);
+                    boot_info("Boot option: lockdep=warn (report, do not panic)");
                 }
-                "panic" | "on" => {
-                    slopos_ostd::sync::set_lockdep_mode(
-                        slopos_ostd::sync::lock_tracking::LockdepMode::Panic,
-                    );
-                    boot_info(b"Boot option: lockdep=panic\0");
+                "panic" => {
+                    slopos_ostd::sync::set_lockdep_mode(slopos_ostd::sync::LockdepMode::Panic);
+                    boot_info("Boot option: lockdep=panic");
                 }
-                _ => boot_info(b"Boot option: lockdep= ignored (want off|warn|panic)\0"),
-            }
-        }
-    }
-
-    // `warn` reports each capability once and keeps booting, so one desktop
-    // boot enumerates what the real userland needs — which `tests=on` cannot
-    // show, since init exits before spawning the compositor or shell.
-    for token in cmdline.split_whitespace() {
-        if let Some(value) = token.strip_prefix("authority=") {
-            match value {
-                "off" => {
-                    slopos_ostd::authority::set_mode(slopos_ostd::authority::AuthorityMode::Off);
-                    boot_info(b"Boot option: authority=off (capability checks disabled)\0");
-                }
-                "warn" => {
-                    slopos_ostd::authority::set_mode(slopos_ostd::authority::AuthorityMode::Warn);
-                    boot_info(b"Boot option: authority=warn (report, do not deny)\0");
-                }
-                "enforce" | "on" => {
-                    slopos_ostd::authority::set_mode(
-                        slopos_ostd::authority::AuthorityMode::Enforce,
-                    );
-                    boot_info(b"Boot option: authority=enforce\0");
-                }
-                _ => boot_info(b"Boot option: authority= ignored (want off|warn|enforce)\0"),
+                _ => boot_info("Boot option: lockdep= ignored (want off|warn|panic)"),
             }
         }
     }
@@ -746,19 +734,19 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
             match value {
                 "off" => {
                     slopos_ostd::process::quota::set_quota_mode(slopos_abi::quota::QuotaMode::Off);
-                    boot_info(b"Boot option: quota=off (ceilings not consulted)\0");
+                    boot_info("Boot option: quota=off (ceilings not consulted)");
                 }
                 "warn" => {
                     slopos_ostd::process::quota::set_quota_mode(slopos_abi::quota::QuotaMode::Warn);
-                    boot_info(b"Boot option: quota=warn (grant and count, do not refuse)\0");
+                    boot_info("Boot option: quota=warn (grant and count, do not refuse)");
                 }
-                "enforce" | "on" => {
+                "enforce" => {
                     slopos_ostd::process::quota::set_quota_mode(
                         slopos_abi::quota::QuotaMode::Enforce,
                     );
-                    boot_info(b"Boot option: quota=enforce\0");
+                    boot_info("Boot option: quota=enforce");
                 }
-                _ => boot_info(b"Boot option: quota= ignored (want off|warn|enforce)\0"),
+                _ => boot_info("Boot option: quota= ignored (want off|warn|enforce)"),
             }
         }
     }
@@ -766,29 +754,15 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     // `watchdog.miss_threshold=` counts consecutive unchanged samples before a
     // CPU is reported: 100 is one second at the 100 Hz tick.
     for token in cmdline.split_whitespace() {
-        match token {
-            "watchdog=off" => {
-                slopos_ostd::watchdog::set_enabled(false);
-                boot_info(b"Boot option: watchdog disabled\0");
-            }
-            "watchdog=on" => slopos_ostd::watchdog::set_enabled(true),
-            "watchdog.panic=off" => {
-                slopos_ostd::watchdog::set_panic_enabled(false);
-                boot_info(b"Boot option: watchdog.panic disabled\0");
-            }
-            "watchdog.panic=on" => slopos_ostd::watchdog::set_panic_enabled(true),
-            _ => {
-                if let Some(value) = token.strip_prefix("watchdog.miss_threshold=") {
-                    let accepted = value
-                        .parse::<u32>()
-                        .ok()
-                        .is_some_and(slopos_ostd::watchdog::set_miss_threshold);
-                    if accepted {
-                        boot_info(b"Boot option: watchdog.miss_threshold set\0");
-                    } else {
-                        boot_info(b"Boot option: watchdog.miss_threshold ignored\0");
-                    }
-                }
+        if let Some(value) = token.strip_prefix("watchdog.miss_threshold=") {
+            let accepted = value
+                .parse::<u32>()
+                .ok()
+                .is_some_and(slopos_ostd::watchdog::set_miss_threshold);
+            if accepted {
+                boot_info("Boot option: watchdog.miss_threshold set");
+            } else {
+                boot_info("Boot option: watchdog.miss_threshold ignored");
             }
         }
     }
@@ -799,9 +773,15 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
 
     apply_panic_options(cmdline);
 
-    if cmdline.split_whitespace().any(|t| t == "verity=require") {
-        crate::boot_services::set_verity_required(true);
-        boot_info(b"Boot option: verity=require\0");
+    for token in cmdline.split_whitespace() {
+        match token.strip_prefix("verity=") {
+            Some("require") => {
+                crate::boot_services::set_verity_required(true);
+                boot_info("Boot option: verity=require");
+            }
+            Some(value) => klog_info!("Boot option: verity={} ignored (want require)", value),
+            None => {}
+        }
     }
 
     // `sched.ap_pause_ms=0` disables the AP pause's wall-clock deadline and
@@ -813,12 +793,12 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
                 Ok(ms) => {
                     slopos_sched::per_cpu::set_ap_pause_budget_ms(ms);
                     if ms == 0 {
-                        boot_info(b"Boot option: sched.ap_pause_ms=0 (deadline disabled)\0");
+                        boot_info("Boot option: sched.ap_pause_ms=0 (deadline disabled)");
                     } else {
-                        boot_info(b"Boot option: sched.ap_pause_ms set\0");
+                        boot_info("Boot option: sched.ap_pause_ms set");
                     }
                 }
-                Err(_) => boot_info(b"Boot option: sched.ap_pause_ms ignored (want an integer)\0"),
+                Err(_) => boot_info("Boot option: sched.ap_pause_ms ignored (want an integer)"),
             }
         }
     }
@@ -827,13 +807,7 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     apply_cpufreq_option(cmdline);
     apply_extension_options(cmdline);
 
-    // A typed parser rather than more `contains` arms, so a malformed value
-    // degrades to the shipped policy instead of to a disabled console.
-    let kconsole = slopos_ostd::kconsole::config::parse(cmdline);
-    slopos_ostd::kconsole::install(kconsole);
-    if kconsole.mask == 0 {
-        boot_info(b"Boot option: kconsole=off\0");
-    }
+    apply_kconsole_options(cmdline);
 }
 
 boot_init!(
@@ -889,13 +863,14 @@ pub fn kernel_main_impl() {
     slopos_ostd::sync::run_bsp_init(|token| {
         // `current_pcr()` is callable from every later boot step once this runs.
         let bsp_apic_id = crate::apic_id::read_bsp_apic_id();
-        slopos_arch::pcr::init_bsp_pcr(token, bsp_apic_id);
+        slopos_ostd::cpu::x86_64::pcr::init_bsp_pcr(token, bsp_apic_id);
         // The per-CPU-slot borrow contract holds trivially here: pre-SMP the BSP
         // is the only writer and the slot was minted immediately above.
-        let pcr = slopos_arch::pcr::get_pcr_mut_via_token(0).expect("BSP PCR not initialized");
+        let pcr = slopos_ostd::cpu::x86_64::pcr::get_pcr_mut_via_token(0)
+            .expect("BSP PCR not initialized");
         pcr.bsp_init_gdt_and_install(token);
 
-        // The earliest point acquisitions can be tracked: `get_current_cpu()`
+        // The earliest point acquisitions can be tracked: `current_cpu_id()`
         // only becomes callable once the PCR is live.
         slopos_ostd::sync::enable_lock_tracking();
 
@@ -905,7 +880,7 @@ pub fn kernel_main_impl() {
 
         // Mask the low CR3 bits before handing the value over as a table base:
         // they carry PCID with CR4.PCIDE, PWT/PCD without it.
-        let cr3 = slopos_arch::cpu::control_regs::read_cr3();
+        let cr3 = slopos_ostd::cpu::x86_64::control_regs::read_cr3();
         slopos_ostd::mm::vm_space::register_kernel_master_pml4(
             token,
             slopos_abi::addr::PhysAddr::new(cr3 & 0x000F_FFFF_FFFF_F000),
@@ -925,13 +900,9 @@ pub fn kernel_main_impl() {
 
         // Inlined rather than delegated so every `register_*` hook below sees
         // the same `&BspToken<'brand>` as the surrounding init scope.
-        use slopos_kernel_services::ostd_backends::diagnostic_sink::CONSOLE_SINK;
         use slopos_kernel_services::ostd_backends::local_tlb::LOCAL_TLB_DYN;
-        use slopos_kernel_services::ostd_backends::preempt::PCR_PREEMPT;
         use slopos_kernel_services::ostd_bridge::{RCU_OPS, WAIT_QUEUE_OPS};
-        use slopos_kernel_services::ostd_bridge_tables::{
-            MMIO_RANGES, PORT_RANGES, RESERVED_VECTORS,
-        };
+        use slopos_kernel_services::ostd_bridge_tables::{MMIO_RANGES, PORT_RANGES};
         slopos_ostd::sync::wait_queue::register_wait_queue_backend(token, &WAIT_QUEUE_OPS);
         slopos_ostd::sync::rcu::register_rcu_backend(token, &RCU_OPS);
         slopos_ostd::klog::klog_register_clock(|| {
@@ -939,21 +910,22 @@ pub fn kernel_main_impl() {
         });
         slopos_ostd::mm::io_mem::register_io_mem_registry(token, MMIO_RANGES);
         slopos_ostd::io::port::register_io_port_registry(token, PORT_RANGES);
-        slopos_ostd::irq::line::register_irq_reserved(token, RESERVED_VECTORS);
-        slopos_ostd::irq::idt::register_diagnostic_sink(token, &CONSOLE_SINK);
-        slopos_ostd::cpu::preempt::register_preempt_backend(token, &PCR_PREEMPT);
+        slopos_ostd::cpu::preempt::register_preempt_backend(
+            token,
+            &slopos_ostd::cpu::preempt::DEFAULT_PCR_PREEMPT,
+        );
         slopos_ostd::mm::tlb::register_local_tlb_flusher(token, &LOCAL_TLB_DYN);
         slopos_ostd::user::mode::register_user_mode_backend(
             token,
             &slopos_ostd::user::mode::DEFAULT_USER_MODE_BACKEND,
         );
         slopos_kernel_services::platform::console_puts(
-            b"BOOT: register_with_ostd: registered preempt/diag/tlb/io_mem/io_port/irq/user_mode tables\n",
+            b"BOOT: register_with_ostd: registered preempt/tlb/io_mem/io_port/user_mode tables\n",
         );
 
         slopos_ostd::mm::io_mem::register_io_mem_mapper(
             token,
-            &slopos_mm::io_mem_mapper_shim::LEGACY_IO_MEM_MAPPER_DYN,
+            &slopos_mm::io_mem_mapper::KERNEL_IO_MEM_MAPPER_DYN,
         );
 
         slopos_sched::scheduler::install_ostd_task_exit_hook(token);
@@ -978,18 +950,18 @@ pub fn kernel_main_impl() {
         slopos_core::efivar::efivar_init(crate::limine_protocol::efi_system_table_addr());
     });
 
-    if klog::is_enabled_level(KlogLevel::Info) {
+    if klog::is_enabled(KlogLevel::Info) {
         klog_info!("");
     }
 
-    boot_info(b"=== KERNEL BOOT SUCCESSFUL ===\0");
-    boot_info(b"Operational subsystems: serial, interrupts, memory, scheduler, init\0");
-    boot_info(b"Graphics: framebuffer required and active\0");
-    boot_info(b"Kernel initialization complete - ALL SYSTEMS OPERATIONAL!\0");
-    boot_info(b"The kernel has initialized. Handing over to scheduler...\0");
-    boot_info(b"Starting scheduler...\0");
+    boot_info("=== KERNEL BOOT SUCCESSFUL ===");
+    boot_info("Operational subsystems: serial, interrupts, memory, scheduler, init");
+    boot_info("Graphics: framebuffer required and active");
+    boot_info("Kernel initialization complete - ALL SYSTEMS OPERATIONAL!");
+    boot_info("The kernel has initialized. Handing over to scheduler...");
+    boot_info("Starting scheduler...");
 
-    if klog::is_enabled_level(KlogLevel::Info) {
+    if klog::is_enabled(KlogLevel::Info) {
         klog_info!("");
     }
 
@@ -1031,15 +1003,15 @@ pub fn kernel_main_impl() {
     // of a recursive fault. Each halts the machine, so never enabled by `just test`.
     if let Some(cmdline) = crate::limine_protocol::kernel_cmdline_str() {
         if cmdline.contains("panic.post_boot_unwind=on") {
-            boot_info(b"PANIC SMOKE: raising a deliberate post-boot unwind panic\0");
+            boot_info("PANIC SMOKE: raising a deliberate post-boot unwind panic");
             post_boot_unwind_smoke_outer();
         }
         if cmdline.contains("panic.fatal_smoke=on") {
-            boot_info(b"PANIC SMOKE: raising a deliberate deep fatal panic\0");
+            boot_info("PANIC SMOKE: raising a deliberate deep fatal panic");
             let _ = fatal_smoke_deep(28);
         }
         if cmdline.contains("panic.nested_drop_smoke=on") {
-            boot_info(b"PANIC SMOKE: raising a Drop panic during a recoverable unwind\0");
+            boot_info("PANIC SMOKE: raising a Drop panic during a recoverable unwind");
             nested_drop_smoke();
         }
     }
@@ -1126,7 +1098,7 @@ fn nested_drop_smoke() {
         let _guard = NestedDropPanic;
         panic!("panic.nested_drop_smoke: outer recoverable panic");
     });
-    boot_info(b"PANIC SMOKE: nested drop smoke unexpectedly survived\0");
+    boot_info("PANIC SMOKE: nested drop smoke unexpectedly survived");
 }
 
 #[inline(never)]
@@ -1169,8 +1141,4 @@ fn fatal_smoke_deep(depth: u32) -> u64 {
         acc = acc.wrapping_add(b as u64);
     }
     acc
-}
-
-pub fn kernel_main_no_multiboot() {
-    crate::ffi_boundary::kernel_main();
 }

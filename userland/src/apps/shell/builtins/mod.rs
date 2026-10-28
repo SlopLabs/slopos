@@ -253,9 +253,9 @@ pub static BUILTINS: &[BuiltinEntry] = &[
     },
     BuiltinEntry {
         name: "set",
-        desc: "Show or set shell variables",
-        usage: "set [KEY=VALUE...]",
-        detail: "Set shell variables or, without arguments, list\nall current variables.",
+        desc: "Set options or positional parameters",
+        usage: "set [-efux] [-o name] [--] [arg...]",
+        detail: "Without arguments, list all shell variables.\n-e, -f, -u, -x or -o name turn an option on, + turns\nit off; each arg becomes a positional parameter.",
         category: Environment,
         func: env::cmd_set,
     },

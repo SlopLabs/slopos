@@ -9,7 +9,7 @@ pub mod image;
 pub mod render_surface;
 pub mod rounded;
 
-pub use damage::{DamageTracker, InternalDamageTracker};
+pub use damage::DamageTracker;
 pub use draw_buffer::DrawBuffer;
 pub use render_surface::{RenderError, RenderSurface};
 

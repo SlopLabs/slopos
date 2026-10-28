@@ -5,7 +5,7 @@
 //! functions 0–3, and `0x19`) are matched specifically instead of the class.
 
 use slopos_abi::addr::PhysAddr;
-use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
+use slopos_mm::mmio;
 use slopos_ostd::KArc;
 use slopos_ostd::{klog_info, klog_warn};
 
@@ -89,7 +89,7 @@ fn lpss_i2c_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeE
     }
 
     let phys = PhysAddr::new(base);
-    let mmio = MmioRegion::map(phys, bar.size as usize).ok_or(PciProbeError::DeviceFault)?;
+    let mmio = mmio::map_uncached(phys, bar.size as usize).ok_or(PciProbeError::DeviceFault)?;
 
     let mut ctrl = DesignWareI2c::new(mmio);
     ctrl.lpss_bringup(base);

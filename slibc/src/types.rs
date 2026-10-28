@@ -183,7 +183,7 @@ pub type dirent64 = dirent;
 pub const DIRENT_D_NAME_OFFSET: usize = 19;
 
 /// `struct statvfs`. Derived from the kernel's `statfs` by
-/// [`crate::io::stat_vfs_from_statfs`]: the two carry the same facts under
+/// `ffi::syscalls::statvfs_from_statfs`: the two carry the same facts under
 /// different names.
 #[repr(C)]
 #[derive(Copy, Clone, Default)]

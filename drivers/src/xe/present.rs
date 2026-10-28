@@ -14,12 +14,12 @@
 //! This unit writes no register other than the active pipe's plane group, so a
 //! present can never disturb the pipe, transcoder, or eDP link.
 
-use core::ffi::c_int;
 use slopos_ostd::lock_class;
 
 use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
-use slopos_mm::mmio::MmioRegion;
+use slopos_kernel_services::syscall_services::scanout::Present;
 use slopos_ostd::arch::x86_64::mem_fence::sfence;
+use slopos_ostd::mm::IoMem;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::util::ptr_buf;
 
@@ -33,7 +33,7 @@ type Box = (u32, u32, u32, u32);
 /// impl. They are turned back into pointers only locally, inside [`present`].
 #[derive(Clone)]
 struct PresentState {
-    mmio: MmioRegion,
+    mmio: IoMem,
     /// The plane-group program re-issued on every flip (its width/height/pitch is
     /// the shared geometry of all three buffers).
     program: PlaneProgram,
@@ -58,7 +58,7 @@ static PRESENT_STATE: SpinLock<Option<PresentState>> =
 /// armed the plane on `scan0_ggtt` (so `front` starts at 0). Writes no hardware
 /// register.
 pub fn install(
-    mmio: &MmioRegion,
+    mmio: &IoMem,
     program: PlaneProgram,
     draw_virt: *const u8,
     scan0_virt: *mut u8,
@@ -77,24 +77,23 @@ pub fn install(
     });
 }
 
-/// Present the damaged region to the panel, tear-free. A null `damage` pointer
-/// or zero `count` presents the whole surface. The committed state is snapshotted
-/// under the lock, which is dropped before any copy or MMIO.
+/// Present the damaged region to the panel, tear-free; an empty `damage`
+/// presents the whole surface. The committed state is snapshotted under the
+/// lock, which is dropped before any copy or MMIO.
 ///
-/// Returns `0` once a present has been issued (including a no-op when the damage
-/// clamps to nothing), or `-1` when xe owns no scanout.
-pub fn present(damage: *const DamageRect, count: u32) -> c_int {
+/// [`Present::Shown`] also covers damage that clamps to nothing;
+/// [`Present::Failed`] when xe owns no scanout.
+pub fn present(damage: &[DamageRect]) -> Present {
     let state = {
         let guard = PRESENT_STATE.lock();
         match guard.as_ref() {
             Some(state) => state.clone(),
-            None => return -1,
+            None => return Present::Failed,
         }
     };
 
-    let Some(curr) = coalesce_damage(damage, count, state.program.width, state.program.height)
-    else {
-        return 0;
+    let Some(curr) = coalesce_damage(damage, state.program.width, state.program.height) else {
+        return Present::Shown;
     };
 
     // The back buffer is the one the plane is NOT scanning, and is two presents
@@ -128,7 +127,7 @@ pub fn present(damage: *const DamageRect, count: u32) -> c_int {
         live.front = back;
         live.prev_damage = Some(curr);
     }
-    0
+    Present::Shown
 }
 
 fn union_box(curr: Box, prev: Option<Box>) -> Box {
@@ -143,41 +142,35 @@ fn union_box(curr: Box, prev: Option<Box>) -> Box {
     }
 }
 
-/// Coalesce the `count` damage rects at `damage` into one inclusive bounding box
-/// `(x0, y0, x1, y1)` clamped to `[0, width) x [0, height)`.
+/// Coalesce `damage` into one inclusive bounding box `(x0, y0, x1, y1)`
+/// clamped to `[0, width) x [0, height)`.
 ///
-/// A null pointer or zero count yields the full surface. An all-invalid damage
-/// list, or a degenerate surface, yields `None` (nothing to present). The rect
-/// count is capped at `MAX_DAMAGE_REGIONS` so a hostile `count` cannot drive an
-/// unbounded borrow.
-fn coalesce_damage(damage: *const DamageRect, count: u32, width: u32, height: u32) -> Option<Box> {
+/// No rects yields the full surface; only invalid rects, or a degenerate
+/// surface, yield `None`. Rects past the first `MAX_DAMAGE_REGIONS` are ignored.
+fn coalesce_damage(damage: &[DamageRect], width: u32, height: u32) -> Option<Box> {
     if width == 0 || height == 0 {
         return None;
     }
     let max_x = width as i32 - 1;
     let max_y = height as i32 - 1;
 
-    if damage.is_null() || count == 0 {
+    if damage.is_empty() {
         return Some((0, 0, max_x as u32, max_y as u32));
     }
 
-    let len = (count as usize).min(MAX_DAMAGE_REGIONS);
-    let (any, min_x, min_y, max_seen_x, max_seen_y) = ptr_buf::with_buf(damage, len, |regions| {
-        let (mut min_x, mut min_y, mut max_seen_x, mut max_seen_y) =
-            (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-        let mut any = false;
-        for r in regions {
-            if !r.is_valid() {
-                continue;
-            }
-            any = true;
-            min_x = min_x.min(r.x0);
-            min_y = min_y.min(r.y0);
-            max_seen_x = max_seen_x.max(r.x1);
-            max_seen_y = max_seen_y.max(r.y1);
+    let (mut min_x, mut min_y, mut max_seen_x, mut max_seen_y) =
+        (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    let mut any = false;
+    for r in &damage[..damage.len().min(MAX_DAMAGE_REGIONS)] {
+        if !r.is_valid() {
+            continue;
         }
-        (any, min_x, min_y, max_seen_x, max_seen_y)
-    });
+        any = true;
+        min_x = min_x.min(r.x0);
+        min_y = min_y.min(r.y0);
+        max_seen_x = max_seen_x.max(r.x1);
+        max_seen_y = max_seen_y.max(r.y1);
+    }
     if !any {
         return None;
     }

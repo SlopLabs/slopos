@@ -13,7 +13,6 @@ pub mod registry;
 pub mod scanf;
 pub mod shim;
 pub mod streams;
-pub mod tests;
 pub mod wide;
 
 pub use registry::WalkMode;
@@ -105,9 +104,6 @@ pub struct FILE {
     /// Internal I/O buffer. Last, so the scalars share cache lines.
     pub buf: [u8; BUFSIZ],
 }
-
-#[allow(non_camel_case_types)]
-pub type FILE_t = FILE;
 
 impl FILE {
     /// Construct a FILE at compile time — used for the three standard streams.

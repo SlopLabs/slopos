@@ -1,6 +1,6 @@
 //! Context-switch register snapshot.
 //!
-//! The switch assembly in [`super::switch`] reads [`TaskContext`]'s register
+//! The switch assembly in [`super::switch`] reads [`SwitchContext`]'s register
 //! offsets via `offset_of!`, so the field order is an ABI contract pinned by
 //! the `const _` asserts below and must not change without the asm.
 
@@ -14,7 +14,7 @@ use core::mem::offset_of;
 /// inside a trap takes the trap's level with it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct TaskContext {
+pub struct SwitchContext {
     pub rbx: u64,
     pub r12: u64,
     pub r13: u64,
@@ -32,7 +32,7 @@ pub struct TaskContext {
     pub interrupt_nesting: u64,
 }
 
-impl TaskContext {
+impl SwitchContext {
     /// All-zero context with `rflags` set to a sensible default
     /// (IF=1, IOPL=0).
     pub const fn zero() -> Self {
@@ -71,34 +71,34 @@ impl TaskContext {
     }
 }
 
-const _: () = assert!(core::mem::size_of::<TaskContext>() == 88);
-const _: () = assert!(offset_of!(TaskContext, rbx) == 0);
-const _: () = assert!(offset_of!(TaskContext, r12) == 8);
-const _: () = assert!(offset_of!(TaskContext, r13) == 16);
-const _: () = assert!(offset_of!(TaskContext, r14) == 24);
-const _: () = assert!(offset_of!(TaskContext, r15) == 32);
-const _: () = assert!(offset_of!(TaskContext, rbp) == 40);
-const _: () = assert!(offset_of!(TaskContext, rsp) == 48);
-const _: () = assert!(offset_of!(TaskContext, rflags) == 56);
-const _: () = assert!(offset_of!(TaskContext, rip) == 64);
+const _: () = assert!(core::mem::size_of::<SwitchContext>() == 88);
+const _: () = assert!(offset_of!(SwitchContext, rbx) == 0);
+const _: () = assert!(offset_of!(SwitchContext, r12) == 8);
+const _: () = assert!(offset_of!(SwitchContext, r13) == 16);
+const _: () = assert!(offset_of!(SwitchContext, r14) == 24);
+const _: () = assert!(offset_of!(SwitchContext, r15) == 32);
+const _: () = assert!(offset_of!(SwitchContext, rbp) == 40);
+const _: () = assert!(offset_of!(SwitchContext, rsp) == 48);
+const _: () = assert!(offset_of!(SwitchContext, rflags) == 56);
+const _: () = assert!(offset_of!(SwitchContext, rip) == 64);
 // The per-task counts live past the asm-visible register block; the switch
 // asm never touches them, so their offsets are not part of the asm contract.
-const _: () = assert!(offset_of!(TaskContext, preempt_count) == 72);
-const _: () = assert!(offset_of!(TaskContext, interrupt_nesting) == 80);
+const _: () = assert!(offset_of!(SwitchContext, preempt_count) == 72);
+const _: () = assert!(offset_of!(SwitchContext, interrupt_nesting) == 80);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn task_context_zero_has_default_rflags() {
-        let ctx = TaskContext::zero();
+    fn switch_context_zero_has_default_rflags() {
+        let ctx = SwitchContext::zero();
         assert_eq!(ctx.rflags, 0x202);
     }
 
     #[test]
-    fn task_context_new_for_task_layout() {
-        let ctx = TaskContext::new_for_task(0xAAAA, 0xBBBB, 0x10000, 0xCCCC);
+    fn switch_context_new_for_task_layout() {
+        let ctx = SwitchContext::new_for_task(0xAAAA, 0xBBBB, 0x10000, 0xCCCC);
         assert_eq!(ctx.r12, 0xAAAA);
         assert_eq!(ctx.r13, 0xBBBB);
         assert_eq!(ctx.rsp, 0x10000 - 8);

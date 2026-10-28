@@ -92,14 +92,6 @@ fn route_origin_of(origin: AddrOrigin) -> u8 {
     }
 }
 
-pub fn default_gateway_for(dev: DevIndex) -> Option<Ipv4Addr> {
-    ROUTE_TABLE
-        .all_routes()
-        .iter()
-        .find(|r| r.prefix_len == 0 && r.dev == dev && !r.gateway.is_unspecified())
-        .map(|r| r.gateway)
-}
-
 /// Apply an interface's administrative intent to the world. Returns the
 /// operational state before and after.
 pub fn set_admin_up(ifindex: u32, up: bool) -> Result<(OperState, OperState), IfaceError> {

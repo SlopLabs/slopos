@@ -4,7 +4,6 @@ pub mod ids;
 pub mod rlimit;
 pub mod shim;
 pub mod spawn;
-pub mod tests;
 pub mod times;
 pub mod wait;
 

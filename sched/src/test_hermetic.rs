@@ -9,8 +9,8 @@
 
 use core::sync::atomic::Ordering;
 
-use slopos_arch::pcr;
 use slopos_ostd::cpu::x86_64::interrupts::IrqDisabled;
+use slopos_ostd::cpu::x86_64::pcr;
 use slopos_ostd::hermetic_state;
 use slopos_ostd::test_support;
 
@@ -190,20 +190,20 @@ hermetic_state! {
     pub MsrShadow {
         type Snapshot = MsrSnapshot;
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
-            use slopos_arch::cpu::msr::Msr;
+            use slopos_ostd::arch::x86_64::msr::Msr;
             Ok(MsrSnapshot {
-                efer: slopos_arch::cpu::read_msr(Msr::EFER),
-                star: slopos_arch::cpu::read_msr(Msr::STAR),
-                lstar: slopos_arch::cpu::read_msr(Msr::LSTAR),
-                sfmask: slopos_arch::cpu::read_msr(Msr::SFMASK),
+                efer: slopos_ostd::arch::x86_64::msr::read_msr(Msr::EFER),
+                star: slopos_ostd::arch::x86_64::msr::read_msr(Msr::STAR),
+                lstar: slopos_ostd::arch::x86_64::msr::read_msr(Msr::LSTAR),
+                sfmask: slopos_ostd::arch::x86_64::msr::read_msr(Msr::SFMASK),
             })
         }
         fn restore(snap: Self::Snapshot) {
-            use slopos_arch::cpu::msr::Msr;
-            slopos_arch::cpu::write_msr(Msr::EFER, snap.efer);
-            slopos_arch::cpu::write_msr(Msr::STAR, snap.star);
-            slopos_arch::cpu::write_msr(Msr::LSTAR, snap.lstar);
-            slopos_arch::cpu::write_msr(Msr::SFMASK, snap.sfmask);
+            use slopos_ostd::arch::x86_64::msr::Msr;
+            slopos_ostd::arch::x86_64::msr::write_msr(Msr::EFER, snap.efer);
+            slopos_ostd::arch::x86_64::msr::write_msr(Msr::STAR, snap.star);
+            slopos_ostd::arch::x86_64::msr::write_msr(Msr::LSTAR, snap.lstar);
+            slopos_ostd::arch::x86_64::msr::write_msr(Msr::SFMASK, snap.sfmask);
         }
     }
 }
@@ -254,7 +254,7 @@ hermetic_state! {
     pub WatchdogHeartbeatShadow {
         type Snapshot = u64;
         fn snapshot() -> Result<Self::Snapshot, AllocError> {
-            Ok(slopos_arch::pcr::heartbeat_for_cpu(0))
+            Ok(slopos_ostd::cpu::x86_64::pcr::heartbeat_for_cpu(0))
         }
         fn restore(_snap: Self::Snapshot) {
             // Monotonic, and only ever read as a difference against the

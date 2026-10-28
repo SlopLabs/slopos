@@ -16,7 +16,7 @@ use bitflags::bitflags;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::quota::KernelMetaAxis;
 
-use crate::mm::frame::{Frame, FrameAllocOptions, MetaSlot, Paddr, PageTableMeta, meta_slot_for};
+use crate::mm::frame::{Frame, FrameAllocOptions, MetaSlot, PageTableMeta, meta_slot_for};
 use crate::mm::frame_alloc::current_frame_allocator;
 use crate::mm::page_property::PageProperty;
 use crate::mm::phys;
@@ -83,6 +83,17 @@ impl PageTableLevel {
     #[inline]
     pub const fn offset_mask(self) -> u64 {
         self.entry_size() - 1
+    }
+}
+
+impl core::fmt::Display for PageTableLevel {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Four => write!(f, "PML4"),
+            Self::Three => write!(f, "PDPT"),
+            Self::Two => write!(f, "PD"),
+            Self::One => write!(f, "PT"),
+        }
     }
 }
 
@@ -206,7 +217,7 @@ impl Pte {
 /// Callers must guarantee `table_phys` is a live `Frame<PageTableMeta>` for
 /// the lifetime of the returned `Pte`.
 #[inline]
-pub(crate) fn entry_in_table(table_phys: Paddr, index: usize) -> Pte {
+pub(crate) fn entry_in_table(table_phys: PhysAddr, index: usize) -> Pte {
     debug_assert!(index < PAGE_TABLE_ENTRIES);
     // SAFETY: `phys::phys_to_virt` returns the kernel HHDM mapping, which is
     // read+write for any frame the kernel owns; `index < 512` keeps the byte
@@ -246,7 +257,7 @@ pub(crate) enum WalkMode {
 #[derive(Debug)]
 pub(crate) enum WalkOutcome {
     LeafTable {
-        leaf_table_phys: Paddr,
+        leaf_table_phys: PhysAddr,
         leaf_index: usize,
         leaf_level: PageTableLevel,
     },
@@ -319,7 +330,7 @@ pub fn walks_for_test() -> u64 {
 }
 
 pub(crate) fn walk_to_leaf(
-    pml4_phys: Paddr,
+    pml4_phys: PhysAddr,
     vaddr: VirtAddr,
     user_mapping: bool,
     mode: WalkMode,
@@ -418,7 +429,7 @@ pub(crate) fn walk_to_leaf(
 }
 
 enum StepOutcome {
-    Phys(Paddr),
+    Phys(PhysAddr),
     NotPresent,
 }
 
@@ -627,7 +638,7 @@ fn table_flags_from_leaf(leaf_flags: PteFlags) -> PteFlags {
 /// leaked into a PTE via `Frame::into_raw`, that PTE has been (or
 /// will be, atomically with this call) cleared, and no other
 /// reference to the slot is outstanding.
-pub(crate) unsafe fn reclaim_leaked_frame(phys: Paddr) {
+pub(crate) unsafe fn reclaim_leaked_frame(phys: PhysAddr) {
     let Some(slot_ptr) = meta_slot_for_paddr_ptr(phys) else {
         return;
     };
@@ -641,7 +652,7 @@ pub(crate) unsafe fn reclaim_leaked_frame(phys: Paddr) {
 
 /// Decode a leaf [`WalkOutcome`] into `(paddr, property, level)`.
 /// Returns `None` if the walk did not reach a present leaf.
-pub(crate) fn read_leaf(outcome: &WalkOutcome) -> Option<(Paddr, PageProperty, PageTableLevel)> {
+pub(crate) fn read_leaf(outcome: &WalkOutcome) -> Option<(PhysAddr, PageProperty, PageTableLevel)> {
     let WalkOutcome::LeafTable {
         leaf_table_phys,
         leaf_index,
@@ -659,7 +670,7 @@ pub(crate) fn read_leaf(outcome: &WalkOutcome) -> Option<(Paddr, PageProperty, P
 }
 
 #[inline]
-fn meta_slot_for_paddr_ptr(paddr: Paddr) -> Option<*const MetaSlot> {
+fn meta_slot_for_paddr_ptr(paddr: PhysAddr) -> Option<*const MetaSlot> {
     meta_slot_for(paddr).map(|s| s as *const MetaSlot)
 }
 

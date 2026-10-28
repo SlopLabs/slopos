@@ -1,4 +1,3 @@
-use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, Ordering};
 use slopos_ostd::lock_class;
 
@@ -106,10 +105,6 @@ impl SleepQueue {
         self.active_high_water = high_water;
         SLEEP_ACTIVE_COUNT.store(kept, Ordering::Release);
         Ok(())
-    }
-
-    fn init_or_reset(&mut self) -> Result<(), ()> {
-        self.reset_preserving(&KernelIoTaskIds::empty())
     }
 
     fn scan_bound(&self) -> usize {
@@ -260,15 +255,6 @@ static SLEEP_QUEUE: SpinLock<SleepQueue> = SpinLock::new(
 /// lock-free load and the lock acquire is simply picked up on the next tick.
 static SLEEP_ACTIVE_COUNT: AtomicU32 = AtomicU32::new(0);
 
-/// Initialise (or reset) the sleep queue; safe on both first boot and
-/// test-fixture re-init.
-pub fn init_sleep_queue() -> c_int {
-    if SLEEP_QUEUE.lock().init_or_reset().is_err() {
-        return -1;
-    }
-    0
-}
-
 #[inline]
 fn deadline_reached(now: u64, deadline: u64) -> bool {
     now.wrapping_sub(deadline) < (1u64 << 63)
@@ -304,13 +290,8 @@ fn wake_sleeping_task(task_id: u32) -> WakeVerdict {
         return WakeVerdict::NotSleepParked;
     }
 
-    let rc = wake_blocked_task(&task_ref, task_id);
-    if rc != 0 {
-        slopos_ostd::klog_info!(
-            "SCHED: sleep wake failed to publish READY task {} (rc={})",
-            task_id,
-            rc
-        );
+    if !wake_blocked_task(&task_ref, task_id) {
+        slopos_ostd::klog_info!("SCHED: sleep wake failed to publish READY task {}", task_id);
         return WakeVerdict::TaskGone;
     }
     WakeVerdict::Delivered
@@ -598,22 +579,32 @@ pub(crate) fn ensure_sleep_queue_allocated() -> bool {
     true
 }
 
-pub fn sleep_current_task_ms(ms: u32) -> c_int {
+/// How a sleep's block attempt ended.
+enum SleepPark {
+    Slept,
+    /// A wake, kill or signal won the race; the queued deadline is scrubbed.
+    Raced,
+    Refused,
+}
+
+/// Sleep the current task for `ms`. `false` when there is no current task or
+/// it could not be parked.
+pub fn sleep_current_task_ms(ms: u32) -> bool {
     if ms == 0 {
-        return 0;
+        return true;
     }
 
     if !is_scheduling_active() {
         platform::timer_poll_delay_ms(ms);
-        return 0;
+        return true;
     }
 
     let Some(current) = crate::task_struct::Current::get() else {
-        return -1;
+        return false;
     };
     if slopos_ostd::task::TaskAddr::current().is_some_and(super::per_cpu::is_idle_task) {
         platform::timer_poll_delay_ms(ms);
-        return 0;
+        return true;
     }
 
     let task_id = current.id();
@@ -621,19 +612,18 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
     let wake_ms = now_ms().wrapping_add(ms as u64);
 
     // See `block_current_task_with_timeout` for why CAS precedes upsert.
-    let rc = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| -> c_int {
-        if task_set_state_from_with_reason(
+    let parked = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
+        if !task_set_state_from_with_reason(
             task_id,
             TaskStatus::Running,
             TaskStatus::Blocked,
             BlockReason::Sleep,
-        ) != 0
-        {
+        ) {
             if current.task().status() == TaskStatus::Ready {
                 consume_ready_wake_for_current(&current);
-                return 1;
+                return SleepPark::Raced;
             }
-            return -1;
+            return SleepPark::Refused;
         }
         if !SLEEP_QUEUE.lock().upsert(task_id, wake_ms) {
             let _ = super::task::task_try_transition_from(
@@ -641,23 +631,26 @@ pub fn sleep_current_task_ms(ms: u32) -> c_int {
                 TaskStatus::Blocked,
                 TaskStatus::Running,
             );
-            return -1;
+            return SleepPark::Refused;
         }
         if abort_raced_block(&current) {
             consume_ready_wake_for_current(&current);
-            return 1; // a kill or signal raced the CAS; scrub the sleep entry below
+            return SleepPark::Raced;
         }
         if !commit_blocked_deschedule(&current) {
-            return 1; // raced: a wake was consumed; scrub the sleep entry below
+            return SleepPark::Raced;
         }
         schedule();
-        0
+        SleepPark::Slept
     });
-    if rc == 1 {
-        cancel_sleep(task_id);
-        return 0;
+    match parked {
+        SleepPark::Slept => true,
+        SleepPark::Raced => {
+            cancel_sleep(task_id);
+            true
+        }
+        SleepPark::Refused => false,
     }
-    rc
 }
 
 /// Block the current task with a timeout.
@@ -691,13 +684,12 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
     // (the timer path gates on `is_blocked`), and leave us about to CAS into
     // Blocked with nothing armed to wake us.
     let cancelled = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| -> bool {
-        if task_set_state_from_with_reason(
+        if !task_set_state_from_with_reason(
             task_id,
             TaskStatus::Running,
             TaskStatus::Blocked,
             BlockReason::Sleep,
-        ) != 0
-        {
+        ) {
             if current.task().status() == TaskStatus::Ready {
                 consume_ready_wake_for_current(&current);
             }
@@ -727,8 +719,8 @@ pub fn block_current_task_with_timeout(timeout_ms: u32) {
 /// `timeout_ms`.
 ///
 /// The [`PollWaiter`](slopos_ostd::sync::PollWaiter) counterpart of
-/// [`block_current_task_with_timeout`], and the reason poll no longer loses
-/// wakes. The difference is one line: the `Running -> Blocked` transition goes
+/// [`block_current_task_with_timeout`], and what keeps poll from losing wakes.
+/// The difference is one line: the `Running -> Blocked` transition goes
 /// through `poll_consume_or_block`, which in the *same* compare-exchange either
 /// takes a wake that arrived while this task was still `Running` — leaving the
 /// status alone, so the caller returns and re-scans — or publishes `Blocked`.

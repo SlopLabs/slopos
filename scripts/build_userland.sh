@@ -86,10 +86,10 @@ CRT0_OBJ="$(cd "$BUILD_DIR" && pwd)/crt0.o"
 # too keeps one `-Zbuild-std` fingerprint across every invocation below rather
 # than rebuilding core for each.
 #
-# The linker script and `--emit-relocs` used to live in the target spec's
-# `pre-link-args`, where every artifact built for this target got them. The
-# shared objects below must not: `userland.ld` fixes an image at 0x400000 and
-# discards `.interp`, which is the opposite of what a `.so` needs.
+# The linker script and `--emit-relocs` are here rather than in the target
+# spec's `pre-link-args`, which every artifact built for this target gets: the
+# shared objects below must not, since `userland.ld` fixes an image at 0x400000
+# and discards `.interp`, the opposite of what a `.so` needs.
 #
 # `relocation-model=static` is here rather than in the target spec because the
 # spec must say `pic`: a target that allows dynamic linking and does not is

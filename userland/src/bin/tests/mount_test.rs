@@ -145,7 +145,7 @@ fn unsupported_fstype_refused() -> bool {
 }
 
 /// The VFS caps a created name at `fs::MAX_NAME_LEN` (255) whatever filesystem
-/// is underneath; ext2's own ceiling on the tests image is the same 255.
+/// is underneath; ext4's own ceiling on the tests image is the same 255.
 fn long_name_refused_on_the_root() -> bool {
     let dir = "/var/mount_test_names";
     let too_long = format!("{dir}/{}", "n".repeat(256));
@@ -234,7 +234,7 @@ fn the_base_is_sealed_over_a_disk_root() -> bool {
         }
     }
     let _ = fs::create_dir(MOUNT_POINT);
-    match fs_syscall::mount(b"", MOUNT_POINT.as_bytes(), b"ext2", 0) {
+    match fs_syscall::mount(b"", MOUNT_POINT.as_bytes(), b"ext4", 0) {
         Ok(()) => {
             for dir in ["usr", "etc"] {
                 let from = format!("{MOUNT_POINT}/{dir}");
@@ -271,7 +271,7 @@ fn label_source_resolution() -> bool {
         (&b"LABEL=no-such-volume"[..], SyscallError::ENOENT),
         (&b"LABEL="[..], SyscallError::EINVAL),
     ] {
-        match fs_syscall::mount(source, MOUNT_POINT.as_bytes(), b"ext2", 0) {
+        match fs_syscall::mount(source, MOUNT_POINT.as_bytes(), b"ext4", 0) {
             Err(e) if e == want => {}
             Err(e) => {
                 println!(
@@ -326,7 +326,7 @@ fn the_boot_mounts_a_volume_by_label() -> bool {
 /// `/media` mounted.
 fn a_volume_remounts_by_label_after_umount() -> bool {
     let _ = fs::create_dir(MOUNT_POINT);
-    let second = fs_syscall::mount(MEDIA_LABEL, MOUNT_POINT.as_bytes(), b"ext2", 0);
+    let second = fs_syscall::mount(MEDIA_LABEL, MOUNT_POINT.as_bytes(), b"ext4", 0);
     let _ = fs::remove_dir(MOUNT_POINT);
     match second {
         Err(e) if e == SyscallError::EBUSY => {}

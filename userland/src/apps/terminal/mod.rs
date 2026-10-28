@@ -4,15 +4,16 @@
 pub mod grid;
 pub mod input;
 mod render;
-mod surface;
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use slopos_abi::task::TaskPriority;
+use slopos_protocol::CURSOR_SHAPE_TEXT;
+use slopos_windowing::{ProtocolHandle, Window};
 
-use crate::ring::{Ring, slopfut};
 use crate::syscall::{ShmBuffer, fs, process, tty};
+use slopos_rt::{Ring, slopfut};
 
 use grid::TerminalGrid;
 use input::{CompositorEvent, KeyAction, KeyBytes, MouseEventKind, PointerState, Selection};
@@ -42,16 +43,14 @@ pub fn terminal_user_main() {
     }));
 
     let handle = connection::connect().unwrap_or_else(|e| panic!("{e}"));
-    surface::init_handle(handle.clone());
 
     let (cw, ch) = render::cell_size();
     let width = OPEN_COLS * cw + 2 * render::MARGIN;
     let height = OPEN_ROWS * ch + 2 * render::MARGIN;
-    if !surface::init(width, height) {
-        panic!("terminal: surface init failed");
-    }
-    surface::set_title("Terminal");
-    surface::set_app_id("org.slopos.terminal");
+    let mut win = Window::new(handle.clone(), width as u32, height as u32)
+        .unwrap_or_else(|e| panic!("terminal: {e}"));
+    win.set_title("Terminal");
+    win.set_app_id("org.slopos.terminal");
 
     let (master_owned, _slave_num) = match process::openpty() {
         Ok(pair) => pair,
@@ -83,14 +82,14 @@ pub fn terminal_user_main() {
 
     let _ = fs::set_fd_nonblocking(master_fd);
 
-    let compositor_fd = with_client_fd(&handle);
+    let compositor_fd = handle.compositor_fd();
 
     let mut grid = TerminalGrid::new(rows, cols);
 
     let result = match Ring::setup(32) {
         Ok(ring) => slopfut::block_on(
             ring,
-            event_loop(master_fd, compositor_fd, &handle, &mut grid),
+            event_loop(master_fd, compositor_fd, &handle, &mut win, &mut grid),
         ),
         Err(_) => {
             let _ = tty::write(b"terminal: ring setup failed\n");
@@ -130,10 +129,6 @@ fn push_winsize(master_fd: i32, rows: u16, cols: u16) {
     let _ = fs::tiocswinsz(master_fd, &ws);
 }
 
-fn with_client_fd(handle: &slopos_windowing::ProtocolHandle) -> i32 {
-    handle.borrow_client().fd()
-}
-
 /// No `TASK_FLAG_NEW_PGRP`: the shell makes its own session and takes the slave
 /// as its terminal.
 fn spawn_shell_on_slave(slave_fd: i32) {
@@ -167,7 +162,8 @@ fn enqueue_mouse(queue: &mut MasterWriteQueue, report: Option<KeyBytes>) {
 async fn event_loop(
     master_fd: i32,
     compositor_fd: i32,
-    handle: &slopos_windowing::ProtocolHandle,
+    handle: &ProtocolHandle,
+    win: &mut Window,
     grid: &mut TerminalGrid,
 ) -> ExitReason {
     use slopos_abi::syscall::POLLIN;
@@ -188,23 +184,12 @@ async fn event_loop(
     let mut last_mouse_cell: Option<(usize, usize)> = None;
 
     let _ = grid.take_damage();
-    render_full(grid, &selection, cursor_on, &mut history, &mut pending);
+    render_full(win, grid, &selection, cursor_on, &mut history, &mut pending);
 
     loop {
         let mut repaint_all = false;
-        loop {
-            let polled = handle.borrow_client().poll_event();
-            let evt = match polled {
-                Ok(Some(evt)) => evt,
-                _ => break,
-            };
-            // Polling the socket directly, it routes releases itself, or both
-            // buffers stay in flight.
-            if let slopos_protocol::types::Event::BufferRelease { buffer_id, .. } = &evt {
-                surface::release_buffer(*buffer_id);
-                continue;
-            }
-            match input::classify(&evt) {
+        while let Some(event) = win.next_event() {
+            match input::classify(event) {
                 CompositorEvent::Key(key) => {
                     match input::encode_key(key, grid.application_cursor_keys()) {
                         KeyAction::ToMaster(bytes) => {
@@ -239,7 +224,7 @@ async fn event_loop(
                     mods = m;
                 }
                 CompositorEvent::Resize(w, h) => {
-                    if surface::resize(w as u32, h as u32) {
+                    if win.resize(w as u32, h as u32).is_ok() {
                         let (cw, ch) = render::cell_size();
                         let cols = render::cells_in(w, cw, grid::MAX_COLS);
                         let rows = render::cells_in(h, ch, grid::MAX_ROWS);
@@ -258,7 +243,7 @@ async fn event_loop(
                         history.clear();
                         pending.set_rows(grid.rows as usize);
                         let _ = grid.take_damage();
-                        render_full(grid, &selection, cursor_on, &mut history, &mut pending);
+                        render_full(win, grid, &selection, cursor_on, &mut history, &mut pending);
                     }
                 }
                 CompositorEvent::Close => {
@@ -267,8 +252,8 @@ async fn event_loop(
                 CompositorEvent::PointerMotion(x, y) | CompositorEvent::PointerEnter(x, y) => {
                     let (x, y) = (x - render::MARGIN, y - render::MARGIN);
                     // Only an enter carries the serial a cursor request needs.
-                    if matches!(evt, slopos_protocol::types::Event::PointerEnter { .. }) {
-                        surface::set_cursor_shape(slopos_abi::CURSOR_SHAPE_TEXT);
+                    if matches!(event, slopos_windowing::Event::PointerEnter { .. }) {
+                        win.set_cursor_shape(CURSOR_SHAPE_TEXT);
                     }
                     ptr.last_x = x;
                     ptr.last_y = y;
@@ -416,7 +401,7 @@ async fn event_loop(
             pending.add_all(grid.cols);
         }
         pending.union(&grid.take_damage());
-        present_pending(grid, &selection, cursor_on, &mut history, &mut pending);
+        present_pending(win, grid, &selection, cursor_on, &mut history, &mut pending);
 
         let elapsed = last_blink.elapsed();
         if elapsed >= BLINK_INTERVAL {
@@ -424,7 +409,7 @@ async fn event_loop(
             last_blink = Instant::now();
             grid.damage_cursor();
             pending.union(&grid.take_damage());
-            present_pending(grid, &selection, cursor_on, &mut history, &mut pending);
+            present_pending(win, grid, &selection, cursor_on, &mut history, &mut pending);
             continue;
         }
         let blink_ms = (BLINK_INTERVAL - elapsed).as_millis().max(1) as u64;
@@ -442,13 +427,14 @@ async fn event_loop(
 
 /// Where the buffers hold nothing a partial repaint could build on.
 fn render_full(
+    win: &mut Window,
     grid: &TerminalGrid,
     selection: &Selection,
     cursor_on: bool,
     history: &mut DamageHistory,
     pending: &mut CellDamage,
 ) {
-    render::render_full(grid, selection, cursor_on);
+    render::render_full(win, grid, selection, cursor_on);
     pending.clear();
     // No recorded frame describes what the other slots hold.
     history.clear();
@@ -459,6 +445,7 @@ fn render_full(
 }
 
 fn present_pending(
+    win: &mut Window,
     grid: &TerminalGrid,
     selection: &Selection,
     cursor_on: bool,
@@ -468,16 +455,16 @@ fn present_pending(
     if pending.is_empty() {
         return;
     }
-    match history.resolve(surface::buffer_age(), pending) {
+    match history.resolve(win.renderer().buffer_age(), pending) {
         Some(repaint) => {
-            render::render_damage(grid, selection, cursor_on, &repaint);
+            render::render_damage(win, grid, selection, cursor_on, &repaint);
             history.push(core::mem::replace(pending, {
                 let mut d = CellDamage::new();
                 d.set_rows(grid.rows as usize);
                 d
             }));
         }
-        None => render_full(grid, selection, cursor_on, history, pending),
+        None => render_full(win, grid, selection, cursor_on, history, pending),
     }
 }
 
@@ -636,11 +623,7 @@ fn drain_master(master_fd: i32, grid: &mut TerminalGrid) -> MasterDrain {
 /// The compositor's ceiling on one copy.
 const MAX_CLIPBOARD_BYTES: usize = 16 * 1024 * 1024;
 
-fn copy_selection(
-    handle: &slopos_windowing::ProtocolHandle,
-    grid: &TerminalGrid,
-    selection: &Selection,
-) {
+fn copy_selection(handle: &ProtocolHandle, grid: &TerminalGrid, selection: &Selection) {
     let bound = input::selection_byte_bound(grid, selection).min(MAX_CLIPBOARD_BYTES);
     if bound == 0 {
         return;

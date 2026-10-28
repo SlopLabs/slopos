@@ -140,7 +140,7 @@ pub fn test_inaddr_any_wildcard() -> TestResult {
 pub fn test_recv_queue_overflow() -> TestResult {
     reset();
 
-    let mut table = NEW_SOCKET_TABLE.lock();
+    let mut table = SOCKET_TABLE.lock();
     let Some(idx) = table.alloc(SocketInner::Udp(UdpSocketInner), SocketOwner::UNOWNED) else {
         return fail!("slab alloc failed");
     };
@@ -337,7 +337,7 @@ pub fn test_so_rcvbuf_resize() -> TestResult {
     assert_eq_test!(u32::from_ne_bytes(out), 256);
 
     {
-        let table = NEW_SOCKET_TABLE.lock();
+        let table = SOCKET_TABLE.lock();
         let Some(sock_ref) = table.get(sock as usize) else {
             return fail!("socket missing");
         };
@@ -353,7 +353,7 @@ pub fn test_so_rcvbuf_resize() -> TestResult {
         socket_setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &max.to_ne_bytes()),
         0
     );
-    let table = NEW_SOCKET_TABLE.lock();
+    let table = SOCKET_TABLE.lock();
     let Some(sock_ref) = table.get(sock as usize) else {
         return fail!("socket missing");
     };

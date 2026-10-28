@@ -4,7 +4,6 @@ use std::sync::Mutex;
 
 use slopos_shell_core::lexer::{self, Tok};
 
-use crate::syscall::UserFsEntry;
 use slopos_abi::fs::USER_PATH_MAX;
 
 /// One limit for every source: the interactive editor and the script reader
@@ -16,8 +15,6 @@ static LINE_BUF: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 /// Heap-backed: `USER_PATH_MAX` bytes need not be resident before a path is
 /// ever built.
 static PATH_BUF: Mutex<Vec<u8>> = Mutex::new(Vec::new());
-
-static LIST_ENTRIES: Mutex<[UserFsEntry; 32]> = Mutex::new([UserFsEntry::new(); 32]);
 
 /// Pre-expanded command words, for a caller that has words rather than a line
 /// of text. The bytes are final — no expansion, splitting or globbing — which
@@ -118,8 +115,4 @@ pub fn with_path_buf<R, F: FnOnce(&mut [u8]) -> R>(f: F) -> R {
 /// buffer is already held.
 pub fn path_scratch() -> Vec<u8> {
     vec![0u8; USER_PATH_MAX]
-}
-
-pub fn with_list_entries<R, F: FnOnce(&mut [UserFsEntry; 32]) -> R>(f: F) -> R {
-    f(&mut LIST_ENTRIES.lock().unwrap())
 }

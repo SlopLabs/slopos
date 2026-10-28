@@ -255,10 +255,7 @@ fn running_manifest(boot: &str) -> Option<Vec<u8>> {
 
 fn read_base(volume: &mut Volume<BlockFile>, path: &str) -> Result<Vec<u8>, String> {
     volume.read_file(path).map_err(|e| match e {
-        FatError::NotFound => format!(
-            "{path}: the boot partition holds no base there; a disk laid out with a base \
-             per slot moves to one shared base by a reinstall that keeps its root"
-        ),
+        FatError::NotFound => format!("{path}: the boot partition holds no base there"),
         e => format!("{path}: {e:?}"),
     })
 }
@@ -586,14 +583,9 @@ fn base_install(
     Ok(())
 }
 
-/// The oldest base interface whose init, privd and remoted take over a
-/// running system: an older init cannot resume the state this one hands it.
-const LIVE_SINCE: u32 = 3;
-
 /// Make `image` the base this system runs, when it booted from the
-/// partition just written, the running kernel serves `interface` and the
-/// base can take over; what happened, with `later` saying when a boot takes
-/// it otherwise.
+/// partition just written and the running kernel serves `interface`; what
+/// happened, with `later` saying when a boot takes it otherwise.
 fn activate(
     booted_here: bool,
     image: &[u8],
@@ -603,7 +595,7 @@ fn activate(
     let mut info = UserSysInfo::default();
     let served = sys_core::sys_info(&mut info) == 0
         && (info.base_interface_min..=info.base_interface_max).contains(&interface);
-    if !booted_here || !served || interface < LIVE_SINCE {
+    if !booted_here || !served {
         return later();
     }
     match crate::syscall::base::base_activate(image) {

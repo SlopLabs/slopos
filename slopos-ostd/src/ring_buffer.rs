@@ -52,18 +52,6 @@ impl<T: Copy, const N: usize> RingBuffer<T, N> {
         N - self.count
     }
 
-    /// Alias for `len()`.
-    #[inline(always)]
-    pub fn count(&self) -> usize {
-        self.len()
-    }
-
-    /// Alias for `free_space()`.
-    #[inline(always)]
-    pub fn free(&self) -> usize {
-        self.free_space()
-    }
-
     /// Peek at the oldest element without removing it.
     #[inline(always)]
     pub fn peek(&self) -> Option<&T> {
@@ -105,12 +93,6 @@ impl<T: Copy + Default, const N: usize> RingBuffer<T, N> {
         self.head = 0;
         self.tail = 0;
         self.count = 0;
-    }
-
-    /// Alias for `reset()`.
-    #[inline(always)]
-    pub fn flush(&mut self) {
-        self.reset()
     }
 
     /// Discard the oldest `n` elements, saturating at the element count.

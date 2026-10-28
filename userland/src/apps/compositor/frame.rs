@@ -2,13 +2,12 @@
 //! rounded at the window radius unless it is maximized, and its shadow.
 
 use slopos_abi::draw::{Canvas, Color32, EncodedPixel};
-use slopos_abi::surface::{WINDOW_STATE_MAXIMIZED, WINDOW_STATE_MINIMIZED};
 use slopos_gfx::rounded::Rounded;
 use slopos_theme_core::{Shadow, radius, with_alpha};
 
 use super::region::Region;
+use super::window_info::{WindowInfo, WindowState};
 use crate::gfx::{self, DamageRect, DrawBuffer};
-use crate::syscall::UserWindowInfo;
 
 pub const TITLE_BAR_HEIGHT: i32 = 28;
 
@@ -22,8 +21,8 @@ pub fn resize_reach() -> i32 {
     shadow_token().spread
 }
 
-pub fn outline(w: &UserWindowInfo) -> Rounded {
-    let radius = match w.state == WINDOW_STATE_MAXIMIZED {
+pub fn outline(w: &WindowInfo) -> Rounded {
+    let radius = match w.state == WindowState::Maximized {
         true => 0,
         false => radius::WINDOW,
     };
@@ -36,7 +35,7 @@ pub fn outline(w: &UserWindowInfo) -> Rounded {
     )
 }
 
-fn caster(w: &UserWindowInfo) -> Rounded {
+fn caster(w: &WindowInfo) -> Rounded {
     let mut caster = outline(w);
     caster.y += shadow_token().offset_y;
     caster
@@ -44,8 +43,8 @@ fn caster(w: &UserWindowInfo) -> Rounded {
 
 /// What casts the window's shadow and its colour at its darkest, which is
 /// half as dark without focus; a maximized window casts none.
-pub fn shadow(w: &UserWindowInfo, focused: bool) -> Option<(Rounded, Color32)> {
-    if w.state == WINDOW_STATE_MAXIMIZED {
+pub fn shadow(w: &WindowInfo, focused: bool) -> Option<(Rounded, Color32)> {
+    if w.state == WindowState::Maximized {
         return None;
     }
     let color = shadow_token().color;
@@ -56,12 +55,12 @@ pub fn shadow(w: &UserWindowInfo, focused: bool) -> Option<(Rounded, Color32)> {
     Some((caster(w), color))
 }
 
-pub fn frame_box(w: &UserWindowInfo) -> DamageRect {
+pub fn frame_box(w: &WindowInfo) -> DamageRect {
     outline(w).bounds()
 }
 
 /// Every pixel the frame or its shadow may touch.
-pub fn bounds(w: &UserWindowInfo) -> DamageRect {
+pub fn bounds(w: &WindowInfo) -> DamageRect {
     frame_box(w).union(&caster(w).grown(shadow_token().spread).bounds())
 }
 
@@ -69,21 +68,21 @@ pub fn bounds(w: &UserWindowInfo) -> DamageRect {
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct WindowBounds {
     rect: DamageRect,
-    state: u8,
+    state: WindowState,
 }
 
 impl Default for WindowBounds {
     fn default() -> Self {
         Self {
             rect: DamageRect::invalid(),
-            state: 0,
+            state: WindowState::Normal,
         }
     }
 }
 
 impl WindowBounds {
-    pub fn from_window(w: &UserWindowInfo) -> Self {
-        let rect = match w.state == WINDOW_STATE_MINIMIZED {
+    pub fn from_window(w: &WindowInfo) -> Self {
+        let rect = match w.state == WindowState::Minimized {
             true => DamageRect::invalid(),
             false => bounds(w),
         };
@@ -101,7 +100,7 @@ impl WindowBounds {
 
 /// The frame less its four rounded corners: what the window paints over
 /// entirely, so nothing beneath it need be drawn.
-pub fn opaque(w: &UserWindowInfo) -> [DamageRect; 3] {
+pub fn opaque(w: &WindowInfo) -> [DamageRect; 3] {
     outline(w).bands()
 }
 

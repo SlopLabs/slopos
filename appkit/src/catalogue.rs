@@ -116,7 +116,7 @@ const FILES: [(&str, u64, &str); 5] = [
         1_468_006,
         "Image",
     ),
-    ("ext2-persist.img", 512 << 20, "Disk image"),
+    ("ext4-persist.img", 512 << 20, "Disk image"),
     ("notes.txt", 2_048, "Text"),
     ("slop.iso", 740 << 20, "Disc image"),
 ];

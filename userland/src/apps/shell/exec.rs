@@ -124,20 +124,7 @@ impl Drop for Depth {
     }
 }
 
-static FOREGROUND_PGID: AtomicU32 = AtomicU32::new(0);
 static SHELL_PGID: AtomicU32 = AtomicU32::new(0);
-
-pub fn foreground_pgid() -> u32 {
-    FOREGROUND_PGID.load(Ordering::Relaxed)
-}
-
-pub fn set_foreground_pgid(pgid: u32) {
-    FOREGROUND_PGID.store(pgid, Ordering::Relaxed);
-}
-
-pub fn clear_foreground_pgid() {
-    FOREGROUND_PGID.store(0, Ordering::Relaxed);
-}
 
 /// Claim the terminal and become a session leader — interactive shells only.
 ///
@@ -178,7 +165,6 @@ pub fn enter_foreground(pgid: u32) {
     if pgid == 0 || !super::is_interactive() {
         return;
     }
-    set_foreground_pgid(pgid);
     let _ = fs::tcsetpgrp(0, pgid);
 }
 
@@ -190,7 +176,6 @@ pub fn leave_foreground() {
     if pgid != 0 {
         let _ = fs::tcsetpgrp(0, pgid);
     }
-    clear_foreground_pgid();
 }
 
 // ---------------------------------------------------------------------------
@@ -225,18 +210,6 @@ pub fn report_parse_failure(failure: ParseFailure) {
             true
         }
     };
-}
-
-/// Run one complete command text — a whole line, or a whole compound command
-/// gathered over several lines.
-pub fn execute_text(text: &[u8]) -> i32 {
-    match parse_text(text) {
-        Ok(list) => execute_list(&list),
-        Err(failure) => {
-            report_parse_failure(failure);
-            STATUS_SYNTAX_ERROR
-        }
-    }
 }
 
 /// Run an already-parsed command list as a top-level command.

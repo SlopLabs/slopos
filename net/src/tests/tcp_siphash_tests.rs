@@ -42,8 +42,8 @@ pub fn test_siphash24_known_answers() -> TestResult {
     pass!()
 }
 
-/// A one-bit key change must not leave the output predictable from the old
-/// one: this is the property the FNV chain it replaced did not have.
+/// A one-bit key change must not leave the output predictable from the
+/// previous key's, which an FNV chain would.
 pub fn test_siphash24_key_sensitivity() -> TestResult {
     let msg = [0x11u8; 12];
     let a = siphash24(K0, K1, &msg);

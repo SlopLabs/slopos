@@ -5,11 +5,10 @@
 //! doesn't need a richer type. It is defined in `slopos-ostd` and re-exported
 //! here so kernel code can reach it under the
 //! `slopos_mm::kernel_meta::KernelMeta` path that
-//! `slopos_mm::page_alloc::KernelFrame` references.
+//! `slopos_mm::page_alloc::OwnedPageFrame` references.
 
 use core::mem::size_of;
 
-use slopos_abi::addr::PhysAddr;
 use slopos_ostd::mm::frame::{MAX_META_ALIGN, MAX_META_SIZE, MetaSlot, init_meta_slots};
 use slopos_ostd::sync::BspToken;
 
@@ -67,7 +66,7 @@ pub fn install_meta_slots<'brand>(token: &BspToken<'brand>) -> usize {
         );
     }
 
-    let virt = PhysAddr::new(phys.as_u64()).to_virt();
+    let virt = phys.to_virt();
     let slots = virt.as_u64() as *mut MetaSlot;
 
     // The allocation above is zeroed, page-aligned and exclusively owned, so

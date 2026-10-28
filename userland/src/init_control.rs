@@ -1,8 +1,8 @@
 //! `/run/init`, where init takes requests to log people in, end, restart,
 //! lock and switch their sessions, to take a change of the extensions and to
-//! re-execute itself, and the login tags it gives each session, remoted,
-//! privd and extensions' services and mechanisms, by which their processes
-//! are found.
+//! re-execute itself; the login tags it gives each session, remoted, privd
+//! and extensions' services and mechanisms, by which their processes are
+//! found; and the descriptors it hands what it starts.
 
 use slopos_abi::net::{AF_UNIX, SOCK_CLOEXEC, SOCK_STREAM};
 use slopos_abi::syscall::{MSG_NOSIGNAL, POLLIN, UserPollFd, UserTaskEntry};
@@ -17,16 +17,23 @@ pub const SOCKET: &str = "/run/init";
 pub const COMPOSITOR: &str = "/bin/compositor";
 pub const TERMINAL: &str = "/bin/terminal";
 
-/// The login tag of every process of the one desktop an init from before
-/// the session table ran, which an init that resumes it takes over.
-pub const DESKTOP: u32 = slopos_abi::task::DESKTOP_LOGIN;
 /// The login tag of remoted and what it runs, which a session restart spares.
-pub const REMOTE: u32 = 2;
+pub const REMOTE: u32 = 1;
 /// The login tag of privd and the mechanisms it runs, which outlive it: a
 /// privd started again takes no exclusive group while its predecessor's run.
-pub const PRIVD: u32 = 3;
+pub const PRIVD: u32 = 2;
 /// The login tag of the copies of init that keep extensions' services' logs.
-pub const LOGGER: u32 = 4;
+pub const LOGGER: u32 = 3;
+
+/// A paired base's pairing, which remoted dials with and privd's `paired`
+/// principal depends on.
+pub const PAIRING: &str = "/usr/share/slopos/remote/";
+const PAIRING_CONF: &str = "/usr/share/slopos/remote/remote.conf";
+
+/// Whether the running base carries a pairing.
+pub fn paired() -> bool {
+    std::path::Path::new(PAIRING_CONF).is_file()
+}
 
 /// The login tags of extensions' services: one each, made from its
 /// extension's number and its place among the services it declares, so init
@@ -109,19 +116,6 @@ impl Tasks {
         }))
     }
 
-    /// The effective uids of the live processes carrying any of `logins`.
-    pub fn uids_of(&self, logins: &[u32]) -> Vec<u32> {
-        let mut uids: Vec<u32> = self
-            .0
-            .iter()
-            .filter(|task| logins.contains(&task.login))
-            .map(|task| task.uid)
-            .collect();
-        uids.sort_unstable();
-        uids.dedup();
-        uids
-    }
-
     /// The login tag of the live process `pid` names by its leader.
     pub fn login_of(&self, pid: u32) -> Option<u32> {
         self.0
@@ -195,11 +189,28 @@ impl Tasks {
     }
 }
 
-/// Where a service finds the sockets init keeps for it, in the order its
-/// declaration lists them: `LISTEN_FDS` of them from this descriptor on,
-/// named in `LISTEN_FDNAMES`, `:` between, `tcp-<port>`, `udp-<port>` or a
-/// socket's own name.
-pub const LISTEN_FDS_START: i32 = crate::readiness::NOTIFIER_FD + 1;
+/// Where what init starts finds the descriptors init hands it, past the
+/// readiness notifier at [`NOTIFIER_FD`](crate::readiness::NOTIFIER_FD).
+pub mod fds {
+    use crate::readiness::NOTIFIER_FD;
+    use crate::syscall::RawFd;
+    use slopos_priv_core::sessions::LINKS;
+
+    /// Where an extension's service finds the sockets init keeps for it, in
+    /// the order its declaration lists them: `LISTEN_FDS` of them from this
+    /// descriptor on, named in `LISTEN_FDNAMES`, `:` between, `tcp-<port>`,
+    /// `udp-<port>` or a socket's own name.
+    pub const LISTEN_START: RawFd = NOTIFIER_FD + 1;
+    /// A compositor's consent link to privd.
+    pub const COMPOSITOR_CONSENT: RawFd = NOTIFIER_FD + 1;
+    /// The pipe init tells a compositor on whether its session is in front.
+    pub const COMPOSITOR_SESSION: RawFd = COMPOSITOR_CONSENT + 1;
+    /// privd's consent link `n` is at `PRIVD_LINKS + n`, one per desktop or
+    /// login screen.
+    pub const PRIVD_LINKS: RawFd = NOTIFIER_FD + 1;
+    /// The pair privd hears the session table on.
+    pub const PRIVD_TABLE: RawFd = PRIVD_LINKS + LINKS as RawFd;
+}
 
 /// The longest request line init reads.
 pub const MAX_REQUEST: usize = 64;

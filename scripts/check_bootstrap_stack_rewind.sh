@@ -13,19 +13,15 @@ set -euo pipefail
 # Storing the buffer *top* back into it re-hands the span of every live caller
 # frame to the allocator. The frames opened afterwards are laid over the frames
 # still owned by the callers, and the first caller to read a clobbered local
-# takes the consequence. That shipped: `init_bootstrap_tasks`, called from
-# `smp_init` at drivers-phase priority 45, re-seeded the BSP slot while
-# `boot_init_run_phase` held ~0x950 bytes below the top. Its `ordered[64]`
-# array of `&BootInitStep` was overwritten with lockdep `HeldLock` records, and
-# the indirect `call *0x10(%r15)` dispatched through a `poison_fn` field —
-# #GP(0) on a non-canonical target, two steps into the drivers phase.
+# takes the consequence: `init_bootstrap_tasks`, called from `smp_init` while
+# `boot_init_run_phase` holds its `ordered[64]` array of `&BootInitStep` below
+# the top, must never re-seed the BSP slot.
 #
 # Why a gate rather than a kernel test: in the dev and tests builds
 # `init_bootstrap_tasks` is *itself* SafeStack-instrumented, so its own
 # epilogue restores the slot and the store is invisible. In the release build
-# it has no such frame and the store persists. A `just test` run therefore
-# cannot observe this bug at all — only the shipped ELF can, which is why the
-# fault reproduced on real hardware and never in the test suite.
+# it has no such frame and the store persists, so only the shipped ELF can
+# show it.
 #
 # The check is a name-and-target check on the disassembly: no store to
 # `BSP_BOOTSTRAP_TASK` may originate anywhere but the boot trampoline, which is

@@ -10,7 +10,7 @@ use slopos_abi::Errno;
 use slopos_abi::input::layout::LAYOUT_NAME_LEN;
 use slopos_kernel_services::syscall_services::keymap;
 use slopos_mm::user_copy::copy_bytes_to_user;
-use slopos_mm::user_ptr::UserBytes;
+use slopos_ostd::user::ptr::UserBytes;
 
 define_syscall!(syscall_keymap_load
     (ctx, data_ptr: u64, len: u64)

@@ -13,13 +13,9 @@
 //! lands on #DF, which `exception_double_fault` classifies.
 
 use core::ffi::CStr;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use slopos_abi::addr::VirtAddr;
-use slopos_arch::arch::idt::{
-    EXCEPTION_DOUBLE_FAULT, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_STACK_FAULT, IRQ_BASE_VECTOR,
-};
-use slopos_arch::{MAX_CPUS, get_current_cpu};
 use slopos_mm::kernel_mappings::kernel_map_4kb_frame;
 use slopos_mm::kernel_meta::KernelMeta;
 use slopos_mm::memory_layout_defs::{
@@ -31,8 +27,13 @@ use slopos_mm::memory_layout_defs::{
     EXCEPTION_STACK_SIZE,
 };
 use slopos_mm::paging::{get_page_size, virt_to_phys};
-use slopos_mm::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use slopos_mm::paging_defs::PAGE_SIZE_4KB;
+use slopos_ostd::cpu::x86_64::pcr::{MAX_CPUS, current_cpu_id};
+use slopos_ostd::irq::idt::{
+    EXCEPTION_DOUBLE_FAULT, EXCEPTION_GENERAL_PROTECTION, EXCEPTION_STACK_FAULT, IRQ_BASE_VECTOR,
+};
 use slopos_ostd::mm::frame::Frame;
+use slopos_ostd::mm::page_property::PageProperty;
 use slopos_ostd::{klog_debug, klog_info};
 
 /// Purely a logging/diagnostics label; it selects no behaviour.
@@ -71,7 +72,6 @@ pub struct IstStackConfig {
     guard_end: u64,
     stack_base: u64,
     stack_top: u64,
-    stack_size: u64,
 }
 
 impl IstStackConfig {
@@ -99,7 +99,6 @@ impl IstStackConfig {
             guard_end,
             stack_base,
             stack_top,
-            stack_size: EXCEPTION_STACK_SIZE,
         }
     }
 
@@ -112,25 +111,18 @@ impl IstStackConfig {
 }
 
 struct IstStackMetrics {
-    /// Bytes below the stack top.
-    peak_usage: AtomicU64,
     out_of_bounds_reported: AtomicBool,
-    entry_count: AtomicU64,
 }
 
 impl IstStackMetrics {
     const fn new() -> Self {
         Self {
-            peak_usage: AtomicU64::new(0),
             out_of_bounds_reported: AtomicBool::new(false),
-            entry_count: AtomicU64::new(0),
         }
     }
 
     fn reset(&self) {
-        self.peak_usage.store(0, Ordering::Relaxed);
         self.out_of_bounds_reported.store(false, Ordering::Relaxed);
-        self.entry_count.store(0, Ordering::Relaxed);
     }
 
     /// True only for the first report, so the log cannot be flooded.
@@ -138,27 +130,6 @@ impl IstStackMetrics {
         self.out_of_bounds_reported
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
             .is_ok()
-    }
-
-    /// True if `usage` is a new peak.
-    fn record_usage(&self, usage: u64) -> bool {
-        let mut current = self.peak_usage.load(Ordering::Relaxed);
-        while usage > current {
-            match self.peak_usage.compare_exchange_weak(
-                current,
-                usage,
-                Ordering::SeqCst,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return true,
-                Err(prev) => current = prev,
-            }
-        }
-        false
-    }
-
-    fn record_entry(&self) {
-        self.entry_count.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -265,7 +236,7 @@ fn find_index_by_address(addr: u64) -> Option<(usize, usize)> {
 /// entry and the last install discards the other's stack pages. Checked in
 /// release too — the resulting reset is indistinguishable from a hardware fault.
 fn assert_bsp_is_mapping(region: &str) {
-    let cpu_id = get_current_cpu();
+    let cpu_id = current_cpu_id();
     if cpu_id != 0 {
         // A panic message does not reach the console from an AP this early in
         // bring-up, but klog does; the assertion only has to stop the machine.
@@ -295,7 +266,7 @@ fn map_stack_pages(stack: &IstStackConfig, stack_base: u64) {
                 stack.name_str()
             )
         });
-        if kernel_map_4kb_frame(VirtAddr::new(virt_addr), frame, PageFlags::KERNEL_RW.bits()) != 0 {
+        if kernel_map_4kb_frame(VirtAddr::new(virt_addr), frame, PageProperty::KERNEL_RW).is_err() {
             let vaddr = VirtAddr::new(virt_addr);
             let mapped_phys = virt_to_phys(vaddr);
             let page_size = get_page_size(vaddr);
@@ -358,7 +329,7 @@ fn map_exc_dstack_pages(cpu_id: usize) {
                 cpu_id
             )
         });
-        if kernel_map_4kb_frame(VirtAddr::new(virt_addr), frame, PageFlags::KERNEL_RW.bits()) != 0 {
+        if kernel_map_4kb_frame(VirtAddr::new(virt_addr), frame, PageProperty::KERNEL_RW).is_err() {
             panic!(
                 "ist_stacks: failed to map exception data-stack page for CPU {}",
                 cpu_id
@@ -371,19 +342,19 @@ fn map_exc_dstack_pages(cpu_id: usize) {
 /// is installed, since an exception on an IST stack selects this data stack.
 fn prime_exc_dstack(cpu_id: usize) {
     let (_guard_start, _usable_base, top) = exc_dstack_bounds_for_cpu(cpu_id);
-    slopos_arch::pcr::set_local_ist_unsafe_sp(top);
+    slopos_ostd::cpu::x86_64::pcr::set_local_ist_unsafe_sp(top);
 }
 
 /// Used by `retire_faulted_cpu` to re-prime `ist_unsafe_sp` after a fatal user
 /// fault abandons the IST data stack without unwinding.
 pub fn exc_dstack_top_current_cpu() -> u64 {
-    let (_guard_start, _usable_base, top) = exc_dstack_bounds_for_cpu(get_current_cpu());
+    let (_guard_start, _usable_base, top) = exc_dstack_bounds_for_cpu(current_cpu_id());
     top
 }
 
 /// `(guard_start, usable_base, top)`; exposed for the SafeStack regression tests.
 pub fn exc_dstack_bounds_current_cpu() -> (u64, u64, u64) {
-    exc_dstack_bounds_for_cpu(get_current_cpu())
+    exc_dstack_bounds_for_cpu(current_cpu_id())
 }
 
 /// Returns the offending CPU id on a data-stack guard-page hit, so the #PF
@@ -430,7 +401,7 @@ fn map_one_stack_region(usable_base: u64, pages: u64, what: &str, cpu_id: usize)
                 what, cpu_id
             )
         });
-        if kernel_map_4kb_frame(VirtAddr::new(virt_addr), frame, PageFlags::KERNEL_RW.bits()) != 0 {
+        if kernel_map_4kb_frame(VirtAddr::new(virt_addr), frame, PageProperty::KERNEL_RW).is_err() {
             panic!("ist_stacks: failed to map {} page for CPU {}", what, cpu_id);
         }
     }
@@ -459,18 +430,18 @@ fn map_emergency_stacks_pages(cpu_id: usize) {
 fn prime_emergency_stacks(cpu_id: usize) {
     let (_g, _u, safe_top) = emergency_safe_bounds_for_cpu(cpu_id);
     let (_g, _u, data_top) = emergency_dstack_bounds_for_cpu(cpu_id);
-    slopos_arch::pcr::set_local_panic_safe_sp(safe_top);
-    slopos_arch::pcr::set_local_panic_unsafe_sp(data_top);
+    slopos_ostd::cpu::x86_64::pcr::set_local_panic_safe_sp(safe_top);
+    slopos_ostd::cpu::x86_64::pcr::set_local_panic_unsafe_sp(data_top);
 }
 
 /// `(guard_start, usable_base, top)`; exposed for the Reliable Abort Core tests.
 pub fn emergency_safe_bounds_current_cpu() -> (u64, u64, u64) {
-    emergency_safe_bounds_for_cpu(get_current_cpu())
+    emergency_safe_bounds_for_cpu(current_cpu_id())
 }
 
 /// `(guard_start, usable_base, top)` of the current CPU's emergency data stack.
 pub fn emergency_dstack_bounds_current_cpu() -> (u64, u64, u64) {
-    emergency_dstack_bounds_for_cpu(get_current_cpu())
+    emergency_dstack_bounds_for_cpu(current_cpu_id())
 }
 
 /// A hit means the fatal-fault report itself overflowed — the #PF handler must
@@ -546,7 +517,7 @@ pub fn premap_cpus(cpu_count: usize) {
 pub fn ist_bind_current_cpu<'b, K: slopos_hermetic::CpuInitKind>(
     ctx: &mut slopos_hermetic::BootCtx<'b, K>,
 ) {
-    let cpu_id = get_current_cpu();
+    let cpu_id = current_cpu_id();
     ensure_cpu_stacks_mapped(cpu_id);
 
     // Both must precede the IST selectors installed below: once an IST is live,
@@ -557,7 +528,8 @@ pub fn ist_bind_current_cpu<'b, K: slopos_hermetic::CpuInitKind>(
 
     for (idx, stack) in IST_CONFIGS.iter().enumerate() {
         let (_guard_start, _guard_end, stack_base, stack_top) = stack_bounds_for_cpu(cpu_id, idx);
-        let Some(slot) = slopos_arch::arch::gdt::IstSlot::from_index(stack.ist_index) else {
+        let Some(slot) = slopos_ostd::arch::x86_64::gdt::IstSlot::from_index(stack.ist_index)
+        else {
             klog_info!(
                 "IST: invalid ist_index {} for vector {}",
                 stack.ist_index,
@@ -587,35 +559,26 @@ pub fn ist_bind_current_cpu<'b, K: slopos_hermetic::CpuInitKind>(
 
 /// Called from the common exception handler; `frame_ptr` is the interrupt
 /// frame's address, i.e. RSP on entry. Vectors without an IST stack are ignored.
-pub fn ist_record_usage(vector: u8, frame_ptr: u64) {
+pub fn ist_check_frame(vector: u8, frame_ptr: u64) {
     let Some(idx) = find_index_by_vector(vector) else {
         return;
     };
 
     let stack = &IST_CONFIGS[idx];
     let metrics = &IST_METRICS[idx];
-    let cpu_id = get_current_cpu();
+    let cpu_id = current_cpu_id();
     let (_guard_start, _guard_end, stack_base, stack_top) = stack_bounds_for_cpu(cpu_id, idx);
 
-    metrics.record_entry();
-
-    if frame_ptr < stack_base || frame_ptr > stack_top {
-        if metrics.mark_out_of_bounds_once() {
-            klog_info!(
-                "IST WARNING: CPU{} RSP 0x{:x} outside {} stack bounds (0x{:x}-0x{:x})",
-                cpu_id,
-                frame_ptr,
-                stack.name_str(),
-                stack_base,
-                stack_top
-            );
-        }
-        return;
+    if (frame_ptr < stack_base || frame_ptr > stack_top) && metrics.mark_out_of_bounds_once() {
+        klog_info!(
+            "IST WARNING: CPU{} RSP 0x{:x} outside {} stack bounds (0x{:x}-0x{:x})",
+            cpu_id,
+            frame_ptr,
+            stack.name_str(),
+            stack_base,
+            stack_top
+        );
     }
-
-    let usage = stack_top - frame_ptr;
-
-    metrics.record_usage(usage);
 }
 
 /// Classifies a CR2 value: `Some` is a guard-page hit, so the #PF handler can
@@ -631,54 +594,4 @@ pub fn ist_guard_fault(fault_addr: u64) -> Option<&'static [u8]> {
     } else {
         None
     }
-}
-
-pub fn ist_is_on_ist_stack(rsp: u64) -> bool {
-    for cpu_id in 0..MAX_CPUS {
-        if !CPU_IST_MAPPED[cpu_id].load(Ordering::Acquire) {
-            continue;
-        }
-        for idx in 0..IST_STACK_COUNT {
-            let (_guard_start, _guard_end, stack_base, stack_top) =
-                stack_bounds_for_cpu(cpu_id, idx);
-            if rsp >= stack_base && rsp <= stack_top {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// `(peak_usage, entry_count)`, or `None` if the vector has no IST stack.
-pub fn ist_get_stats(vector: u8) -> Option<(u64, u64)> {
-    let idx = find_index_by_vector(vector)?;
-    let metrics = &IST_METRICS[idx];
-    Some((
-        metrics.peak_usage.load(Ordering::Relaxed),
-        metrics.entry_count.load(Ordering::Relaxed),
-    ))
-}
-
-pub fn ist_dump_stats() {
-    klog_info!("=== IST Stack Statistics ===");
-    for (i, stack) in IST_CONFIGS.iter().enumerate() {
-        let metrics = &IST_METRICS[i];
-        let peak = metrics.peak_usage.load(Ordering::Relaxed);
-        let entries = metrics.entry_count.load(Ordering::Relaxed);
-        let pct_tenths = if stack.stack_size > 0 {
-            (peak * 1000 / stack.stack_size) as u32
-        } else {
-            0
-        };
-
-        klog_info!(
-            "  {}: {} entries, peak {} bytes ({}.{}%)",
-            stack.name_str(),
-            entries,
-            peak,
-            pct_tenths / 10,
-            pct_tenths % 10
-        );
-    }
-    klog_info!("============================");
 }

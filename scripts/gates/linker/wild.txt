@@ -6,10 +6,10 @@
 #
 # <construct> <TAB> has|lacks
 #
-# wild is the Rust-written ELF linker that was the candidate for a toolchain
-# with no C++ in it. The toolchain went the other way, to LLVM's, so this
-# gate's job now is to notice the day the answer changes. Measured against
-# wild 0.10.0, it takes twelve of the eighteen constructs link.ld uses.
+# wild is a Rust-written ELF linker, the candidate for a toolchain with no C++
+# in it. The toolchain is LLVM's, and this gate notices the day wild can link
+# the kernel. Measured against wild 0.10.0, it takes twelve of the eighteen
+# constructs link.ld uses.
 #
 # Three it refuses:
 #

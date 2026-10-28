@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Task-ownership gate — the acceptance criterion for the migration that
-# replaces raw task pointers with `KArc<Task>`.
+# Task-ownership gate: `KArc<Task>` is the only owning task handle, and
+# `TaskRef` the only way to hold one outside `slopos-ostd` (AGENTS.md's
+# task-ownership discipline, I1–I8).
 #
 # A `*mut Task` is a task handle with no owner. It says nothing about
 # whether the task is still alive, whether anyone else is mutating it, or
 # who is responsible for tearing it down. `KArc<Task>` says all three.
-# This gate is the load-bearing check that the raw form does not drift
-# back in once the migration lands — the same belt-and-braces role
+# This gate keeps the raw form out of the kernel — the same role
 # scripts/check_unsafe_outside_ostd.sh plays for the OSTD boundary.
 #
 # ---------------------------------------------------------------------
@@ -34,13 +34,12 @@
 #        3b (inbound)  a cast back to `Task` inside a function whose own
 #           signature takes a `*mut c_void` parameter, e.g. the
 #           `task_arg as *mut Task` at the top of a `*mut c_void` entry
-#           shim. Without 3b the migration could satisfy 3a by keeping
-#           only the receiving half of the same round trip.
+#           shim. Without 3b, 3a could be satisfied by keeping only the
+#           receiving half of the same round trip.
 #
-#   4. `task_borrow` and `task_borrow_mut` are gone. This is the
-#      migration's terminal criterion — the accessor layer that turns a
-#      raw pointer back into a reference is what the whole exercise
-#      exists to delete. No exemptions.
+#   4. No `task_borrow` / `task_borrow_mut`: an accessor that turns a raw
+#      task pointer back into a reference undoes every check above. No
+#      exemptions.
 #
 #   5. No `unsafe impl Send`/`Sync` justified by a task refcount. Flags an
 #      `unsafe impl ... Send/Sync` whose preceding ~8 lines mention both a
@@ -564,7 +563,7 @@ scan_sources() {
                 }
             }
 
-            # ---- check 4: the accessor layer is gone -----------------
+            # ---- check 4: no raw-pointer-to-reference accessor ---------
             {
                 if (stripped ~ /(^|[^A-Za-z0-9_])task_borrow(_mut)?([^A-Za-z0-9_]|$)/ \
                     && !cfg_gated(NR)) {
@@ -975,7 +974,7 @@ declare -A CHECK_DESC=(
     [2]="KernelSync<*mut Task> — an owner-less handle with Send/Sync silenced"
     [3a]="task handle cast out to c_void"
     [3b]="task handle cast back in from a c_void parameter"
-    [4]="task_borrow / task_borrow_mut — the accessor layer must be gone"
+    [4]="task_borrow / task_borrow_mut — no accessor turns a raw task pointer into a reference"
     [5]="unsafe impl Send/Sync justified by a task refcount"
     [6]="manual task refcount manipulation (refcnt / inc_ref / dec_ref)"
     [7]="panic/fault path takes a lock or upgrades a KArc"

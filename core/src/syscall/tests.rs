@@ -1,14 +1,13 @@
 //! Syscall validation tests: invalid/null pointer handling, boundary
 //! conditions, permission checks, resource exhaustion, and dispatch edge cases.
 
-use core::ffi::c_char;
 use core::ptr;
 use slopos_fs::fileio::FdTable;
 
 use crate::syscall::fs::syscall_ioctl;
 use crate::syscall::handlers::{
-    syscall_arch_prctl, syscall_ctty_read, syscall_futex, syscall_getpgid, syscall_setpgid,
-    syscall_setsid, syscall_wait4,
+    syscall_arch_prctl, syscall_futex, syscall_getpgid, syscall_setpgid, syscall_setsid,
+    syscall_wait4,
 };
 use crate::syscall::signal::{
     deliver_pending_signal, deliver_pending_signal_on_irq_exit, syscall_kill, syscall_rt_sigaction,
@@ -31,14 +30,14 @@ use slopos_abi::syscall::{
     SYSCALL_SYS_INFO, SYSCALL_TABLE_SIZE, SYSCALL_VHANGUP, SYSCALL_WRITE, TIOCSCTTY, TtyIndex,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, TaskStatus};
-use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{process_vm_alloc, process_vm_get_stack_top};
 use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
-use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::authority::{CAP_MASK_ALL, CAP_UNIVERSAL, Capability};
+use slopos_ostd::mm::page_property::PageProperty;
 use slopos_ostd::task::SchedPlacement;
 use slopos_ostd::task::{new_group_in_session, new_session_group};
 use slopos_ostd::user::context::UserContext;
+use slopos_ostd::user::ptr::UserPtr;
 use slopos_ostd::{KArc, KBox, klog_info};
 use slopos_sched::task_struct::{Current, SignalAction};
 use slopos_testing::{TestResult, assert_eq_test, assert_some, assert_test, fail, pass};
@@ -61,25 +60,23 @@ use slopos_sched::task::{
     task_set_state_from_with_reason, task_terminate, task_try_transition_from,
 };
 
-/// Hermetic scope: restores every piece of cross-test state a syscall test can
-/// disturb, so a test cannot leak by forgetting a teardown.
-type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
+use slopos_sched::test_fixture::KernelTestScope;
 
 /// For tests that mutate the running-task pointer; `BspCurrentTask` restores
 /// the parked pointer on scope drop.
 fn park_bootstrap_on_current_cpu() {
-    slopos_arch::pcr::park_bootstrap_task(
-        slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut ()
+    slopos_ostd::cpu::x86_64::pcr::park_bootstrap_task(
+        slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut (),
     );
 }
 
 fn make_task_current(task_id: u32) {
     let task = task_find_by_id(task_id).expect("make_task_current: no such task");
     if task.status() == TaskStatus::Blocked {
-        assert_eq!(task_set_state(task_id, TaskStatus::Ready), 0);
+        assert!(task_set_state(task_id, TaskStatus::Ready));
     }
     task.set_sched_placement(SchedPlacement::OnCpu);
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     assert!(
         slopos_sched::scheduler::dispatch_task_for_test(cpu_id, task_id),
         "make_task_current: task vanished before dispatch"
@@ -102,7 +99,7 @@ use crate::tests::helpers::{dummy_task_entry, mark_current_killed};
 
 fn create_test_kernel_task() -> u32 {
     task_create(
-        b"KernelTest\0".as_ptr() as *const c_char,
+        b"KernelTest",
         dummy_task_entry,
         ptr::null_mut(),
         1,
@@ -118,7 +115,7 @@ fn create_test_user_task() -> u32 {
 fn create_test_user_task_holding(caps: u64) -> u32 {
     let user_entry = slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
     let id = task_create(
-        b"UserTest\0".as_ptr() as *const c_char,
+        b"UserTest",
         user_entry,
         ptr::null_mut(),
         1,
@@ -192,16 +189,16 @@ fn user_copy_in<T: Copy>(table: FdTable, addr: u64) -> Option<T> {
 
 fn map_user_rw_page(table: FdTable) -> Option<u64> {
     let process = table.process()?;
-    let base = process_vm_alloc(process, 4096, PageFlags::USER_RW.bits() as u32);
+    let base = process_vm_alloc(process, 4096, true);
     if base == 0 {
         return None;
     }
 
     let mapped = slopos_mm::process_vm::process_vm_with_vm_space(process, |vs| {
-        slopos_mm::user_mappings::ostd_map_4kb_user_fresh(
+        slopos_mm::user_mappings::map_4kb_user_fresh(
             vs,
             slopos_abi::addr::VirtAddr::new(base),
-            PageFlags::USER_RW.bits(),
+            PageProperty::USER_RW,
         )
         .is_ok()
     });
@@ -342,7 +339,7 @@ pub fn test_private_range_does_not_alias_linux() -> TestResult {
 }
 
 pub fn test_pipe_poll_eof_baseline() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
@@ -389,7 +386,7 @@ pub fn test_pipe_poll_eof_baseline() -> TestResult {
 }
 
 pub fn test_process_group_session_syscalls_baseline() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID);
@@ -448,7 +445,7 @@ pub fn test_process_group_session_syscalls_baseline() -> TestResult {
 }
 
 pub fn test_kill_process_group_semantics() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let leader_id = create_test_user_task();
     assert_test!(leader_id != INVALID_TASK_ID, "failed to create leader task");
@@ -551,7 +548,7 @@ pub fn test_kill_process_group_semantics() -> TestResult {
 }
 
 pub fn test_process_group_object_fork_and_setsid_identity() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID);
@@ -609,7 +606,7 @@ pub fn test_process_group_object_fork_and_setsid_identity() -> TestResult {
 /// inside an RCU read-side section, and the displaced reference is released
 /// only after a grace period.
 pub fn test_process_group_slot_survives_republication() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID);
@@ -673,7 +670,7 @@ pub fn test_process_group_slot_survives_republication() -> TestResult {
 }
 
 pub fn test_process_group_session_dag_lifetime() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let pg = new_session_group(42).expect("mint session+group");
     assert_eq_test!(pg.id(), 42, "group id");
@@ -699,7 +696,7 @@ pub fn test_process_group_session_dag_lifetime() -> TestResult {
 }
 
 pub fn test_tiocsctty_session_leader_acquires_ctty() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
@@ -728,55 +725,8 @@ pub fn test_tiocsctty_session_leader_acquires_ctty() -> TestResult {
     TestResult::Pass
 }
 
-/// The read resolves the caller's controlling terminal, not `TtyIndex(0)`, so
-/// no task reads the operator's keystrokes off a terminal it does not own.
-pub fn test_console_read_without_a_controlling_tty_is_refused() -> TestResult {
-    let _fixture = SyscallFixture::new();
-
-    let task_id = create_test_user_task();
-    assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
-    let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
-    let Some(pid) = task_guard
-        .process()
-        .as_deref()
-        .and_then(slopos_fs::fileio::FdTable::of)
-    else {
-        return TestResult::Fail;
-    };
-    assert_eq_test!(
-        task_guard.controlling_tty(),
-        None,
-        "fixture task already owns a terminal"
-    );
-
-    let Some(user_buf) = map_user_rw_page(pid) else {
-        return fail!("could not map a user page");
-    };
-
-    let mut frame: KBox<UserContext> = KBox::zeroed().expect("alloc");
-    frame.regs_mut().rdi = user_buf;
-    frame.regs_mut().rsi = 16;
-    let _ = with_user_process_context(pid, || {
-        crate::syscall::dispatch::dispatch_handler(syscall_ctty_read, &task_guard, &mut *frame)
-    });
-    assert_eq_test!(
-        frame.rax(),
-        slopos_abi::Errno::ENXIO.as_u64(),
-        "a task with no controlling terminal was served a read"
-    );
-
-    drop(task_guard);
-    task_terminate(task_id);
-    pass!()
-}
-
-slopos_testing::stest!(
-    name = test_console_read_without_a_controlling_tty_is_refused,
-    suite = syscall_core
-);
-
 pub fn test_tiocsctty_non_leader_rejected() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
@@ -810,7 +760,7 @@ pub fn test_tiocsctty_non_leader_rejected() -> TestResult {
 }
 
 pub fn test_open_dev_tty_with_o_noctty_preserves_flag() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
@@ -859,7 +809,7 @@ pub fn test_open_dev_tty_with_o_noctty_preserves_flag() -> TestResult {
 }
 
 pub fn test_setsid_child_preserves_parent_controlling_tty() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
@@ -912,7 +862,7 @@ pub fn test_setsid_child_preserves_parent_controlling_tty() -> TestResult {
 }
 
 pub fn test_hangup_clears_all_session_controlling_ttys() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let leader_id = create_test_user_task();
     assert_test!(leader_id != INVALID_TASK_ID, "failed to create leader task");
@@ -955,7 +905,7 @@ pub fn test_hangup_clears_all_session_controlling_ttys() -> TestResult {
 }
 
 pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
@@ -1020,7 +970,7 @@ pub fn test_pts_open_acquires_controlling_tty_without_o_noctty() -> TestResult {
 }
 
 pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
@@ -1084,7 +1034,7 @@ pub fn test_pts_open_with_o_noctty_skips_controlling_tty_acquire() -> TestResult
 }
 
 pub fn test_tty_poll_after_close_reuse_no_crossobject() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
@@ -1171,7 +1121,7 @@ pub fn test_tty_poll_after_close_reuse_no_crossobject() -> TestResult {
 }
 
 pub fn test_vm_mmap_munmap_stress_baseline() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
@@ -1202,7 +1152,8 @@ pub fn test_vm_mmap_munmap_stress_baseline() -> TestResult {
             pid.process().expect("a live process"),
             addr,
             4096,
-        ) != 0
+        )
+        .is_err()
         {
             task_terminate(task_id);
             return TestResult::Fail;
@@ -1214,7 +1165,7 @@ pub fn test_vm_mmap_munmap_stress_baseline() -> TestResult {
 }
 
 pub fn test_fork_kernel_task() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let kernel_task_id = create_test_kernel_task();
     assert_test!(kernel_task_id != INVALID_TASK_ID);
@@ -1233,7 +1184,7 @@ pub fn test_fork_kernel_task() -> TestResult {
 }
 
 pub fn test_fork_terminated_parent() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     use slopos_sched::task::task_fork;
 
@@ -1259,7 +1210,7 @@ pub fn test_fork_terminated_parent() -> TestResult {
 }
 
 pub fn test_fork_blocked_parent() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     use slopos_sched::task::{task_fork, task_set_state};
 
@@ -1319,7 +1270,7 @@ impl AccountedVm {
 }
 
 pub fn test_fork_cleanup_on_failure() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     slopos_mm::process_vm::init_process_vm();
 
@@ -1328,11 +1279,7 @@ pub fn test_fork_cleanup_on_failure() -> TestResult {
     };
 
     for _ in 0..5 {
-        let _ = slopos_mm::process_vm::process_vm_alloc(
-            parent.id,
-            4096 * 4,
-            slopos_mm::paging_defs::PageFlags::WRITABLE.bits() as u32,
-        );
+        let _ = slopos_mm::process_vm::process_vm_alloc(parent.id, 4096 * 4, true);
     }
 
     let parent_pages = assert_some!(parent.pages_used(), "parent account row missing");
@@ -1367,7 +1314,7 @@ pub fn test_fork_cleanup_on_failure() -> TestResult {
 }
 
 pub fn test_user_ptr_null() -> TestResult {
-    use slopos_mm::user_ptr::UserPtr;
+    use slopos_ostd::user::ptr::UserPtr;
     assert_test!(
         UserPtr::<u64>::try_new(0).is_err(),
         "null address should be rejected"
@@ -1376,7 +1323,7 @@ pub fn test_user_ptr_null() -> TestResult {
 }
 
 pub fn test_user_ptr_kernel_address() -> TestResult {
-    use slopos_mm::user_ptr::UserPtr;
+    use slopos_ostd::user::ptr::UserPtr;
     let kernel_addr: u64 = 0xFFFF_8000_0000_0000;
     assert_test!(
         UserPtr::<u64>::try_new(kernel_addr).is_err(),
@@ -1386,14 +1333,14 @@ pub fn test_user_ptr_kernel_address() -> TestResult {
 }
 
 pub fn test_user_ptr_misaligned() -> TestResult {
-    use slopos_mm::user_ptr::UserPtr;
+    use slopos_ostd::user::ptr::UserPtr;
     let _result = UserPtr::<u64>::try_new(0x1001);
     // TODO(tech-debt): asserts nothing — pin the alignment policy down and assert it.
     TestResult::Pass
 }
 
 pub fn test_user_ptr_overflow_boundary() -> TestResult {
-    use slopos_mm::user_ptr::UserPtr;
+    use slopos_ostd::user::ptr::UserPtr;
     let near_max: u64 = u64::MAX - 4;
     assert_test!(
         UserPtr::<u64>::try_new(near_max).is_err(),
@@ -1403,7 +1350,7 @@ pub fn test_user_ptr_overflow_boundary() -> TestResult {
 }
 
 pub fn test_brk_extreme_values() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     slopos_mm::process_vm::init_process_vm();
     let pid = slopos_mm::process_vm::create_process_vm();
@@ -1428,20 +1375,20 @@ pub fn test_brk_extreme_values() -> TestResult {
 }
 
 pub fn test_memfd_create_boundaries() -> TestResult {
-    let result = slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root());
+    let result = slopos_mm::memfd::memfd_create(slopos_ostd::process::quota::root());
     assert_test!(result.is_some(), "memfd_create should succeed");
     if let Some((handle, _ops, backing)) = result {
         let rc =
             slopos_mm::memfd::memfd_ftruncate(handle, 0, slopos_ostd::process::AccountId::NONE);
-        assert_test!(rc < 0, "ftruncate(0) should fail");
+        assert_test!(rc.is_err(), "ftruncate(0) should fail");
 
         let rc =
             slopos_mm::memfd::memfd_ftruncate(handle, 4096, slopos_ostd::process::AccountId::NONE);
-        assert_eq_test!(rc, 0, "ftruncate(4096) should succeed");
+        assert_test!(rc.is_ok(), "ftruncate(4096) should succeed");
 
         let rc =
             slopos_mm::memfd::memfd_ftruncate(handle, 8192, slopos_ostd::process::AccountId::NONE);
-        assert_test!(rc < 0, "ftruncate twice should fail");
+        assert_test!(rc.is_err(), "ftruncate twice should fail");
 
         drop(backing);
     }
@@ -1449,12 +1396,12 @@ pub fn test_memfd_create_boundaries() -> TestResult {
 }
 
 pub fn test_terminate_already_terminated() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_kernel_task();
     assert_test!(task_id != INVALID_TASK_ID);
 
-    assert_eq_test!(task_terminate(task_id), 0, "first termination failed");
+    assert_test!(task_terminate(task_id), "first termination failed");
 
     let _r2 = task_terminate(task_id);
 
@@ -1467,7 +1414,7 @@ pub fn test_terminate_already_terminated() -> TestResult {
 }
 
 pub fn test_operations_on_terminated_task() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_kernel_task();
     assert_test!(task_id != INVALID_TASK_ID);
@@ -1479,7 +1426,7 @@ pub fn test_operations_on_terminated_task() -> TestResult {
 
     use slopos_sched::task::task_set_state;
     let state_result = task_set_state(task_id, TaskStatus::Ready);
-    if state_result == 0 {
+    if state_result {
         if let Some(task) = task_find_by_id(task_id) {
             let current_state = task.status();
             assert_test!(
@@ -1493,7 +1440,7 @@ pub fn test_operations_on_terminated_task() -> TestResult {
 }
 
 pub fn test_fork_memory_pressure() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     slopos_mm::process_vm::init_process_vm();
 
@@ -1502,11 +1449,7 @@ pub fn test_fork_memory_pressure() -> TestResult {
     };
 
     for _ in 0..10 {
-        let addr = slopos_mm::process_vm::process_vm_alloc(
-            parent.id,
-            4096 * 4,
-            slopos_mm::paging_defs::PageFlags::WRITABLE.bits() as u32,
-        );
+        let addr = slopos_mm::process_vm::process_vm_alloc(parent.id, 4096 * 4, true);
         if addr == 0 {
             break;
         }
@@ -1553,14 +1496,14 @@ pub fn test_fork_memory_pressure() -> TestResult {
 }
 
 pub fn test_task_id_wraparound() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let mut ids_seen: [u32; 256] = [INVALID_TASK_ID; 256];
     let mut seen_count = 0usize;
 
     for _i in 0..500 {
         let id = task_create(
-            b"WrapTest\0".as_ptr() as *const c_char,
+            b"WrapTest",
             dummy_task_entry,
             ptr::null_mut(),
             1,
@@ -1587,7 +1530,7 @@ pub fn test_task_id_wraparound() -> TestResult {
 }
 
 pub fn test_clone_thread_tls_isolation() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     assert_test!(
@@ -1634,7 +1577,7 @@ pub fn test_clone_thread_tls_isolation() -> TestResult {
 }
 
 pub fn test_clone_then_fork_interaction() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     assert_test!(
@@ -1681,7 +1624,7 @@ pub fn test_clone_then_fork_interaction() -> TestResult {
 }
 
 pub fn test_futex_wait_mismatch_and_wake_no_waiters() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -1738,7 +1681,7 @@ pub fn test_futex_wait_mismatch_and_wake_no_waiters() -> TestResult {
 }
 
 pub fn test_futex_lost_wakeup_regression() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -1795,7 +1738,7 @@ pub fn test_futex_lost_wakeup_regression() -> TestResult {
 }
 
 pub fn test_futex_contention_path_stability() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -1917,7 +1860,7 @@ fn sigreturn_refuses_a_poisoned_fpu_image(
 }
 
 pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -2083,8 +2026,9 @@ pub fn test_signal_install_deliver_and_sigreturn() -> TestResult {
 
 /// A synthetic user-mode `InterruptFrame` (`cs & 3 == 3`); heap-backed to keep
 /// it off the test stack.
-fn user_irq_frame(rip: u64, rsp: u64) -> KBox<slopos_arch::InterruptFrame> {
-    let mut frame: KBox<slopos_arch::InterruptFrame> = KBox::zeroed().expect("alloc");
+fn user_irq_frame(rip: u64, rsp: u64) -> KBox<slopos_ostd::irq::interrupt_frame::InterruptFrame> {
+    let mut frame: KBox<slopos_ostd::irq::interrupt_frame::InterruptFrame> =
+        KBox::zeroed().expect("alloc");
     frame.rip = rip;
     frame.rsp = rsp;
     frame.cs = 0x23; // user code selector (RPL 3)
@@ -2100,7 +2044,7 @@ pub fn test_task_cwd_round_trips_through_the_cell() -> TestResult {
     static TOO_LONG: [u8; slopos_ostd::task::CWD_MAX] = [b'a'; slopos_ostd::task::CWD_MAX];
     const MAX: usize = slopos_ostd::task::CWD_MAX;
 
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_kernel_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
@@ -2160,7 +2104,7 @@ pub fn test_task_cwd_round_trips_through_the_cell() -> TestResult {
 }
 
 pub fn test_signal_delivery_on_irq_exit_dispatch() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -2216,7 +2160,7 @@ pub fn test_signal_delivery_on_irq_exit_dispatch() -> TestResult {
     let original_rsp = stack_top.wrapping_sub(0x200);
     let mut frame = user_irq_frame(original_rip, original_rsp);
 
-    let frame_ptr = &mut *frame as *mut slopos_arch::InterruptFrame;
+    let frame_ptr = &mut *frame as *mut slopos_ostd::irq::interrupt_frame::InterruptFrame;
     let _ = with_user_process_context(pid, || deliver_pending_signal_on_irq_exit(frame_ptr));
     park_bootstrap_on_current_cpu();
 
@@ -2277,7 +2221,7 @@ pub fn test_signal_delivery_on_irq_exit_dispatch() -> TestResult {
 }
 
 pub fn test_signal_delivery_on_irq_exit_kernel_frame_untouched() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -2293,7 +2237,7 @@ pub fn test_signal_delivery_on_irq_exit_kernel_frame_untouched() -> TestResult {
     frame.cs = 0x08;
     frame.ss = 0x10;
 
-    let frame_ptr = &mut *frame as *mut slopos_arch::InterruptFrame;
+    let frame_ptr = &mut *frame as *mut slopos_ostd::irq::interrupt_frame::InterruptFrame;
     deliver_pending_signal_on_irq_exit(frame_ptr);
     park_bootstrap_on_current_cpu();
 
@@ -2318,7 +2262,7 @@ pub fn test_signal_delivery_on_irq_exit_kernel_frame_untouched() -> TestResult {
 }
 
 pub fn test_signal_delivery_on_irq_exit_copy_failure_rearms() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -2370,7 +2314,7 @@ pub fn test_signal_delivery_on_irq_exit_copy_failure_rearms() -> TestResult {
     let original_rsp = 0x0000_3000_0000_0000; // valid user range, unmapped
     let mut frame = user_irq_frame(original_rip, original_rsp);
 
-    let frame_ptr = &mut *frame as *mut slopos_arch::InterruptFrame;
+    let frame_ptr = &mut *frame as *mut slopos_ostd::irq::interrupt_frame::InterruptFrame;
     let _ = with_user_process_context(pid, || deliver_pending_signal_on_irq_exit(frame_ptr));
     park_bootstrap_on_current_cpu();
 
@@ -2395,7 +2339,7 @@ pub fn test_signal_delivery_on_irq_exit_copy_failure_rearms() -> TestResult {
 }
 
 pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -2511,7 +2455,7 @@ pub fn test_sigprocmask_block_then_unblock_delivery() -> TestResult {
 pub fn test_sigchld_and_wait_interaction() -> TestResult {
     // SIGCHLD's default is Ignore, so an unblocked default-disposition parent
     // never accumulates the bit; one that blocked it (signalfd) must still pend.
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent");
@@ -2521,7 +2465,7 @@ pub fn test_sigchld_and_wait_interaction() -> TestResult {
     assert_test!(child_id != INVALID_TASK_ID, "task_fork failed");
     task_set_state(child_id, TaskStatus::Blocked);
 
-    assert_eq_test!(task_terminate(child_id), 0, "failed to terminate child");
+    assert_test!(task_terminate(child_id), "failed to terminate child");
 
     let pending = parent_guard.signal_pending();
     assert_eq_test!(
@@ -2536,9 +2480,8 @@ pub fn test_sigchld_and_wait_interaction() -> TestResult {
     assert_test!(child2_id != INVALID_TASK_ID, "second task_fork failed");
     task_set_state(child2_id, TaskStatus::Blocked);
 
-    assert_eq_test!(
+    assert_test!(
         task_terminate(child2_id),
-        0,
         "failed to terminate second child"
     );
 
@@ -2553,7 +2496,7 @@ pub fn test_sigchld_and_wait_interaction() -> TestResult {
 }
 
 pub fn test_arch_prctl_set_get_fs_roundtrip() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -2631,7 +2574,7 @@ pub fn test_arch_prctl_set_get_fs_roundtrip() -> TestResult {
 }
 
 pub fn test_pipe_write_read_basic() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -2676,7 +2619,7 @@ pub fn test_pipe_write_read_basic() -> TestResult {
 }
 
 pub fn test_pipe_eof_returns_zero() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -2720,7 +2663,7 @@ pub fn test_pipe_eof_returns_zero() -> TestResult {
 }
 
 pub fn test_pipe_broken_pipe() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -2753,7 +2696,7 @@ pub fn test_pipe_broken_pipe() -> TestResult {
 }
 
 pub fn test_pipe_multi_write_read() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -2794,7 +2737,7 @@ pub fn test_pipe_multi_write_read() -> TestResult {
 }
 
 pub fn test_pipe_partial_read() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -2845,7 +2788,7 @@ pub fn test_pipe_partial_read() -> TestResult {
 }
 
 pub fn test_pipe_buffer_full() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -2899,7 +2842,7 @@ pub fn test_pipe_buffer_full() -> TestResult {
 
 /// Exiting destroys the task's file table, so a peer reader observes EOF.
 pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let t1 = create_test_user_task();
     let t2 = create_test_user_task();
@@ -2945,7 +2888,7 @@ pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
 
     // Current, so `task_terminate` takes the current-task cleanup path.
     make_task_current(t1);
-    assert_eq_test!(task::task_terminate(t1), 0, "current-task terminate failed");
+    assert_test!(task::task_terminate(t1), "current-task terminate failed");
     park_bootstrap_on_current_cpu();
 
     let mut one = [0u8; 1];
@@ -2959,7 +2902,7 @@ pub fn test_exit_current_task_releases_pipe_refs() -> TestResult {
 
 /// Only exec strips close-on-exec descriptors, not fork (POSIX).
 pub fn test_fork_clone_keeps_cloexec_fds() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let t1 = create_test_user_task();
     let t2 = create_test_user_task();
@@ -3023,7 +2966,7 @@ pub fn test_fork_clone_keeps_cloexec_fds() -> TestResult {
 /// The pipe fd beside it is the control: it must still be inherited, proving
 /// the clone ran rather than failing wholesale.
 pub fn test_ring_fd_not_inherited_by_fork() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let t1 = create_test_user_task();
     let t2 = create_test_user_task();
@@ -3089,7 +3032,7 @@ pub fn test_ring_fd_not_inherited_by_fork() -> TestResult {
 /// The ring's user mapping does not survive an image replacement, so neither
 /// does the descriptor naming it.
 pub fn test_ring_fd_closed_on_exec() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let t = create_test_user_task();
     assert_test!(t != INVALID_TASK_ID, "failed to create task");
@@ -3125,7 +3068,7 @@ pub fn test_ring_fd_closed_on_exec() -> TestResult {
 }
 
 pub fn test_spawn_empty_table_unless_actions() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let t = create_test_user_task();
     assert_test!(t != INVALID_TASK_ID, "failed to create task");
@@ -3154,7 +3097,7 @@ pub fn test_spawn_empty_table_unless_actions() -> TestResult {
 }
 
 pub fn test_spawn_clone_fd_shares_backing() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let t1 = create_test_user_task();
     let t2 = create_test_user_task();
@@ -3222,7 +3165,7 @@ pub fn test_spawn_clone_fd_shares_backing() -> TestResult {
 
 /// A failed spawn file action's errno reaches the spawner unchanged.
 pub fn test_spawn_fd_action_reports_its_own_errno() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let t1 = create_test_user_task();
     let t2 = create_test_user_task();
@@ -3272,7 +3215,7 @@ pub fn test_spawn_fd_action_reports_its_own_errno() -> TestResult {
 }
 
 pub fn test_spawn_transfer_fd_moves() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let t1 = create_test_user_task();
     let t2 = create_test_user_task();
@@ -3337,7 +3280,7 @@ pub fn test_spawn_transfer_fd_moves() -> TestResult {
 }
 
 pub fn test_spawn_actions_all_or_nothing() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let t1 = create_test_user_task();
     let t2 = create_test_user_task();
@@ -3416,7 +3359,7 @@ pub fn test_spawn_path_rejects_bad_attrs() -> TestResult {
     use crate::syscall::handlers::syscall_spawn_path;
     use slopos_abi::spawn::SpawnAttrs;
 
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -3491,7 +3434,7 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
     use slopos_abi::spawn::SpawnAttrs;
     use slopos_abi::task::{SPAWN_RESERVED, TASK_FLAG_NEW_PGRP, TASK_FLAG_NO_PREEMPT};
 
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -3548,7 +3491,7 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
         "spawning with NO_PREEMPT must be EPERM — it wedges a CPU"
     );
 
-    // A retired privilege bit asks for nothing that exists.
+    // An undefined bit asks for nothing that exists.
     for bit in (0..16).map(|shift| 1u16 << shift) {
         if SPAWN_RESERVED & bit == 0 {
             continue;
@@ -3611,7 +3554,7 @@ pub fn test_spawn_path_rejects_privileged_flags() -> TestResult {
 pub fn test_set_cpu_affinity_rejects_other_process() -> TestResult {
     use crate::syscall::handlers::{syscall_sched_getaffinity, syscall_sched_setaffinity};
 
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let caller_id = create_test_user_task();
     assert_test!(caller_id != INVALID_TASK_ID, "failed to create caller task");
@@ -3692,7 +3635,7 @@ pub fn test_set_cpu_affinity_rejects_other_process() -> TestResult {
 }
 
 pub fn test_execve_resets_caught_signals_keeps_ignored() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let t = create_test_user_task();
     assert_test!(t != INVALID_TASK_ID, "failed to create task");
@@ -3736,7 +3679,7 @@ pub fn test_execve_resets_caught_signals_keeps_ignored() -> TestResult {
 /// `sigdefault` (POSIX_SPAWN_SETSIGDEF) forces masked signals to SIG_DFL over
 /// a caught handler or SIG_IGN.
 pub fn test_sigdefault_forces_default_over_ignore() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let t = create_test_user_task();
     assert_test!(t != INVALID_TASK_ID, "failed to create task");
@@ -3776,7 +3719,7 @@ pub fn test_sigdefault_forces_default_over_ignore() -> TestResult {
 }
 
 pub fn test_dev_tty_no_ctty_returns_enxio() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
@@ -3810,7 +3753,7 @@ pub fn test_dev_tty_no_ctty_returns_enxio() -> TestResult {
 }
 
 pub fn test_dev_tty_with_ctty_succeeds() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
@@ -3849,7 +3792,7 @@ pub fn test_dev_tty_with_ctty_succeeds() -> TestResult {
 }
 
 pub fn test_setsid_then_dev_tty_returns_enxio() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent");
@@ -3910,7 +3853,7 @@ pub fn test_setsid_then_dev_tty_returns_enxio() -> TestResult {
 }
 
 pub fn test_fork_child_inherits_dev_tty() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent");
@@ -3966,7 +3909,7 @@ pub fn test_fork_child_inherits_dev_tty() -> TestResult {
 /// `ConsoleConfig`: without it the terminal is refused untouched, and the same
 /// call from a holder hangs it up.
 pub fn test_vhangup_needs_console_config() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let plain_id = create_test_user_task();
     let holder_id = create_test_user_task_holding(CAP_UNIVERSAL | Capability::ConsoleConfig.bit());
@@ -4022,7 +3965,7 @@ pub fn test_vhangup_needs_console_config() -> TestResult {
 /// A jobserver client trusts an inherited descriptor only after `fstat`
 /// says it is a FIFO.
 pub fn test_fstat_on_a_pipe_reports_a_fifo() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
@@ -4065,7 +4008,7 @@ pub fn test_fstat_on_a_pipe_reports_a_fifo() -> TestResult {
 /// `F_DUPFD_CLOEXEC` is what `OwnedFd::try_clone` issues, so a jobserver
 /// client's private copy of the token pipe has to arrive close-on-exec.
 pub fn test_dupfd_cloexec_sets_the_flag_on_the_new_number() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
@@ -4120,7 +4063,7 @@ pub fn test_dupfd_cloexec_sets_the_flag_on_the_new_number() -> TestResult {
 /// cloexec is per-fd-entry, not a property of the open file, so dup must not
 /// copy it.
 pub fn test_dup_does_not_copy_cloexec() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
@@ -4187,7 +4130,7 @@ pub fn test_dup_does_not_copy_cloexec() -> TestResult {
 }
 
 pub fn test_close_twice_is_safe() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
@@ -4224,7 +4167,7 @@ pub fn test_close_twice_is_safe() -> TestResult {
 }
 
 pub fn test_close_while_dup_keeps_object_alive() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
@@ -4281,7 +4224,7 @@ pub fn test_close_while_dup_keeps_object_alive() -> TestResult {
 /// The backing clone minted for the attempt drops exactly once inside the
 /// failed install, and the live tty survives untouched.
 pub fn test_open_tty_fd_emfile_no_double_teardown() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
@@ -4362,7 +4305,7 @@ pub fn test_open_tty_fd_emfile_no_double_teardown() -> TestResult {
 pub fn test_tty_ioctl_never_changes_open_state() -> TestResult {
     use slopos_kernel_services::syscall_services::tty as ttysvc;
 
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
@@ -4432,7 +4375,7 @@ pub fn test_scm_rights_tty_balanced() -> TestResult {
     use slopos_kernel_services::syscall_services::tty as ttysvc;
     use slopos_net::unix_socket;
 
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
@@ -4570,7 +4513,7 @@ static SEEK_PROBE_OPS: SeekProbeOps = SeekProbeOps;
 /// dup'd fds share one open file description, so they share the file offset
 /// (POSIX).
 pub fn test_dup_shares_offset() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
@@ -4873,139 +4816,16 @@ slopos_testing::stest!(
 );
 
 slopos_testing::stest!(
-    name = test_syscall_lookup_valid,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_process_syscall_lookup_valid,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_private_range_does_not_alias_linux,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_pipe_poll_eof_baseline,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_pipe_write_read_basic,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_pipe_eof_returns_zero,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(name = test_pipe_broken_pipe, suite = syscall_compat_smoke);
-slopos_testing::stest!(
-    name = test_pipe_multi_write_read,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(name = test_pipe_partial_read, suite = syscall_compat_smoke);
-slopos_testing::stest!(name = test_pipe_buffer_full, suite = syscall_compat_smoke);
-slopos_testing::stest!(
-    name = test_exit_current_task_releases_pipe_refs,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_process_group_session_syscalls_baseline,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_kill_process_group_semantics,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_process_group_object_fork_and_setsid_identity,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_process_group_slot_survives_republication,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_process_group_session_dag_lifetime,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_tiocsctty_session_leader_acquires_ctty,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_tiocsctty_non_leader_rejected,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_open_dev_tty_with_o_noctty_preserves_flag,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_setsid_child_preserves_parent_controlling_tty,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_hangup_clears_all_session_controlling_ttys,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_pts_open_acquires_controlling_tty_without_o_noctty,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_pts_open_with_o_noctty_skips_controlling_tty_acquire,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_sigchld_and_wait_interaction,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_clone_thread_tls_isolation,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_futex_wait_mismatch_and_wake_no_waiters,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_arch_prctl_set_get_fs_roundtrip,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_spawn_path_rejects_bad_attrs,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_dev_tty_no_ctty_returns_enxio,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_dev_tty_with_ctty_succeeds,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_setsid_then_dev_tty_returns_enxio,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_fork_child_inherits_dev_tty,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
-    name = test_vhangup_needs_console_config,
-    suite = syscall_compat_smoke
-);
-slopos_testing::stest!(
     name = test_unix_socket_send_recv_basic,
-    suite = syscall_compat_smoke
+    suite = syscall_valid
 );
 slopos_testing::stest!(
     name = test_unix_socket_poll_after_send,
-    suite = syscall_compat_smoke
+    suite = syscall_valid
 );
 slopos_testing::stest!(
     name = test_unix_socket_poll_before_send,
-    suite = syscall_compat_smoke
+    suite = syscall_valid
 );
 
 fn unix_create_connected_pair(table: FdTable) -> Option<(i32, i32)> {
@@ -5090,7 +4910,7 @@ fn unix_create_connected_pair(table: FdTable) -> Option<(i32, i32)> {
 }
 
 pub fn test_unix_socket_send_recv_basic() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
     let Some(pid) = task_find_by_id(task_id)
@@ -5126,7 +4946,7 @@ pub fn test_unix_socket_send_recv_basic() -> TestResult {
 }
 
 pub fn test_unix_socket_poll_after_send() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
     let Some(pid) = task_find_by_id(task_id)
@@ -5159,7 +4979,7 @@ pub fn test_unix_socket_poll_after_send() -> TestResult {
 }
 
 pub fn test_unix_socket_poll_before_send() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
@@ -5218,22 +5038,22 @@ pub fn test_unix_socket_poll_before_send() -> TestResult {
 /// A wait path that already CAS'd the task to `Blocked` under a queue's
 /// SpinLock must make a concurrent `sleep_current_task_ms` CAS fail.
 pub fn test_sleep_ms_cas_overwrites_wakeup() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
 
     // Tasks are `Blocked` at creation; publish Ready then Running.
-    assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
-    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
+    assert_test!(task_set_state(task_id, TaskStatus::Ready));
+    assert_test!(task_set_state(task_id, TaskStatus::Running));
     let blocked_cas = task_set_state_from_with_reason(
         task_id,
         TaskStatus::Running,
         TaskStatus::Blocked,
         BlockReason::IoWait,
     );
-    assert_eq_test!(blocked_cas, 0);
+    assert_test!(blocked_cas);
 
     // A racing `sleep_current_task_ms` would now try CAS(Running, Blocked).
     let result = task_set_state_from_with_reason(
@@ -5246,7 +5066,7 @@ pub fn test_sleep_ms_cas_overwrites_wakeup() -> TestResult {
     let state = Some(task_guard.status()).unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(state, TaskStatus::Blocked, "state stays Blocked");
     assert_test!(
-        result != 0,
+        !result,
         "CAS(Running, Blocked) should fail when task is already Blocked"
     );
 
@@ -5257,24 +5077,24 @@ pub fn test_sleep_ms_cas_overwrites_wakeup() -> TestResult {
 
 /// A stale blocker retrying `CAS(Running, Blocked)` after a wake must fail.
 pub fn test_block_current_task_toctou_allows_reblock() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
 
-    assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
-    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
+    assert_test!(task_set_state(task_id, TaskStatus::Ready));
+    assert_test!(task_set_state(task_id, TaskStatus::Running));
     // The wait-queue protocol commits Blocked under the queue lock.
     let cas_block = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
-    assert_eq_test!(cas_block, 0);
+    assert_test!(cas_block);
     let cas_wake = task_try_transition_from(task_id, TaskStatus::Blocked, TaskStatus::Ready);
-    assert_eq_test!(cas_wake, 0);
+    assert_test!(cas_wake);
 
     let result = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
     let state = Some(task_guard.status()).unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(state, TaskStatus::Ready, "state should still be Ready");
-    assert_test!(result != 0, "CAS(Running, Blocked) should fail from Ready");
+    assert_test!(!result, "CAS(Running, Blocked) should fail from Ready");
 
     task_terminate(task_id);
     TestResult::Pass
@@ -5283,7 +5103,7 @@ pub fn test_block_current_task_toctou_allows_reblock() -> TestResult {
 /// A waiter CAS-flips Running → Blocked under the queue lock; a racing producer
 /// observes that and flips it to Ready.
 pub fn test_wq_wrong_order_wakeup_lost() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
@@ -5294,14 +5114,14 @@ pub fn test_wq_wrong_order_wakeup_lost() -> TestResult {
         "fixture task was not nascent"
     );
 
-    assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
-    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
+    assert_test!(task_set_state(task_id, TaskStatus::Ready));
+    assert_test!(task_set_state(task_id, TaskStatus::Running));
 
     let cas_block = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
-    assert_eq_test!(cas_block, 0);
+    assert_test!(cas_block);
 
     let result = unblock_task(&task_guard);
-    assert_eq_test!(result, 0, "unblock_task should succeed from Blocked");
+    assert_test!(result, "unblock_task should succeed from Blocked");
 
     let state = Some(task_guard.status()).unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(
@@ -5317,17 +5137,17 @@ pub fn test_wq_wrong_order_wakeup_lost() -> TestResult {
 /// `unblock_task` against a still-`Running` task — the producer's `wake_one`
 /// beat the consumer into the queue lock — is a benign no-op.
 pub fn test_wq_correct_order_wakeup_preserved() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
 
-    assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
-    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
+    assert_test!(task_set_state(task_id, TaskStatus::Ready));
+    assert_test!(task_set_state(task_id, TaskStatus::Running));
 
     let result = unblock_task(&task_guard);
-    assert_eq_test!(result, 0, "unblock_task on Running task is a no-op");
+    assert_test!(result, "unblock_task on Running task is a no-op");
 
     let state = Some(task_guard.status()).unwrap_or(TaskStatus::Terminated);
     assert_eq_test!(state, TaskStatus::Running, "state stays Running");
@@ -5339,26 +5159,25 @@ pub fn test_wq_correct_order_wakeup_preserved() -> TestResult {
 /// The wait-queue protocol relies on this asymmetry to detect a wake that
 /// already won the race and skip the CAS that would re-sleep the task.
 pub fn test_try_transition_from_rejects_wrong_state() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID);
     let task_guard = assert_some!(task_find_by_id(task_id));
 
     // Ready: a wake has already transitioned the task off Running.
-    assert_eq_test!(task_set_state(task_id, TaskStatus::Ready), 0);
+    assert_test!(task_set_state(task_id, TaskStatus::Ready));
 
     let result = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
     assert_test!(
-        result != 0,
+        !result,
         "try_transition_from(Running, Blocked) should fail from Ready"
     );
 
-    assert_eq_test!(task_set_state(task_id, TaskStatus::Running), 0);
+    assert_test!(task_set_state(task_id, TaskStatus::Running));
     let result2 = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
-    assert_eq_test!(
+    assert_test!(
         result2,
-        0,
         "try_transition_from(Running, Blocked) succeeds from Running"
     );
     let state2 = Some(task_guard.status()).unwrap_or(TaskStatus::Terminated);
@@ -5411,18 +5230,8 @@ pub fn test_task_state_fused_cas() -> TestResult {
         TaskStatus::Blocked,
         TaskStatus::Terminated,
     ];
-    let reasons = [
-        BlockReason::None,
-        BlockReason::Sleep,
-        BlockReason::IoWait,
-        BlockReason::MutexWait,
-        BlockReason::KeyboardWait,
-        BlockReason::IpcWait,
-        BlockReason::Generic,
-        BlockReason::FutexWait,
-    ];
     for st in statuses {
-        for rn in reasons {
+        for rn in BlockReason::ALL {
             s.force_set(st, rn);
             let v = s.snapshot();
             assert_eq_test!(v.status, st, "status roundtrip");
@@ -5458,7 +5267,7 @@ pub fn test_unix_socket_poll_syscall_e2e() -> TestResult {
     use crate::syscall::fs::syscall_poll;
     use slopos_abi::syscall::UserPollFd;
 
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
@@ -5599,7 +5408,7 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
     use slopos_net::unix_socket;
     use slopos_net::unix_socket_file_ops::UNIX_SOCKET_FILE_OPS;
 
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let Some(pid) = task_find_by_id(task_id)
@@ -5712,7 +5521,7 @@ pub fn test_compositor_handshake_listen_accept_send_poll() -> TestResult {
 }
 
 pub fn test_unix_send_wakes_blocked_poll_waiter() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
@@ -5744,7 +5553,7 @@ pub fn test_unix_send_wakes_blocked_poll_waiter() -> TestResult {
     assert_test!((revents & POLLIN) == 0, "STEP1: no data before write");
 
     let cas_block = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
-    assert_eq_test!(cas_block, 0, "STEP2: Running → Blocked");
+    assert_test!(cas_block, "STEP2: Running → Blocked");
 
     let payload = b"wake-test";
     let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
@@ -5773,7 +5582,7 @@ fn socket_handle_for_fd(table: FdTable, fd: i32) -> Option<slopos_net::unix_sock
 /// Demonstrates the check-first-register-second race: the write publishes to a
 /// queue nobody is on, so no `unblock_task` can run.
 pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
@@ -5805,7 +5614,7 @@ pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
 
     // Commit Blocked without first registering — the broken ordering.
     let cas_block = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
-    assert_eq_test!(cas_block, 0, "STEP1: Running → Blocked");
+    assert_test!(cas_block, "STEP1: Running → Blocked");
 
     let revents = file_poll_fd(pid, cli_fd, POLLIN);
     assert_test!((revents & POLLIN) == 0, "no data yet");
@@ -5834,7 +5643,7 @@ pub fn test_poll_fused_gap_demonstrates_race() -> TestResult {
 }
 
 pub fn test_poll_fused_register_first_catches_wakeup() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
@@ -5871,7 +5680,7 @@ pub fn test_poll_fused_register_first_catches_wakeup() -> TestResult {
     );
 
     let cas_block = task_try_transition_from(task_id, TaskStatus::Running, TaskStatus::Blocked);
-    assert_eq_test!(cas_block, 0, "Running → Blocked");
+    assert_test!(cas_block, "Running → Blocked");
 
     let payload = b"race-fix";
     let written = file_write_fd(pid, srv_fd, &mut KernelIoBufRef::new(payload));
@@ -5947,7 +5756,7 @@ slopos_testing::stest!(
 pub fn test_poll_wake_survives_register_to_block_gap() -> TestResult {
     use slopos_ostd::sync::PollWaiter;
 
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
@@ -6026,7 +5835,7 @@ pub fn test_poll_wake_survives_register_to_block_gap() -> TestResult {
 pub fn test_poll_waiter_slot_is_exclusive() -> TestResult {
     use slopos_ostd::sync::PollWaiter;
 
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
@@ -6059,7 +5868,7 @@ pub fn test_poll_waiter_slot_is_exclusive() -> TestResult {
 pub fn test_poll_waiter_drop_discards_late_wake() -> TestResult {
     use slopos_ostd::sync::PollWaiter;
 
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
@@ -6117,7 +5926,7 @@ pub fn test_poll_waiter_drop_discards_late_wake() -> TestResult {
 /// A `pack`/`unpack` round trip that dropped them would make the token vanish
 /// on the next unrelated CAS — silently reintroducing the lost wake.
 pub fn test_poll_bits_survive_state_transitions() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
@@ -6181,7 +5990,7 @@ slopos_testing::stest!(
 pub fn test_poll_token_generation_rejects_a_stale_era_wake() -> TestResult {
     use slopos_ostd::sync::PollWaiter;
 
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
@@ -6226,7 +6035,7 @@ pub fn test_poll_token_generation_rejects_a_stale_era_wake() -> TestResult {
 /// every non-poll registration path from queueing, leaving those callers
 /// reachable only by timer.
 pub fn test_registration_without_a_token_still_queues() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
@@ -6288,7 +6097,7 @@ slopos_testing::stest!(
 /// single path able to restore a task stamped terminal by a peer back into a
 /// live status — which is how a task stops reaching deferred cleanup.
 pub fn test_poll_block_refuses_an_illegal_transition() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "create task");
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
@@ -6442,7 +6251,7 @@ impl Drop for OwnedTask {
 /// SCM_RIGHTS atomicity: one `unix_sendmsg` carrying data and an fd delivers
 /// both to the peer's next `unix_recvmsg`, or neither.
 pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     use slopos_net::unix_socket;
 
     let task_id = create_test_user_task();
@@ -6461,7 +6270,7 @@ pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
     let (srv, cli) = (pair.server, pair.client);
 
     let (mfd_handle, mfd_ops, mfd_backing) =
-        match slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root()) {
+        match slopos_mm::memfd::memfd_create(slopos_ostd::process::quota::root()) {
             Some(h) => h,
             None => return fail!("memfd_create failed"),
         };
@@ -6530,7 +6339,7 @@ pub fn test_unix_scm_rights_atomic_delivery() -> TestResult {
 /// A `sendmsg` past `MAX_INFLIGHT_FDS` rejects with ENOMEM, leaving the aliases
 /// with the caller and publishing nothing to the peer.
 pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     use slopos_net::unix_socket;
 
     let task_id = create_test_user_task();
@@ -6549,7 +6358,7 @@ pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
     let (srv, cli) = (pair.server, pair.client);
 
     let (mfd_handle, mfd_ops, mfd_backing) =
-        match slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root()) {
+        match slopos_mm::memfd::memfd_create(slopos_ostd::process::quota::root()) {
             Some(p_guard) => p_guard,
             None => return fail!("memfd_create failed"),
         };
@@ -6623,7 +6432,7 @@ pub fn test_unix_scm_rights_anc_queue_full_no_partial() -> TestResult {
 /// A failed send leaves the alias with the caller, and the sender's own fd
 /// keeps the file alive — no leak, no double teardown.
 pub fn test_unix_scm_rights_error_returns_custody() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     use slopos_net::unix_socket;
 
     let task_id = create_test_user_task();
@@ -6644,7 +6453,7 @@ pub fn test_unix_scm_rights_error_returns_custody() -> TestResult {
     unix_socket::unix_close(pair.client);
 
     let (mfd_handle, mfd_ops, mfd_backing) =
-        match slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root()) {
+        match slopos_mm::memfd::memfd_create(slopos_ostd::process::quota::root()) {
             Some(p_guard) => p_guard,
             None => return fail!("memfd_create failed"),
         };
@@ -6658,7 +6467,7 @@ pub fn test_unix_scm_rights_error_returns_custody() -> TestResult {
     assert_test!(mfd_fd >= 0, "memfd fd install failed");
     assert_test!(
         slopos_mm::memfd::memfd_ftruncate(mfd_handle, 4096, slopos_ostd::process::AccountId::NONE)
-            == 0,
+            .is_ok(),
         "ftruncate failed"
     );
 
@@ -6715,7 +6524,7 @@ slopos_testing::stest!(
 /// stops being in flight: held by a `ConnectionPair` and by no descriptor
 /// table, without the `Custody` axis it would count against nothing.
 pub fn test_quota_custody_charges_the_sender() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     use slopos_abi::quota::ResourceKind;
     use slopos_net::unix_socket;
     use slopos_ostd::process::quota::stats;
@@ -6736,7 +6545,7 @@ pub fn test_quota_custody_charges_the_sender() -> TestResult {
     };
 
     let (mfd_handle, mfd_ops, mfd_backing) =
-        match slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root()) {
+        match slopos_mm::memfd::memfd_create(slopos_ostd::process::quota::root()) {
             Some(triple) => triple,
             None => return fail!("memfd_create failed"),
         };
@@ -6852,7 +6661,7 @@ pub fn test_sig_default_action_table() -> TestResult {
 }
 
 pub fn test_signal_post_disposition_gate() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -6936,7 +6745,7 @@ pub fn test_signal_post_disposition_gate() -> TestResult {
 /// `kill(SIGWINCH)` against a default-disposition task succeeds per POSIX and
 /// the target survives: dropped at the send site, discarded at delivery.
 pub fn test_kill_default_ignored_sigwinch_target_survives() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -7005,7 +6814,7 @@ slopos_testing::stest!(
 /// registered, Blocked and `SchedPlacement::Nascent` when a group signal names
 /// it: the kill must pend the signal without publishing it to a runqueue.
 pub fn test_kill_process_group_reaches_nascent_task_without_publishing() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let caller_id = create_test_user_task();
     assert_test!(caller_id != INVALID_TASK_ID, "failed to create caller task");
@@ -7065,7 +6874,7 @@ pub fn test_kill_process_group_reaches_nascent_task_without_publishing() -> Test
 /// A forked child starts where its parent is and then owns its own working
 /// directory: a shared context would make the child's `chdir` move the parent.
 pub fn test_fork_child_inherits_and_then_diverges_from_parent_cwd() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
@@ -7121,7 +6930,7 @@ pub fn test_fork_child_inherits_and_then_diverges_from_parent_cwd() -> TestResul
 /// thread, and a `CLONE_FS` child shares it too, while a clone without either
 /// gets a copy that diverges.
 pub fn test_clone_shares_cwd_with_threads_and_clone_fs() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
@@ -7178,7 +6987,7 @@ pub fn test_clone_shares_cwd_with_threads_and_clone_fs() -> TestResult {
 /// `sa_mask` is OR'd into the blocked set at delivery, so `rt_sigaction` must
 /// filter the uncatchable signals out of it or a handler could block SIGKILL.
 pub fn test_rt_sigaction_round_trips_every_field() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -7364,7 +7173,7 @@ slopos_testing::stest!(
 /// The handler indexes `[SignalActionCell; NSIG]` with `signum - 1`, and reads
 /// `old_act` before every other validation.
 pub fn test_rt_sigaction_bounds_signum_at_nsig() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -7461,7 +7270,7 @@ slopos_testing::stest!(
 /// Setting and clearing any of the 64 pending bits through the public writers
 /// never marks the task killed, nor clears the mark once set.
 pub fn test_kill_flag_is_outside_every_signal_word() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -7526,7 +7335,7 @@ fn spared_pending_moved(spared: &slopos_ostd::KVec<(u32, SigSet)>) -> Option<u32
 /// A broadcast `kill` never names a kernel task: the SIGKILL path is not
 /// signal-gated, so a fanout would tear down a driver thread and its IRQ line.
 pub fn test_broadcast_kill_spares_kernel_tasks() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let kernel_id = create_test_kernel_task();
     assert_test!(kernel_id != INVALID_TASK_ID, "failed to create kernel task");
@@ -7591,7 +7400,7 @@ slopos_testing::stest!(
 /// the capability mask is the whole privilege model, the relation POSIX puts
 /// on uids.
 pub fn test_kill_refuses_a_more_privileged_target() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let plain_id = create_test_user_task();
     assert_test!(plain_id != INVALID_TASK_ID, "failed to create user task");
@@ -7672,7 +7481,7 @@ pub fn test_kill_refuses_a_more_privileged_target() -> TestResult {
 
 /// The broadcast arm applies the same relation to every target it collects.
 pub fn test_broadcast_kill_spares_privileged_tasks() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let sender_id = create_test_user_task();
     assert_test!(sender_id != INVALID_TASK_ID, "failed to create user task");
@@ -7730,7 +7539,7 @@ pub fn test_broadcast_kill_spares_privileged_tasks() -> TestResult {
 /// Only the parent reaps: a stranger's wait would take the exit code and leave
 /// the real parent with `ECHILD`.
 pub fn test_waitpid_refuses_a_task_that_is_not_a_child() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let child_id = create_test_user_task();
     assert_test!(child_id != INVALID_TASK_ID, "failed to create child task");
@@ -7802,7 +7611,7 @@ slopos_testing::stest!(
 /// The kill flag sits outside the deliverable range, so `claim_pending_signal`
 /// never sees it and something on the way back to CPL3 has to act on it.
 pub fn test_killed_task_exits_at_return_to_user() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -7858,7 +7667,7 @@ slopos_testing::stest!(
 /// destructors run on the victim's own stack; the exit code is `128 + signal`
 /// per POSIX.
 pub fn test_sigkill_marks_the_target_and_exits_with_the_signal() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let victim_id = create_test_user_task();
     assert_test!(victim_id != INVALID_TASK_ID, "failed to create the victim");
@@ -7931,7 +7740,7 @@ slopos_testing::stest!(
 /// One layout table feeds every TTY and the compositor's input path, so
 /// installing one is console administration — `loadkeys`, not `setxkbmap`.
 pub fn test_keymap_load_requires_console_config() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let plain_id = create_test_user_task();
     assert_test!(plain_id != INVALID_TASK_ID, "failed to create user task");
@@ -8009,7 +7818,7 @@ slopos_testing::stest!(
 /// `process_list` reports only tasks that can still run code: a `Zombie` has no
 /// address space, no descriptor table and no placement — it is an exit receipt.
 pub fn test_process_list_excludes_exited_tasks() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let caller_id = create_test_user_task_holding(CAP_UNIVERSAL | Capability::SysInspect.bit());
     assert_test!(caller_id != INVALID_TASK_ID, "failed to create caller task");
@@ -8092,7 +7901,7 @@ pub fn test_process_list_excludes_exited_tasks() -> TestResult {
 /// Enumeration is universal, as Linux's `/proc` is: an unprivileged caller is
 /// shown a task it may not signal and a kernel task, each with its uid.
 pub fn test_process_list_reports_every_task() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let plain_id = create_test_user_task();
     assert_test!(plain_id != INVALID_TASK_ID, "failed to create plain task");
@@ -8165,7 +7974,7 @@ pub fn test_process_list_reports_every_task() -> TestResult {
 /// `kconsole` prints every task and CPU, so a task outside `SysInspect` is
 /// refused before anything is queued, informational key or not.
 pub fn test_kconsole_needs_sys_inspect() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let plain_id = create_test_user_task();
     assert_test!(plain_id != INVALID_TASK_ID, "failed to create plain task");
@@ -8277,7 +8086,7 @@ pub fn test_dispatch_gates_follow_the_capability_mask() -> TestResult {
         SYSCALL_PROF_CTL,
     };
 
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let plain_id = create_test_user_task();
     let inspector_id = create_test_user_task_holding(CAP_UNIVERSAL | Capability::SysInspect.bit());
@@ -8400,7 +8209,7 @@ slopos_testing::stest!(
 /// the drop is born without it even if its creator's mask had not yet been
 /// narrowed when it was copied.
 pub fn test_caps_drop_is_total_and_process_wide() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let held = CAP_UNIVERSAL | Capability::NetAdmin.bit() | Capability::RawBlock.bit();
     let leader_id = create_test_user_task_holding(held);
@@ -8492,7 +8301,7 @@ slopos_testing::stest!(
 
 /// `waitpid(-1)` reaps whichever child exited, without being told which.
 pub fn test_waitpid_any_reaps_an_unnamed_child() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent task");
@@ -8525,9 +8334,8 @@ pub fn test_waitpid_any_reaps_an_unnamed_child() -> TestResult {
 
     let child_id = create_test_user_task();
     assert_test!(child_id != INVALID_TASK_ID, "failed to create child task");
-    assert_eq_test!(
+    assert_test!(
         slopos_sched::task::task_set_parent(child_id, parent_id),
-        0,
         "could not parent the child"
     );
 
@@ -8566,7 +8374,7 @@ pub fn test_waitpid_any_reaps_an_unnamed_child() -> TestResult {
 /// `SA_NOCLDWAIT`). SlopOS maps SIGCHLD's *default* action to Ignore, so keying
 /// the skip on the effective disposition would leave `waitpid` nothing to reap.
 pub fn test_sigchld_ignore_skips_the_zombie_state() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let exit_status_of = |handler: u64| -> Option<TaskStatus> {
         let parent_id = create_test_user_task();
@@ -8589,7 +8397,7 @@ pub fn test_sigchld_ignore_skips_the_zombie_state() -> TestResult {
         if child_id == INVALID_TASK_ID {
             return None;
         }
-        if slopos_sched::task::task_set_parent(child_id, parent_id) != 0 {
+        if !slopos_sched::task::task_set_parent(child_id, parent_id) {
             return None;
         }
         task_terminate(child_id);
@@ -8617,7 +8425,7 @@ pub fn test_sigchld_ignore_skips_the_zombie_state() -> TestResult {
 /// Each unreaped receipt pins a `Task`, a 32 KiB kernel stack, a 16 KiB data
 /// stack and a registry slot, so an unbounded set ends in spawn failure.
 pub fn test_zombie_budget_is_enforced_per_parent() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     // `budget + 1` consecutive spawns share a registry and allocator with earlier tests.
     task::task_graveyard_drain();
@@ -8633,7 +8441,7 @@ pub fn test_zombie_budget_is_enforced_per_parent() -> TestResult {
         if child_id == INVALID_TASK_ID {
             break;
         }
-        if slopos_sched::task::task_set_parent(child_id, parent_id) != 0 {
+        if !slopos_sched::task::task_set_parent(child_id, parent_id) {
             task_terminate(child_id);
             break;
         }
@@ -8670,7 +8478,7 @@ pub fn test_a_person_s_zombie_holds_their_task_until_the_reap() -> TestResult {
     use slopos_abi::quota::ResourceKind;
     use slopos_ostd::process::Cred;
     use slopos_ostd::process::quota::{person_account, stats};
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     task::task_graveyard_drain();
     slopos_ostd::sync::rcu_barrier();
 
@@ -8682,7 +8490,7 @@ pub fn test_a_person_s_zombie_holds_their_task_until_the_reap() -> TestResult {
     let before = held();
     let user_entry = slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
     let child = task::task_build_in(
-        b"PersonZombie\0".as_ptr() as *const c_char,
+        b"PersonZombie",
         user_entry,
         ptr::null_mut(),
         1,
@@ -8698,7 +8506,7 @@ pub fn test_a_person_s_zombie_holds_their_task_until_the_reap() -> TestResult {
     let made_theirs = child
         .process()
         .is_some_and(|process| process.change_cred(|_| Ok(Cred::of(uid, uid))).is_ok());
-    let parented = slopos_sched::task::task_set_parent(child_id, parent_id) == 0;
+    let parented = slopos_sched::task::task_set_parent(child_id, parent_id);
     let live = held();
     task_terminate(child_id);
     let zombie = held();
@@ -8739,7 +8547,7 @@ slopos_testing::stest!(
 /// cycle permanently leaks socket slots until AF_UNIX — and therefore the
 /// compositor connection — is denied to every process.
 pub fn test_unix_scm_rights_refuses_socket_fd() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some(task) = OwnedTask::user() else {
         return fail!("task creation failed");
@@ -8829,7 +8637,7 @@ impl MsgScratch {
 }
 
 fn write_user_bytes(table: FdTable, addr: u64, data: &[u8]) -> bool {
-    let Ok(bytes) = slopos_mm::user_ptr::UserBytes::try_new(addr, data.len()) else {
+    let Ok(bytes) = slopos_ostd::user::ptr::UserBytes::try_new(addr, data.len()) else {
         return false;
     };
     with_user_process_context(table, || {
@@ -8839,7 +8647,7 @@ fn write_user_bytes(table: FdTable, addr: u64, data: &[u8]) -> bool {
 }
 
 fn read_user_bytes(table: FdTable, addr: u64, out: &mut [u8]) -> bool {
-    let Ok(bytes) = slopos_mm::user_ptr::UserBytes::try_new(addr, out.len()) else {
+    let Ok(bytes) = slopos_ostd::user::ptr::UserBytes::try_new(addr, out.len()) else {
         return false;
     };
     with_user_process_context(table, || {
@@ -8918,15 +8726,15 @@ fn stage_recvmsg(table: FdTable, s: &MsgScratch) -> bool {
 /// `sendmsg`/`recvmsg` over Linux's `msghdr`: a real iovec array the kernel
 /// must walk, and a 16-byte `cmsghdr` whose payload starts at +16.
 ///
-/// Three offsets are under test, and each was somewhere else before: `msg_iov`
-/// at 16 (the header used to inline a single segment), `msg_controllen` at 40,
-/// and `CMSG_DATA` at +16 rather than +12. Splitting the payload across two
-/// non-adjacent segments is what tells a real walk from the old inlined one —
-/// a kernel that honoured only `msg_iov[0]` would pass a one-segment test and
-/// fail this. The delivered descriptor is resolved back to the sender's memfd,
-/// so a control buffer read at the wrong offset cannot pass by luck.
+/// Three offsets are under test: `msg_iov` at 16, `msg_controllen` at 40, and
+/// `CMSG_DATA` at +16 rather than +12. Splitting the payload across two
+/// non-adjacent segments is what tells a real walk from a header that carries
+/// one segment inline — a kernel that honoured only `msg_iov[0]` would pass a
+/// one-segment test and fail this. The delivered descriptor is resolved back
+/// to the sender's memfd, so a control buffer read at the wrong offset cannot
+/// pass by luck.
 pub fn test_sendmsg_recvmsg_linux_layouts() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some(task) = OwnedTask::user() else {
         return fail!("task creation failed");
@@ -8946,7 +8754,7 @@ pub fn test_sendmsg_recvmsg_linux_layouts() -> TestResult {
     // A memfd is a leaf description, so it is the one kind the ancillary path
     // accepts, and its handle is what identifies the delivered fd below.
     let (mfd_handle, mfd_ops, mfd_backing) =
-        match slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root()) {
+        match slopos_mm::memfd::memfd_create(slopos_ostd::process::quota::root()) {
             Some(h) => h,
             None => return fail!("memfd_create failed"),
         };
@@ -9177,7 +8985,7 @@ fn verify_two_item_control(table: FdTable, recv: &MsgScratch, mfd_handle: usize)
 /// every other one stages a single item, which both shapes handle. Both items
 /// name the same memfd, so one description is enough to identify what arrived.
 pub fn test_sendmsg_walks_every_cmsg_item() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some(task) = OwnedTask::user() else {
         return fail!("task creation failed");
@@ -9195,7 +9003,7 @@ pub fn test_sendmsg_walks_every_cmsg_item() -> TestResult {
     let _cli = OwnedFd::new(pid, cli_fd);
 
     let (mfd_handle, mfd_ops, mfd_backing) =
-        match slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root()) {
+        match slopos_mm::memfd::memfd_create(slopos_ostd::process::quota::root()) {
             Some(h) => h,
             None => return fail!("memfd_create failed"),
         };
@@ -9392,7 +9200,7 @@ fn run_cmsg_refusal_cases(
 /// without it, `msg_controllen` alone decides how many `copy_from_user`s of a
 /// `cmsghdr` one `sendmsg` performs.
 pub fn test_sendmsg_refuses_malformed_cmsg() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some(task) = OwnedTask::user() else {
         return fail!("task creation failed");
@@ -9425,18 +9233,18 @@ slopos_testing::stest!(
 /// whole send.
 ///
 /// `unix_sendmsg` promises all-or-nothing ancillary delivery, and the
-/// `MAX_INFLIGHT_FDS` pre-check does not model the sender's custody charge: the
-/// commit loop's own refusal arm used to drop the descriptor it could not
-/// charge, report the byte count anyway, and count the dropped descriptor in
-/// the peer wake. With headroom for one of two descriptors, that shape returns
-/// a byte count and leaves `files` empty; the batch reservation makes it
-/// `ENOMEM` with both aliases still the caller's.
+/// `MAX_INFLIGHT_FDS` pre-check does not model the sender's custody charge, so
+/// a commit loop that refused one descriptor alone would drop it, report the
+/// byte count anyway, and count it in the peer wake. With headroom for one of
+/// two descriptors, that shape returns a byte count and leaves `files` empty;
+/// the batch reservation makes it `ENOMEM` with both aliases still the
+/// caller's.
 pub fn test_unix_scm_rights_custody_refusal_is_atomic() -> TestResult {
     use slopos_abi::quota::{QuotaMode, ResourceKind};
     use slopos_net::unix_socket;
     use slopos_ostd::process::quota::{NO_LIMIT, quota_mode, set_limit, set_quota_mode, stats};
 
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some(task) = OwnedTask::user() else {
         return fail!("task creation failed");
@@ -9454,7 +9262,7 @@ pub fn test_unix_scm_rights_custody_refusal_is_atomic() -> TestResult {
     };
 
     let (mfd_handle, mfd_ops, mfd_backing) =
-        match slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root()) {
+        match slopos_mm::memfd::memfd_create(slopos_ostd::process::quota::root()) {
             Some(triple) => triple,
             None => return fail!("memfd_create failed"),
         };
@@ -9525,7 +9333,7 @@ slopos_testing::stest!(
 
 /// Stage `mount(2)`'s three C-string arguments in one user page, answering the
 /// (target, fstype) user addresses. `source` is the empty string at the page's
-/// base, which is what every fstype but `ext2` expects.
+/// base, which is what every fstype but `ext2`, `ext3` and `ext4` expects.
 #[inline(never)]
 fn stage_mount_args(
     table: FdTable,
@@ -9538,7 +9346,7 @@ fn stage_mount_args(
     let mut staged = [0u8; 8 + 256 + 32];
     staged[8..8 + target.len()].copy_from_slice(target);
     staged[8 + 256..8 + 256 + fstype.len()].copy_from_slice(fstype);
-    let Ok(bytes) = slopos_mm::user_ptr::UserBytes::try_new(user_buf, staged.len()) else {
+    let Ok(bytes) = slopos_ostd::user::ptr::UserBytes::try_new(user_buf, staged.len()) else {
         return None;
     };
     let ok = with_user_process_context(table, || {
@@ -9552,7 +9360,7 @@ fn stage_mount_args(
 /// dispatcher is the only thing that checks it — so this goes through the
 /// table entry rather than the handler.
 pub fn test_mount_requires_the_mount_capability() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     // The kernel-test phase runs before the boot step that mounts the builtin
     // filesystems, so `/tmp` is a mount point only once this has run.
@@ -9788,10 +9596,10 @@ pub fn test_mount_over_the_base_is_refused() -> TestResult {
 /// Unmounting a singleton filesystem's *second* mount must not end the
 /// filesystem's in-memory life: the first mount is still using it.
 ///
-/// devfs rather than ext2, the other singleton `mount(2)` will place twice:
-/// the disk is attached after the kernel-test phase, so ext2 would make this
-/// conditional on the image. Either way the defect is `forget_filesystem`
-/// dropping the surviving mount's orphan records.
+/// devfs rather than the root's ext4 instance, the other filesystem `mount(2)`
+/// will place twice: the disk is attached after the kernel-test phase, so ext4
+/// would make this conditional on the image. Either way the defect is
+/// `forget_filesystem` dropping the surviving mount's orphan records.
 pub fn test_umount2_of_a_second_mount_spares_the_first() -> TestResult {
     use crate::syscall::fs::mount_handlers::{mount_apply_at, umount_path_at};
     use slopos_fs::vfs::init::vfs_devfs_instance;
@@ -9839,16 +9647,15 @@ pub fn test_umount2_of_a_second_mount_spares_the_first() -> TestResult {
 }
 
 /// A `source` naming a device that is not there answers "no such device", not
-/// "busy": `EBUSY` was the old answer to every named `source`, since one ext2
-/// instance existed and was already bound.
-pub fn test_mount_ext2_unknown_source_is_not_busy() -> TestResult {
+/// "busy".
+pub fn test_mount_ext4_unknown_source_is_not_busy() -> TestResult {
     use crate::syscall::fs::mount_handlers::{mount_apply_at, umount_path_at};
 
     if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
         return fail!("the VFS is unavailable");
     }
 
-    const MP: &[u8] = b"/tmp/ext2_absent";
+    const MP: &[u8] = b"/tmp/ext4_absent";
     let _ = slopos_fs::vfs::vfs_rmdir(MP);
     if slopos_fs::vfs::vfs_mkdir(MP).is_err() {
         return fail!("could not create the mount point");
@@ -9876,7 +9683,7 @@ pub fn test_mount_ext2_unknown_source_is_not_busy() -> TestResult {
     let _ = slopos_fs::vfs::vfs_rmdir(MP);
 
     if absent != Err(slopos_abi::Errno::ENOENT) {
-        return fail!("mount of an absent ext2 device answered {:?}", absent);
+        return fail!("mount of an absent ext4 device answered {:?}", absent);
     }
     if garbage != Err(slopos_abi::Errno::EINVAL) {
         return fail!("mount of an unparseable device name answered {:?}", garbage);
@@ -9884,10 +9691,10 @@ pub fn test_mount_ext2_unknown_source_is_not_busy() -> TestResult {
     pass!()
 }
 
-/// `umount2` of an ext2 mount an open file still names is `EBUSY` without
+/// `umount2` of an ext4 mount an open file still names is `EBUSY` without
 /// `MNT_DETACH`, and the detach path gives the instance, its device and its
 /// write claim back once the last reference dies.
-pub fn test_umount2_of_ext2_is_busy_unless_detached() -> TestResult {
+pub fn test_umount2_of_ext4_is_busy_unless_detached() -> TestResult {
     use crate::syscall::fs::mount_handlers::umount_path_at;
     use slopos_abi::fs::MNT_DETACH;
 
@@ -9898,13 +9705,13 @@ pub fn test_umount2_of_ext2_is_busy_unless_detached() -> TestResult {
         return TestResult::Skipped;
     }
 
-    const MP: &[u8] = b"/tmp/ext2_busy_mp";
+    const MP: &[u8] = b"/tmp/ext4_busy_mp";
     let _ = slopos_fs::vfs::vfs_rmdir(MP);
     if slopos_fs::vfs::vfs_mkdir(MP).is_err() {
         return fail!("could not create the mount point");
     }
 
-    let outcome = ext2_umount_busy_body(MP);
+    let outcome = ext4_umount_busy_body(MP);
 
     if umount_path_at(MP, b"/", 0, &slopos_fs::vfs::Subject::KERNEL).is_err() {
         let _ = umount_path_at(MP, b"/", MNT_DETACH, &slopos_fs::vfs::Subject::KERNEL);
@@ -9917,7 +9724,7 @@ pub fn test_umount2_of_ext2_is_busy_unless_detached() -> TestResult {
     }
 }
 
-fn ext2_umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
+fn ext4_umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
     use crate::syscall::fs::mount_handlers::{mount_apply_at, umount_path_at};
     use slopos_abi::fs::MNT_DETACH;
     use slopos_fs::vfs::mount::mount_at;
@@ -9933,18 +9740,18 @@ fn ext2_umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
     )
     .map_err(|_| "mount of the scratch device failed")?;
 
-    let handle = slopos_fs::vfs::vfs_open(b"/tmp/ext2_busy_mp/held", true)
+    let handle = slopos_fs::vfs::vfs_open(b"/tmp/ext4_busy_mp/held", true)
         .map_err(|_| "could not create a file through the mount")?;
     open_ref(handle.fs, handle.inode).map_err(|_| "could not take an open reference")?;
 
     let busy = umount_path_at(mp, b"/", 0, &slopos_fs::vfs::Subject::KERNEL);
     if busy != Err(slopos_abi::Errno::EBUSY) {
         let _ = close_ref(handle.fs, handle.inode);
-        return Err("umount2 of a held ext2 mount was not EBUSY");
+        return Err("umount2 of a held ext4 mount was not EBUSY");
     }
     if umount_path_at(mp, b"/", MNT_DETACH, &slopos_fs::vfs::Subject::KERNEL).is_err() {
         let _ = close_ref(handle.fs, handle.inode);
-        return Err("MNT_DETACH did not detach a held ext2 mount");
+        return Err("MNT_DETACH did not detach a held ext4 mount");
     }
     if mount_at(mp).is_some() {
         let _ = close_ref(handle.fs, handle.inode);
@@ -9974,7 +9781,7 @@ fn ext2_umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
     )
     .map_err(|_| "the scratch device would not mount again after a lazy unmount")?;
     umount_path_at(mp, b"/", 0, &slopos_fs::vfs::Subject::KERNEL)
-        .map_err(|_| "the re-mounted ext2 would not unmount")
+        .map_err(|_| "the re-mounted ext4 would not unmount")
 }
 
 slopos_testing::stest!(
@@ -9995,18 +9802,18 @@ slopos_testing::stest!(
     suite = syscall_core
 );
 slopos_testing::stest!(
-    name = test_mount_ext2_unknown_source_is_not_busy,
+    name = test_mount_ext4_unknown_source_is_not_busy,
     suite = syscall_core
 );
 slopos_testing::stest!(
-    name = test_umount2_of_ext2_is_busy_unless_detached,
+    name = test_umount2_of_ext4_is_busy_unless_detached,
     suite = syscall_core
 );
 
-const RACE_MP_A: &[u8] = b"/tmp/ext2_race_a";
-const RACE_MP_B: &[u8] = b"/tmp/ext2_race_b";
-const RACE_FILE_B: &[u8] = b"/tmp/ext2_race_b/held";
-const DYING_MP: &[u8] = b"/tmp/ext2_dying";
+const RACE_MP_A: &[u8] = b"/tmp/ext4_race_a";
+const RACE_MP_B: &[u8] = b"/tmp/ext4_race_b";
+const RACE_FILE_B: &[u8] = b"/tmp/ext4_race_b/held";
+const DYING_MP: &[u8] = b"/tmp/ext4_dying";
 
 /// Blocks in the fixture images, at the builder's 1 KiB block size.
 const RACE_IMAGE_BLOCKS: u32 = 512;
@@ -10020,7 +9827,7 @@ static RACE_FIRED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBo
 /// where a second task's `mount` can land.
 struct MountsOnWrite {
     inner: KBox<dyn slopos_fs::blockdev::BlockDevice + Send + Sync>,
-    fs: &'static slopos_fs::ext2_vfs::Ext2Mount,
+    fs: &'static slopos_fs::ext4_vfs::Ext4Mount,
 }
 
 impl MountsOnWrite {
@@ -10085,8 +9892,8 @@ pub fn test_umount2_releases_on_the_table_the_removal_leaves() -> TestResult {
     let Some(image) = slopos_fs::tests::mount::fixture_image_device(RACE_IMAGE_BLOCKS) else {
         return TestResult::Skipped;
     };
-    let Some(fs) = slopos_fs::vfs::init::vfs_ext2_pool_claim() else {
-        return fail!("the ext2 pool handed out no instance");
+    let Some(fs) = slopos_fs::vfs::init::vfs_ext4_pool_claim() else {
+        return fail!("the ext4 pool handed out no instance");
     };
     RACE_ARMED.store(false, Ordering::Release);
     RACE_FIRED.store(false, Ordering::Release);
@@ -10098,7 +9905,7 @@ pub fn test_umount2_releases_on_the_table_the_removal_leaves() -> TestResult {
     RACE_ARMED.store(false, Ordering::Release);
     let _ = slopos_fs::vfs::mount::unmount(RACE_MP_A);
     let _ = slopos_fs::vfs::mount::unmount(RACE_MP_B);
-    slopos_fs::vfs::init::vfs_ext2_pool_release(fs, false);
+    slopos_fs::vfs::init::vfs_ext4_pool_release(fs, false);
     for mp in [RACE_MP_A, RACE_MP_B] {
         let _ = slopos_fs::vfs::vfs_rmdir(mp);
     }
@@ -10110,7 +9917,7 @@ pub fn test_umount2_releases_on_the_table_the_removal_leaves() -> TestResult {
 
 #[inline(never)]
 fn umount_release_body(
-    fs: &'static slopos_fs::ext2_vfs::Ext2Mount,
+    fs: &'static slopos_fs::ext4_vfs::Ext4Mount,
     device: KBox<dyn slopos_fs::blockdev::BlockDevice + Send + Sync>,
 ) -> Result<(), &'static str> {
     use crate::syscall::fs::mount_handlers::umount_path_at;
@@ -10120,7 +9927,7 @@ fn umount_release_body(
         .map_err(|_| "the fixture image would not mount")?;
     slopos_fs::vfs::mount::mount(RACE_MP_A, fs, 0).map_err(|_| "the fixture would not mount")?;
     // Dirty, so the sync inside the unmount's window reaches the device.
-    slopos_fs::vfs::vfs_open(b"/tmp/ext2_race_a/held", true)
+    slopos_fs::vfs::vfs_open(b"/tmp/ext4_race_a/held", true)
         .map_err(|_| "could not create a file through the mount")?;
 
     RACE_ARMED.store(true, Ordering::Release);
@@ -10147,7 +9954,7 @@ fn umount_release_body(
 }
 
 pub fn test_user_copy_retries_a_copy_that_faulted_midway() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create a user task");
     let task = assert_some!(task_find_by_id(task_id), "task lookup failed");
@@ -10183,7 +9990,7 @@ static DYING_DEVICE_DROPPED: core::sync::atomic::AtomicBool =
 /// lock contended, and the kill flag is read off the contending task.
 struct ReleasesWhileDying {
     inner: KBox<dyn slopos_fs::blockdev::BlockDevice + Send + Sync>,
-    fs: &'static slopos_fs::ext2_vfs::Ext2Mount,
+    fs: &'static slopos_fs::ext4_vfs::Ext4Mount,
 }
 
 impl ReleasesWhileDying {
@@ -10195,7 +10002,7 @@ impl ReleasesWhileDying {
         if !mark_current_killed(true) {
             return;
         }
-        slopos_fs::vfs::init::vfs_ext2_pool_release(self.fs, false);
+        slopos_fs::vfs::init::vfs_ext4_pool_release(self.fs, false);
         mark_current_killed(false);
         DYING_RELEASED.store(true, Ordering::Release);
     }
@@ -10244,7 +10051,7 @@ impl slopos_fs::blockdev::BlockDevice for ReleasesWhileDying {
 /// and the slot retired, so a later claim runs it again. Publishing the slot
 /// free strands it both ways: it reports uninitialised, so the bound-instance
 /// sweep skips it, and nothing ever drops the device or its write claim.
-pub fn test_ext2_release_retries_a_teardown_that_could_not_run() -> TestResult {
+pub fn test_ext4_release_retries_a_teardown_that_could_not_run() -> TestResult {
     use core::sync::atomic::Ordering;
 
     if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
@@ -10257,8 +10064,8 @@ pub fn test_ext2_release_retries_a_teardown_that_could_not_run() -> TestResult {
     let Some(image) = slopos_fs::tests::mount::fixture_image_device(RACE_IMAGE_BLOCKS) else {
         return TestResult::Skipped;
     };
-    let Some(fs) = slopos_fs::vfs::init::vfs_ext2_pool_claim() else {
-        return fail!("the ext2 pool handed out no instance");
+    let Some(fs) = slopos_fs::vfs::init::vfs_ext4_pool_claim() else {
+        return fail!("the ext4 pool handed out no instance");
     };
     DYING_ARMED.store(false, Ordering::Release);
     DYING_RELEASED.store(false, Ordering::Release);
@@ -10270,7 +10077,7 @@ pub fn test_ext2_release_retries_a_teardown_that_could_not_run() -> TestResult {
 
     DYING_ARMED.store(false, Ordering::Release);
     let _ = slopos_fs::vfs::mount::unmount(DYING_MP);
-    slopos_fs::vfs::init::vfs_ext2_pool_release(fs, false);
+    slopos_fs::vfs::init::vfs_ext4_pool_release(fs, false);
     let _ = slopos_fs::vfs::vfs_rmdir(DYING_MP);
     match outcome {
         Ok(true) => pass!(),
@@ -10283,7 +10090,7 @@ pub fn test_ext2_release_retries_a_teardown_that_could_not_run() -> TestResult {
 
 #[inline(never)]
 fn dying_teardown_body(
-    fs: &'static slopos_fs::ext2_vfs::Ext2Mount,
+    fs: &'static slopos_fs::ext4_vfs::Ext4Mount,
     device: KBox<dyn slopos_fs::blockdev::BlockDevice + Send + Sync>,
 ) -> Result<bool, &'static str> {
     use core::sync::atomic::Ordering;
@@ -10292,7 +10099,7 @@ fn dying_teardown_body(
         .map_err(|_| "the fixture image would not mount")?;
     slopos_fs::vfs::mount::mount(DYING_MP, fs, 0).map_err(|_| "the fixture would not mount")?;
     // Dirty, so the sync below reaches the device while holding the lock.
-    slopos_fs::vfs::vfs_open(b"/tmp/ext2_dying/held", true)
+    slopos_fs::vfs::vfs_open(b"/tmp/ext4_dying/held", true)
         .map_err(|_| "could not create a file through the mount")?;
     slopos_fs::vfs::mount::unmount(DYING_MP).map_err(|_| "the fixture would not unmount")?;
 
@@ -10323,10 +10130,10 @@ fn dying_teardown_body(
     }
 
     // The retry: the sweep a claim runs is what finishes the teardown.
-    let swept = slopos_fs::vfs::init::vfs_ext2_pool_claim();
+    let swept = slopos_fs::vfs::init::vfs_ext4_pool_claim();
     let dropped = DYING_DEVICE_DROPPED.load(Ordering::Acquire);
     if let Some(claimed) = swept {
-        slopos_fs::vfs::init::vfs_ext2_pool_release(claimed, false);
+        slopos_fs::vfs::init::vfs_ext4_pool_release(claimed, false);
     }
     if !dropped {
         return Err("no later claim ever finished the teardown -- the device is stranded");
@@ -10342,7 +10149,7 @@ slopos_testing::stest!(
     suite = syscall_core
 );
 slopos_testing::stest!(
-    name = test_ext2_release_retries_a_teardown_that_could_not_run,
+    name = test_ext4_release_retries_a_teardown_that_could_not_run,
     suite = syscall_core
 );
 slopos_testing::stest!(
@@ -10360,7 +10167,7 @@ pub fn test_block_ioctls_through_the_syscall() -> TestResult {
     if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
         return fail!("no /dev to open the node through");
     }
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create task");
     let verdict = block_ioctls_body(task_id);

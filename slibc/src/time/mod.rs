@@ -1,9 +1,6 @@
 //! Clock and sleep functions.
 
 pub mod calendar;
-#[allow(dead_code)]
-pub(crate) mod shim;
-pub mod tests;
 
 use core::ffi::c_long;
 
@@ -15,13 +12,6 @@ pub const CLOCK_REALTIME: i32 = slopos_abi::syscall::CLOCK_REALTIME as i32;
 pub const CLOCK_MONOTONIC: i32 = slopos_abi::syscall::CLOCK_MONOTONIC as i32;
 
 pub use slopos_abi::syscall::Timespec;
-
-pub const fn timespec_from_nanos(nanos: u64) -> Timespec {
-    Timespec {
-        tv_sec: (nanos / 1_000_000_000) as i64,
-        tv_nsec: (nanos % 1_000_000_000) as i64,
-    }
-}
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]

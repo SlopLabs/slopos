@@ -20,7 +20,7 @@ use slopos_abi::quota::ObjectRow;
 use slopos_fs::fileio::FdTable;
 use slopos_ostd::KArc;
 use slopos_ostd::process::quota::{Charge, FileBacking, try_charge};
-use slopos_ostd::seat::{self, SeatGrant, SeatId, SeatKind};
+use slopos_ostd::seat::{self, SeatId, SeatKind};
 
 pub struct SeatFileOps;
 
@@ -107,20 +107,10 @@ pub fn seat_acquire_fd(table: FdTable, kind: SeatKind, id: SeatId, task_id: u32)
 
 /// Whether `task_id` holds `kind`'s seat.
 ///
-/// The display syscalls check this rather than resolving a descriptor
-/// argument, because their ABI predates the seat and takes no fd. The seat is
-/// still the authority: the arbiter decides who holds it, the descriptor is
-/// the holder's evidence, and this asks the arbiter directly.
-///
-/// A descriptor-taking form was written and then deleted rather than left
-/// unused: a security helper with no callers drifts out of step with the one
-/// that is actually used, and the next person to need it copies whichever they
-/// find first. When `fb_flip` grows an fd argument, it comes back with a
-/// caller.
+/// The display syscalls take no descriptor, so they ask the arbiter directly:
+/// the arbiter decides who holds the seat, and the descriptor is only the
+/// holder's evidence.
 #[inline]
 pub fn seat_held_by(kind: SeatKind, task_id: u32) -> bool {
     seat::is_held_by(kind, task_id)
 }
-
-#[allow(dead_code)]
-type _UnusedGrant = SeatGrant;

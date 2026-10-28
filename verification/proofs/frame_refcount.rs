@@ -273,7 +273,7 @@ pub open spec fn broken_clone(s: Slot) -> Slot {
 /// Witness that the conditional clone is *not* redundant, so this proof is not
 /// vacuous. From a teardown-complete slot (`step(_, DropFinal)`'s own output)
 /// the broken clone revives rc to 1 on a freed frame with a dead payload,
-/// violating (I1); the fixed `CloneConditional` refuses the bump.
+/// violating (I1); the real `CloneConditional` refuses the bump.
 pub proof fn broken_clone_violates_invariant()
     ensures
         exists|s: Slot|
@@ -319,7 +319,7 @@ pub open spec fn broken_drop_free(s: Slot) -> Slot {
 /// singly-referenced slot the free-before-reset ordering reaches an
 /// intermediate violating (I4) — a page on the free list whose slot is still
 /// TYPED, exactly the state in which a concurrent `from_unused` on the
-/// recycled paddr fails its CAS → `StateMismatch` → `PathCorrupt`. The fixed
+/// recycled paddr fails its CAS → `StateMismatch` → `PathCorrupt`. The real
 /// reset-before-free ordering keeps every sub-state invariant.
 pub proof fn broken_drop_ordering_violates_invariant()
     ensures

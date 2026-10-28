@@ -28,8 +28,9 @@ const USABLE_BYTES: [u64; 6] = [
     1024 * 1024 * 1024 * 1024,
 ];
 
-/// A ramfs must never promise less than it used to, nor more than its share of
-/// a machine that cannot swap any of it back out.
+/// A ramfs never promises less than its floors, less on a larger machine than
+/// on a smaller one, nor more than its share of a machine that cannot swap any
+/// of it back out.
 pub fn test_ramfs_limits_track_usable_memory() -> TestResult {
     let mut previous_size = 0usize;
     let mut previous_inodes = 0usize;
@@ -95,8 +96,7 @@ pub fn test_ramfs_limits_track_usable_memory() -> TestResult {
 /// they assert is the file body rather than the path walk above it.
 static CHUNK_FS: RamFs = RamFs::new_const(lock_class!("RAMFS_CHUNK_TEST", LOCK_LEVEL_RESOURCE));
 
-/// Past the 1 MiB a single allocation could hold, which is what a file's
-/// bytes were before they were chunked.
+/// Past the 1 MiB a single allocation can hold.
 const SPAN_BYTES: usize = 4 * 1024 * 1024;
 /// Neither a multiple of the chunk size nor a divisor of it, so every write
 /// but the first starts mid-chunk and every one ends mid-chunk.
@@ -121,8 +121,9 @@ fn drop_file(name: &[u8]) {
     let _ = CHUNK_FS.unlink(root, name);
 }
 
-/// A file four times the old ceiling, written and read back in pieces that
-/// straddle chunk boundaries, plus a read across every boundary in it.
+/// A file four times what one allocation holds, written and read back in
+/// pieces that straddle chunk boundaries, plus a read across every boundary in
+/// it.
 pub fn test_ramfs_file_spans_chunks() -> TestResult {
     let outcome = span_chunks();
     drop_file(b"span");

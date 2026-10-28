@@ -201,7 +201,7 @@ pub static NETMON_TABLE: NetMonTable = NetMonTable::new(lock_class!("NETMON", LO
 impl NetMonTable {
     /// An empty registry. The lock class comes from the caller so a scratch
     /// registry is a genuinely different lock to the validator.
-    pub const fn new(class: &'static slopos_ostd::sync::lock_tracking::LockClassKey) -> Self {
+    pub const fn new(class: &'static slopos_ostd::sync::LockClassKey) -> Self {
         Self {
             inner: SpinLock::new(
                 NetMonTableInner {
@@ -409,16 +409,4 @@ impl NetMonTable {
 #[inline]
 pub fn netmon_post(kind: u16, ifindex: u32, payload: [u8; 16]) -> u64 {
     NETMON_TABLE.post(kind, ifindex, payload)
-}
-
-/// Open a monitor in the kernel registry. See [`NetMonTable::open`].
-#[inline]
-pub fn netmon_open(owner: FdTable, mask: u32) -> Result<usize, Errno> {
-    NETMON_TABLE.open(owner, mask)
-}
-
-/// Release a monitor from the kernel registry. See [`NetMonTable::close`].
-#[inline]
-pub fn netmon_close(raw_handle: usize) {
-    NETMON_TABLE.close(raw_handle)
 }

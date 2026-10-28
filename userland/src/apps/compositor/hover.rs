@@ -5,7 +5,7 @@ use crate::gfx::DamageRect;
 
 const MAX_HOVER_REGIONS: usize = 64;
 
-/// Plus a window's task id: the hover id of its buttons' group.
+/// Plus a window's id: the hover id of its buttons' group.
 pub const HOVER_BUTTONS_BASE: u32 = 0x0006_0000;
 /// Plus a status item's kind: its hover id.
 pub const HOVER_STATUS_ITEM_BASE: u32 = 0x0007_0000;

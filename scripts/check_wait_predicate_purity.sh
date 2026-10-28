@@ -2,16 +2,12 @@
 # Wait-predicate purity gate.
 #
 # `WaitQueue::wait_event{,_timeout,_until}` predicates do nothing but
-# observe state — they must not paper over a scheduler / NAPI
-# starvation bug by side-effecting the world. The pre-refactor
-# `crate::napi::kick()` workaround was exactly that, and letting it
-# return would silently re-introduce the curl-times-out regression
-# that prompted the scheduler rip-and-replace.
+# observe state: a predicate that dispatches NAPI, forces a poll or
+# sleeps papers over a scheduler / NAPI starvation bug by side-effecting
+# the world instead of exposing it.
 #
-# Scope: the gate flags `napi::kick`, `napi::wake_napi`,
-# `force_napi_poll`, and `sleep_current_task_ms` inside wait
-# predicates — all are starvation-papering moves that should never
-# live inside a `wait_event*` closure.
+# Scope: the gate flags `napi::wake_napi`, `force_napi_poll`, and
+# `sleep_current_task_ms` inside wait predicates.
 #
 # This is a simple `grep`-based audit, not a full Rust AST walker.
 # It scans the workspace for the offending tokens, then for each hit
@@ -19,8 +15,7 @@
 # / `wait_event_until` opener. A hit that resolves to a wait-predicate
 # context fails the gate.
 #
-# The allowlist is empty and meant to stay that way. `napi::kick` is
-# not a function this tree has; the pattern is the tripwire.
+# The allowlist is empty and meant to stay that way.
 
 set -euo pipefail
 
@@ -40,7 +35,6 @@ gate_parse_args check_wait_predicate_purity "$@"
 ALLOWLIST=()
 
 PATTERNS=(
-    "napi::kick"
     "napi::wake_napi"
     "force_napi_poll"
     "sleep_current_task_ms"
@@ -72,7 +66,7 @@ is_allowlisted() {
 # scope (they call `force_napi_poll` legitimately as a synchronous
 # poll, not inside a wait predicate).
 KERNEL_DIRS=(
-    abi acpi boot core drivers font fs gfx hermetic karch keymap-core
+    abi acpi boot core drivers font fs gfx hermetic keymap-core
     kernel-services ktesting mm net pidfd ring sched service-core signalfd
     slopos-ostd slopos-ostd-derive video vt windowing
 )
@@ -94,8 +88,8 @@ require_kernel_dirs() {
     fi
 }
 
-# Both passes run to completion and report together: pass 1 used to `exit 1`
-# before pass 2 ever ran, hiding every Epoch-scope violation behind it.
+# Both passes run to completion and report together, so no Epoch-scope
+# violation hides behind a wait-predicate one.
 scan_wait_predicates() {
     local root="$1"
     shift
@@ -224,7 +218,7 @@ if [ "$GATE_SELF_TEST" -eq 1 ]; then
     # files stay apart because `sleep_current_task_ms` is in both pattern
     # lists, and mixing them would make neither count interpretable.
     cat > "$(gate_fixture net/src/wait_positives.rs)" <<'FIXTURE'
-fn a() { let _ = q.wait_event(|| { crate::napi::kick(); true }); }
+fn a() { let _ = q.wait_event(|| { crate::napi::wake_napi(); true }); }
 fn b() { let _ = q.wait_event_timeout(|| { crate::napi::wake_napi(); true }, 10); }
 fn c() { let _ = q.wait_event_until(|| { force_napi_poll(); true }); }
 fn d() { let _ = q.wait_event(|| { sleep_current_task_ms(1); true }); }
@@ -243,7 +237,7 @@ FIXTURE
     # No production entry to exercise, so the self-test supplies its own.
     # Pass 1 must honour it, pass 2 must ignore it.
     cat > "$(gate_fixture net/src/allowlisted_fixture.rs)" <<'FIXTURE'
-fn allowlisted() { let _ = q.wait_event(|| { crate::napi::kick(); true }); }
+fn allowlisted() { let _ = q.wait_event(|| { crate::napi::wake_napi(); true }); }
 fn not_allowlisted_for_epoch() {
     let _guard = NET_EPOCH.enter();
     let x = m.lock();
@@ -253,8 +247,8 @@ FIXTURE
 
     # The 20-line lookback *is* the gate; both bounds are pinned here.
     cat > "$(gate_fixture net/src/negatives.rs)" <<'FIXTURE'
-fn bare_kick_with_no_wait_anywhere() {
-    crate::napi::kick();
+fn bare_wake_with_no_wait_anywhere() {
+    crate::napi::wake_napi();
 }
 fn far_below_a_wait_event() {
     let _ = q.wait_event(|| true);
@@ -279,7 +273,7 @@ fn far_below_a_wait_event() {
     // 19
     // 20
     // 21
-    crate::napi::kick();
+    crate::napi::wake_napi();
 }
 FIXTURE
 
@@ -298,10 +292,10 @@ FIXTURE
 
     ALLOWLIST=()
 
-    gate_expect 1 4 "kick, wake_napi, force_napi_poll and a sleep inside the three wait_event spellings"
+    gate_expect 1 4 "wake_napi twice, force_napi_poll and a sleep inside the three wait_event spellings"
     gate_expect 2 5 "lock, sleep, yield and wait inside an Epoch scope, plus the allowlisted file which pass 2 does not exempt"
     gate_expect_silent 'negatives\.rs|slopos-ostd/src/sync/epoch\.rs|userland/' \
-        "a kick with no wait_event above it, one 21 lines below a wait_event, the Epoch type's own source, and a directory outside the kernel crate set all stay silent"
+        "a wake with no wait_event above it, one 21 lines below a wait_event, the Epoch type's own source, and a directory outside the kernel crate set all stay silent"
 
     # A root with none of the kernel directories must fail, not report clean.
     empty_root="$(mktemp -d)"

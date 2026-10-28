@@ -71,7 +71,7 @@ fn pattern(len: usize, seed: u8) -> Result<KVec<u8>, TestResult> {
     Ok(buf)
 }
 
-/// The root disk carries the ext2 superblock this boot mounted.
+/// The root disk carries the ext4 superblock this boot mounted.
 pub fn test_block_root_superblock_reads() -> TestResult {
     let Some(root) = block::disk_name(0) else {
         return fail!("no disk registered");
@@ -86,7 +86,7 @@ pub fn test_block_root_superblock_reads() -> TestResult {
         "the superblock read must succeed"
     );
     let magic = u16::from_le_bytes([buf[0x38], buf[0x39]]);
-    assert_eq_test!(magic, 0xEF53, "ext2 superblock magic mismatch");
+    assert_eq_test!(magic, 0xEF53, "ext4 superblock magic mismatch");
     pass!()
 }
 
@@ -402,7 +402,7 @@ fn counters_per_request(name: &[u8]) -> TestResult {
     const WIDE: usize = 256 * 1024;
     let offset = 3 << 20;
     let wide = assert_ok!(KVec::<u8>::zeroed(WIDE), "wide payload");
-    // Deltas and lower bounds: the counters are global and the ext2 flusher
+    // Deltas and lower bounds: the counters are global and the ext4 flusher
     // writes to another disk while this runs.
     let before = stats::snapshot();
     assert_test!(device.write_at(offset, &wide).is_ok(), "the wide write");

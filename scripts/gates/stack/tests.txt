@@ -12,8 +12,8 @@
 # same 32 KiB task stacks as everything else, so it lives under the same
 # ceiling; a frame that exceeds it is refactored, not exempted.
 
-# Measured 2026-07-31: 44732 records. See the dev allowlist for why the
-# floors are set relative to the other variants' counts.
+# Tens of thousands of records. See the dev allowlist for why the floors are
+# set relative to the other variants' counts.
 min-records 30000
 
 # The kernel/tests image registers thousands of tests; a dev or release ELF
@@ -38,13 +38,10 @@ expect-test-registry many
 2424	*slopos_acpi3aml14process_device*
 2344	*slopos_net4ipv49handle_rx*
 2200	*slopos_acpi3aml6interp*Interp4eval*
-# Staging the child's cwd (`SpawnAttrs.cwd_ptr`) added 256 B to the
-# `syscall_spawn_path` closure's frame; the path itself is a `KVec`.
-2328	*slopos_core7syscall16process_handlers18syscall_spawn_path*
-# Sharing the signal-action table under `CLONE_SIGHAND` put a
-# `KArc<SigHandTable>` handoff in `task_clone`'s frame; a non-leader thread's
-# inherited `real_parent` added a second owning handle, and charging a clone
-# its task once it is registered took it to 2152 B.
+
+# `task_clone` holds the `KArc<SigHandTable>` a `CLONE_SIGHAND` thread shares,
+# its group leader's `real_parent` and the task charge a registered clone
+# takes.
 2152	*slopos_sched4task14task_lifecycle10task_clone*
 
 # Library smallsort monomorphizations: scratch is the element size, not

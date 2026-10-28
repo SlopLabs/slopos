@@ -122,21 +122,19 @@ impl<T: Default> Default for TaskOwnCell<T> {
     }
 }
 
-// `#[repr(transparent)]` is what makes wrapping a `Task` field free, and
-// `sched/src/task_struct.rs`'s offset-delta razor silently depends on it — but
-// that razor does not catch a `#[repr(C)]` regression here, since both offsets
-// would move together. So assert the properties the hardware needs beside the
-// definition that could break them.
+// `#[repr(transparent)]` is what makes wrapping a `Task` field free; the
+// switch asm and XSAVE depend on the wrapped layout, so it is asserted here.
 const _: () = {
     use crate::task::fpu::FpuState;
-    use crate::task::task::TaskContext;
+    use crate::task::task::SwitchContext;
     use crate::user::context::UserContext;
 
     assert!(
-        core::mem::size_of::<TaskOwnCell<TaskContext>>() == core::mem::size_of::<TaskContext>()
+        core::mem::size_of::<TaskOwnCell<SwitchContext>>() == core::mem::size_of::<SwitchContext>()
     );
     assert!(
-        core::mem::align_of::<TaskOwnCell<TaskContext>>() == core::mem::align_of::<TaskContext>()
+        core::mem::align_of::<TaskOwnCell<SwitchContext>>()
+            == core::mem::align_of::<SwitchContext>()
     );
 
     assert!(core::mem::size_of::<TaskOwnCell<FpuState>>() == core::mem::size_of::<FpuState>());
@@ -234,8 +232,8 @@ impl<K, U> CurrentTask<K, U> {
         task_placement_clone(self.ptr)
     }
 
-    /// The underlying pointer. Transitional: it exists so call sites can adopt
-    /// the guard before the surfaces they feed have been retyped.
+    /// The task's address, for the placement and PCR primitives that take a
+    /// task by pointer. Valid only while this guard lives.
     #[inline]
     pub fn as_ptr(&self) -> *mut TaskInner<K, U> {
         self.ptr.as_ptr()
@@ -289,7 +287,7 @@ impl<K, U> IdleTask<K, U> {
     where
         TaskInner<K, U>: crate::task::PcrTaskType,
     {
-        let cpu_id = pcr::get_current_cpu();
+        let cpu_id = pcr::current_cpu_id();
         let ptr = NonNull::new(pcr::get_idle_task(cpu_id).cast::<TaskInner<K, U>>())?;
         Some(Self {
             ptr,
@@ -307,7 +305,7 @@ impl<K, U> IdleTask<K, U> {
     {
         debug_assert_eq!(
             cpu_id,
-            pcr::get_current_cpu(),
+            pcr::current_cpu_id(),
             "IdleTask is a local-CPU guard"
         );
         Self::current()

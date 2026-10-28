@@ -1,4 +1,4 @@
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::c_void;
 use core::ptr;
 use slopos_ostd::lock_class;
 
@@ -20,7 +20,7 @@ use slopos_ostd::task::SchedPlacement;
 const MAX_IDLE_CALLBACKS: usize = 4;
 
 struct IdleCallbacks {
-    slots: [Option<fn() -> c_int>; MAX_IDLE_CALLBACKS],
+    slots: [Option<fn() -> bool>; MAX_IDLE_CALLBACKS],
     count: usize,
 }
 
@@ -35,7 +35,7 @@ impl IdleCallbacks {
 
 static IDLE_CBS: OnceLock<SpinLock<IdleCallbacks>> = OnceLock::new();
 
-pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> c_int>) {
+pub fn scheduler_register_idle_wakeup_callback(callback: Option<fn() -> bool>) {
     IDLE_CBS.call_once(|| {
         SpinLock::new(
             IdleCallbacks::new(),
@@ -88,16 +88,6 @@ pub(crate) extern "C" fn kernel_thread_trampoline(arg: *mut c_void) {
     }
 }
 
-/// NUL-terminated copy of `name` for the scheduler's C-string name input;
-/// truncates at `TASK_NAME_MAX_LEN - 1`.
-fn name_to_task_buffer(name: &str) -> [u8; super::task::TASK_NAME_MAX_LEN] {
-    let mut buf = [0u8; super::task::TASK_NAME_MAX_LEN];
-    let bytes = name.as_bytes();
-    let take = core::cmp::min(bytes.len(), super::task::TASK_NAME_MAX_LEN - 1);
-    buf[..take].copy_from_slice(&bytes[..take]);
-    buf
-}
-
 pub struct KernelThreadSpawnerImpl;
 
 impl KernelThreadSpawner for KernelThreadSpawnerImpl {
@@ -108,9 +98,8 @@ impl KernelThreadSpawner for KernelThreadSpawnerImpl {
         priority: u8,
     ) -> Result<SpawnedTaskId, SpawnError> {
         let payload = (entry as usize) as *mut c_void;
-        let name_buf = name_to_task_buffer(name);
         let task_id = task_create(
-            name_buf.as_ptr() as *const c_char,
+            name.as_bytes(),
             kernel_thread_trampoline,
             payload,
             priority,
@@ -125,7 +114,7 @@ impl KernelThreadSpawner for KernelThreadSpawnerImpl {
             let _ = task_terminate(task_id);
             return Err(SpawnError::OutOfTaskIds);
         };
-        if publish_new_task(&task) != 0 {
+        if !publish_new_task(&task) {
             let _ = task_terminate(task_id);
             return Err(SpawnError::ScheduleFailed);
         }
@@ -166,7 +155,7 @@ pub fn kernel_io_yield_backend() -> slopos_ostd::sync::kernel_io_task::YieldBack
 /// same loop on the same stack, so resuming a seeded idle context does not
 /// start a second one.
 extern "C" fn idle_task_entry(_: *mut c_void) {
-    scheduler_loop(slopos_arch::pcr::get_current_cpu())
+    scheduler_loop(slopos_ostd::cpu::x86_64::pcr::current_cpu_id())
 }
 
 /// The relaxed half of the bottom half: what needs preemption *enabled*.
@@ -200,9 +189,7 @@ fn run_idle_callbacks() -> bool {
 
     let mut any_work = false;
     for cb in callbacks.into_iter().flatten() {
-        if cb() != 0 {
-            any_work = true;
-        }
+        any_work |= cb();
     }
     any_work
 }
@@ -230,7 +217,7 @@ fn scheduler_loop_bottom_half() -> bool {
     any_work
 }
 
-pub fn create_idle_task() -> c_int {
+pub fn create_idle_task() -> bool {
     create_idle_task_for_cpu(0)
 }
 
@@ -264,20 +251,20 @@ fn idle_task_name(cpu: usize) -> [u8; super::task::TASK_NAME_MAX_LEN] {
     buf
 }
 
-pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
+pub fn create_idle_task_for_cpu(cpu_id: usize) -> bool {
     let name = idle_task_name(cpu_id);
     let idle_task_id = crate::task::task_create(
-        name.as_ptr() as *const i8,
+        &name,
         idle_task_entry,
         ptr::null_mut(),
         TaskPriority::Idle.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
     if idle_task_id == INVALID_TASK_ID {
-        return -1;
+        return false;
     }
     let Some(idle_guard) = crate::task::task_find_by_id(idle_task_id) else {
-        return -1;
+        return false;
     };
 
     super::task::task_install_idle_affinity(
@@ -291,7 +278,7 @@ pub fn create_idle_task_for_cpu(cpu_id: usize) -> c_int {
 
     super::scheduler::install_idle_task(cpu_id, &idle_guard);
 
-    0
+    true
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -331,7 +318,7 @@ extern "C" fn scheduler_loop_entry(cpu_id: usize, _idle_task: *mut ()) -> ! {
 
 pub fn enter_scheduler(cpu_id: usize) -> ! {
     // Called exactly once per CPU at boot (BSP from `kernel_main_impl`, APs
-    // from `ap_entry_rust`). No re-entry guard: re-entry is a caller bug to fix
+    // from `ap_late_entry`). No re-entry guard: re-entry is a caller bug to fix
     // at the call site, not a runtime condition to defend against.
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.enable();
@@ -339,7 +326,7 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
 
     set_scheduler_enabled(true);
 
-    slopos_arch::pcr::mark_cpu_online(cpu_id);
+    slopos_ostd::cpu::x86_64::pcr::mark_cpu_online(cpu_id);
     klog_info!("SCHED: CPU {} scheduler online", cpu_id);
 
     let (idle_task, idle_stack_top) = match resolve_idle_stack_for_cpu(cpu_id) {
@@ -349,8 +336,8 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
             slopos_mm::tlb::notify_cpu_offline();
             // Leaving `online` latched on a CPU that parks forever would have
             // the lockup detector watch a CPU that can never tick.
-            slopos_arch::pcr::mark_cpu_offline(cpu_id);
-            slopos_arch::cpu::disable_interrupts();
+            slopos_ostd::cpu::x86_64::pcr::mark_cpu_offline(cpu_id);
+            slopos_ostd::cpu::x86_64::disable_interrupts();
             slopos_ostd::cpu::x86_64::core::halt_loop();
         }
         Err(IdleStackResolveError::MissingKernelStack) => {
@@ -359,8 +346,8 @@ pub fn enter_scheduler(cpu_id: usize) -> ! {
                 cpu_id
             );
             slopos_mm::tlb::notify_cpu_offline();
-            slopos_arch::pcr::mark_cpu_offline(cpu_id);
-            slopos_arch::cpu::disable_interrupts();
+            slopos_ostd::cpu::x86_64::pcr::mark_cpu_offline(cpu_id);
+            slopos_ostd::cpu::x86_64::disable_interrupts();
             slopos_ostd::cpu::x86_64::core::halt_loop();
         }
     };
@@ -396,9 +383,9 @@ pub fn register_ap_timer_start(cb: fn() -> bool) {
 fn deferred_start_ap_timer(cpu_id: usize) {
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    static AP_TIMER_DONE: [AtomicBool; slopos_arch::MAX_CPUS] = {
+    static AP_TIMER_DONE: [AtomicBool; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS] = {
         const FALSE: AtomicBool = AtomicBool::new(false);
-        [FALSE; slopos_arch::MAX_CPUS]
+        [FALSE; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS]
     };
 
     if cpu_id >= AP_TIMER_DONE.len() {
@@ -447,12 +434,12 @@ fn scheduler_loop(cpu_id: usize) -> ! {
         // window — its trap-exit handoff re-entering `schedule()` — interleaves
         // a second switch with the half-completed swap. Idle's context saves
         // IF=0, so the restore below runs at idle resumption.
-        let irq_flags = slopos_arch::cpu::save_flags_cli();
+        let irq_flags = slopos_ostd::cpu::x86_64::save_flags_cli();
         // Minted per iteration rather than cached: the slot is the authority for
         // which task this loop dispatches from, and re-reading it is two atomic
         // loads.
         let Some(idle) = Idle::current() else {
-            slopos_arch::cpu::restore_flags(irq_flags);
+            slopos_ostd::cpu::x86_64::restore_flags(irq_flags);
             slopos_ostd::sync::rcu_note_qs();
             crate::scheduler::arm_tickless_idle_if_due();
             slopos_ostd::sync::rcu_note_cpu_idle_enter();
@@ -467,7 +454,7 @@ fn scheduler_loop(cpu_id: usize) -> ! {
         // re-entrant dispatch would park a second reference into it.
         let _ = crate::scheduler::drain_previous_task();
         crate::profile::switch_end(cpu_id);
-        slopos_arch::cpu::restore_flags(irq_flags);
+        slopos_ostd::cpu::x86_64::restore_flags(irq_flags);
         crate::scheduler::drain_deferred_task_reclaim();
         if dispatched {
             continue;

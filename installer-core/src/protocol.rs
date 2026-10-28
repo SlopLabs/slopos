@@ -32,7 +32,7 @@ use crate::{
     Proposal, Refusal, Reinstall, Segment, Setup, Span, Step, Summary, System, Tag, Target,
 };
 
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 1;
 /// No request comes near it.
 pub const MAX_REQUEST: usize = 64 * 1024;
 

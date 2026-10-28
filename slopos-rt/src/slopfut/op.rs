@@ -417,8 +417,7 @@ impl MultishotStream {
 impl Drop for MultishotStream {
     fn drop(&mut self) {
         if let MultishotState::Armed { cookie } = self.state {
-            // The terminal -ECANCELED CQE retires the armed kernel row
-            // (SLOPRING §1.3 trigger 4).
+            // The terminal -ECANCELED CQE retires the armed kernel row.
             with_reactor(|r| r.cancel(cookie));
         }
     }

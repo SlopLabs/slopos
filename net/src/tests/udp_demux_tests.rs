@@ -4,10 +4,10 @@ use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 use crate::tests::net_scope::NetTestScope;
 use crate::tests::tcp_common::{LOCAL_IP, REMOTE_IP};
 use crate::types::{Ipv4Addr, NetError, Port};
-use crate::udp::UDP_DEMUX;
+use crate::udp::demux;
 
 fn reset() {
-    UDP_DEMUX.lock().clear();
+    demux::clear();
 }
 
 /// These register wildcards at socket indices that do not exist, and nothing
@@ -16,7 +16,7 @@ struct ClearOnExit;
 
 impl Drop for ClearOnExit {
     fn drop(&mut self) {
-        UDP_DEMUX.lock().clear();
+        demux::clear();
     }
 }
 
@@ -24,17 +24,16 @@ pub fn test_udp_demux_register_lookup() -> TestResult {
     reset();
     let _clear = ClearOnExit;
 
-    let mut demux = UDP_DEMUX.lock();
-    let rc = demux.register(Ipv4Addr(LOCAL_IP), Port(5000), 3, false);
+    let rc = demux::register(Ipv4Addr(LOCAL_IP), Port(5000), 3, false);
     assert_test!(rc.is_ok(), "register succeeds");
 
     assert_eq_test!(
-        demux.lookup(Ipv4Addr(LOCAL_IP), Port(5000)),
+        demux::lookup(Ipv4Addr(LOCAL_IP), Port(5000)),
         Some(3),
         "lookup returns socket index"
     );
     assert_eq_test!(
-        demux.lookup(Ipv4Addr(LOCAL_IP), Port(5001)),
+        demux::lookup(Ipv4Addr(LOCAL_IP), Port(5001)),
         None,
         "lookup misses wrong port"
     );
@@ -46,17 +45,16 @@ pub fn test_udp_demux_inaddr_any() -> TestResult {
     reset();
     let _clear = ClearOnExit;
 
-    let mut demux = UDP_DEMUX.lock();
-    let rc = demux.register(Ipv4Addr::UNSPECIFIED, Port(6000), 7, false);
+    let rc = demux::register(Ipv4Addr::UNSPECIFIED, Port(6000), 7, false);
     assert_test!(rc.is_ok(), "wildcard register succeeds");
 
     assert_eq_test!(
-        demux.lookup(Ipv4Addr([10, 1, 2, 3]), Port(6000)),
+        demux::lookup(Ipv4Addr([10, 1, 2, 3]), Port(6000)),
         Some(7),
         "wildcard match works"
     );
     assert_eq_test!(
-        demux.lookup(Ipv4Addr([192, 168, 4, 9]), Port(6000)),
+        demux::lookup(Ipv4Addr([192, 168, 4, 9]), Port(6000)),
         Some(7),
         "wildcard matches any destination ip"
     );
@@ -68,18 +66,17 @@ pub fn test_udp_demux_exact_over_wildcard() -> TestResult {
     reset();
     let _clear = ClearOnExit;
 
-    let mut demux = UDP_DEMUX.lock();
-    let rc_a = demux.register(Ipv4Addr(LOCAL_IP), Port(7000), 11, true);
-    let rc_b = demux.register(Ipv4Addr::UNSPECIFIED, Port(7000), 12, true);
+    let rc_a = demux::register(Ipv4Addr(LOCAL_IP), Port(7000), 11, true);
+    let rc_b = demux::register(Ipv4Addr::UNSPECIFIED, Port(7000), 12, true);
     assert_test!(rc_a.is_ok() && rc_b.is_ok(), "both registrations succeed");
 
     assert_eq_test!(
-        demux.lookup(Ipv4Addr(LOCAL_IP), Port(7000)),
+        demux::lookup(Ipv4Addr(LOCAL_IP), Port(7000)),
         Some(11),
         "exact ip wins over wildcard"
     );
     assert_eq_test!(
-        demux.lookup(Ipv4Addr(REMOTE_IP), Port(7000)),
+        demux::lookup(Ipv4Addr(REMOTE_IP), Port(7000)),
         Some(12),
         "wildcard handles non-exact destination"
     );
@@ -91,41 +88,40 @@ pub fn test_udp_demux_reuse_addr() -> TestResult {
     reset();
     let _clear = ClearOnExit;
 
-    let mut demux = UDP_DEMUX.lock();
-    let first = demux.register(Ipv4Addr(LOCAL_IP), Port(8000), 20, false);
+    let first = demux::register(Ipv4Addr(LOCAL_IP), Port(8000), 20, false);
     assert_test!(first.is_ok(), "initial register succeeds");
 
-    let second = demux.register(Ipv4Addr(LOCAL_IP), Port(8000), 21, false);
+    let second = demux::register(Ipv4Addr(LOCAL_IP), Port(8000), 21, false);
     assert_eq_test!(
         second,
         Err(NetError::AddressInUse),
         "second register without reuse fails"
     );
 
-    let third = demux.register(Ipv4Addr(LOCAL_IP), Port(8000), 21, true);
+    let third = demux::register(Ipv4Addr(LOCAL_IP), Port(8000), 21, true);
     assert_eq_test!(
         third,
         Err(NetError::AddressInUse),
         "reuse does not take a port from a socket that did not ask for it"
     );
-    let wildcard = demux.register(Ipv4Addr::UNSPECIFIED, Port(8000), 21, true);
+    let wildcard = demux::register(Ipv4Addr::UNSPECIFIED, Port(8000), 21, true);
     assert_eq_test!(
         wildcard,
         Err(NetError::AddressInUse),
         "nor does a wildcard beneath it"
     );
-    assert_eq_test!(demux.lookup(Ipv4Addr(LOCAL_IP), Port(8000)), Some(20));
+    assert_eq_test!(demux::lookup(Ipv4Addr(LOCAL_IP), Port(8000)), Some(20));
 
-    let shared = demux.register(Ipv4Addr(LOCAL_IP), Port(8001), 22, true);
-    let sharer = demux.register(Ipv4Addr(LOCAL_IP), Port(8001), 23, true);
+    let shared = demux::register(Ipv4Addr(LOCAL_IP), Port(8001), 22, true);
+    let sharer = demux::register(Ipv4Addr(LOCAL_IP), Port(8001), 23, true);
     assert_test!(shared.is_ok() && sharer.is_ok(), "every sharer asked");
     assert_eq_test!(
-        demux.lookup(Ipv4Addr(LOCAL_IP), Port(8001)),
+        demux::lookup(Ipv4Addr(LOCAL_IP), Port(8001)),
         Some(23),
         "the newest sharer receives"
     );
-    demux.unregister(Ipv4Addr(LOCAL_IP), Port(8001), 23);
-    assert_eq_test!(demux.lookup(Ipv4Addr(LOCAL_IP), Port(8001)), Some(22));
+    demux::unregister(Ipv4Addr(LOCAL_IP), Port(8001), 23);
+    assert_eq_test!(demux::lookup(Ipv4Addr(LOCAL_IP), Port(8001)), Some(22));
 
     pass!()
 }
@@ -134,13 +130,12 @@ pub fn test_udp_demux_unregister() -> TestResult {
     reset();
     let _clear = ClearOnExit;
 
-    let mut demux = UDP_DEMUX.lock();
-    let rc = demux.register(Ipv4Addr(LOCAL_IP), Port(9000), 30, false);
+    let rc = demux::register(Ipv4Addr(LOCAL_IP), Port(9000), 30, false);
     assert_test!(rc.is_ok(), "register succeeds");
 
-    demux.unregister(Ipv4Addr(LOCAL_IP), Port(9000), 30);
+    demux::unregister(Ipv4Addr(LOCAL_IP), Port(9000), 30);
     assert_eq_test!(
-        demux.lookup(Ipv4Addr(LOCAL_IP), Port(9000)),
+        demux::lookup(Ipv4Addr(LOCAL_IP), Port(9000)),
         None,
         "lookup is empty after unregister"
     );
@@ -152,25 +147,24 @@ pub fn test_udp_demux_clear() -> TestResult {
     reset();
     let _clear = ClearOnExit;
 
-    let mut demux = UDP_DEMUX.lock();
-    let _ = demux.register(Ipv4Addr(LOCAL_IP), Port(9100), 31, false);
-    let _ = demux.register(Ipv4Addr(REMOTE_IP), Port(9101), 32, false);
-    let _ = demux.register(Ipv4Addr::UNSPECIFIED, Port(9102), 33, false);
+    let _ = demux::register(Ipv4Addr(LOCAL_IP), Port(9100), 31, false);
+    let _ = demux::register(Ipv4Addr(REMOTE_IP), Port(9101), 32, false);
+    let _ = demux::register(Ipv4Addr::UNSPECIFIED, Port(9102), 33, false);
 
-    demux.clear();
+    demux::clear();
 
     assert_eq_test!(
-        demux.lookup(Ipv4Addr(LOCAL_IP), Port(9100)),
+        demux::lookup(Ipv4Addr(LOCAL_IP), Port(9100)),
         None,
         "first entry removed"
     );
     assert_eq_test!(
-        demux.lookup(Ipv4Addr(REMOTE_IP), Port(9101)),
+        demux::lookup(Ipv4Addr(REMOTE_IP), Port(9101)),
         None,
         "second entry removed"
     );
     assert_eq_test!(
-        demux.lookup(Ipv4Addr([8, 8, 8, 8]), Port(9102)),
+        demux::lookup(Ipv4Addr([8, 8, 8, 8]), Port(9102)),
         None,
         "wildcard entry removed"
     );
@@ -187,16 +181,15 @@ pub fn test_udp_demux_overflow() -> TestResult {
     reset();
 
     // A shared port hashes every registration into one bucket, which holds 8 entries.
-    let mut demux = UDP_DEMUX.lock();
     for idx in 0..8u32 {
         let ip = Ipv4Addr([10, 0, idx as u8, 1]);
-        let rc = demux.register(ip, Port(5555), idx, false);
+        let rc = demux::register(ip, Port(5555), idx, false);
         if rc.is_err() {
             return fail!("register failed before bucket became full");
         }
     }
 
-    let overflow = demux.register(Ipv4Addr([10, 0, 8, 1]), Port(5555), 999, false);
+    let overflow = demux::register(Ipv4Addr([10, 0, 8, 1]), Port(5555), 999, false);
     assert_eq_test!(
         overflow,
         Err(NetError::NoBufferSpace),

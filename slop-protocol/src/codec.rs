@@ -71,14 +71,6 @@ fn put_u32(buf: &mut [u8], pos: usize, v: u32) -> Result<usize, ProtocolError> {
     Ok(pos + 4)
 }
 
-fn put_u64(buf: &mut [u8], pos: usize, v: u64) -> Result<usize, ProtocolError> {
-    if pos + 8 > buf.len() {
-        return Err(ProtocolError::MessageTooLarge);
-    }
-    buf[pos..pos + 8].copy_from_slice(&v.to_le_bytes());
-    Ok(pos + 8)
-}
-
 fn put_i32(buf: &mut [u8], pos: usize, v: i32) -> Result<usize, ProtocolError> {
     put_u32(buf, pos, v as u32)
 }
@@ -110,23 +102,6 @@ fn get_u32(buf: &[u8], pos: usize) -> Result<(u32, usize), ProtocolError> {
     Ok((v, pos + 4))
 }
 
-fn get_u64(buf: &[u8], pos: usize) -> Result<(u64, usize), ProtocolError> {
-    if pos + 8 > buf.len() {
-        return Err(ProtocolError::MalformedMessage);
-    }
-    let v = u64::from_le_bytes([
-        buf[pos],
-        buf[pos + 1],
-        buf[pos + 2],
-        buf[pos + 3],
-        buf[pos + 4],
-        buf[pos + 5],
-        buf[pos + 6],
-        buf[pos + 7],
-    ]);
-    Ok((v, pos + 8))
-}
-
 fn get_i32(buf: &[u8], pos: usize) -> Result<(i32, usize), ProtocolError> {
     let (v, p) = get_u32(buf, pos)?;
     Ok((v as i32, p))
@@ -137,41 +112,48 @@ fn get_bool(buf: &[u8], pos: usize) -> Result<(bool, usize), ProtocolError> {
     Ok((v != 0, p))
 }
 
-const REQ_HELLO: u8 = 0;
-const REQ_CREATE_SURFACE: u8 = 1;
-const REQ_SURFACE_ATTACH: u8 = 2;
-const REQ_SURFACE_DAMAGE: u8 = 3;
-const REQ_SURFACE_COMMIT: u8 = 4;
-const REQ_SURFACE_FRAME: u8 = 5;
-const REQ_SURFACE_DESTROY: u8 = 6;
-const REQ_GET_TOPLEVEL: u8 = 7;
-const REQ_TOPLEVEL_SET_TITLE: u8 = 8;
-const REQ_TOPLEVEL_SET_APP_ID: u8 = 9;
-const REQ_TOPLEVEL_DESTROY: u8 = 10;
-// 11, 15 and 16 were requests version 5 retired.
-const REQ_SET_CURSOR_SHAPE: u8 = 12;
-const REQ_CLIPBOARD_COPY: u8 = 13;
-const REQ_CLIPBOARD_PASTE: u8 = 14;
-const REQ_CLIPBOARD_READ: u8 = 17;
-const REQ_TOPLEVEL_SET_SIZE_LIMITS: u8 = 18;
+/// The first byte of each message: its kind.
+pub mod tag {
+    pub const REQ_HELLO: u8 = 0;
+    pub const REQ_CREATE_SURFACE: u8 = 1;
+    pub const REQ_SURFACE_ATTACH: u8 = 2;
+    pub const REQ_SURFACE_DAMAGE: u8 = 3;
+    pub const REQ_SURFACE_COMMIT: u8 = 4;
+    pub const REQ_SURFACE_FRAME: u8 = 5;
+    pub const REQ_SURFACE_DESTROY: u8 = 6;
+    pub const REQ_GET_TOPLEVEL: u8 = 7;
+    pub const REQ_TOPLEVEL_SET_TITLE: u8 = 8;
+    pub const REQ_TOPLEVEL_SET_APP_ID: u8 = 9;
+    pub const REQ_TOPLEVEL_DESTROY: u8 = 10;
+    pub const REQ_SET_CURSOR_SHAPE: u8 = 11;
+    pub const REQ_CLIPBOARD_COPY: u8 = 12;
+    pub const REQ_CLIPBOARD_PASTE: u8 = 13;
+    pub const REQ_CLIPBOARD_READ: u8 = 14;
+    pub const REQ_TOPLEVEL_SET_SIZE_LIMITS: u8 = 15;
+    /// One past the last request's.
+    pub const REQ_END: u8 = 16;
 
-const EVT_HELLO: u8 = 0;
-// 1, 11 and 12 were events version 5 retired.
-const EVT_OUTPUT_INFO: u8 = 2;
-const EVT_FRAME_DONE: u8 = 3;
-const EVT_CONFIGURE: u8 = 4;
-const EVT_CLOSE: u8 = 5;
-const EVT_POINTER_ENTER: u8 = 6;
-const EVT_POINTER_LEAVE: u8 = 7;
-const EVT_POINTER_MOTION: u8 = 8;
-const EVT_POINTER_BUTTON: u8 = 9;
-const EVT_POINTER_AXIS: u8 = 10;
-const EVT_KEY: u8 = 13;
-const EVT_MODIFIERS: u8 = 14;
-const EVT_PASTE_RESULT: u8 = 15;
-const EVT_ERROR: u8 = 16;
-const EVT_PASTE_READY: u8 = 17;
-const EVT_BUFFER_RELEASE: u8 = 18;
+    pub const EVT_HELLO: u8 = 0;
+    pub const EVT_OUTPUT_INFO: u8 = 1;
+    pub const EVT_FRAME_DONE: u8 = 2;
+    pub const EVT_BUFFER_RELEASE: u8 = 3;
+    pub const EVT_CONFIGURE: u8 = 4;
+    pub const EVT_CLOSE: u8 = 5;
+    pub const EVT_POINTER_ENTER: u8 = 6;
+    pub const EVT_POINTER_LEAVE: u8 = 7;
+    pub const EVT_POINTER_MOTION: u8 = 8;
+    pub const EVT_POINTER_BUTTON: u8 = 9;
+    pub const EVT_POINTER_AXIS: u8 = 10;
+    pub const EVT_KEY: u8 = 11;
+    pub const EVT_MODIFIERS: u8 = 12;
+    pub const EVT_PASTE_READY: u8 = 13;
+    pub const EVT_PASTE_RESULT: u8 = 14;
+    pub const EVT_ERROR: u8 = 15;
+    /// One past the last event's.
+    pub const EVT_END: u8 = 16;
+}
+
+use tag::*;
 
 impl Encode for Request {
     fn encode(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
@@ -502,13 +484,9 @@ impl Decode for Request {
 impl Encode for Event {
     fn encode(&self, buf: &mut [u8]) -> Result<usize, ProtocolError> {
         match self {
-            Event::Hello {
-                version,
-                capabilities,
-            } => {
+            Event::Hello { version } => {
                 let p = put_u8(buf, 0, EVT_HELLO)?;
-                let p = put_u32(buf, p, *version)?;
-                put_u64(buf, p, *capabilities)
+                put_u32(buf, p, *version)
             }
             Event::OutputInfo {
                 width,
@@ -636,14 +614,7 @@ impl Decode for Event {
         match tag {
             EVT_HELLO => {
                 let (version, p) = get_u32(buf, p)?;
-                let (capabilities, p) = get_u64(buf, p)?;
-                Ok((
-                    Event::Hello {
-                        version,
-                        capabilities,
-                    },
-                    p,
-                ))
+                Ok((Event::Hello { version }, p))
             }
             EVT_OUTPUT_INFO => {
                 let (width, p) = get_u32(buf, p)?;

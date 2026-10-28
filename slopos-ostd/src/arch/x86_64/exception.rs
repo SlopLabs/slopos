@@ -1,15 +1,6 @@
 //! Exception metadata for x86_64, usable by kernel and test code without
 //! depending on the boot crate.
 
-use crate::irq::idt::{EXCEPTION_DOUBLE_FAULT, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI};
-
-pub fn exception_is_critical(vector: u8) -> bool {
-    matches!(
-        vector,
-        EXCEPTION_DOUBLE_FAULT | EXCEPTION_MACHINE_CHECK | EXCEPTION_NMI
-    )
-}
-
 pub fn get_exception_name(vector: u8) -> &'static str {
     match vector {
         0 => "Divide Error",

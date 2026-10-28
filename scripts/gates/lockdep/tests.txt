@@ -1,115 +1,33 @@
 # check_lockdep_headroom gate data — variant: tests
 #
-# The lock-order validator must be ACTIVE at every phase it reports, must
-# report no violation, and must keep every pool clear of its ceiling.
+# The lock-order validator must be ACTIVE at every phase it reports, report no
+# violation, and keep every pool clear of its ceiling. Re-measure with
 #
 #     scripts/check_lockdep_headroom.sh --variant tests --emit-allowlist \
 #         --log RUN1.log --log RUN2.log --log RUN3.log
 #
-# Two kinds of entry, because the three pools are not one kind of measurement:
+# and say in the commit message which lock moved a value. Two kinds of entry:
 #
 #   <phase> <TAB> <pool> <TAB> <cap>   exceeding it FAILS the run
 #   band <phase> <pool> <lo> <hi>      leaving it prints DRIFT and passes
 #
-# A band is advisory in *both* directions. What stops a pool that quietly
-# stopped being counted from reading as healthy is the `min-edges` /
-# `min-chains` floor below, not the band's low end — see "What the bands give
-# up".
-#
-# Either kind matching no LOCKDEP[...] line is a dead entry and fails the gate,
-# because a phase that stopped reporting looks exactly like a phase that passed.
-# An entry records what a pool *is*, not that the value is acceptable.
-#
-#
-# Why the split: exact where the measurement is deterministic
-# ----------------------------------------------------------
-#
-# A class registers on the first acquire of a declaration site — a mutex's or
-# a wait queue's on its first lock or wait, not on the first waiter that
-# sleeps, which is timing — and by the end of a phase every site that phase
-# reaches has been reached. So a class count is a property of the kernel,
-# identical on every run — this file's own history below records "identical
-# in all 8 runs" and "193 on every run" — and one extra class is a new lock, or
-# a lock reached one phase earlier, which is exactly what should require a
-# deliberate bump. Class caps are exact, with no margin, in every phase. Under
-# `tests=on` each report is followed by `LOCKDEP-CLASS[<phase>]:` lines naming
-# the classes that phase registered, so a count that moved names its lock.
-#
-# `boot` reaches its report by a fixed sequence with no test dispatch in it, and
-# measures 43 edges and 110 chains on every run. Its edge and chain counts are
-# therefore caps too. (The recorded caps of 49 and 112 are the values the old
-# convention left them at; tightening them onto 43/110 is a re-measurement, not
-# a policy change, and is not made here.)
-#
-# Edges and chains in the two TEST phases are a different object. They count
-# which *orderings a run happened to observe*, not which the kernel contains,
-# and they move between runs of identical code — measured spreads of 6 to 18.
-# An exact threshold on a quantity like that fires on interleaving and on suite
-# growth, not on a change to the kernel: this file previously recorded, in its
-# own prose, that "unmodified develop reaches 412 against a 409 cap", and a
-# run whose tests were entirely green failed CI for "chains grew to 400, over
-# the recorded cap 399". Those pools carry bands instead. A run inside the band
-# passes silently; a run outside it prints a DRIFT line naming which way the
-# count went and by how much, and the run still passes.
-#
-# Bands do not weaken the headroom check they sit inside. max-fill-pct 70 puts
-# the chain ceiling at 1433 of 2048 (MAX_CHAINS) against ~410 observed and the
-# edge ceiling at 716 of 1024 (MAX_EDGES) against ~200 observed, so the exact
-# caps were never the headroom check — the fill percentage is, and it still
-# fails.
-#
-#
-# What the bands give up
-# ----------------------
-#
-# Stated exactly, because understating it is how a gate ends up trusted for
-# something it does not do: a banded pool has NO upper failure of its own. The
-# only ceiling left above it is `max-fill-pct 70` — 1433 of 2048 chains, 716 of
-# 1024 edges, roughly 3.5x the observed values, and a number that rises
-# automatically if MAX_CHAINS is ever raised. So *any* growth in observed
-# orderings below that ceiling now passes green, reaching the operator only as
-# a DRIFT line on a passing run's stderr.
-#
-# Those two numbers are exact: the fill check compares `val * 100` against
-# `max-fill-pct * pool_size` rather than a truncated percentage, so 1433 chains
-# pass and 1434 fail. A truncated comparison would have made the enforced
-# ceilings 1454 and 727 while this file claimed 1433 and 716.
-#
-# Concretely, the bands lose the ability to *fail* on a new, consistent,
-# non-cyclic nesting between two already-registered classes. That is a real
-# loss, and it has been paid before: `1858edd` moved the kernel phase 351 -> 359
-# with no class movement at all, and the chain count was the only signal that
-# the reclaim tests had taken the quiesce and quarantine locks around the buddy
-# lock — an ordering the kernel phase previously reached only from process exit.
-# A band prints DRIFT there instead of failing.
-#
-# It is accepted because the *defect* is not what was lost. An inverted acquire
-# order — A→B where B→A exists — is caught by the cycle detector and reported in
-# `violations=`, which this gate still fails on, and which no count threshold was
-# ever what caught. A new consistent nesting is a design change, and a design
-# change that fails an otherwise green run four times in fifteen teaches
-# everyone that red means re-run, which costs more than the prompt is worth. The
-# prompt still reaches the operator, as a DRIFT line.
+# Either kind matching no LOCKDEP[...] line is a dead entry and fails the gate:
+# a phase that stopped reporting looks exactly like a phase that passed.
 
-
-# Classes must be well clear of the pool before the validator would disable
-# itself. 70% mirrors MAX_POOL_FILL_PCT in ktesting/src/zz_lockdep_tests.rs;
-# the failure it catches is a new array-of-locks static landing without a class
-# key, which adds classes by the hundred.
+# Every pool stays this far below its size, mirroring MAX_POOL_FILL_PCT in
+# ktesting/src/zz_lockdep_tests.rs. The comparison is `val * 100` against
+# `max-fill-pct * pool_size`, so the ceilings are exactly 355 of 508 classes,
+# 716 of 1024 edges and 1433 of 2048 chains. It catches an array-of-locks
+# static landing without a class key, which adds classes by the hundred.
 max-fill-pct 70
 
-# Without a floor, "0 classes" satisfies every ceiling and a validator that
-# stopped registering reports as maximally healthy — the hole `min-records`
-# plugs in the stack-size gate. Mirrors MIN_CLASSES in zz_lockdep_tests.rs.
+# Floors: without them "0 classes" satisfies every ceiling, and a validator
+# that stopped registering reads as healthy. Mirrors MIN_CLASSES there.
 min-classes 32
 
-# The same hole for the two banded pools, and deliberately NOT the band's low
-# end: a run that happened to observe fewer orderings is exactly as innocent as
-# one that observed more, which is the whole reason those pools carry bands.
-# These sit far under every observation (the smallest is boot's 43 edges / 110
-# chains) so they fail a validator that stopped recording and nothing else.
-# Declaring a band without the matching floor is a gate-file error rather than
-# a run failure: no run can tell you the line is missing.
+# The floors of the banded pools, far under every observation, so they fail a
+# validator that stopped recording and nothing else. A band without its floor
+# is a gate-file error.
 min-edges 16
 min-chains 32
 
@@ -118,420 +36,24 @@ require-phase post-kernel-tests
 require-phase post-userland-tests
 
 
-# Class caps — exact, no margin. Every value below was identical on every run
-# of the measurement that set it. What each bump was:
-#
-#   2026-08-02  baseline over 8 consecutive runs of the tests ISO.
-#   2026-08-03  RCU's callback-batch lock and the bottom-half tests' probe lock
-#               each add a class.
-#   2026-08-07  the TTY lock order is declared at `tty_table_init`, which
-#               registers TTY_WRITE_LOCKS eagerly (+1 boot class) instead of on
-#               first acquire; the vconsole input-injection hook a test-hooks
-#               build carries adds one class to both test phases.
-#   2026-08-09  network management. Boot gains exactly five, one per new lock:
-#               NET_IFACES, NETMON, evbus.netmon (one class for the whole
-#               wait-queue array), UDP_PORT_LISTENERS and DHCP_CLIENTS. The
-#               test phases add those plus the scratch tables and mock locks
-#               the new iface, netmon and DHCP tests declare.
-#   2026-08-09  the per-socket wait-queue spine: evbus.socket_recv / _send /
-#               _accept register from the boot-allocated spine rather than the
-#               static array, so both test phases gain exactly three. Instances
-#               went 64 -> 1024 per axis; a class is per declaration site, not
-#               per instance, which is the point of declaration-site keying.
-#   2026-08-09  descriptor-table isolation test: both test phases gain
-#               KERNEL_FILE_TABLE, the only acquire of that lock in the tree.
-#               Confirmed by disabling the probe, which returns both to
-#               176/185.
-#   ----------  `waitpid(-1)`: both test phases gain evbus.any_child_exit.
-#               Boot is unchanged — nothing on the boot path waits for an
-#               unnamed child.
-#   2026-08-10  reclaim tier: kernel +1, userland +0, which is the signature of
-#               a class registering EARLIER rather than of a new lock.
-#               CACHED_EXT2 has always been taken, but before the reclaim tier
-#               nothing in the kernel test phase reached it. Confirmed by the
-#               pair: post-kernel 181 -> 182 while post-userland stays at 190.
-#   2026-08-12  OPEN_FILE_POSITION (fs/src/fileio/mod.rs), which serialises the
-#               offset read, the write and the advance on one open file
-#               description, and DNS_PENDING_QUERY (net/src/dns.rs), which
-#               holds the in-flight query's server address and source port.
-#               The kernel phase gains only DNS_PENDING_QUERY: its fs tests
-#               drive `vfs_*` directly and never open a descriptor.
-#   2026-08-24  userland 192 -> 193: `dns_resolve_test` is the first utest to
-#               take the resolver path, so DNS_PENDING_QUERY registers there
-#               too. 193 on every run.
-#   2026-08-23  kernel 183 -> 184, userland 193 -> 194: `fblog.PANIC_TAIL`
-#               registers on the first recovered panic, which both phases
-#               reach. Boot is unchanged — nothing panics before its report.
-#   2026-08-25  kernel 184 -> 186, userland 194 -> 196: exactly two new
-#               declaration sites, both test-only statics —
-#               `TEST_PACKET_POOL` (net/src/tests/packetbuf_tests.rs), the
-#               scratch pool that lets a pool test assert on a count no live
-#               receive path moves, and `NET_TEST_TIMER_WHEEL`
-#               (net/src/timer.rs), the wheel `NetTestScope` selects so a
-#               test's timers are invisible to the live net-timer thread.
-#               Boot is unchanged at 71 — it reaches neither. Measured at 71 /
-#               186 on three runs of one pinned ISO, which also settles that
-#               boot's count is deterministic per build: an earlier 71/72/73
-#               spread was across different builds, not different runs.
-#   2026-08-31  +1 in all three phases: `TOUCHPAD_PLATFORM`
-#               (drivers/src/touchpad/platform.rs), the single lock holding the
-#               boot-installed touchpad config and the ACPI discovery result now
-#               that the touchpad binds as a platform driver instead of running
-#               from a boot step. It registers during boot, when the boot step
-#               installs the config, so every later phase inherits it. Uniform
-#               +1 with no edge movement is the signature of one new
-#               declaration site, which is what this is.
-#   2026-09-05  kernel 187 -> 188, userland 197 -> 198: `VFS_OPEN_INODES`
-#               (fs/src/vfs/orphan.rs), the open-inode reference table that
-#               `unlink` consults to decide whether an inode is still held
-#               open — POSIX's unlinked-but-open rule, which needs a count the
-#               VFS did not previously keep. Boot is unchanged at 72: nothing
-#               on the boot path opens a descriptor. Re-measured over three
-#               runs of one pinned ISO, 188/198 on every one; the two banded
-#               pools moved within their existing bands (kernel edges 159-162,
-#               chains 359-361; userland edges 196-200, chains 409-410), so
-#               they are left as recorded.
-#   2026-09-06  kernel 188 -> 199, userland 198 -> 209: Phase 6's new
-#               declaration sites, uniform +11 in both test phases with boot
-#               unchanged at 72 — the signature of new locks none of which the
-#               boot path acquires before its report. They are
-#               `DEVFS_BLOCK_NODES` (the runtime block-node registry devfs
-#               grew for `/dev/vd*`), `VerifiedBlockDevice.attested` (the
-#               rewritten-block bitmap of a v2 verity trailer), `FILEMAP_IO`
-#               and `FILEMAP` (the file-mapping page set's populate/writeback
-#               mutex and its bookkeeping spinlock), `FILEMAP_OPS` (mm's hook
-#               onto that registry), `RAMFS_POOL_0..3` (the four instances
-#               `mount(2)` hands out for `fstype=ramfs`, one class each
-#               because a path walk crossing a mount holds one mount's lock
-#               while taking the next one's), and the test-only
-#               `FILEMAP_TEST_MOUNT`, `RAMFS_MOUNT_TEST_0..3` and
-#               `STATFS_RDONLY_PROBE`. Only a site that is actually acquired
-#               registers, which is why fifteen declarations add eleven
-#               classes. Measured 199/209 on all three runs of one pinned ISO.
-#   2026-09-13  kernel 199 -> 203, userland 209 -> 212: "A build
-#               system's floor" in `plans/self-hosting.md`. Boot is unchanged
-#               at 72, so none of these is on the boot path. The named new
-#               declaration sites are
-#               `FILE_LOCK_ROWS` and `FILE_LOCK_WAITERS` (the advisory-lock
-#               row table and its wait queue, `fs/src/fileio/flock.rs`, which
-#               `flock(2)` and `fcntl(2)` record locks share because they
-#               contend on the same file) and the `FUTEX_TABLE` subclass-1
-#               instance that `FUTEX_REQUEUE`/`FUTEX_CMP_REQUEUE` acquire
-#               (`sched/src/futex.rs` orders the two buckets by index and
-#               declares the nesting with `lock_nested`, rather than marking
-#               the class `LO_DUPOK`, which would have discarded the order
-#               check for every futex acquire in the kernel). The kernel phase
-#               gains one more than the userland phase because a class the
-#               userland phase already registered now first registers during
-#               the kernel tests. Class counts are deterministic: 203/212 on
-#               all three runs of one pinned ISO. Both banded pools moved
-#               within their existing bands (kernel edges 172-179, chains
-#               385-394; userland edges 210-216, chains 434-442), so the bands
-#               are left as recorded rather than re-narrowed onto three runs
-#               of one machine.
-#   2026-09-21  userland edges band 185-218 -> 185-235: the LLVM port's new
-#               test coverage, not a new lock. `libc_probe` gained six checks
-#               (the locale objects, `<wctype.h>`, wide stdio, `<inttypes.h>`,
-#               the scan conversions and the absent POSIX names) and
-#               `cxx_probe` gained the localized-runtime half, which reads a
-#               file through `<fstream>`; between them the userland phase
-#               observes orderings it did not reach before. 221 and 223 over
-#               two fresh runs of one ISO, and the cycle detector is silent,
-#               so these are orderings newly *observed* rather than newly
-#               inverted. The low end stays at 185 and the kernel bands stay
-#               as recorded rather than re-narrowed onto two runs of one
-#               machine, per the note above. Class counts did not move:
-#               71/206/214 on both runs, and the chain bands were not left
-#               (userland 448/450 inside 359-467).
-#   2026-09-14  kernel 203 -> 206, userland 212 -> 214: the storage work in
-#               `plans/self-hosting.md` ("Storage holds a tree"). Boot is
-#               unchanged at 71 measured against its cap of 72, so none of
-#               these is on the boot path. The new declaration sites are
-#               `EXT2_POOL_1`, `EXT2_POOL_2` and `EXT2_POOL_3` — the three
-#               pooled `Ext2Mount` instances `mount(2)` hands out beyond the
-#               one boot attaches. Each needs its own class for the same
-#               reason `RAMFS_POOL_0..3` do: a path walk crossing a mount
-#               holds one mount's lock while taking the next one's, and one
-#               class over four instances would make that legal nesting look
-#               like an unordered self-nest. Slot 0 keeps the name
-#               `CACHED_EXT2`, which is why this is +3 and not +4. The
-#               userland phase gains two rather than three because one of
-#               them first registers during the kernel tests. Deterministic:
-#               206/214 on all three runs of one pinned ISO. Both banded
-#               pools moved within their existing bands (kernel edges
-#               172-173, chains 388-392; userland edges 204-205, chains
-#               429-433), so the bands are left as recorded.
-#   2026-09-23  kernel 206 -> 208, userland 214 -> 215: "Code gets in and
-#               out" in `plans/self-hosting.md`. Boot is unchanged at 71. Three
-#               new declaration sites — `DNS_QUERY_SLOT` and
-#               `DNS_QUERY_SLOT.waiters` (net/src/dns.rs, a lookup's slot and
-#               its wait queue, one class over the sixteen slots since no
-#               lookup holds two) and `TCP_CHUNK_CACHE` (net/src/tcp/chunk.rs,
-#               the freed-chunk cache) — replace `DNS_PENDING_QUERY` and
-#               `DNS_RX_BUF`. The kernel phase nets +2 rather than +1 because
-#               it never reached `DNS_RX_BUF`. 208/215 on both full runs of the
-#               change; every banded pool stayed inside its band (kernel edges
-#               181, chains 402; userland edges 226, chains 457).
-#   2026-09-23  userland 215 -> 216: the in-guest toolchain's `shm_open`.
-#               One new declaration site, `RAMFS_SHM` (fs/src/vfs/init.rs,
-#               the ramfs boot mounts at `/dev/shm` for `shm_open`), with a
-#               class of its own for the reason `RAMFS_POOL_0..3` have theirs.
-#               Boot is unchanged at 71 and the kernel phase at 208: nothing
-#               opens a file under `/dev/shm` before the userland tests do.
-#               Every banded pool stayed inside its band (kernel edges 175,
-#               chains 397; userland edges 226, chains 458).
-#   2026-09-25  kernel 208 -> 212, userland 216 -> 220: the guest kernel
-#               build's storage and fault fixes. Boot is unchanged at 71.
-#               Three new declaration sites — `VirtioBlk.abandon_waiters`
-#               (drivers/src/virtio_blk.rs, where writes wait behind one a
-#               timeout abandoned), `POPULATE_NAP` (mm/src/page_fault.rs,
-#               where a populate on a kernel copy's behalf naps instead of
-#               failing) and the test-only `test.wq_killed` — and the first
-#               acquire of `RAMFS_MOUNT_TEST_3`, the fixture instance under
-#               the flaky-lookup filesystem. 212/220 on both full runs of the
-#               change; every banded pool stayed inside its band (kernel edges
-#               182, chains 410; userland edges 225, chains 463).
-#   2026-10-01  boot 72 -> 75, kernel 212 -> 214: the block layer and NVMe
-#               (`plans/bare-metal.md` phase 1). A disk's partition table is now
-#               read, and its `/dev` nodes published, when its driver probes,
-#               so `BlockEngine.state`, `BlockEngine.slot_waiters`,
-#               `BlockEngine.free_waiters` (drivers/src/block/engine.rs, the
-#               request engine every transport shares, replacing
-#               `VirtioBlk.state` and its wait queues) and `DEVFS_BLOCK_NODES`
-#               register during boot instead of during the tests. New at boot:
-#               `NvmeAdmin.ring` and `NvmeAdmin.waiters` (drivers/src/nvme/
-#               admin.rs). Gone: `BLK_REGISTRY`, whose replacement
-#               `BLOCK_DISKS` is a sleeping `Mutex` an uncontended acquire
-#               registers no class for. The kernel phase adds `NvmePanic.ring`
-#               (the polled queue's test) beside the two admin classes and loses
-#               `BLK_REGISTRY`; `BlockEngine.abandon_waiters` replaces
-#               `VirtioBlk.abandon_waiters`. The userland phase holds at 220.
-#               Measured from a class-name dump on two full runs; boot edges 39
-#               and chains 110 sit inside their caps and every banded pool
-#               inside its band (kernel edges 174-183, chains 401-410;
-#               userland edges 223-226, chains 459-462).
-#   2026-10-01  userland 220 -> 223, and its chain band 359-467 -> 359-479:
-#               the boot chain (`plans/bare-metal.md` phase 3). The suite now
-#               reaches the UEFI-variable thread (core/src/efivar.rs), because
-#               `install_test` looks for its boot disk through
-#               `LoaderDevicePartUUID`, and checks that the installer's role
-#               reaches `BootOrder`, before deciding there is nothing to test.
-#               Its classes are `EFIVAR_SLOT`, `EFIVAR_STOP.waiters` and
-#               `EFIVAR_DONE`; `EFIVAR_CALLER` is a sleeping `Mutex` an
-#               uncontended acquire registers no class for. Measured from a
-#               class-name dump; boot and the kernel phase hold at 75 and 214.
-#               The thread's orderings put userland chains at 469-474 over
-#               seven full runs of the change, so that band's top takes the
-#               measured range widened by its own width. Every other banded
-#               pool stayed inside its band (kernel edges 181-186, chains
-#               411-414; userland edges 227-233).
-#   2026-10-01  kernel 214 -> 215, userland 223 -> 224: the crash record
-#               (`plans/bare-metal.md` phase 4). The crash store's tests take
-#               `crash.BUFFER`, the static buffer a panic's record is staged
-#               in, which nothing else takes before a panic. Measured from a
-#               class-name dump; six full runs agree but one, which counted
-#               216 and 225 because a test's mount landed in pool slot 1 and
-#               registered `EXT2_POOL_1` early, as it does on unchanged trees.
-#               Boot held at 75 and every banded pool inside its band (kernel
-#               edges 183-185, chains 412-414; userland edges 225-234, chains
-#               465-475).
-#   2026-10-03  boot 75 -> 76, kernel 215 -> 216, userland 224 -> 225, and
-#               the userland bands, edges 185-235 -> 185-248 and chains
-#               359-479 -> 359-495: the wired network (`plans/bare-metal.md`
-#               phase 6). The new class is `NIC_TABLE`, the table of
-#               published NICs `nic::publish` takes when the virtio NIC probes
-#               at boot; the stack's netpoll and net-timer threads kept their
-#               wakers' classes when they moved out of virtio-net, and the
-#               RTL8168 driver's locks are never taken under QEMU. Six full
-#               runs of the final trees agree but one, which counted 226 at
-#               the userland phase, the pool-slot variance recorded above. The
-#               netpoll thread now serves every NIC and sockets carry IP_TOS
-#               through TCP, so the userland phase observes orderings it did
-#               not: edges 226-238 and chains 465-480 over the change's runs
-#               (each the cycle detector passed), and each band takes its
-#               spread widened by its width above. Boot edges 39 and chains
-#               111 sit inside their caps, and the kernel bands held.
-#   2026-10-04  userland 225 -> 227: full speed (`plans/bare-metal.md` phase
-#               7). No new lock: `cpufreq_test` starts the sampling profiler
-#               at runtime (`prof start`), the first test to, and the
-#               lock-site tables' `EXT2_LOCK_SITES` and
-#               `PROCESS_VM_LOCK_SITES` register on the first acquire a
-#               profiled lock makes. Boot and the kernel phase hold at 76 and
-#               216, which is that signature. Three full runs counted 227,
-#               228, 227, the extra one the pool-slot variance recorded above;
-#               every banded pool stayed inside its band (kernel edges
-#               182-184, chains 409-413; userland edges 231-237, chains
-#               473-481), and boot's 39 edges and 111 chains sit inside their
-#               caps.
-#   2026-10-05  kernel 216 -> 219, userland 227 -> 230: the pool-slot
-#               variance above, removed. `EXT2_POOL_1..3` registered only when
-#               a mount landed in that slot and its sleeping lock contended,
-#               which CI hit on two of three runs of unchanged kernels
-#               (217/228). The first `vfs_ext2_pool_claim` now registers all
-#               four pool classes (`register_class_eagerly`), so both test
-#               phases carry the three every run. Boot holds at 76: nothing
-#               claims an ext2 slot before its report. Measured with
-#               `--emit-allowlist` over three full runs, 219/230 on each, no
-#               collision; every banded pool stayed inside its band (kernel
-#               edges 180-182, chains 407-412; userland edges 228-231, chains
-#               472-474), and boot's 39 edges and 111 chains sit inside their
-#               caps.
-#   2026-10-08  boot 76 -> 79, kernel 219 -> 222, userland 230 -> 233, and
-#               boot chains 111 -> 120: USB keyboards and pointers
-#               (`plans/usb-xhci.md` phase 3). Boot gains `POINTER`, the one
-#               cursor `input_event` keeps and the video layer bounds, and
-#               `ps2kbd.DECODER` and `ps2kbd.LEDS`, the i8042's set-1 decoder
-#               and its LED exchange, which its init takes; a class-name dump
-#               of the boot report names exactly those three. The test phases
-#               add `keyboard.STATE`, the keyboard state every keyboard feeds,
-#               and lose `ps2kbd.STATE`, which it replaces. The USB HID
-#               classes are never taken: `just test` attaches no xHCI.
-#               Measured with `--emit-allowlist`; classes 79/222/233 on every
-#               full run and boot sample of the final tree. That host has no
-#               KVM, and there two boots of the unchanged tree count 77
-#               classes and 117 chains against the 76 and 111 recorded here:
-#               boot's chains move with timing under TCG. The change's tree
-#               took 118-120 chains over four runs, so the cap takes that
-#               maximum. Every banded pool stayed inside its band (kernel
-#               edges 175, chains 410; userland edges 225, chains 474), and
-#               boot's 43 edges sit at their cap.
-#   2026-10-08  boot 79 -> 95, kernel 222 -> 238, userland 233 -> 249; boot
-#               edges 43 -> 59 and chains 120 -> 156; the test phases' bands
-#               moved: USB mass storage (`plans/usb-xhci.md` phase 4). `just
-#               test` now attaches a `qemu-xhci` with a scratch stick that
-#               `usb-storage` binds at boot, so the controller's and its
-#               devices' classes (`Xhci.*`, `UsbDevice.*`, `USB.transfers`,
-#               the USB threads' stop waiters, `usb.JOBS`, `usb.CLAIMS`),
-#               which only `just test-usb` reached before, register at boot,
-#               beside the five the phase adds: `UsbDevice.sinks` and
-#               `usb-storage.transport`, `.STICKS`, `.disks` and `.pause`.
-#               Two full captures count 238 and 249 on each; three boots
-#               count 95, 95 and 94 classes, 58, 59 and 54 edges and 155, 156
-#               and 149 chains, so each boot cap takes the maximum. The
-#               engine suite's fourth arm runs on the stick, so the test
-#               phases observe orderings they did not: kernel edges 193 and
-#               198, chains 444 and 452; userland edges 245 and 243, chains
-#               511 and 512. Two runs measure no spread, so each band takes
-#               those values widened by the spread the table below recorded
-#               for that pool, on each side.
-#   2026-10-13  kernel 238 -> 239, userland 249 -> 250: delegation at spawn
-#               (`plans/access-model.md` phase 4) mounts a ramfs at `/run`,
-#               the session's runtime directory, whose `RAMFS_RUN` class
-#               registers the first time either phase walks it. One full
-#               capture counts 239 and 250; boot is unchanged at 95.
-#   2026-10-15  boot 95 -> 105, kernel 239 -> 260, userland 250 -> 273; the
-#               userland edge band moved. A mutex's class lived on its wait
-#               queue's inner lock, which only a waiter that sleeps takes, so
-#               each mutex registered on its first contention: CI counted
-#               240/251 on unchanged trees while local runs held 239/250.
-#               `Mutex::lock` and every wait now register the class at first
-#               use, which adds every mutex a phase locks, plus the
-#               `selftest.mutex` and `selftest.queue` classes of the test that
-#               holds it. Three full captures name identical class sets in
-#               every phase (`LOCKDEP-CLASS` lines). Userland edges measured
-#               249, 256 and 259, past the band's 256, as CI had.
-#   2026-10-16  kernel 260 -> 262, userland 273 -> 278: bases replaced live
-#               (`plans/live-userland.md` phase 5). The kernel phase's
-#               generation tests take `BASEFS_GENERATIONS` and
-#               `BASEFS_ACTIVATING`; the userland phase adds `BASE_MONITORS`,
-#               `evbus.base_generation` and `BASEFS_REAP_STOP.waiters`, which
-#               init's monitor and `live_base_test`'s switch reach. A capture
-#               on a host without KVM counts 261/277 and the unchanged tree
-#               259 in its kernel phase, one under the 260 recorded, so each
-#               cap adds the named classes to the recorded count. Every
-#               banded pool stayed inside its band (kernel edges 200, chains
-#               460; userland edges 265, chains 546).
-#   2026-10-17  kernel 262 -> 265, userland 278 -> 280: extensions activated
-#               beside the base (`plans/system-extensions.md` phase 1). The
-#               kernel phase's extension tests take `EXT_ACTIVATING`,
-#               `BASEFS_REAP_PASS`, and start the reaper, so
-#               `BASEFS_REAP_STOP.waiters` registers there rather than in the
-#               userland phase; the userland phase adds no class. Two
-#               captures without KVM count 264/279 against the parent's
-#               261/277, and each cap adds the named classes to the recorded
-#               count. Every banded pool stayed inside its band (kernel edges
-#               199 and 202, chains 458 and 459; userland edges 265 and 266,
-#               chains 543 and 543).
-#   2026-10-19  kernel 265 -> 268, userland 280 -> 283: activations served
-#               from disk (`plans/system-extensions.md` phase 5). The kernel
-#               phase's extension tests mount each image through an
-#               `Ext2Mount` of the pool's own class, `EXT_ACTIVATION`, beside
-#               `EXT_ACTIVATION_STATE` and the verifying device's
-#               `EXT_VERITY`; `EXT_ACTIVATING` only moved its declaration
-#               site. Two captures without KVM count 267/282 against the
-#               parent's 264/279 on the same host, whose boot counts 106 for
-#               both, and each cap adds the named classes to the recorded
-#               count. Kernel bands held (edges 206 and 208, chains 465 and
-#               465); userland chains drifted to 556 and 552 above 548, the
-#               new nesting of an activation, its device and the root's
-#               filesystem, with edges 274 and 273.
-#   2026-10-21  kernel 268 -> 269, userland 283 -> 284: `VFS_REMOVAL_ENDED`
-#               (fs/src/vfs/orphan.rs), the wait queue an open that raced a
-#               rename over its name waits on until that removal ends. It
-#               registers at the first removal's end, which both test phases
-#               reach, and is the one name the phases' class lists gained
-#               against a capture of the sessions work before it; boot is
-#               unchanged at 105. Three captures of the sessions work without
-#               KVM measured userland edges 282, 277 and 289 and chains 564,
-#               560 and 573, above both bands, which are widened below; the
-#               kernel phase held its bands (edges 213, 211 and 208, chains
-#               473, 472 and 468).
-#   2026-10-22  kernel 269 -> 270, userland 284 -> 285: `CLIPBOARD`
-#               (drivers/src/input_event.rs), the lock over the clipboards the
-#               sessions work keeps one per session. Nothing acquired it in
-#               either phase until that commit's
-#               `test_each_session_keeps_its_own_clipboard`, a kernel test, so
-#               it registers in the kernel phase and both phases carry it; the
-#               2026-10-21 entry missed it because its baseline already held
-#               the sessions work. Captures with KVM of the last tree CI
-#               passed (90345675) and of 849bc24f count 262/278 and 264/280,
-#               and their class lists differ by `CLIPBOARD` and
-#               `VFS_REMOVAL_ENDED` alone, both new in the kernel phase; boot
-#               counts 99 on both. CI counts 270/285 on 849bc24f, the recorded
-#               268/283 plus those two. Every banded pool stayed inside its
-#               band (kernel edges 204 and 200, chains 455 and 453; userland
-#               edges 266 and 272, chains 540 and 548).
+# Class caps, exact: a class registers on the first acquire of a declaration
+# site, so by a phase's end the count is a property of the kernel. One more is
+# a new lock, or a lock reached a phase earlier; each phase's
+# `LOCKDEP-CLASS[<phase>]:` lines name its classes.
 boot	classes	105
-post-kernel-tests	classes	270
-post-userland-tests	classes	285
+post-kernel-tests	classes	268
+post-userland-tests	classes	283
 
-# Boot edges and chains — exact, because boot has no test scheduling in it.
-# Measured 43 edges and 111 chains on all three runs of the Phase 6 ISO; the
-# caps of 49 and 112 the old convention left here are tightened onto that
-# measurement. The one extra chain over the 110 recorded in prose is a new
-# ordering among locks that already existed, not a new lock: boot's class
-# count did not move.
+# Boot's edges and chains are caps too: boot reaches its report by a fixed
+# sequence with no test dispatch in it.
 boot	edges	59
 boot	chains	156
 
-# Bands, for the two phases whose edge and chain counts move with scheduling.
-# Each band is the recorded range widened by that range's own width on each
-# side, so a band is three times as wide as the spread it was measured over and
-# a re-measurement that finds a wider spread widens the band with it.
-#
-#   post-kernel-tests    edges   193-198  (spread 20)  ->  173-218
-#   post-userland-tests  edges   243-289  (spread 46)  ->  197-335
-#   post-kernel-tests    chains  444-452  (spread 36)  ->  408-488
-#   post-userland-tests  chains  511-573  (spread 62)  ->  449-635
-#
-# The kernel spreads are those measured before phase 4 of `plans/usb-xhci.md`;
-# its ranges are that phase's two captures, as the 2026-10-08 entry above
-# records. The userland ranges fold in the five captures since, which the
-# 2026-10-19 and 2026-10-21 entries record.
-#
-# Each recorded range is the union of the measurements this file already
-# carried, not one sitting: the 24-run set taken when the sleep queue moved
-# from the global tick counter to the HPET millisecond clock (12 runs on the
-# change, 12 on unmodified develop, indistinguishable distributions), the
-# twelve-run set taken for the `tests_exec_boundary` / `tests_pcid` /
-# OOM-quarantine work, and the three- and four-run sets before them, now with
-# the three Phase 6 runs (kernel edges 168, chains 378-381; userland edges
-# 207, chains 428-431) folded in. A union across tree states is the right
-# input here precisely because none of those states differed in class count
-# for a reason the class caps did not already record — the check that would
-# have moved had any of them been a real ordering change. Leaving a band is
-# not a failure, so a band set slightly tight costs a DRIFT line to read,
-# never a red run.
+# The test phases' edges and chains count the orderings a run happened to
+# observe, which move between runs of identical code, so they carry bands: the
+# measured range widened by its own width on each side. A band has no upper
+# failure of its own — max-fill-pct, roughly 3.5x the observed values, is the
+# ceiling above it — and an inverted order is still a `violations=` failure.
 band post-kernel-tests edges 173 218
 band post-userland-tests edges 197 335
 band post-kernel-tests chains 408 488

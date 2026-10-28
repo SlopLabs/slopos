@@ -47,15 +47,15 @@ ninja = true
 # hold bitcode.
 thin-lto = true
 # libc++ is linked statically, with \`-Bsymbolic\`: upstream's release
-# configuration (\`-Wl,-Bsymbolic -static-libstdc++\`), and 0004 in
+# configuration (\`-Wl,-Bsymbolic -static-libstdc++\`), and 0003 in
 # toolchain/compiler/ makes \`rustc_llvm\` take \`libc++.a\` the same way. The
-# loader binds eagerly, so every interposable name libLLVM used of its own —
-# 5,381 symbolic relocations — was looked up anew at every start, and a
-# shared libc++ was one more object to map and bind. libLLVM exports the
+# loader binds eagerly, so without it every interposable name libLLVM uses of
+# its own — 5,381 symbolic relocations — is looked up at every start, and a
+# shared libc++ is one more object to map and bind. libLLVM exports the
 # runtime it links, and libclang-cpp, clang and lld, which list libLLVM before
 # \`libc++.a\`, bind to that one copy: libc++'s error categories are
-# singletons compared by address, and with a copy each, clang took LLVM's
-# ENOENT for an error that is not ENOENT and failed on the first header its
+# singletons compared by address, so with a copy each clang takes LLVM's
+# ENOENT for an error that is not ENOENT and fails on the first header its
 # resource directory does not carry. librustc_driver does keep its own copy
 # (\`rustc_llvm\`'s archive is read before libLLVM), which is sound because
 # the wrapper only tests the error codes LLVM hands it for zero and no
@@ -66,15 +66,15 @@ thin-lto = true
 static-libstdcpp = true
 # A cross find_package searches the *host*: without an empty find root,
 # FindZLIB and friends take /usr/include, and a wchar.h that reaches glibc's
-# mbstate_t collides with slibc's. Measured: it is what stopped the cross
-# LLVM. The build triple's LLVM gets the same options, so both are built
-# without the same optional libraries.
+# mbstate_t collides with slibc's, which stops the cross LLVM. The build
+# triple's LLVM gets the same options, so both are built without the same
+# optional libraries.
 #
 # \`LLVM_LINKER_SUPPORTS_B_SYMBOLIC_FUNCTIONS\` off: libLLVM's and
 # libclang-cpp's own link options add \`-Bsymbolic-functions\` after the
-# \`-Bsymbolic\` above, and the linker keeps the last of the two, so the
-# objects came out with every data reference to themselves still
-# interposable — 3,857 \`GLOB_DAT\`s in libLLVM, measured.
+# \`-Bsymbolic\` above, and the linker keeps the last of the two, which
+# leaves every data reference of the objects to themselves interposable —
+# 3,857 \`GLOB_DAT\`s in libLLVM.
 build-config = { CMAKE_FIND_ROOT_PATH = "$1", CMAKE_FIND_ROOT_PATH_MODE_INCLUDE = "ONLY", CMAKE_FIND_ROOT_PATH_MODE_LIBRARY = "ONLY", CMAKE_FIND_ROOT_PATH_MODE_PROGRAM = "NEVER", LLVM_ENABLE_ZLIB = "OFF", LLVM_ENABLE_ZSTD = "OFF", LLVM_ENABLE_TERMINFO = "OFF", LLVM_ENABLE_LIBXML2 = "OFF", LLVM_ENABLE_LIBEDIT = "OFF", LLVM_ENABLE_LIBPFM = "OFF", LLVM_ENABLE_BACKTRACES = "OFF", LLVM_ENABLE_CRASH_OVERRIDES = "OFF", LLVM_LINKER_SUPPORTS_B_SYMBOLIC_FUNCTIONS = "OFF" }
 EOF
     } | if [ "$plain" = plain ]; then sed '/^# ThinLTO across LLVM/,/^thin-lto = true$/d'; else cat; fi
@@ -96,7 +96,7 @@ deny-warnings = false
 # librustc_driver's crates (bootstrap applies it from stage 2, the compiler
 # that ships) and one codegen unit per crate. `codegen-units` also reaches
 # std, which has no `codegen-units-std` here; that is std's own
-# `profile.dist` value (1), so std builds as it did.
+# `profile.dist` value (1).
 lto = "thin"
 codegen-units = 1
 EOF

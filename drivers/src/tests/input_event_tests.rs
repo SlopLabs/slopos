@@ -1,43 +1,43 @@
-//! Queue-slot allocation for the per-task input queues.
+//! Queue-slot allocation for the input sink's queues.
 //!
 //! Task ids are monotonic and never recycled, so the slot table must be keyed
 //! by slot rather than by task id: a table indexed by task id carries a ceiling
 //! that a long-lived boot walks past, silently dropping input for every process
 //! created afterwards. These tests drive ids far above any a test boot reaches.
 
+use slopos_abi::input::keycode::KEY_A;
 use slopos_abi::input::{InputEventType, MAX_INPUT_TASKS};
 use slopos_testing::{TestResult, fail, pass};
 
 use crate::input_event::{
-    input_cleanup_task, input_compositor_task_id, input_event_count, input_poll,
-    input_register_compositor, input_request_close, input_send_configure,
+    input_cleanup_task, input_compositor_task_id, input_poll, input_register_compositor,
+    input_route_key,
 };
 
 /// Comfortably past any id a test boot allocates.
 const HIGH_TASK_ID: u32 = 1_000_003;
 
+fn route_a(timestamp_ms: u64) {
+    input_route_key(KEY_A, 'a' as u32, 0, 0, true, timestamp_ms);
+}
+
 pub fn test_input_queue_serves_high_task_id() -> TestResult {
+    let restore = input_compositor_task_id();
     input_cleanup_task(HIGH_TASK_ID);
 
-    if !input_request_close(HIGH_TASK_ID, 42) {
-        input_cleanup_task(HIGH_TASK_ID);
-        return fail!("no queue could be claimed for task id {}", HIGH_TASK_ID);
-    }
-
-    let count = input_event_count(HIGH_TASK_ID);
+    input_register_compositor(HIGH_TASK_ID);
+    route_a(42);
     let event = input_poll(HIGH_TASK_ID);
     let drained = input_poll(HIGH_TASK_ID);
     input_cleanup_task(HIGH_TASK_ID);
+    input_register_compositor(restore);
 
-    if count != 1 {
-        return fail!("queued event count = {}, want 1", count);
-    }
     let event = match event {
         Some(e) => e,
-        None => return fail!("queued event was not readable back"),
+        None => return fail!("no queue served task id {}", HIGH_TASK_ID),
     };
-    if event.event_type != InputEventType::CloseRequest {
-        return fail!("read back {:?}, want CloseRequest", event.event_type);
+    if event.event_type != InputEventType::KeyPress || event.key_keycode() != KEY_A {
+        return fail!("read back {:?}, want the key routed", event.event_type);
     }
     if event.timestamp_ms != 42 {
         return fail!("read back timestamp {}, want 42", event.timestamp_ms);
@@ -51,64 +51,63 @@ pub fn test_input_queue_serves_high_task_id() -> TestResult {
 /// Cleanup returns the slot to the pool, so a run of distinct task ids never
 /// exhausts the [`MAX_INPUT_TASKS`] queues.
 pub fn test_input_slot_is_reusable_across_high_task_ids() -> TestResult {
+    let restore = input_compositor_task_id();
     let rounds = (MAX_INPUT_TASKS * 2) as u32;
     for round in 0..rounds {
         let task_id = HIGH_TASK_ID + 1 + round;
         input_cleanup_task(task_id);
 
-        if !input_send_configure(task_id, 640 + round, 480 + round, round as u64) {
-            input_cleanup_task(task_id);
-            return fail!(
-                "round {}: no queue could be claimed for task id {}",
-                round,
-                task_id
-            );
-        }
-
+        input_register_compositor(task_id);
+        route_a(u64::from(round));
         let event = input_poll(task_id);
         input_cleanup_task(task_id);
 
-        let event = match event {
-            Some(e) => e,
-            None => return fail!("round {}: queued event was not readable back", round),
-        };
-        if event.configure_width() != 640 + round || event.configure_height() != 480 + round {
-            return fail!(
-                "round {}: read back {}x{}, want {}x{}",
-                round,
-                event.configure_width(),
-                event.configure_height(),
-                640 + round,
-                480 + round
-            );
+        match event {
+            Some(e) if e.timestamp_ms == u64::from(round) => {}
+            Some(e) => {
+                input_register_compositor(restore);
+                return fail!(
+                    "round {}: read back timestamp {}, want {}",
+                    round,
+                    e.timestamp_ms,
+                    round
+                );
+            }
+            None => {
+                input_register_compositor(restore);
+                return fail!(
+                    "round {}: no queue could be claimed for task id {}",
+                    round,
+                    task_id
+                );
+            }
         }
     }
+    input_register_compositor(restore);
     pass!()
 }
 
 pub fn test_input_slot_release_drops_queued_events() -> TestResult {
+    let restore = input_compositor_task_id();
     let first = HIGH_TASK_ID + 200;
     let second = HIGH_TASK_ID + 201;
     input_cleanup_task(first);
     input_cleanup_task(second);
 
-    if !input_request_close(first, 7) {
-        input_cleanup_task(first);
-        return fail!("no queue could be claimed for task id {}", first);
-    }
+    input_register_compositor(first);
+    route_a(7);
     // Release the slot with the event still queued.
     input_cleanup_task(first);
 
-    if !input_request_close(second, 8) {
-        input_cleanup_task(second);
-        return fail!("no queue could be claimed for task id {}", second);
-    }
-    let count = input_event_count(second);
+    input_register_compositor(second);
+    route_a(8);
     let event = input_poll(second);
+    let rest = input_poll(second);
     input_cleanup_task(second);
+    input_register_compositor(restore);
 
-    if count != 1 {
-        return fail!("re-claimed queue holds {} events, want 1", count);
+    if rest.is_some() {
+        return fail!("re-claimed queue holds more than the one event routed to it");
     }
     match event {
         Some(e) if e.timestamp_ms == 8 => pass!(),
@@ -198,60 +197,48 @@ slopos_testing::stest!(
 
 /// The IRQ-driven routing path never claims a queue slot.
 ///
-/// `input_route_key_full` runs in the PS/2 IRQ handler, where there is no
-/// principal to charge for a slot and no errno path to refuse on: routing looks
-/// up, and only a syscall claims.
-///
-/// Focus is set through the raw state rather than `input_set_keyboard_focus`,
-/// which legitimately claims.
+/// Routing runs in the PS/2 IRQ handler and the xHCI drain, where there is no
+/// principal to charge for a slot and no errno path to refuse on: routing
+/// looks up, and only a syscall or a registration claims.
 pub fn test_input_routing_never_claims_a_slot() -> TestResult {
-    use crate::input_event::{input_route_key_full, input_set_keyboard_focus};
+    use crate::input_event::input_hold_sink_unqueued;
 
     const ORPHAN: u32 = 1_000_017;
 
+    let restore = input_compositor_task_id();
     input_cleanup_task(ORPHAN);
-    let before = input_event_count(ORPHAN);
-    if before != 0 {
-        return fail!("orphan task starts with {before} events");
-    }
+    input_hold_sink_unqueued(ORPHAN);
 
-    // Give the orphan focus, then take its queue away: focus without a queue
-    // is exactly the state an IRQ can observe after a task exits.
-    input_set_keyboard_focus(ORPHAN);
-    input_cleanup_task(ORPHAN);
-
-    input_route_key_full(0x1E, b'a', 0x04, 'a' as u32, 0, 0, true, 0);
+    route_a(0);
 
     // A claim would have created a queue and delivered the key into it.
-    if input_poll(ORPHAN).is_some() {
-        input_cleanup_task(ORPHAN);
-        input_set_keyboard_focus(0);
+    let claimed = input_poll(ORPHAN).is_some();
+    input_cleanup_task(ORPHAN);
+    input_register_compositor(restore);
+
+    if claimed {
         return fail!("the routing path claimed a queue slot for a task that never asked");
     }
-
-    input_set_keyboard_focus(0);
-    input_cleanup_task(ORPHAN);
     pass!()
 }
 
-/// The other half of the rule: if nothing claimed at a syscall, the routing
+/// The other half of the rule: if nothing claimed at registration, the routing
 /// path's refusal to claim would lose every event.
-pub fn test_input_focus_claims_the_slot_up_front() -> TestResult {
-    use crate::input_event::{input_route_key_full, input_set_keyboard_focus};
+pub fn test_input_registration_claims_the_slot_up_front() -> TestResult {
+    const HOLDER: u32 = 1_000_019;
 
-    const FOCUSED: u32 = 1_000_019;
+    let restore = input_compositor_task_id();
+    input_cleanup_task(HOLDER);
+    input_register_compositor(HOLDER);
 
-    input_cleanup_task(FOCUSED);
-    input_set_keyboard_focus(FOCUSED);
+    route_a(0);
 
-    input_route_key_full(0x1E, b'a', 0x04, 'a' as u32, 0, 0, true, 0);
-
-    let delivered = input_poll(FOCUSED).is_some();
-    input_set_keyboard_focus(0);
-    input_cleanup_task(FOCUSED);
+    let delivered = input_poll(HOLDER).is_some();
+    input_cleanup_task(HOLDER);
+    input_register_compositor(restore);
 
     if !delivered {
-        return fail!("focus must reserve the queue, or routing loses every event");
+        return fail!("registration must reserve the queue, or routing loses every event");
     }
     pass!()
 }
@@ -261,77 +248,55 @@ slopos_testing::stest!(
     suite = input_event
 );
 slopos_testing::stest!(
-    name = test_input_focus_claims_the_slot_up_front,
+    name = test_input_registration_claims_the_slot_up_front,
     suite = input_event
 );
 
-/// The pointer re-seed self-heal.
-///
-/// `input_poll_batch` used to re-seed the pointer focus on every call, at
-/// frame rate: `if get_pointer_focus() == 0 { set_pointer_focus(self) }`. That
-/// re-arm is gone, so the repair has to happen where the loss does — when the
-/// focused task is cleaned up. Without it the pointer stays aimed at nothing
-/// after any focused window dies, and nothing ever re-aims it.
-///
-/// A naive "consume a handle" rewrite deletes exactly this; the lost-wake
-/// failure class has already bitten this tree twice.
-pub fn test_pointer_focus_reseeds_to_the_seat_holder() -> TestResult {
-    use crate::input_event::{input_get_pointer_focus, input_set_pointer_focus};
-    use slopos_ostd::seat::{self, SeatId, SeatKind};
+/// A button reaches the sink's holder alone, and goes nowhere while nothing
+/// holds the sink: not to a compositor that held it before.
+pub fn test_pointer_events_reach_only_the_sink_holder() -> TestResult {
+    use crate::input_event::{PointerSource, pointer_buttons};
 
-    const SEAT_HOLDER: u32 = 1_000_023;
-    const FOCUSED: u32 = 1_000_029;
+    const HOLDER: u32 = 1_000_023;
+    const BUTTON: u8 = 1 << 0;
 
-    let restore = input_get_pointer_focus();
-    input_cleanup_task(SEAT_HOLDER);
-    input_cleanup_task(FOCUSED);
-    seat::reset_all();
+    let restore = input_compositor_task_id();
+    input_cleanup_task(HOLDER);
 
-    // The compositor holds the input seat; a different task holds the pointer.
-    if seat::acquire(SeatKind::InputSink, SeatId::CompositorPrimary, SEAT_HOLDER).is_err() {
-        seat::reset_all();
-        return fail!("a reset arbiter must grant a free seat");
+    input_register_compositor(HOLDER);
+    pointer_buttons(PointerSource::PS2, BUTTON, 5);
+    pointer_buttons(PointerSource::PS2, 0, 6);
+    let press = input_poll(HOLDER);
+    let release = input_poll(HOLDER);
+
+    input_register_compositor(0);
+    pointer_buttons(PointerSource::PS2, BUTTON, 7);
+    pointer_buttons(PointerSource::PS2, 0, 8);
+    let unheld = input_poll(HOLDER);
+
+    input_cleanup_task(HOLDER);
+    input_register_compositor(restore);
+
+    match press {
+        Some(e)
+            if e.event_type == InputEventType::PointerButtonPress
+                && e.pointer_button_code() == BUTTON => {}
+        _ => return fail!("the holder did not get the button's press"),
     }
-    input_set_pointer_focus(FOCUSED, 0);
-    if input_get_pointer_focus() != FOCUSED {
-        seat::reset_all();
-        input_set_pointer_focus(restore, 0);
-        return fail!("pointer focus did not take");
+    match release {
+        Some(e)
+            if e.event_type == InputEventType::PointerButtonRelease
+                && e.pointer_button_code() == BUTTON => {}
+        _ => return fail!("the holder did not get the button's release"),
     }
-
-    // The focused task dies. The pointer must land back on the seat holder
-    // rather than on nothing.
-    input_cleanup_task(FOCUSED);
-    let reseeded = input_get_pointer_focus();
-
-    // A dying seat holder has no one to re-seed to, so the pointer goes to 0
-    // rather than back to itself.
-    input_cleanup_task(SEAT_HOLDER);
-    let after_holder_death = input_get_pointer_focus();
-
-    seat::reset_all();
-    input_set_pointer_focus(restore, 0);
-    input_cleanup_task(SEAT_HOLDER);
-    input_cleanup_task(FOCUSED);
-
-    if reseeded != SEAT_HOLDER {
-        return fail!(
-            "pointer focus = {} after the focused task died, want the seat holder {}",
-            reseeded,
-            SEAT_HOLDER
-        );
-    }
-    if after_holder_death != 0 {
-        return fail!(
-            "pointer focus = {} after the seat holder itself died, want 0",
-            after_holder_death
-        );
+    if unheld.is_some() {
+        return fail!("a button pressed while nothing held the sink reached a queue");
     }
     pass!()
 }
 
 slopos_testing::stest!(
-    name = test_pointer_focus_reseeds_to_the_seat_holder,
+    name = test_pointer_events_reach_only_the_sink_holder,
     suite = input_event
 );
 

@@ -22,7 +22,7 @@ use crate::process_vm::{
     process_vm_munmap, process_vm_prepay_commit, process_vm_reset_stack,
     process_vm_user_va_to_paddr,
 };
-use crate::user_mappings::ostd_get_pte_flags_4kb;
+use crate::user_mappings::leaf_property_4kb;
 
 /// 0x06 / 0x07: a user write to an absent page, and to a present one.
 const WRITE_ABSENT: u64 = 0x06;
@@ -64,7 +64,7 @@ impl Scratch {
         )
     }
 
-    fn munmap(&self, addr: u64, pages: u64) -> i32 {
+    fn munmap(&self, addr: u64, pages: u64) -> Result<(), slopos_abi::Errno> {
         process_vm_munmap(resolve_pid(self.pid), addr, pages * PAGE_SIZE_4KB)
     }
 
@@ -107,10 +107,10 @@ impl Scratch {
 
     fn is_cow(&self, addr: u64) -> bool {
         crate::process_vm::process_vm_with_vm_space(resolve_pid(self.pid), |vs| {
-            ostd_get_pte_flags_4kb(vs, slopos_abi::addr::VirtAddr::new(addr))
+            leaf_property_4kb(vs, slopos_abi::addr::VirtAddr::new(addr))
         })
         .flatten()
-        .is_some_and(|flags| flags.contains(crate::paging_defs::PageFlags::COW))
+        .is_some_and(|leaf| crate::user_mappings::is_cow(&leaf))
     }
 }
 
@@ -177,7 +177,7 @@ pub fn test_commit_extent_is_charged_at_mmap_and_returned_at_munmap() -> TestRes
         PAGES,
         scratch.committed() as i64 - before as i64
     );
-    assert_test!(scratch.munmap(addr, PAGES) == 0, "munmap failed");
+    assert_test!(scratch.munmap(addr, PAGES).is_ok(), "munmap failed");
     assert_test!(
         scratch.committed() == before,
         "munmap left {} pages committed, want {}",
@@ -204,7 +204,7 @@ pub fn test_commit_prot_none_owes_nothing_until_made_accessible() -> TestResult 
     );
     let process = resolve_pid(scratch.pid);
     assert_test!(
-        process_vm_mprotect(process, addr, PAGES * PAGE_SIZE_4KB, PROT_RW) == 0,
+        process_vm_mprotect(process, addr, PAGES * PAGE_SIZE_4KB, PROT_RW).is_ok(),
         "mprotect to RW failed"
     );
     assert_test!(
@@ -214,14 +214,14 @@ pub fn test_commit_prot_none_owes_nothing_until_made_accessible() -> TestResult 
         PAGES
     );
     assert_test!(
-        process_vm_mprotect(process, addr, PAGES * PAGE_SIZE_4KB, PROT_NONE) == 0,
+        process_vm_mprotect(process, addr, PAGES * PAGE_SIZE_4KB, PROT_NONE).is_ok(),
         "mprotect back to NONE failed"
     );
     assert_test!(
         scratch.committed() == before + PAGES as u32,
         "narrowing to PROT_NONE gave the promise back"
     );
-    assert_test!(scratch.munmap(addr, PAGES) == 0, "munmap failed");
+    assert_test!(scratch.munmap(addr, PAGES).is_ok(), "munmap failed");
     assert_test!(
         scratch.committed() == before,
         "munmap did not return the promise"
@@ -242,7 +242,7 @@ pub fn test_commit_noreserve_is_charged_at_the_touch_not_the_mmap() -> TestResul
         "MAP_NORESERVE committed {} pages at mmap",
         scratch.committed() - before
     );
-    assert_test!(scratch.munmap(addr, PAGES) == 0, "munmap failed");
+    assert_test!(scratch.munmap(addr, PAGES).is_ok(), "munmap failed");
     assert_test!(scratch.committed() == before, "munmap moved the commit");
     pass!()
 }
@@ -260,7 +260,7 @@ pub fn test_commit_noreserve_survives_a_prot_none_reservation() -> TestResult {
     assert_test!(addr != 0, "mmap refused");
     let process = resolve_pid(scratch.pid);
     assert_test!(
-        process_vm_mprotect(process, addr, PAGES * PAGE_SIZE_4KB, PROT_RW) == 0,
+        process_vm_mprotect(process, addr, PAGES * PAGE_SIZE_4KB, PROT_RW).is_ok(),
         "mprotect to RW failed"
     );
     assert_test!(
@@ -268,7 +268,7 @@ pub fn test_commit_noreserve_survives_a_prot_none_reservation() -> TestResult {
         "mprotect of a MAP_NORESERVE reservation committed {} pages",
         scratch.committed() - before
     );
-    assert_test!(scratch.munmap(addr, PAGES) == 0, "munmap failed");
+    assert_test!(scratch.munmap(addr, PAGES).is_ok(), "munmap failed");
     assert_test!(scratch.committed() == before, "munmap moved the commit");
     pass!()
 }
@@ -293,7 +293,7 @@ pub fn test_commit_exec_advance_is_drawn_before_the_ceiling() -> TestResult {
         scratch.committed(),
         before + stack_pages + SPARE
     );
-    assert_test!(process_vm_reset_stack(process) == 0, "reset_stack failed");
+    assert_test!(process_vm_reset_stack(process), "reset_stack failed");
     assert_test!(
         scratch.committed() == before + SPARE,
         "the stack drew on the ceiling rather than the advance: {} committed, want {}",
@@ -324,7 +324,7 @@ pub fn test_commit_ceiling_refuses_at_mmap_and_leaves_no_debit() -> TestResult {
     let granted = scratch.mmap(4, PROT_RW, MAP_FLAGS);
     let after_grant = root_committed();
     if granted != 0 {
-        scratch.munmap(granted, 4);
+        let _ = scratch.munmap(granted, 4);
     }
     set_limit(root(), ResourceKind::CommitPages, restore);
 
@@ -384,8 +384,8 @@ pub fn test_anon_fault_around_stays_inside_its_region() -> TestResult {
     // guards at pages 0-1 and 5.., the faulting region at pages 2-4.
     let first = (base + window - 1) & !(window - 1);
     assert_test!(
-        process_vm_mprotect(process, first, 2 * page, PROT_NONE) == 0
-            && process_vm_mprotect(process, first + 5 * page, window - 5 * page, PROT_NONE) == 0,
+        process_vm_mprotect(process, first, 2 * page, PROT_NONE).is_ok()
+            && process_vm_mprotect(process, first + 5 * page, window - 5 * page, PROT_NONE).is_ok(),
         "mprotect refused"
     );
     let Some(handle) = process_vm_handle(process) else {
@@ -478,9 +478,9 @@ pub fn test_commit_forked_copy_is_charged_as_written() -> TestResult {
         "the parent's write"
     );
     let parent_after = parent.committed();
-    assert_test!(child.munmap(shared, PAGES) == 0, "munmap failed");
+    assert_test!(child.munmap(shared, PAGES).is_ok(), "munmap failed");
     let after_unmap = child.committed();
-    assert_test!(child.munmap(fresh, PAGES) == 0, "munmap failed");
+    assert_test!(child.munmap(fresh, PAGES).is_ok(), "munmap failed");
     let after_both = child.committed();
 
     assert_test!(

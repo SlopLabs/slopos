@@ -1,54 +1,42 @@
-//! `slopos-terminal-core`'s input model, and `classify`, which maps the
-//! compositor's events onto it.
+//! `slopos-terminal-core`'s input model, and `classify`, which maps a
+//! window's events onto it.
 
 pub use slopos_terminal_core::input::*;
 
 use slopos_abi::input::POINTER_AXIS_VERTICAL;
-use slopos_protocol::types::Event as ProtocolEvent;
+use slopos_windowing::Event;
 
-pub fn classify(evt: &ProtocolEvent) -> CompositorEvent {
-    match evt {
-        ProtocolEvent::Key {
+pub fn classify(event: Event) -> CompositorEvent {
+    match event {
+        Event::KeyPress {
             keycode,
             codepoint,
             modifiers,
-            pressed,
-            ..
-        } => {
-            if *pressed {
-                CompositorEvent::Key(KeyPress {
-                    keycode: *keycode as u16,
-                    codepoint: *codepoint,
-                    mods: *modifiers as u8,
-                })
-            } else {
-                CompositorEvent::Ignored
-            }
-        }
-        ProtocolEvent::Modifiers { mods } => CompositorEvent::Modifiers(*mods as u8),
-        ProtocolEvent::PointerMotion { x, y, .. } => CompositorEvent::PointerMotion(*x, *y),
-        ProtocolEvent::PointerEnter { x, y, .. } => CompositorEvent::PointerEnter(*x, *y),
-        ProtocolEvent::PointerLeave { .. } => CompositorEvent::PointerLeave,
-        ProtocolEvent::PointerButton {
-            button, pressed, ..
-        } => CompositorEvent::PointerButton {
-            pressed: *pressed,
-            code: *button as u8,
+        } => CompositorEvent::Key(KeyPress {
+            keycode,
+            codepoint,
+            mods: modifiers,
+        }),
+        Event::KeyRelease { .. } => CompositorEvent::Ignored,
+        Event::Modifiers { modifiers } => CompositorEvent::Modifiers(modifiers),
+        Event::PointerMotion { x, y } => CompositorEvent::PointerMotion(x, y),
+        Event::PointerEnter { x, y } => CompositorEvent::PointerEnter(x, y),
+        Event::PointerLeave => CompositorEvent::PointerLeave,
+        Event::PointerPress { button } => CompositorEvent::PointerButton {
+            pressed: true,
+            code: button,
         },
-        ProtocolEvent::Configure { width, height, .. } => {
-            CompositorEvent::Resize(*width as i32, *height as i32)
+        Event::PointerRelease { button } => CompositorEvent::PointerButton {
+            pressed: false,
+            code: button,
+        },
+        Event::Configure { width, height } => CompositorEvent::Resize(width as i32, height as i32),
+        Event::PointerAxis { axis, value_v120 } if axis == POINTER_AXIS_VERTICAL => {
+            CompositorEvent::Scroll(value_v120)
         }
-        ProtocolEvent::PointerAxis { axis, value, .. } => {
-            // Horizontal scroll has no meaning for the terminal grid.
-            if *axis == POINTER_AXIS_VERTICAL {
-                CompositorEvent::Scroll(*value)
-            } else {
-                CompositorEvent::Ignored
-            }
-        }
-        ProtocolEvent::Close { .. } => CompositorEvent::Close,
-        ProtocolEvent::PasteReady { len } => CompositorEvent::PasteReady(*len),
-        ProtocolEvent::PasteResult { len } => CompositorEvent::PasteResult(*len),
-        _ => CompositorEvent::Ignored,
+        Event::PointerAxis { .. } => CompositorEvent::Ignored,
+        Event::CloseRequest => CompositorEvent::Close,
+        Event::ClipboardOffer { len } => CompositorEvent::PasteReady(len),
+        Event::ClipboardData { len } => CompositorEvent::PasteResult(len),
     }
 }

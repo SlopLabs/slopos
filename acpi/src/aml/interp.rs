@@ -332,7 +332,7 @@ impl<'a> Interp<'a> {
             0x68..=0x6e => Some((AmlVal::Int(self.arg((op - 0x68) as usize)), p + 1)),
             0x60..=0x67 => Some((AmlVal::Int(self.local((op - 0x60) as usize)), p + 1)),
             OP_ROOT_CHAR | OP_PARENT_CHAR | OP_DUAL_NAME | OP_MULTI_NAME => self.eval_name(p),
-            b if is_lead_name_char_pub(b) => self.eval_name(p),
+            b if is_lead_name_char(b) => self.eval_name(p),
             _ => None,
         }
     }
@@ -366,7 +366,7 @@ impl<'a> Interp<'a> {
                 self.set_arg((tb - 0x68) as usize, res);
                 Some(q + 1)
             }
-            b if is_lead_name_char_pub(b)
+            b if is_lead_name_char(b)
                 || b == OP_ROOT_CHAR
                 || b == OP_PARENT_CHAR
                 || b == OP_DUAL_NAME
@@ -388,7 +388,7 @@ impl<'a> Interp<'a> {
         let tb = *self.aml.get(q)?;
         match tb {
             0x00 | 0x60..=0x6e => Some(q + 1),
-            b if is_lead_name_char_pub(b)
+            b if is_lead_name_char(b)
                 || b == OP_ROOT_CHAR
                 || b == OP_PARENT_CHAR
                 || b == OP_DUAL_NAME
@@ -546,9 +546,4 @@ impl<'a> Interp<'a> {
         }
         self.locals.insert(target, val);
     }
-}
-
-#[inline]
-fn is_lead_name_char_pub(b: u8) -> bool {
-    b == b'_' || b.is_ascii_uppercase()
 }

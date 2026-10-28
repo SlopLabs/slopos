@@ -6,8 +6,8 @@
 
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
-use slopos_arch::MAX_CPUS;
-use slopos_arch::cpu::msr::{self, Msr};
+use slopos_ostd::arch::x86_64::msr::{self, Msr};
+use slopos_ostd::cpu::x86_64::pcr::MAX_CPUS;
 
 /// `IA32_MTRR_DEF_TYPE` — [11] MTRR enable, [10] fixed-range enable, [7:0]
 /// default memory type.
@@ -62,7 +62,7 @@ static CENSUS: [CpuEntry; MAX_CPUS] = [EMPTY_ENTRY; MAX_CPUS];
 /// Runs on the timer tick, so it takes no lock: each slot has one writer and the
 /// reader wants a recent value rather than a synchronized one.
 pub fn record_current_cpu() {
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     if cpu >= MAX_CPUS {
         return;
     }
@@ -76,11 +76,11 @@ pub fn record_current_cpu() {
 
     entry.pat.store(msr::read_msr(Msr::PAT), Ordering::Relaxed);
     entry.cr0.store(
-        slopos_arch::cpu::control_regs::read_cr0(),
+        slopos_ostd::cpu::x86_64::control_regs::read_cr0(),
         Ordering::Relaxed,
     );
     entry.cr4.store(
-        slopos_arch::cpu::control_regs::read_cr4(),
+        slopos_ostd::cpu::x86_64::control_regs::read_cr4(),
         Ordering::Relaxed,
     );
 
@@ -96,7 +96,7 @@ pub fn record_current_cpu() {
 }
 
 fn mtrr_supported() -> bool {
-    let (_, _, _, edx) = slopos_arch::cpu::cpuid(1);
+    let (_, _, _, edx) = slopos_ostd::arch::x86_64::cpuid::cpuid(1);
     (edx & (1 << 12)) != 0
 }
 

@@ -2,4 +2,4 @@
 # scripts/check_ui_literals.sh: `<check> <path> <why>`. An entry that matches
 # nothing fails the gate.
 colour apps/src/editor/syntax.rs the code view's syntax palette
-colour apps/src/image_viewer/checker.rs the checks an image's transparent pixels are judged against
+colour appkit/src/widgets/picture.rs the checks a picture's transparent pixels are judged against

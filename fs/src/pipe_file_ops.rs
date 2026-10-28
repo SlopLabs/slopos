@@ -184,7 +184,7 @@ pub(crate) fn fifo_open(
     }
 
     if !joined.partner_present && !nonblock {
-        if scheduler_is_enabled() == 0 {
+        if !scheduler_is_enabled() {
             return Err(Errno::EAGAIN);
         }
         let own_end = if reads { read_ev(h) } else { write_ev(h) };
@@ -302,7 +302,7 @@ fn pipe_read(handle: usize, buf: &mut dyn IoBufWrite, flags: u32) -> isize {
         if is_nonblock {
             return Errno::EAGAIN.as_isize();
         }
-        if scheduler_is_enabled() == 0 {
+        if !scheduler_is_enabled() {
             return Errno::EAGAIN.as_isize();
         }
 
@@ -419,7 +419,7 @@ fn pipe_write(handle: usize, buf: &dyn IoBufRead, flags: u32) -> isize {
                     Errno::EAGAIN.as_isize()
                 };
             }
-            if scheduler_is_enabled() == 0 {
+            if !scheduler_is_enabled() {
                 return Errno::EAGAIN.as_isize();
             }
             if let Err(abort) = BUS
@@ -513,7 +513,7 @@ fn pipe_write(handle: usize, buf: &dyn IoBufRead, flags: u32) -> isize {
                 Errno::EAGAIN.as_isize()
             };
         }
-        if scheduler_is_enabled() == 0 {
+        if !scheduler_is_enabled() {
             return Errno::EAGAIN.as_isize();
         }
         if let Err(abort) = BUS

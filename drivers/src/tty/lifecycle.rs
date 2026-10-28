@@ -45,7 +45,7 @@ pub fn switch_active_tty(idx: TtyIndex) -> Result<(), TtyError> {
     }
 
     set_active_tty(idx);
-    if scheduler_is_enabled() != 0 {
+    if scheduler_is_enabled() {
         BUS.publish(tty_input_event(slot));
     }
     Ok(())
@@ -106,7 +106,7 @@ pub(crate) fn hangup_notify(idx: TtyIndex, session_id: u32) {
         let _ = signal_session(session_id, SIGCONT);
     }
 
-    if scheduler_is_enabled() != 0 {
+    if scheduler_is_enabled() {
         // Readers, writers and poll waiters must all get to observe POLLHUP,
         // as must the master's writers and pollers the slave's throttle held.
         BUS.publish(tty_input_event(slot));

@@ -43,8 +43,7 @@ pub enum LayoutError {
 }
 
 /// Is `cp` a codepoint a literal cell / compose result may hold? Rejects `0` (the
-/// "absent" sentinel), surrogates, and controls — C0, DEL and C1, the last also
-/// colliding with the legacy TTY nav pseudo-codes 0x80..=0x88.
+/// "absent" sentinel), surrogates, and controls — C0, DEL and C1.
 fn is_valid_glyph(cp: u32) -> bool {
     cp != 0
         && cp <= UNICODE_MAX

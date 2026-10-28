@@ -44,7 +44,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=lib/root_layout.sh
 . "$SCRIPT_DIR/lib/root_layout.sh"
 
-DEFAULT_IMAGE="${REPO_ROOT}/fs/assets/ext2-tests.img"
+DEFAULT_IMAGE="${REPO_ROOT}/fs/assets/ext4-tests.img"
 
 # macOS: e2fsprogs is keg-only under Homebrew, as in build_fs_image.sh.
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -82,7 +82,7 @@ map_departures() {
     0) root_layout_read_record <<<"$record" ;;
     4)
         echo "$OWNERS_RECORD is missing"
-        HELD_TREES=("${PERSON_TREES[@]}")
+        HELD_TREES=()
         ;;
     *)
         echo "$OWNERS_RECORD could not be read: $record"

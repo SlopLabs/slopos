@@ -63,13 +63,12 @@ impl Owners {
         held: [false; PERSON_TREES.len()],
     };
 
-    /// What a record grants: `/home` is the first person's home, as records
-    /// before the map named it, and another owner or tree grants nothing.
+    /// What a record grants the first person; a line naming another owner or
+    /// tree grants nothing.
     pub fn parse(text: &str) -> Owners {
         let mut held = [false; PERSON_TREES.len()];
         let person = format!("{SESSION_UID}:{SESSION_GID}");
         for (owner, tree) in text.lines().filter_map(|line| line.split_once(' ')) {
-            let tree = if tree == "/home" { SESSION_HOME } else { tree };
             if let Some(at) = PERSON_TREES.iter().position(|t| *t == tree)
                 && owner == person
             {
@@ -140,25 +139,6 @@ impl Owners {
             .map(|text| Owners::parse(&text))
     }
 
-    /// The record of the root at `root`; a recordless root's what init lays
-    /// out at its next boot, and nothing where either cannot be read.
-    pub fn of(root: &Path) -> Owners {
-        match recorded(root) {
-            Ok(Some(text)) => Owners::parse(&text),
-            Ok(None) => Owners::unrecorded(root).unwrap_or(Owners::NOBODY),
-            Err(_) => Owners::NOBODY,
-        }
-    }
-
-    /// What a root without a record is laid out as: every tree the one
-    /// person's, `/usr/local` the system's once the accounts name two.
-    fn unrecorded(root: &Path) -> Option<Owners> {
-        Some(match people(root)? > 1 {
-            true => Owners::ONE_PERSON.without(LOCAL),
-            false => Owners::ONE_PERSON,
-        })
-    }
-
     pub fn write(&self, root: &Path) -> std::io::Result<()> {
         write_durably(&under(root, OWNERS_RECORD), self.render().as_bytes())
     }
@@ -174,29 +154,21 @@ fn recorded(root: &Path) -> std::io::Result<Option<String>> {
     }
 }
 
-fn people(root: &Path) -> Option<usize> {
-    crate::accounts::Store::read(root)
-        .accounts()
-        .ok()
-        .map(|accounts| accounts.people().len())
-}
-
-/// Make each directory of the map the root at `root` lacks, hand the first
-/// person their trees once per root, and `/usr/local` to the system once a
-/// second person has an account or a hand-over was begun. What the root's
-/// record says now; a record that cannot be read, or accounts on a root
-/// without one, grant nothing and change nothing.
+/// Make each directory of the map the root at `root` lacks, and finish a
+/// hand-over of `/usr/local` to the system that was begun. What the root's
+/// record says now; a record that is absent or cannot be read grants nothing
+/// and changes nothing.
 pub fn lay_out(root: &Path) -> Owners {
     let record = under(root, OWNERS_RECORD);
-    let (owners, recorded) = match recorded(root) {
-        Ok(Some(text)) => (Owners::parse(&text), Some(text)),
-        Ok(None) => match Owners::unrecorded(root) {
-            Some(owners) => (owners, None),
-            None => {
-                eprintln!("init: the accounts cannot be read; the next boot lays out this root");
-                return Owners::NOBODY;
-            }
-        },
+    let owners = match recorded(root) {
+        Ok(Some(text)) => Owners::parse(&text),
+        Ok(None) => {
+            eprintln!(
+                "init: {}: absent; nothing is the first person's",
+                record.display()
+            );
+            return Owners::NOBODY;
+        }
         Err(e) => {
             eprintln!(
                 "init: {}: {e}; nothing is the first person's",
@@ -221,15 +193,6 @@ pub fn lay_out(root: &Path) -> Owners {
             Err(e) => eprintln!("init: {}: {e}", path.display()),
         }
     }
-    match recorded {
-        None => migrate(root, &owners),
-        Some(text) if text != owners.render() => {
-            if let Err(e) = owners.write(root) {
-                eprintln!("init: {}: {e}", record.display());
-            }
-        }
-        Some(_) => {}
-    }
     let begun = sharing(root);
     if !owners.holds(LOCAL) {
         if begun {
@@ -237,7 +200,7 @@ pub fn lay_out(root: &Path) -> Owners {
         }
         return owners;
     }
-    if !begun && people(root).is_none_or(|n| n < 2) {
+    if !begun {
         return owners;
     }
     match share(root) {
@@ -276,90 +239,12 @@ fn own(path: &Path, dir: &RootDir) -> std::io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(dir.mode.into()))
 }
 
-/// A root that ran everything as uid 0 holds the first person's work as uid
-/// 0's. Hand them what uid 0 holds below their trees, set each directory of
-/// the map as it says, and record that it was done.
-fn migrate(root: &Path, owners: &Owners) {
-    let mut refused = 0usize;
-    for tree in PERSON_TREES.into_iter().filter(|tree| owners.holds(tree)) {
-        let path = under(root, tree);
-        if !fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
-            continue;
-        }
-        refused += hand_over_below(&path);
-        if lchown(&path, Some(SESSION_UID), Some(SESSION_GID)).is_err() {
-            refused += 1;
-        }
-    }
-    for dir in ROOT_LAYOUT {
-        let path = under(root, dir.path);
-        if !fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
-            continue;
-        }
-        let (uid, gid) = owners.owner(dir.path);
-        match own(&path, &RootDir { uid, gid, ..dir }) {
-            Ok(()) => {}
-            Err(e) if e.kind() == ErrorKind::ReadOnlyFilesystem => return,
-            Err(_) => refused += 1,
-        }
-    }
-    if !owners.holds(LOCAL) {
-        refused += home_to_themselves(root) + take_local(root);
-    }
-    if refused > 0 {
-        eprintln!("init: {refused} entries kept their owner; the next boot tries again");
-        return;
-    }
-    // The record must not outlive the changes it records.
-    let _ = crate::syscall::fs::sync();
-    if let Err(e) = owners.write(root) {
-        eprintln!("init: {}: {e}", under(root, OWNERS_RECORD).display());
-    }
-}
-
-/// Every entry uid 0 holds below `top`, itself left alone, links never
-/// followed, and nothing in a directory another uid holds. A file with more
-/// than one name keeps its owner: its other name may be the system's. A
-/// read-only volume mounted there is not this root's to change.
-fn hand_over_below(top: &Path) -> usize {
-    let mut refused = 0usize;
-    let mut dirs: Vec<PathBuf> = vec![top.to_path_buf()];
-    while let Some(dir) = dirs.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            refused += 1;
-            continue;
-        };
-        for entry in entries {
-            let Ok(path) = entry.map(|entry| entry.path()) else {
-                refused += 1;
-                continue;
-            };
-            let Ok(meta) = fs::symlink_metadata(&path) else {
-                refused += 1;
-                continue;
-            };
-            if ![0, SESSION_UID].contains(&meta.uid()) || !meta.is_dir() && meta.nlink() > 1 {
-                continue;
-            }
-            let handed = match meta.uid() {
-                0 => lchown(&path, Some(SESSION_UID), Some(SESSION_GID)),
-                _ => Ok(()),
-            };
-            match handed {
-                Ok(()) if meta.is_dir() => dirs.push(path),
-                Ok(()) => {}
-                Err(e) if e.kind() == ErrorKind::ReadOnlyFilesystem => {}
-                Err(_) => refused += 1,
-            }
-        }
-    }
-    refused
-}
-
 /// Ready the root at `root` for a second person: the first person's home
 /// theirs alone, `/usr/local` the system's whatever lies below it, and the
 /// record saying the first person no longer holds it. Takes `DacOverride`.
 pub fn share(root: &Path) -> Result<(), String> {
+    let record = under(root, OWNERS_RECORD);
+    let owners = Owners::read(root).ok_or_else(|| format!("{}: unreadable", record.display()))?;
     let begun = under(root, SHARING);
     write_durably(&begun, b"").map_err(|e| format!("{}: {e}", begun.display()))?;
     let refused = home_to_themselves(root) + take_local(root);
@@ -369,10 +254,10 @@ pub fn share(root: &Path) -> Result<(), String> {
         ));
     }
     let _ = crate::syscall::fs::sync();
-    Owners::of(root)
+    owners
         .without(LOCAL)
         .write(root)
-        .map_err(|e| format!("{}: {e}", under(root, OWNERS_RECORD).display()))?;
+        .map_err(|e| format!("{}: {e}", record.display()))?;
     let _ = fs::remove_file(begun);
     Ok(())
 }

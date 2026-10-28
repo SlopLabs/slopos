@@ -25,8 +25,8 @@ pub enum FileKind {
     PipeWrite = 3,
     Tty = 4,
     Memfd = 5,
-    /// SlopRing submission/completion ring (SLOPRING § 3). The fd's
-    /// `handle` resolves a ring object in the per-process ring registry.
+    /// SlopRing submission/completion ring. The fd's `handle` resolves a ring
+    /// object in the ring registry.
     Ring = 6,
     /// Process-exit fd (`pidfd_open(2)`). The fd's `handle` is a target task id;
     /// it becomes `POLLIN`-ready once that task exits. Read/write give `-EINVAL`.
@@ -38,7 +38,7 @@ pub enum FileKind {
     /// configuration changes; `read` drains whole `NetEvent` records.
     Netmon = 9,
     /// A held seat: the screen or the input sink (`slopos_ostd::seat`). The
-    /// fd's `handle` packs the [`crate::seat`] kind and the grant epoch.
+    /// fd's `handle` packs the seat's kind and the grant epoch.
     /// Read/write give `-EINVAL`; the descriptor is a capability to *name* the
     /// resource in `fb_flip`/`input_poll_batch`, never a byte stream.
     ///
@@ -152,19 +152,21 @@ pub trait FileOps: Send + Sync {
         }
     }
 
-    /// **Legacy** — prefer `poll_fused` for new code.
+    /// What `handle` is ready for now, as `poll(2)` reports it in `revents`.
+    /// [`Self::poll_fused`]'s default reads it after registering.
     fn poll_events(&self, handle: usize, events: u16) -> u16 {
         let _ = (handle, events);
         0
     }
 
-    /// **Legacy** — prefer `poll_fused` for new code.
+    /// Put the current task on the resource's wait queue; `true` if it is
+    /// there, so a later wakeup reaches it.
     fn poll_wait(&self, handle: usize) -> bool {
         let _ = handle;
         false
     }
 
-    /// **Legacy** — prefer `poll_fused` for new code.
+    /// Take the current task off the wait queue [`Self::poll_wait`] put it on.
     fn poll_unwait(&self, handle: usize) {
         let _ = handle;
     }

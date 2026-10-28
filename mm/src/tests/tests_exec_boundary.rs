@@ -1,9 +1,9 @@
 //! `exec` is an address-space boundary.
 //!
-//! Replacing the program image must sever every mapping the old image made.
-//! The implementation this replaced unmapped exactly the code window, so the
-//! heap, the mmap arena, shared memfd mappings and SlopRing mappings all
-//! survived into a program that never mapped them.
+//! Replacing the program image must sever every mapping the old image made —
+//! the heap, the mmap arena, shared memfd mappings and SlopRing mappings, not
+//! only the code window — or they survive into a program that never mapped
+//! them.
 
 use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 use slopos_testing::TestResult;
@@ -96,7 +96,7 @@ pub fn test_exec_severs_previous_image_mappings() -> TestResult {
     settle_teardown();
 
     assert_test!(seen_before, "the marker was not readable before exec");
-    assert_test!(rc == 0, "process_vm_reset_for_exec failed: {}", rc);
+    assert_test!(rc, "process_vm_reset_for_exec failed");
     assert_test!(
         !seen_after,
         "an mmap made by the previous image survived exec at {:#x}",
@@ -122,18 +122,18 @@ pub fn test_exec_reset_reseeds_a_usable_layout() -> TestResult {
     let process = resolve_pid(pid);
 
     let rc = process_vm_reset_for_exec(process);
-    if rc != 0 {
+    if !rc {
         destroy_process_vm(process);
         settle_teardown();
-        return fail!("process_vm_reset_for_exec failed: {}", rc);
+        return fail!("process_vm_reset_for_exec failed");
     }
 
     let stack_top = crate::process_vm::process_vm_get_stack_top(process);
 
     // `reset_stack` is what `do_exec` runs next; after it the stack is backed
     // and writable, which is the property the new image actually depends on.
-    let stack_rc = crate::process_vm::process_vm_reset_stack(process);
-    let stack_ok = stack_top != 0 && stack_rc == 0 && {
+    let stack_reset = crate::process_vm::process_vm_reset_stack(process);
+    let stack_ok = stack_top != 0 && stack_reset && {
         let Some(vm_space) = process_vm_get_vm_space(process) else {
             destroy_process_vm(process);
             settle_teardown();
@@ -149,12 +149,12 @@ pub fn test_exec_reset_reseeds_a_usable_layout() -> TestResult {
     destroy_process_vm(process);
     settle_teardown();
 
-    assert_test!(stack_rc == 0, "process_vm_reset_stack failed: {}", stack_rc);
+    assert_test!(stack_reset, "process_vm_reset_stack failed");
     assert_test!(
         stack_ok,
         "the stack is not writable after reset + reset_stack"
     );
-    assert_test!(rc2 == 0, "a second reset failed: {}", rc2);
+    assert_test!(rc2, "a second reset failed");
     pass!()
 }
 
@@ -191,7 +191,7 @@ pub fn test_exec_reset_leaves_the_page_ledger_consistent() -> TestResult {
     settle_teardown();
 
     assert_test!(addr != 0, "mmap failed");
-    assert_test!(rc == 0, "reset failed: {}", rc);
+    assert_test!(rc, "reset failed");
     assert_test!(
         mismatches == 0,
         "exec left {} page-ledger mismatch(es)",

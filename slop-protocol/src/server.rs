@@ -73,8 +73,8 @@ pub struct ClientConn {
 
 pub struct Server {
     listen_fd: i32,
-    // Boxed for one niche: inline, `[None; N]` was const-initialised through
-    // one niche and read through another, as `Some(garbage)`.
+    // Boxed for one niche: inline, `[None; N]` const-initialised through one
+    // niche reads back through another as `Some(garbage)`.
     pub clients: alloc::boxed::Box<[Option<alloc::boxed::Box<ClientConn>>; MAX_CLIENTS]>,
 }
 
@@ -117,6 +117,17 @@ impl Server {
             greeted: false,
         }));
         Ok(Some(idx))
+    }
+
+    /// Queues the [`Event::Hello`] that opens every connection, naming
+    /// [`PROTOCOL_VERSION`].
+    pub fn greet(&mut self, client: usize) -> Result<(), ProtocolError> {
+        self.queue_event(
+            client,
+            &Event::Hello {
+                version: PROTOCOL_VERSION,
+            },
+        )
     }
 
     /// The first request must be a `Hello` naming [`PROTOCOL_VERSION`], and

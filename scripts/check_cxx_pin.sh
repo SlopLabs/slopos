@@ -9,8 +9,8 @@
 #      still links; it just links a different C++ ABI.
 #   2. **The built tree stops matching its inputs.** `make_slopos_cxx.sh`
 #      rebuilds on a stamp over the pin, its own build line and slibc's C
-#      headers; a tree built before one of those moved is a C++ runtime
-#      compiled against headers the C library no longer has. Asked of the
+#      headers; a tree stamped over other inputs is a C++ runtime compiled
+#      against headers the C library does not have. Asked of the
 #      build script rather than recomputed here, so there is no second copy of
 #      that digest to drift.
 #   3. **`libc++.so` names a symbol `libc.so` does not export.** The C++
@@ -22,9 +22,9 @@
 # The first is unconditional. The other two need the runtime to have been
 # cross-built here, which the staged `builddir/libc++.so` says and
 # `builddir/libc.so` does not: the shipped userland build stages that one
-# too, two steps before the tests build that refreshes the runtime, so
-# keying on it graded a cache-restored tree at a point where failing is a
-# red run no later step can repair. `--libc` grades regardless.
+# too, two steps before the tests build that refreshes the runtime, so keying
+# on it would grade a cache-restored tree at a point where failing is a red
+# run no later step can repair. `--libc` grades regardless.
 #
 # `MIN_UNDEFINED` is the floor that stops a measurement which stopped
 # happening from reading as one that got free: a truncated `libc++.so`, or an
@@ -333,9 +333,8 @@ EOF
     fi
     sed -i 's|^clang_major_tested=.*|clang_major_tested=18 22|' "$tmp/toolchain/cxx/PIN"
 
-    # The precondition, driven through `check_tree` itself: the shape that
-    # shipped broken is the whole gate's, a cache-restored tree with only
-    # the shipped `libc.so` beside it.
+    # The precondition, driven through `check_tree` itself: a cache-restored
+    # tree with only the shipped `libc.so` beside it is not graded.
     local cached="$tmp/third_party/slopos-cxx"
     mkdir -p "$cached/lib" "$cached/include/c++/v1" "$cached/licenses" \
         "$tmp/builddir" "$tmp/scripts"

@@ -4,20 +4,18 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
-use slopos_abi::damage::DamageRect;
-use slopos_abi::surface::WINDOW_STATE_NORMAL;
-use slopos_abi::window::{AppId, MAX_WINDOW_DAMAGE_REGIONS, WindowInfo};
+use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
 use slopos_chrome_core::placement;
 use slopos_chrome_core::positioner::{Rect, Size};
 use slopos_protocol::server::{MAX_CLIENTS, Server};
 use slopos_protocol::types::{
-    Event, OwnedFd, PROTOCOL_VERSION, ProtocolError, Request, SurfaceId, ToplevelId,
-    WINDOW_STRING_MAX,
+    Event, OwnedFd, ProtocolError, Request, SurfaceId, ToplevelId, WINDOW_STRING_MAX,
 };
 
 use super::frame::TITLE_BAR_HEIGHT;
-use crate::ring::slopfut::sync::Notify;
+use super::window_info::{AppId, WindowInfo, WindowState};
 use crate::syscall::CachedShmMapping;
+use slopos_rt::slopfut::sync::Notify;
 
 /// So a runaway selection cannot exhaust memory.
 const MAX_CLIPBOARD_BYTES: u32 = 16 * 1024 * 1024;
@@ -63,7 +61,7 @@ struct ProtocolSurface {
     surface_id: SurfaceId,
     toplevel_id: ToplevelId,
     /// The committed buffer's fd; 0 before one is.
-    shm_token: u32,
+    buffer_fd: u32,
     width: u32,
     height: u32,
     frame_width: u32,
@@ -80,7 +78,7 @@ struct ProtocolSurface {
     window_y: i32,
     z_order: u32,
     visible: bool,
-    window_state: u8,
+    window_state: WindowState,
     /// Tells a recycled slot from the surface that held it before.
     generation: u32,
     frame_callback_pending: bool,
@@ -108,7 +106,7 @@ impl ProtocolSurface {
             client_idx: 0,
             surface_id: SurfaceId::NONE,
             toplevel_id: ToplevelId::NONE,
-            shm_token: 0,
+            buffer_fd: 0,
             width: 0,
             height: 0,
             frame_width: 0,
@@ -125,7 +123,7 @@ impl ProtocolSurface {
             window_y: 0,
             z_order: 0,
             visible: false,
-            window_state: WINDOW_STATE_NORMAL,
+            window_state: WindowState::Normal,
             generation: 0,
             frame_callback_pending: false,
             role: SurfaceRole::None,
@@ -174,7 +172,7 @@ pub struct ProtocolBridge {
 
 impl ProtocolBridge {
     pub fn new() -> Option<Self> {
-        let path = slopos_protocol::socket_path(crate::syscall::process::geteuid());
+        let path = slopos_protocol::socket_path();
         // A dead compositor's name: only the session writes its runtime
         // directory.
         let _ = std::fs::remove_file(OsStr::from_bytes(&path));
@@ -289,16 +287,6 @@ impl ProtocolBridge {
         }
     }
 
-    fn greet_client(&mut self, idx: usize) {
-        let _ = self.server.queue_event(
-            idx,
-            &Event::Hello {
-                version: PROTOCOL_VERSION,
-                capabilities: 0,
-            },
-        );
-    }
-
     fn send_output_info(&mut self, idx: usize) {
         let _ = self.server.queue_event(
             idx,
@@ -343,7 +331,7 @@ impl ProtocolBridge {
         while n < out.len() {
             match self.server.accept() {
                 Ok(Some(idx)) => {
-                    self.greet_client(idx);
+                    let _ = self.server.greet(idx);
                     let generation = self.next_gen;
                     self.next_gen = self.next_gen.wrapping_add(1);
                     let fd = self.client_fd(idx).unwrap_or(-1);
@@ -612,7 +600,7 @@ impl ProtocolBridge {
 
             let slot = surface.buffers[pend as usize];
             if slot.registered {
-                surface.shm_token = slot.fd as u32;
+                surface.buffer_fd = slot.fd as u32;
                 surface.width = slot.width;
                 surface.height = slot.height;
                 if surface.width > 0 && surface.height > 0 {
@@ -975,8 +963,8 @@ impl ProtocolBridge {
             .queue_event(client_idx, &Event::Modifiers { mods });
     }
 
-    pub fn send_modifiers_for_task(&mut self, task_id: u32, mods: u8) {
-        if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+    pub fn send_modifiers_for_window(&mut self, window: u32, mods: u8) {
+        if let Some(idx) = self.surface_of(window) {
             self.send_modifiers(idx, mods as u32);
         }
     }
@@ -985,16 +973,16 @@ impl ProtocolBridge {
     /// modifiers as they are, not as the last event left them.
     pub fn forward_key_event(
         &mut self,
-        keyboard_focus_task: u32,
+        focused_window: u32,
         event: &slopos_abi::InputEvent,
         pressed: bool,
         modifier_state: u8,
         serial: &mut u32,
     ) {
-        let Some(idx) = self.task_id_to_surface_idx(keyboard_focus_task) else {
+        let Some(idx) = self.surface_of(focused_window) else {
             if pressed {
                 log!(
-                    "key {:#06x} dropped (no surface for focus task {keyboard_focus_task})",
+                    "key {:#06x} dropped (no surface for focused window {focused_window})",
                     event.key_keycode()
                 );
             }
@@ -1019,49 +1007,48 @@ impl ProtocolBridge {
         );
     }
 
-    pub fn send_pointer_motion_for_task(&mut self, task_id: u32, time: u32, x: i32, y: i32) {
-        if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+    pub fn send_pointer_motion_for_window(&mut self, window: u32, time: u32, x: i32, y: i32) {
+        if let Some(idx) = self.surface_of(window) {
             let local_x = x - self.surfaces[idx].window_x;
             let local_y = y - self.surfaces[idx].window_y;
             self.send_pointer_motion(idx, time, local_x, local_y);
         }
     }
 
-    pub fn send_pointer_button_for_task(
+    pub fn send_pointer_button_for_window(
         &mut self,
-        task_id: u32,
+        window: u32,
         serial: u32,
         time: u32,
         button: u32,
         state: u32,
     ) {
-        if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+        if let Some(idx) = self.surface_of(window) {
             self.send_pointer_button(idx, serial, time, button, state);
         }
     }
 
-    pub fn send_pointer_axis_for_task(&mut self, task_id: u32, time: u32, axis: u32, value: i32) {
-        if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+    pub fn send_pointer_axis_for_window(&mut self, window: u32, time: u32, axis: u32, value: i32) {
+        if let Some(idx) = self.surface_of(window) {
             self.send_pointer_axis(idx, time, axis, value);
         }
     }
 
-    pub fn send_pointer_enter_for_task(&mut self, task_id: u32, serial: u32, x: i32, y: i32) {
-        if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+    pub fn send_pointer_enter_for_window(&mut self, window: u32, serial: u32, x: i32, y: i32) {
+        if let Some(idx) = self.surface_of(window) {
             let local_x = x - self.surfaces[idx].window_x;
             let local_y = y - self.surfaces[idx].window_y;
             self.send_pointer_enter(idx, serial, local_x, local_y);
         }
     }
 
-    pub fn send_pointer_leave_for_task(&mut self, task_id: u32) {
-        if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+    pub fn send_pointer_leave_for_window(&mut self, window: u32) {
+        if let Some(idx) = self.surface_of(window) {
             self.send_pointer_leave(idx);
         }
     }
 
-    /// The shown toplevels, bottom first; a window's `task_id` is its slot
-    /// and one.
+    /// The shown toplevels, bottom first.
     pub fn get_windows(&self, out: &mut [WindowInfo]) -> u32 {
         let mut indices = [0usize; MAX_SURFACES];
         let mut count = 0usize;
@@ -1089,14 +1076,14 @@ impl ProtocolBridge {
         for i in 0..write_count {
             let s = &self.surfaces[indices[i]];
             let mut info = WindowInfo::default();
-            info.task_id = indices[i] as u32 + 1;
+            info.id = indices[i] as u32 + 1;
             info.pid = self.client_pid[s.client_idx];
             info.x = s.window_x;
             info.y = s.window_y;
             info.width = s.width;
             info.height = s.height;
             info.state = s.window_state;
-            info.shm_token = s.shm_token;
+            info.buffer_fd = s.buffer_fd;
             info.buffer_id = if s.current_buffer == NO_BUFFER {
                 0
             } else {
@@ -1115,7 +1102,7 @@ impl ProtocolBridge {
                 if s.committed_damage_count == 0 {
                     info.damage_count = u8::MAX;
                 } else {
-                    let dc = (s.committed_damage_count as usize).min(MAX_WINDOW_DAMAGE_REGIONS);
+                    let dc = (s.committed_damage_count as usize).min(MAX_DAMAGE_REGIONS);
                     info.damage_count = dc as u8;
                     for j in 0..dc {
                         info.damage_regions[j] = s.committed_damage[j];
@@ -1131,24 +1118,24 @@ impl ProtocolBridge {
 
     /// Only what reached the screen: a commit after this frame's snapshot
     /// stays dirty for the next.
-    pub fn clear_presented(&mut self, presented_task_ids: &[u32]) {
-        for &task_id in presented_task_ids {
-            if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+    pub fn clear_presented(&mut self, presented: &[u32]) {
+        for &window in presented {
+            if let Some(idx) = self.surface_of(window) {
                 self.surfaces[idx].dirty = false;
                 self.surfaces[idx].committed_damage_count = 0;
             }
         }
     }
 
-    pub fn set_window_position(&mut self, task_id: u32, x: i32, y: i32) {
-        if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+    pub fn set_window_position(&mut self, window: u32, x: i32, y: i32) {
+        if let Some(idx) = self.surface_of(window) {
             self.surfaces[idx].window_x = x;
             self.surfaces[idx].window_y = y;
         }
     }
 
-    pub fn set_window_size(&mut self, task_id: u32, w: u32, h: u32) {
-        if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+    pub fn set_window_size(&mut self, window: u32, w: u32, h: u32) {
+        if let Some(idx) = self.surface_of(window) {
             self.surfaces[idx].frame_width = w;
             self.surfaces[idx].frame_height = h;
         }
@@ -1156,8 +1143,8 @@ impl ProtocolBridge {
 
     /// `(w, h)` held to the compositor's least window and the window's own
     /// limits.
-    pub fn clamp_window_size(&self, task_id: u32, w: i32, h: i32) -> (i32, i32) {
-        match self.task_id_to_surface_idx(task_id) {
+    pub fn clamp_window_size(&self, window: u32, w: i32, h: i32) -> (i32, i32) {
+        match self.surface_of(window) {
             Some(idx) => self.limited(idx, w, h),
             None => (w.max(MIN_WINDOW_WIDTH), h.max(MIN_WINDOW_HEIGHT)),
         }
@@ -1176,27 +1163,27 @@ impl ProtocolBridge {
         )
     }
 
-    pub fn set_window_state(&mut self, task_id: u32, state: u8) {
-        if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+    pub fn set_window_state(&mut self, window: u32, state: WindowState) {
+        if let Some(idx) = self.surface_of(window) {
             self.surfaces[idx].window_state = state;
         }
     }
 
-    pub fn raise_window(&mut self, task_id: u32) {
-        if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+    pub fn raise_window(&mut self, window: u32) {
+        if let Some(idx) = self.surface_of(window) {
             self.surfaces[idx].z_order = self.next_z_order;
             self.next_z_order = self.next_z_order.wrapping_add(1).max(1);
         }
     }
 
-    pub fn send_configure_for_task(&mut self, task_id: u32, width: u32, height: u32, states: u32) {
-        if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+    pub fn send_configure_for_window(&mut self, window: u32, width: u32, height: u32, states: u32) {
+        if let Some(idx) = self.surface_of(window) {
             self.send_configure(idx, width, height, states);
         }
     }
 
-    pub fn send_close_for_task(&mut self, task_id: u32) {
-        if let Some(idx) = self.task_id_to_surface_idx(task_id) {
+    pub fn send_close_for_window(&mut self, window: u32) {
+        if let Some(idx) = self.surface_of(window) {
             self.send_close(idx);
         }
     }
@@ -1261,14 +1248,14 @@ impl ProtocolBridge {
             .position(|s| s.active && s.client_idx == client_idx && s.toplevel_id == toplevel_id)
     }
 
-    /// What tells the surface `task_id` named once from the one it names now.
-    pub fn surface_generation_for_task(&self, task_id: u32) -> Option<u32> {
-        self.task_id_to_surface_idx(task_id)
+    /// What tells the surface `window` named once from the one it names now.
+    pub fn surface_generation_for_window(&self, window: u32) -> Option<u32> {
+        self.surface_of(window)
             .map(|idx| self.surfaces[idx].generation)
     }
 
-    fn task_id_to_surface_idx(&self, task_id: u32) -> Option<usize> {
-        let idx = (task_id as usize).checked_sub(1)?;
+    fn surface_of(&self, window: u32) -> Option<usize> {
+        let idx = (window as usize).checked_sub(1)?;
         if idx < MAX_SURFACES && self.surfaces[idx].active {
             Some(idx)
         } else {

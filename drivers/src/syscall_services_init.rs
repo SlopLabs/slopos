@@ -1,4 +1,3 @@
-use slopos_abi::KernelErrno;
 use slopos_abi::syscall::TtyIndex;
 use slopos_kernel_services::syscall_services::input::{InputServices, register_input_services};
 use slopos_kernel_services::syscall_services::keymap::{KeymapServices, register_keymap_services};
@@ -9,18 +8,7 @@ use slopos_ostd::process::quota::FileBacking;
 use crate::{input_event, keyboard, tty};
 
 static INPUT_SERVICES: InputServices = InputServices {
-    poll: input_event::input_poll,
     drain_batch: input_event::input_drain_batch,
-    event_count: input_event::input_event_count,
-    set_keyboard_focus: input_event::input_set_keyboard_focus,
-    set_pointer_focus: input_event::input_set_pointer_focus,
-    set_pointer_focus_with_offset: input_event::input_set_pointer_focus_with_offset,
-    request_close: input_event::input_request_close,
-    send_configure: input_event::input_send_configure,
-    get_pointer_focus: input_event::input_get_pointer_focus,
-    get_pointer_position: input_event::input_get_pointer_position,
-    get_button_state: input_event::input_get_button_state,
-    get_modifier_state: input_event::input_get_modifier_state,
     clipboard_copy: input_event::clipboard_copy,
     clipboard_paste: input_event::clipboard_paste,
     register_compositor: input_event::input_register_compositor,
@@ -30,17 +18,11 @@ static INPUT_SERVICES: InputServices = InputServices {
 };
 
 fn route_key_adapter(keycode: u16, codepoint: u32, pressed: bool) {
-    let ascii = u8::try_from(codepoint)
-        .ok()
-        .filter(u8::is_ascii)
-        .unwrap_or(0);
-    input_event::input_route_key_full(
-        0,
-        ascii,
+    input_event::input_route_key(
         keycode,
         codepoint,
         0,
-        slopos_abi::input::KEY_FLAG_HAS_CANONICAL,
+        0,
         pressed,
         input_event::get_timestamp_ms(),
     );
@@ -52,21 +34,11 @@ fn tty_read_adapter(
     max: usize,
     nonblock: bool,
 ) -> Result<usize, tty::TtyError> {
-    tty_read_with_attach_adapter(tty_index, buf, max, nonblock, true)
-}
-
-fn tty_read_with_attach_adapter(
-    tty_index: TtyIndex,
-    buf: *mut u8,
-    max: usize,
-    nonblock: bool,
-    auto_attach: bool,
-) -> Result<usize, tty::TtyError> {
     if buf.is_null() || max == 0 {
         return Ok(0);
     }
     slopos_ostd::util::ptr_buf::with_buf_mut(buf, max, |slice| {
-        tty::read_with_attach(tty_index, slice, nonblock, auto_attach)
+        tty::read(tty_index, slice, nonblock)
     })
 }
 
@@ -91,48 +63,6 @@ fn tty_alloc_pty_adapter(
     tty::pty_alloc(account, owner).map(|(idx, b)| -> (TtyIndex, KArc<dyn FileBacking>) { (idx, b) })
 }
 
-fn tty_ptsname_adapter(tty_index: TtyIndex, buf: *mut u8, buflen: usize) -> i32 {
-    if buf.is_null() || buflen == 0 {
-        return tty::TtyError::InvalidArg.to_errno();
-    }
-
-    let pty_num = match tty::get_pty_number(tty_index) {
-        Ok(n) => n,
-        Err(e) => return e.to_errno(),
-    };
-
-    let mut path = [0u8; 32];
-    let prefix = b"/dev/pts/";
-    let mut len = 0usize;
-    path[..prefix.len()].copy_from_slice(prefix);
-    len += prefix.len();
-
-    if pty_num == 0 {
-        path[len] = b'0';
-        len += 1;
-    } else {
-        let mut num = pty_num;
-        let mut rev = [0u8; 10];
-        let mut rev_len = 0usize;
-        while num > 0 {
-            rev[rev_len] = b'0' + (num % 10) as u8;
-            rev_len += 1;
-            num /= 10;
-        }
-        for i in (0..rev_len).rev() {
-            path[len] = rev[i];
-            len += 1;
-        }
-    }
-
-    if len + 1 > buflen {
-        return tty::TtyError::InvalidArg.to_errno();
-    }
-
-    slopos_ostd::util::ptr_buf::copy_with_nul_terminator(buf, &path[..len], len);
-    0
-}
-
 fn tty_write_bytes_adapter(
     tty_index: TtyIndex,
     buf: *const u8,
@@ -147,8 +77,6 @@ fn tty_write_bytes_adapter(
 
 static TTY_SERVICES: TtyServices = TtyServices {
     read_cooked: tty_read_adapter,
-    read_cooked_with_attach: tty_read_with_attach_adapter,
-    has_cooked_data: tty::has_data,
     set_termios: tty::set_termios,
     set_termios_wait: tty::set_termios_wait,
     set_termios_flush: tty::set_termios_flush,
@@ -157,8 +85,6 @@ static TTY_SERVICES: TtyServices = TtyServices {
     get_ldisc: tty::get_ldisc,
     get_winsize: tty::get_winsize,
     set_winsize: tty::set_winsize,
-    set_compositor_focus: tty::set_compositor_focus,
-    get_compositor_focus: tty::get_compositor_focus,
     switch_active_tty: tty::switch_active_tty,
     set_foreground_pgrp: tty::set_foreground_pgrp,
     get_foreground_pgrp: tty::get_foreground_pgrp,
@@ -174,7 +100,6 @@ static TTY_SERVICES: TtyServices = TtyServices {
     is_hung_up: tty::is_hung_up,
     alloc_pty: tty_alloc_pty_adapter,
     grantpt: tty_grantpt_adapter,
-    ptsname: tty_ptsname_adapter,
     get_pty_number: tty::get_pty_number,
     is_pty_slave: tty::is_pty_slave,
     pty_slave_owner: tty::pty_slave_owner,

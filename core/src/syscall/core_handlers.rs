@@ -1,4 +1,3 @@
-use core::ffi::c_char;
 use core::ops::ControlFlow;
 use core::sync::atomic::Ordering as AtomicOrdering;
 
@@ -10,17 +9,13 @@ use slopos_abi::syscall::{
     Sysinfo, Timespec, UserSysInfo, UserUtsname, linux_reboot_magic2,
 };
 use slopos_abi::task::{INVALID_TASK_ID, TaskExitReason, TaskFaultReason};
-use slopos_abi::tty_error::TtyError;
 use slopos_ostd::authority::BootEntry;
 use slopos_ostd::klog_debug;
 
 use crate::syscall::args::{UserBytes, UserPtr, UserSlice};
-use crate::syscall::common::{
-    USER_IO_MAX_BYTES, syscall_bounded_from_user, syscall_copy_to_user_bounded,
-};
+use crate::syscall::common::{USER_IO_MAX_BYTES, syscall_bounded_from_user};
 use crate::syscall::result::SyscallResult;
 use slopos_kernel_services::platform;
-use slopos_kernel_services::syscall_services::tty;
 use slopos_ostd::platform::power;
 use slopos_sched::scheduler::{
     get_scheduler_stats, schedule, scheduler_is_preemption_enabled, sleep_current_task_ms, yield_,
@@ -207,10 +202,10 @@ define_syscall!(syscall_reboot
     };
     match cmd {
         LINUX_REBOOT_CMD_RESTART => {
-            power::reboot(&cap, b"user reboot\0".as_ptr() as *const c_char)
+            power::reboot(&cap, "user reboot")
         }
         LINUX_REBOOT_CMD_POWER_OFF | LINUX_REBOOT_CMD_HALT => {
-            power::shutdown(&cap, b"user halt\0".as_ptr() as *const c_char)
+            power::shutdown(&cap, "user halt")
         }
         // No Ctrl-Alt-Del handler to toggle, so the toggle succeeds and
         // changes nothing; an init program calls it early and expects 0.
@@ -242,7 +237,7 @@ define_syscall!(syscall_nanosleep
     if ms == 0 {
         return Ok(());
     }
-    if scheduler_is_preemption_enabled() == 0 {
+    if !scheduler_is_preemption_enabled() {
         // Nothing to park on and no signal that could arrive, so the interval
         // is burned in polls bounded by what the timer call accepts.
         let mut left = ms;
@@ -276,7 +271,7 @@ define_syscall!(syscall_nanosleep
             return Err(Errno::EINTR);
         }
         let remaining = (deadline_ms - now_ms).min(u32::MAX as u64) as u32;
-        if sleep_current_task_ms(remaining) != 0 {
+        if !sleep_current_task_ms(remaining) {
             return Err(Errno::EINVAL);
         }
     }
@@ -366,27 +361,6 @@ define_syscall!(syscall_klog_write (ctx, buf: UserBytes) cap(ConsoleIo)
     .map_err(|_| Errno::EFAULT)?;
     platform::console_write_serialized(&tmp[..write_len]);
     Ok(write_len as u64)
-});
-
-// `/dev/tty` semantics: the terminal resolves per process, so a task in a PTY
-// session reads its own PTY and one with no controlling terminal reads nothing
-// rather than the operator's console — `ENXIO`, as opening `/dev/tty` answers.
-define_syscall!(syscall_ctty_read (ctx, buf: UserBytes) cap(NoneSelf)
-    -> Result<u64, Errno> {
-    if buf.len() == 0 {
-        return Ok(0);
-    }
-    let tty_idx = ctx.task().controlling_tty().ok_or(Errno::ENXIO)?;
-    let mut tmp = [0u8; USER_IO_MAX_BYTES];
-    let max_len = buf.len().min(USER_IO_MAX_BYTES);
-    let read_len = tty::read_cooked(tty_idx, tmp.as_mut_ptr(), max_len, false);
-    let n = match read_len {
-        Ok(n) => n,
-        Err(TtyError::Restart) => return Err(Errno::ERESTARTSYS),
-        Err(_) => return Err(Errno::EINVAL),
-    };
-    syscall_copy_to_user_bounded(buf.base_u64(), &tmp[..n]).map_err(|_| Errno::EFAULT)?;
-    Ok(n as u64)
 });
 
 define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) cap(NoneSelf)
@@ -509,7 +483,7 @@ define_syscall!(syscall_process_list
         let dst_addr = buf
             .as_u64()
             .wrapping_add((i * core::mem::size_of::<UserTaskEntry>()) as u64);
-        let user_ptr = slopos_mm::user_ptr::UserPtr::<UserTaskEntry>::try_new(dst_addr)
+        let user_ptr = slopos_ostd::user::ptr::UserPtr::<UserTaskEntry>::try_new(dst_addr)
             .map_err(|_| Errno::EFAULT)?;
         copy_to_user(user_ptr, &entries[i]).map_err(|_| Errno::EFAULT)?;
     }
@@ -522,12 +496,12 @@ define_syscall!(syscall_cpu_info
     -> Result<(), Errno>
 {
     use slopos_abi::syscall::UserCpuInfo;
-    use slopos_arch::cpu::cpuid;
+    use slopos_ostd::arch::x86_64::cpuid;
 
     let mut info = UserCpuInfo::default();
     info.vendor = cpuid::cpu_vendor_string();
     info.brand_string = cpuid::cpu_brand_string();
-    info.cpu_count = slopos_arch::pcr::get_cpu_count() as u32;
+    info.cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count() as u32;
     let (family, model, stepping) = cpuid::cpu_family_model_stepping();
     info.family = family;
     info.model = model;
@@ -545,7 +519,7 @@ define_syscall!(syscall_percpu_stats
     use core::sync::atomic::Ordering;
     use slopos_abi::syscall::UserPerCpuStats;
 
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     let max_entries = (max as usize).min(cpu_count);
 
     for i in 0..max_entries {
@@ -566,7 +540,7 @@ define_syscall!(syscall_percpu_stats
         let dst_addr = buf
             .as_u64()
             .wrapping_add((i * core::mem::size_of::<UserPerCpuStats>()) as u64);
-        let user_ptr = slopos_mm::user_ptr::UserPtr::<UserPerCpuStats>::try_new(dst_addr)
+        let user_ptr = slopos_ostd::user::ptr::UserPtr::<UserPerCpuStats>::try_new(dst_addr)
             .map_err(|_| Errno::EFAULT)?;
         copy_to_user(user_ptr, &stats).map_err(|_| Errno::EFAULT)?;
     }
@@ -585,13 +559,13 @@ define_syscall!(syscall_cpu_perf
         let info = slopos_sched::cpufreq::info();
         copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)?;
     }
-    let entries = cpus.len().min(slopos_arch::pcr::get_cpu_count());
+    let entries = cpus.len().min(slopos_ostd::cpu::x86_64::pcr::get_cpu_count());
     for cpu in 0..entries {
         let record = slopos_sched::cpufreq::cpu_record(cpu);
         let dst_addr = cpus
             .base_u64()
             .wrapping_add((cpu * core::mem::size_of::<UserCpuPerf>()) as u64);
-        let user_ptr = slopos_mm::user_ptr::UserPtr::<UserCpuPerf>::try_new(dst_addr)
+        let user_ptr = slopos_ostd::user::ptr::UserPtr::<UserCpuPerf>::try_new(dst_addr)
             .map_err(|_| Errno::EFAULT)?;
         copy_to_user(user_ptr, &record).map_err(|_| Errno::EFAULT)?;
     }

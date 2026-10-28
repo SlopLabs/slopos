@@ -1,8 +1,6 @@
 //! Safe view over a received frame for XDP filters.
 
-use crate::checksum;
 use crate::packetbuf::PacketBuf;
-use crate::tcp::checksum as tcp_checksum;
 use crate::tcp::header::{TcpHeader, parse_header};
 use crate::types::{EtherType, IpProtocol, Ipv4Addr, MacAddr};
 use crate::{ETH_HEADER_LEN, IPV4_HEADER_LEN};
@@ -53,12 +51,6 @@ impl<'a> PacketView<'a> {
 
     #[inline]
     pub fn frame_mut(&mut self) -> &mut [u8] {
-        self.pkt.payload_mut()
-    }
-
-    /// Alias for [`frame_mut`](Self::frame_mut).
-    #[inline]
-    pub fn payload_mut(&mut self) -> &mut [u8] {
         self.pkt.payload_mut()
     }
 
@@ -135,47 +127,5 @@ impl<'a> PacketView<'a> {
             dst_port: u16::from_be_bytes([l4[2], l4[3]]),
             length: u16::from_be_bytes([l4[4], l4[5]]),
         })
-    }
-
-    /// Recompute the IPv4 header checksum in place. Call after mutating any
-    /// IPv4 header field. Returns `false` if the frame is not IPv4.
-    pub fn recompute_ipv4_checksum(&mut self) -> bool {
-        let Some(ip) = self.ipv4() else {
-            return false;
-        };
-        let end = ETH_HEADER_LEN + ip.header_len;
-        let frame = self.frame_mut();
-        if frame.len() < end {
-            return false;
-        }
-        let header = &mut frame[ETH_HEADER_LEN..end];
-        header[10] = 0;
-        header[11] = 0;
-        let csum = checksum::internet_checksum(header);
-        header[10..12].copy_from_slice(&csum.to_be_bytes());
-        true
-    }
-
-    /// Recompute the TCP checksum in place over the pseudo-header + segment.
-    /// Call after mutating TCP header fields or payload. Returns `false` if the
-    /// frame is not IPv4/TCP.
-    pub fn recompute_tcp_checksum(&mut self) -> bool {
-        let Some(ip) = self.ipv4() else {
-            return false;
-        };
-        if ip.protocol != IpProtocol::Tcp.as_u8() {
-            return false;
-        }
-        let l4_start = ETH_HEADER_LEN + ip.header_len;
-        let (src, dst) = (ip.src.0, ip.dst.0);
-        let frame = self.frame_mut();
-        if frame.len() <= l4_start + 18 {
-            return false;
-        }
-        frame[l4_start + 16] = 0;
-        frame[l4_start + 17] = 0;
-        let csum = tcp_checksum::tcp_checksum(src, dst, &frame[l4_start..]);
-        frame[l4_start + 16..l4_start + 18].copy_from_slice(&csum.to_be_bytes());
-        true
     }
 }

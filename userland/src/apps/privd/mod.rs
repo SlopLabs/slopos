@@ -65,21 +65,12 @@ use slopos_slibc::pal::{Pal, Sys};
 use self::answers::{Asked, Checks, Kept};
 use self::consent::{Broker, Waiting};
 use self::sessions::Seen;
+use crate::app_entry;
+use crate::init_control::{self, fds};
 use crate::readiness::ReadinessNotifier;
 use crate::syscall::process::{self, Endowment, WaitStatus};
 use crate::syscall::{OwnedFd, RawFd, SyscallError, fs, net, pidfd};
-use crate::{app_entry, init_control};
 
-/// Init's readiness notifier is fd 3. A privd started with [`SESSIONS_ARG`]
-/// finds consent link `n` at `LINKS_FD + n` and the session table past them;
-/// one started without it takes `CONSENT_FD`, where an init that keeps one
-/// desktop hands its one link and one that keeps sessions hands nothing. A
-/// compositor holds its own link at `CONSENT_FD`.
-pub const CONSENT_FD: RawFd = 4;
-pub const LINKS_FD: RawFd = CONSENT_FD + 1;
-pub const SESSIONS_FD: RawFd = LINKS_FD + LINKS as RawFd;
-pub const SESSIONS_ARG: &str = "--hear-sessions";
-const REMOTE_CONF: &str = "/usr/share/slopos/remote/remote.conf";
 /// Per uid, for every requester but root and the paired agent, whom nothing
 /// else can crowd out: no person takes another's connections.
 const MAX_CONNECTIONS: usize = 32;
@@ -195,18 +186,9 @@ pub fn privd_main() -> ! {
     // inherited one privd was started without.
     let ready = ReadinessNotifier::acquire();
     process::set_signal_handler(SIGHUP, reload);
-    let hears = std::env::args().nth(1).as_deref() == Some(SESSIONS_ARG);
-    let (seen, links) = match hears {
-        true => (
-            Seen::hear(init_channel(SESSIONS_FD)),
-            (0..LINKS)
-                .map(|i| init_channel(LINKS_FD + i as RawFd))
-                .collect(),
-        ),
-        false => (Seen::legacy(), vec![init_channel(CONSENT_FD)]),
-    };
-    let consent = links
-        .into_iter()
+    let seen = Seen::hear(init_channel(fds::PRIVD_TABLE));
+    let consent = (0..LINKS)
+        .map(|i| init_channel(fds::PRIVD_LINKS + i as RawFd))
         .zip(&seen.shown)
         .map(|(link, shown)| Broker::start(link, shown.clone()))
         .collect();
@@ -217,7 +199,7 @@ pub fn privd_main() -> ! {
     let daemon = Daemon {
         loaded: Mutex::new(base.clone().map(|base| Arc::new(with_extensions(base)))),
         base,
-        paired: std::path::Path::new(REMOTE_CONF).is_file(),
+        paired: init_control::paired(),
         consent,
         seen,
         running: Mutex::new(Vec::new()),
@@ -878,7 +860,7 @@ fn run(
         .then(init_control::Tasks::try_read)
         .flatten();
     let people = match action.names_people() {
-        true => people::now(tasks.as_ref(), daemon.seen),
+        true => people::now(daemon.seen),
         false => Ok(People::default()),
     };
     let (reach, link) = reach(daemon, peer, tasks.as_ref(), request.terminal);
@@ -1166,7 +1148,7 @@ fn judged_again(
     by: Option<&str>,
 ) -> Result<(), Reply> {
     let tasks = init_control::Tasks::try_read();
-    let people = people::now(tasks.as_ref(), daemon.seen).map_err(|why| fault(said::FAULT, why))?;
+    let people = people::now(daemon.seen).map_err(|why| fault(said::FAULT, why))?;
     let (reach, _) = reach(daemon, peer, tasks.as_ref(), request.terminal);
     let requester = peer.requester(daemon.paired).reached(reach);
     match action.admits(&requester, &people) {
@@ -1242,7 +1224,7 @@ fn requester_identity(
     let admin = match peer.uid {
         0 => false,
         uid => {
-            people::now(tasks, daemon.seen)
+            people::now(daemon.seen)
                 .map_err(|why| fault(said::FAULT, why))?
                 .person(uid)
                 .ok_or_else(|| Reply::denied(said::NO_ACCOUNT))?

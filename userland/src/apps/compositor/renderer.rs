@@ -1,17 +1,16 @@
 use slopos_abi::draw::{Canvas, Color32};
 use slopos_abi::pixel::PixelFormat;
-use slopos_abi::window::{
+use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
+use slopos_gfx::rounded::Rounded;
+use slopos_image::{DecodeOptions, Image};
+use slopos_protocol::{
     CURSOR_SHAPE_E_RESIZE, CURSOR_SHAPE_GRAB, CURSOR_SHAPE_GRABBING, CURSOR_SHAPE_N_RESIZE,
     CURSOR_SHAPE_NE_RESIZE, CURSOR_SHAPE_NW_RESIZE, CURSOR_SHAPE_S_RESIZE, CURSOR_SHAPE_SE_RESIZE,
     CURSOR_SHAPE_SW_RESIZE, CURSOR_SHAPE_TEXT, CURSOR_SHAPE_W_RESIZE,
 };
-use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
-use slopos_gfx::rounded::Rounded;
-use slopos_image::{DecodeOptions, Image};
 use slopos_theme_core::with_alpha;
 
 use crate::gfx::{self, DamageRect, DrawBuffer};
-use crate::syscall::UserWindowInfo;
 
 use super::confirm::Asking;
 use super::consent::Consent;
@@ -23,7 +22,7 @@ use super::menu_bar::MenuBar;
 use super::popover::Popover;
 use super::region::{Region, intersection};
 use super::surface_cache::ClientSurfaceCache;
-use slopos_abi::surface::WINDOW_STATE_MINIMIZED;
+use super::window_info::{WindowInfo, WindowState};
 use slopos_chrome_core::status::BAR_HEIGHT;
 
 const DEFAULT_WALLPAPER: &str = "/usr/share/slopos/wallpapers/default.png";
@@ -193,9 +192,9 @@ impl Renderer {
     pub fn render(
         &mut self,
         buf: &mut DrawBuffer,
-        windows: &[UserWindowInfo],
-        focused_task: u32,
-        buttons_hovered_task: u32,
+        windows: &[WindowInfo],
+        focused_window: u32,
+        buttons_hovered_window: u32,
         mouse_x: i32,
         mouse_y: i32,
         cursor_shape: u8,
@@ -241,9 +240,9 @@ impl Renderer {
             return;
         }
 
-        let order: Vec<&UserWindowInfo> = windows
+        let order: Vec<&WindowInfo> = windows
             .iter()
-            .filter(|w| w.state != WINDOW_STATE_MINIMIZED)
+            .filter(|w| w.state != WindowState::Minimized)
             .collect();
 
         let mut exposed = frame_damage.clone();
@@ -262,7 +261,7 @@ impl Renderer {
         }
 
         for (k, w) in order.iter().enumerate() {
-            let focused = w.task_id == focused_task;
+            let focused = w.id == focused_window;
             if let Some((caster, color)) = frame::shadow(w, focused) {
                 for rect in shadow_vis[k].rects() {
                     draw_window_shadow(buf, &caster, color, rect);
@@ -271,7 +270,7 @@ impl Renderer {
             if content_vis[k].is_empty() {
                 continue;
             }
-            let hovered = w.task_id == buttons_hovered_task;
+            let hovered = w.id == buttons_hovered_window;
             let outline = frame::outline(w);
             for rect in content_vis[k].rects() {
                 buf.set_scissor(Some(*rect));
@@ -397,7 +396,7 @@ impl Renderer {
     fn draw_window_content(
         &self,
         buf: &mut DrawBuffer,
-        window: &UserWindowInfo,
+        window: &WindowInfo,
         outline: &Rounded,
         clip: &DamageRect,
         surface_cache: &mut ClientSurfaceCache,
@@ -423,10 +422,10 @@ impl Renderer {
 
         let src = surface_cache
             .get_or_create_index(
-                window.task_id,
+                window.id,
                 window.generation,
                 window.buffer_id,
-                window.shm_token,
+                window.buffer_fd,
                 src_pitch * buf_h.max(0) as usize,
             )
             .and_then(|index| surface_cache.get_slice(index));

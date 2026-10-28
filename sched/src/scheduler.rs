@@ -1,9 +1,9 @@
-use core::ffi::c_int;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
+use slopos_abi::Errno;
 use slopos_abi::event::{KernelEvent, TaskSlot};
-use slopos_arch::cpu;
+use slopos_ostd::cpu::x86_64 as cpu;
 use slopos_ostd::sync::BUS;
 use slopos_ostd::sync::PreemptGuard;
 
@@ -16,9 +16,9 @@ use core::sync::atomic::{AtomicBool, AtomicPtr};
 
 /// Per-CPU: this CPU's idle path armed a LAPIC one-shot for the next sleep-queue
 /// deadline. The first timer ISR restores periodic mode and clears the flag.
-static ONESHOT_ARMED: [AtomicBool; slopos_arch::MAX_CPUS] = {
+static ONESHOT_ARMED: [AtomicBool; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS] = {
     const FALSE: AtomicBool = AtomicBool::new(false);
-    [FALSE; slopos_arch::MAX_CPUS]
+    [FALSE; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS]
 };
 
 /// Must match `boot/src/boot_drivers.rs::LAPIC_TIMER_PERIOD_MS`.
@@ -43,8 +43,8 @@ pub fn arm_tickless_idle_if_due() {
     }
     let ms_until = delta as u32;
     if platform::timer_program_next_wakeup_ms(ms_until) {
-        let cpu_id = slopos_arch::pcr::get_current_cpu();
-        if cpu_id < slopos_arch::MAX_CPUS {
+        let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
+        if cpu_id < slopos_ostd::cpu::x86_64::pcr::MAX_CPUS {
             ONESHOT_ARMED[cpu_id].store(true, Ordering::Release);
         }
     }
@@ -52,8 +52,8 @@ pub fn arm_tickless_idle_if_due() {
 
 #[inline]
 fn restore_periodic_if_armed() {
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
-    if cpu_id >= slopos_arch::MAX_CPUS {
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
+    if cpu_id >= slopos_ostd::cpu::x86_64::pcr::MAX_CPUS {
         return;
     }
     if ONESHOT_ARMED[cpu_id].swap(false, Ordering::AcqRel) {
@@ -83,8 +83,8 @@ use super::task::{
     task_record_yield, task_set_state, task_transition_from,
 };
 pub use super::trap::{
-    RescheduleReason, TrapExitSource, save_preempt_context, scheduler_handle_post_irq,
-    scheduler_handle_timer_interrupt, scheduler_handoff_on_trap_exit, scheduler_request_reschedule,
+    RescheduleReason, TrapExitSource, scheduler_handle_post_irq, scheduler_handle_timer_interrupt,
+    scheduler_handoff_on_trap_exit, scheduler_request_reschedule,
     scheduler_request_reschedule_from_interrupt,
 };
 const SCHED_DEFAULT_TIME_SLICE: u32 = 10;
@@ -149,14 +149,14 @@ fn reset_task_quantum(task: &Task) {
 // `AbortOnUnwind` drop there abort a healthy kernel.
 #[inline]
 fn save_live_recovery_depth(task: &Task) {
-    task.set_recovery_depth(slopos_arch::pcr::recovery_depth());
-    task.set_panic_in_flight(slopos_arch::pcr::panic_in_flight_depth());
+    task.set_recovery_depth(slopos_ostd::cpu::x86_64::pcr::recovery_depth());
+    task.set_panic_in_flight(slopos_ostd::cpu::x86_64::pcr::panic_in_flight_depth());
 }
 
 #[inline]
 fn restore_live_recovery_depth(task: &Task) {
-    slopos_arch::pcr::recovery_depth_store(task.recovery_depth());
-    slopos_arch::pcr::panic_in_flight_store(task.panic_in_flight());
+    slopos_ostd::cpu::x86_64::pcr::recovery_depth_store(task.recovery_depth());
+    slopos_ostd::cpu::x86_64::pcr::panic_in_flight_store(task.panic_in_flight());
 }
 
 #[inline]
@@ -170,21 +170,21 @@ fn scheduler_ready_count(cpu_id: usize) -> u32 {
 ///
 /// # Preconditions
 ///
-/// - `cpu_id == slopos_arch::pcr::get_current_cpu()`: SafeStack reads only the
-///   *local* PCR via GS, so a cross-CPU dispatch corrupts the remote CPU's
-///   unsafe-SP resolution.
+/// - `cpu_id == slopos_ostd::cpu::x86_64::pcr::current_cpu_id()`: SafeStack
+///   reads only the *local* PCR via GS, so a cross-CPU dispatch corrupts the
+///   remote CPU's unsafe-SP resolution.
 /// - `task` is registry-owned (or a bootstrap stub) with `unsafe_stack_sp` primed.
 /// - Preemption disabled, or inside the interrupts-off context-switch window.
 #[inline]
 pub(crate) fn dispatch(cpu_id: usize, task: &Task) {
     debug_assert!(
-        cpu_id == slopos_arch::pcr::get_current_cpu(),
+        cpu_id == slopos_ostd::cpu::x86_64::pcr::current_cpu_id(),
         "dispatch() must run on the target CPU (SafeStack slot is gs-local)"
     );
 
     // The id and priority ride along so a peer asking who is running never
     // dereferences a task whose switch tail may be destroying it.
-    slopos_arch::pcr::set_current_task_typed(
+    slopos_ostd::cpu::x86_64::pcr::set_current_task_typed(
         core::ptr::from_ref(task).cast_mut(),
         task.task_id,
         published_priority(task),
@@ -194,7 +194,7 @@ pub(crate) fn dispatch(cpu_id: usize, task: &Task) {
     // Keep `PCR.syscall_pid` in sync so `copy_from_user` resolves the correct
     // address space even after preemption.
     let pid = task.process_id;
-    if let Some(pcr) = slopos_arch::pcr::current_pcr_local() {
+    if let Some(pcr) = slopos_ostd::cpu::x86_64::pcr::current_pcr_local() {
         pcr.syscall_pid.store(pid, Ordering::Release);
     }
 
@@ -264,7 +264,10 @@ pub(super) fn install_idle_task(cpu_id: usize, task: &Task) {
         name_looks_idle(&task.name.get()),
         "install_idle_task() must receive a task named idle/<n>"
     );
-    slopos_arch::pcr::set_idle_task(cpu_id, core::ptr::from_ref(task).cast::<()>().cast_mut());
+    slopos_ostd::cpu::x86_64::pcr::set_idle_task(
+        cpu_id,
+        core::ptr::from_ref(task).cast::<()>().cast_mut(),
+    );
 }
 
 /// Pre-switch housekeeping. Must run with interrupts disabled, from the scheduler
@@ -289,18 +292,13 @@ fn prepare_switch_to(
         prev_window.task().fpu_save_current(prev_window, xcr0);
     }
 
-    let new_pid = if is_user_mode {
-        next.process_id
-    } else {
-        INVALID_PROCESS_ID
-    };
     let next_vm = if is_user_mode {
         slopos_mm::process_vm::unpack_process_vm_handle(next.process_vm_handle_raw())
     } else {
         None
     };
     let next_key = next_vm.and_then(|handle| tlb::TlbProcessKey::from_slot(handle.slot()));
-    tlb::notify_mm_switch(next_key, new_pid, cpu_id);
+    tlb::notify_mm_switch(next_key, cpu_id);
     if is_user_mode {
         tlb::exit_lazy_tlb(cpu_id);
     } else {
@@ -316,7 +314,7 @@ fn prepare_switch_to(
         } else {
             0
         };
-        slopos_arch::cpu::msr::write_msr(slopos_arch::cpu::msr::Msr::FS_BASE, fs);
+        slopos_ostd::arch::x86_64::msr::write_msr(slopos_ostd::arch::x86_64::msr::Msr::FS_BASE, fs);
     }
 
     let _ = cpu_id;
@@ -354,7 +352,7 @@ fn ensure_idle_switch_ctx_valid(idle_task: &Task) -> bool {
 
     klog_info!(
         "SCHED: CPU {} idle task {} has corrupt switch_ctx: rip=0x{:x} (ok={}) rsp=0x{:x} (ok={}) — refusing switch",
-        slopos_arch::pcr::get_current_cpu(),
+        slopos_ostd::cpu::x86_64::pcr::current_cpu_id(),
         idle_task.task_id,
         rip,
         rip_ok,
@@ -389,10 +387,10 @@ fn switch_from_current_to_idle(cpu_id: usize, current: Option<&Task>, idle_task:
 
     // Idle owns no reference, so this clears the slot and hands back whatever
     // the outgoing task held.
-    let prev_raw = slopos_arch::pcr::install_current_task(core::ptr::null_mut());
+    let prev_raw = slopos_ostd::cpu::x86_64::pcr::install_current_task(core::ptr::null_mut());
     if let Some(prev_node) = NonNull::new(prev_raw.cast::<Task>()) {
         assert!(
-            slopos_arch::pcr::defer_previous_task(prev_node.as_ptr().cast()).is_ok(),
+            slopos_ostd::cpu::x86_64::pcr::defer_previous_task(prev_node.as_ptr().cast()).is_ok(),
             "previous-task slot was not drained before the next switch"
         );
     }
@@ -478,7 +476,7 @@ fn task_has_durable_owner(task: &Task) -> bool {
 /// on one always loses the preemption comparison.
 #[inline]
 fn published_priority(task: &Task) -> u8 {
-    Some(task.priority).map_or(slopos_arch::pcr::PRIORITY_NONE, |p| p.as_u8())
+    Some(task.priority).map_or(slopos_ostd::cpu::x86_64::pcr::PRIORITY_NONE, |p| p.as_u8())
 }
 
 /// Whether `new` should preempt whatever `cpu` is running.
@@ -487,7 +485,7 @@ fn published_priority(task: &Task) -> u8 {
 /// `current_task` races that CPU's `drain_previous_task`, which can run the
 /// task's destructor.
 pub(crate) fn newcomer_outranks_current(cpu: usize, new: &Task) -> bool {
-    new.priority.as_u8() < slopos_arch::pcr::current_task_priority_for(cpu)
+    new.priority.as_u8() < slopos_ostd::cpu::x86_64::pcr::current_task_priority_for(cpu)
 }
 
 /// Whether a task that blocked and is now woken should preempt `cpu`'s
@@ -496,13 +494,13 @@ pub(crate) fn newcomer_outranks_current(cpu: usize, new: &Task) -> bool {
 /// a device may hold the lock everyone else is queued on — and left behind a
 /// CPU-bound peer it waits out that peer's whole slice.
 fn wakee_preempts_current(cpu: usize, new: &Task) -> bool {
-    new.priority.as_u8() <= slopos_arch::pcr::current_task_priority_for(cpu)
+    new.priority.as_u8() <= slopos_ostd::cpu::x86_64::pcr::current_task_priority_for(cpu)
 }
 
-fn publish_ready_fallback(task: &TaskRef) -> c_int {
+fn publish_ready_fallback(task: &TaskRef) -> bool {
     let body: &Task = task;
     if !body.is_ready() {
-        return -1;
+        return false;
     }
 
     match body.sched_placement() {
@@ -510,8 +508,8 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
         | SchedPlacement::RemoteWake
         | SchedPlacement::OnCpu
         | SchedPlacement::Migrating
-        | SchedPlacement::Held => return 0,
-        SchedPlacement::Nascent => return -1,
+        | SchedPlacement::Held => return true,
+        SchedPlacement::Nascent => return false,
         SchedPlacement::None | SchedPlacement::Waking => {}
     }
 
@@ -519,8 +517,8 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
     // permitted CPU's enqueue momentarily raced; only when no permitted CPU
     // accepts it does the last resort below relax. `affinity == 0` permits all.
     let affinity = body.cpu_affinity();
-    let current_cpu = slopos_arch::pcr::get_current_cpu();
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let current_cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
 
     if per_cpu::affinity_allows_cpu(affinity, current_cpu)
         && per_cpu::with_cpu_scheduler(current_cpu, |sched| sched.enqueue_local(task)) == Some(0)
@@ -528,7 +526,7 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
         if newcomer_outranks_current(current_cpu, body) {
             scheduler_request_reschedule(RescheduleReason::InterruptWake);
         }
-        return 0;
+        return true;
     }
 
     for cpu_id in 0..cpu_count {
@@ -536,18 +534,18 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
             continue;
         }
         if per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.enqueue_local(task)) == Some(0) {
-            if slopos_arch::pcr::is_cpu_online(cpu_id) {
+            if slopos_ostd::cpu::x86_64::pcr::is_cpu_online(cpu_id) {
                 send_reschedule_ipi(cpu_id);
             }
-            return 0;
+            return true;
         }
         match body.sched_placement() {
             SchedPlacement::ReadyQueue
             | SchedPlacement::RemoteWake
             | SchedPlacement::OnCpu
             | SchedPlacement::Migrating
-            | SchedPlacement::Held => return 0,
-            SchedPlacement::Nascent => return -1,
+            | SchedPlacement::Held => return true,
+            SchedPlacement::Nascent => return false,
             SchedPlacement::None | SchedPlacement::Waking => {}
         }
     }
@@ -564,18 +562,18 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
                 body.task_id,
                 cpu_id,
             );
-            if cpu_id != current_cpu && slopos_arch::pcr::is_cpu_online(cpu_id) {
+            if cpu_id != current_cpu && slopos_ostd::cpu::x86_64::pcr::is_cpu_online(cpu_id) {
                 send_reschedule_ipi(cpu_id);
             }
-            return 0;
+            return true;
         }
         match body.sched_placement() {
             SchedPlacement::ReadyQueue
             | SchedPlacement::RemoteWake
             | SchedPlacement::OnCpu
             | SchedPlacement::Migrating
-            | SchedPlacement::Held => return 0,
-            SchedPlacement::Nascent => return -1,
+            | SchedPlacement::Held => return true,
+            SchedPlacement::Nascent => return false,
             SchedPlacement::None | SchedPlacement::Waking => {}
         }
     }
@@ -588,10 +586,10 @@ fn publish_ready_fallback(task: &TaskRef) -> c_int {
         current_cpu,
         cpu_count,
     );
-    -1
+    false
 }
 
-fn publish_reserved_waking_ready(task: &TaskRef, task_id: u32, context: &str) -> c_int {
+fn publish_reserved_waking_ready(task: &TaskRef, task_id: u32, context: &str) -> bool {
     let body: &Task = task;
     if !body.is_ready() {
         if body.sched_placement() == SchedPlacement::Waking {
@@ -602,15 +600,10 @@ fn publish_reserved_waking_ready(task: &TaskRef, task_id: u32, context: &str) ->
             };
             let _ = body.sched_placement_compare_exchange(SchedPlacement::Waking, restore);
         }
-        return if body.is_exited() || (body.status() == TaskStatus::Invalid) || !body.is_ready() {
-            0
-        } else {
-            -1
-        };
+        return body.is_exited() || (body.status() == TaskStatus::Invalid) || !body.is_ready();
     }
 
-    let rc = schedule_task_from_placement(task, SchedPlacement::Waking, false);
-    if rc == 0
+    if schedule_task_from_placement(task, SchedPlacement::Waking, false)
         || matches!(
             body.sched_placement(),
             SchedPlacement::ReadyQueue
@@ -620,21 +613,20 @@ fn publish_reserved_waking_ready(task: &TaskRef, task_id: u32, context: &str) ->
                 | SchedPlacement::Held
         )
     {
-        return 0;
+        return true;
     }
 
     klog_info!(
-        "SCHED: {} failed to publish READY task {} rc={} status={:?} placement={:?}",
+        "SCHED: {} failed to publish READY task {} status={:?} placement={:?}",
         context,
         task_id,
-        rc,
         body.status(),
         body.sched_placement(),
     );
-    rc
+    false
 }
 
-fn publish_ready_from_current_owner(task: &TaskRef, task_id: u32, context: &str) -> c_int {
+fn publish_ready_from_current_owner(task: &TaskRef, task_id: u32, context: &str) -> bool {
     let body: &Task = task;
     for _ in 0..4 {
         match body.sched_placement() {
@@ -642,12 +634,12 @@ fn publish_ready_from_current_owner(task: &TaskRef, task_id: u32, context: &str)
             | SchedPlacement::RemoteWake
             | SchedPlacement::Migrating
             | SchedPlacement::Held => {
-                return 0;
+                return true;
             }
             SchedPlacement::Waking => return publish_reserved_waking_ready(task, task_id, context),
             // Never published: a wake that reached a nascent task is its
             // caller's bug, not a race to spin on.
-            SchedPlacement::Nascent => return -1,
+            SchedPlacement::Nascent => return false,
             SchedPlacement::OnCpu => {
                 if body
                     .sched_placement_compare_exchange(SchedPlacement::OnCpu, SchedPlacement::Waking)
@@ -665,18 +657,18 @@ fn publish_ready_from_current_owner(task: &TaskRef, task_id: u32, context: &str)
         }
     }
 
-    if task_has_durable_owner(body) { 0 } else { -1 }
+    task_has_durable_owner(body)
 }
 
-fn schedule_task_from_placement(task: &TaskRef, from: SchedPlacement, new_task: bool) -> c_int {
+fn schedule_task_from_placement(task: &TaskRef, from: SchedPlacement, new_task: bool) -> bool {
     let body: &Task = task;
     if !body.is_ready() {
-        return -1;
+        return false;
     }
 
     // Conclusive, not a failure: the hold owns the task and publishes it on release.
     if crate::task::kernel_io_hold_claim(body, from) {
-        return 0;
+        return true;
     }
 
     if body.time_slice_remaining() == 0 {
@@ -691,7 +683,7 @@ fn schedule_task_from_placement(task: &TaskRef, from: SchedPlacement, new_task: 
     let Some(target_cpu) = target_cpu else {
         return publish_ready_fallback(task);
     };
-    let current_cpu = slopos_arch::pcr::get_current_cpu();
+    let current_cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     if target_cpu == current_cpu {
         let result = per_cpu::with_cpu_scheduler(target_cpu, |sched| match from {
@@ -720,7 +712,7 @@ fn schedule_task_from_placement(task: &TaskRef, from: SchedPlacement, new_task: 
         if interrupt_wake || newcomer_outranks_current(current_cpu, body) {
             scheduler_request_reschedule(RescheduleReason::InterruptWake);
         }
-        0
+        true
     } else {
         let push_result = per_cpu::with_cpu_scheduler(target_cpu, |sched| match from {
             SchedPlacement::None => {
@@ -737,10 +729,10 @@ fn schedule_task_from_placement(task: &TaskRef, from: SchedPlacement, new_task: 
 
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
-        if slopos_arch::pcr::is_cpu_online(target_cpu) {
+        if slopos_ostd::cpu::x86_64::pcr::is_cpu_online(target_cpu) {
             send_reschedule_ipi(target_cpu);
         }
-        0
+        true
     }
 }
 
@@ -795,15 +787,15 @@ fn release_publication(task: &Task, reservation: &Reservation) {
     }
 }
 
-pub fn schedule_task(task: &TaskRef) -> c_int {
+pub fn schedule_task(task: &TaskRef) -> bool {
     let Some(reservation) = reserve_publication(task) else {
-        return 0;
+        return true;
     };
-    let rc = schedule_task_from_placement(task, reservation.from, false);
-    if rc != 0 {
+    let published = schedule_task_from_placement(task, reservation.from, false);
+    if !published {
         release_publication(task, &reservation);
     }
-    rc
+    published
 }
 
 /// Put a freshly created task into the placement a *published, then blocked* task
@@ -820,52 +812,47 @@ pub fn clear_nascent_for_test(task_id: u32) -> bool {
 /// Schedule a **newly created** task (fork, spawn, exec): picks the globally
 /// idlest CPU to spread new processes out, where [`schedule_task()`] prefers
 /// `last_cpu` for cache affinity.
-pub fn schedule_new_task(task: &TaskRef) -> c_int {
+pub fn schedule_new_task(task: &TaskRef) -> bool {
     let Some(reservation) = reserve_publication(task) else {
-        return 0;
+        return true;
     };
-    let rc = schedule_task_from_placement(task, reservation.from, true);
-    if rc != 0 {
+    let published = schedule_task_from_placement(task, reservation.from, true);
+    if !published {
         release_publication(task, &reservation);
     }
-    rc
+    published
 }
 
 /// Publish a fully-initialized new task as runnable without ever exposing
 /// `Ready + no scheduler owner`.
-pub fn publish_new_task(task: &TaskRef) -> c_int {
+pub fn publish_new_task(task: &TaskRef) -> bool {
     let body: &Task = task;
     // The sole sanctioned exit from `Nascent`; every other path refuses the
     // transition. `None` covers re-publishing a task unscheduled back to no owner.
     let reserved_from = match body.sched_placement() {
         from @ (SchedPlacement::Nascent | SchedPlacement::None) => {
             if !body.sched_placement_compare_exchange(from, SchedPlacement::Waking) {
-                return if task_has_durable_owner(body)
-                    || body.sched_placement() == SchedPlacement::Waking
-                {
-                    0
-                } else {
-                    -1
-                };
+                return task_has_durable_owner(body)
+                    || body.sched_placement() == SchedPlacement::Waking;
             }
             from
         }
         SchedPlacement::Waking => SchedPlacement::Waking,
         _ => {
-            return if task_has_durable_owner(body) { 0 } else { -1 };
+            return task_has_durable_owner(body);
         }
     };
     let previous_status = body.status();
     if !body.set_status(TaskStatus::Ready) {
         let _ = body.sched_placement_compare_exchange(SchedPlacement::Waking, reserved_from);
-        return -1;
+        return false;
     }
-    let rc = schedule_task_from_placement(task, SchedPlacement::Waking, true);
-    if rc != 0 {
+    let published = schedule_task_from_placement(task, SchedPlacement::Waking, true);
+    if !published {
         let _ = body.sched_placement_compare_exchange(SchedPlacement::Waking, reserved_from);
         let _ = body.set_status(previous_status);
     }
-    rc
+    published
 }
 
 /// Strip `task` from whichever ready queue holds it.
@@ -876,24 +863,24 @@ pub fn publish_new_task(task: &TaskRef) -> c_int {
 ///
 /// A wake racing this call is the caller's `status()` re-check to catch, not
 /// this function's.
-pub fn unschedule_task(task: &Task) -> c_int {
+pub fn unschedule_task(task: &Task) -> bool {
     match task.sched_placement() {
         SchedPlacement::None
         | SchedPlacement::OnCpu
         | SchedPlacement::Waking
         | SchedPlacement::RemoteWake
         | SchedPlacement::Nascent
-        | SchedPlacement::Held => return 0,
+        | SchedPlacement::Held => return true,
         SchedPlacement::ReadyQueue | SchedPlacement::Migrating => {}
     }
 
     // Stamped before the link, under the same lock `remove_task` takes.
     let last_cpu = task.last_cpu() as usize;
     if per_cpu::with_cpu_scheduler(last_cpu, |sched| sched.remove_task(task)) == Some(0) {
-        return 0;
+        return true;
     }
 
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
         if cpu_id == last_cpu {
             continue;
@@ -903,7 +890,7 @@ pub fn unschedule_task(task: &Task) -> c_int {
         });
     }
 
-    0
+    true
 }
 
 /// Re-place a task after its CPU-affinity mask changes. Idempotent when the task
@@ -920,10 +907,10 @@ pub fn task_apply_affinity(task: &TaskRef, new_affinity: u32) {
             let _ = schedule_task(task);
         }
         SchedPlacement::OnCpu => {
-            let current_cpu = slopos_arch::pcr::get_current_cpu();
+            let current_cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
             if last_cpu == current_cpu {
                 scheduler_request_reschedule(RescheduleReason::InterruptWake);
-            } else if slopos_arch::pcr::is_cpu_online(last_cpu) {
+            } else if slopos_ostd::cpu::x86_64::pcr::is_cpu_online(last_cpu) {
                 send_reschedule_ipi(last_cpu);
             }
         }
@@ -1047,10 +1034,12 @@ fn execute_task(
             // The last point still executing as the outgoing task, so the only
             // place the handover can happen.
             let next_node = handover.into_placement();
-            let prev_raw = slopos_arch::pcr::install_current_task(next_node.as_ptr().cast());
+            let prev_raw =
+                slopos_ostd::cpu::x86_64::pcr::install_current_task(next_node.as_ptr().cast());
             if let Some(prev_node) = NonNull::new(prev_raw.cast::<Task>()) {
                 assert!(
-                    slopos_arch::pcr::defer_previous_task(prev_node.as_ptr().cast()).is_ok(),
+                    slopos_ostd::cpu::x86_64::pcr::defer_previous_task(prev_node.as_ptr().cast())
+                        .is_ok(),
                     "previous-task slot was not drained before the next switch"
                 );
             }
@@ -1140,7 +1129,7 @@ fn claim_next_task(cpu_id: usize, from_idle: bool) -> Option<TaskRef> {
 
     // Single-winner dispatch claim: only one CPU may run a Ready task.
     let next_task_id = next_task.task_id;
-    if task_set_state(next_task_id, TaskStatus::Running) != 0 {
+    if !task_set_state(next_task_id, TaskStatus::Running) {
         // A still-Ready task holds no other scheduler placement, so dropping the
         // dequeue would strand it; a claimed one is the winner's responsibility.
         if next_task.is_ready() {
@@ -1227,7 +1216,8 @@ pub(crate) fn run_ready_task_from_idle(cpu_id: usize, idle_task: &Task) -> bool 
     // No CR3 reload: `prepare_switch_to(next = idle)` already loaded the master.
     debug_assert!(
         slopos_ostd::mm::vm_space::kernel_master_pml4().is_none_or(|master| {
-            slopos_arch::cpu::control_regs::read_cr3() & 0x000F_FFFF_FFFF_F000 == master.as_u64()
+            slopos_ostd::cpu::x86_64::control_regs::read_cr3() & 0x000F_FFFF_FFFF_F000
+                == master.as_u64()
         }),
         "idle resumed on an address space that is not the kernel master",
     );
@@ -1255,7 +1245,7 @@ fn finish_switch(cpu_id: usize, dispatch_ref: TaskRef) {
         let should_enqueue = if already_ready {
             true
         } else if needs_ready_transition {
-            task_set_state(next_task_id, TaskStatus::Ready) == 0
+            task_set_state(next_task_id, TaskStatus::Ready)
         } else {
             false
         };
@@ -1264,15 +1254,14 @@ fn finish_switch(cpu_id: usize, dispatch_ref: TaskRef) {
             // rather than re-queue it locally forever; `on_cpu` is still cleared
             // below, so the target CPU's dispatcher waits for us.
             let allowed = per_cpu::affinity_allows_cpu(next_task.cpu_affinity(), cpu_id);
-            let rc = if allowed {
+            let published = if allowed {
                 per_cpu::with_cpu_scheduler(cpu_id, |sched| {
                     sched.enqueue_from_on_cpu(&dispatch_ref)
-                })
-                .unwrap_or(-1)
+                }) == Some(0)
             } else {
                 publish_ready_from_current_owner(&dispatch_ref, next_task_id, "affinity_migrate")
             };
-            ready_published = rc == 0
+            ready_published = published
                 || matches!(
                     next_task.sched_placement(),
                     SchedPlacement::ReadyQueue
@@ -1286,12 +1275,10 @@ fn finish_switch(cpu_id: usize, dispatch_ref: TaskRef) {
         // Only a non-ready task may drop `OnCpu` to `None`; a Ready one is
         // published from a `Waking` token, leaving no Ready+None interval.
         if next_task.is_ready() {
-            let rc = publish_ready_from_current_owner(&dispatch_ref, next_task_id, "finish_switch");
-            if rc != 0 {
+            if !publish_ready_from_current_owner(&dispatch_ref, next_task_id, "finish_switch") {
                 klog_info!(
-                    "SCHED: finish_switch failed final READY publish id={} rc={} placement={:?}",
+                    "SCHED: finish_switch failed final READY publish id={} placement={:?}",
                     next_task_id,
-                    rc,
                     next_task.sched_placement(),
                 );
             }
@@ -1299,13 +1286,10 @@ fn finish_switch(cpu_id: usize, dispatch_ref: TaskRef) {
             let _ = next_task
                 .sched_placement_compare_exchange(SchedPlacement::OnCpu, SchedPlacement::None);
             if next_task.is_ready() {
-                let rc =
-                    publish_ready_from_current_owner(&dispatch_ref, next_task_id, "finish_switch");
-                if rc != 0 {
+                if !publish_ready_from_current_owner(&dispatch_ref, next_task_id, "finish_switch") {
                     klog_info!(
-                        "SCHED: finish_switch failed raced READY publish id={} rc={} placement={:?}",
+                        "SCHED: finish_switch failed raced READY publish id={} placement={:?}",
                         next_task_id,
-                        rc,
                         next_task.sched_placement(),
                     );
                 }
@@ -1327,7 +1311,7 @@ fn finish_switch(cpu_id: usize, dispatch_ref: TaskRef) {
     // once it leaves the window, is that context.
     let parked = dispatch_ref.into_placement();
     assert!(
-        slopos_arch::pcr::defer_previous_task(parked.as_ptr().cast()).is_ok(),
+        slopos_ostd::cpu::x86_64::pcr::defer_previous_task(parked.as_ptr().cast()).is_ok(),
         "previous-task slot was not drained before the next switch"
     );
 }
@@ -1336,7 +1320,7 @@ fn finish_switch(cpu_id: usize, dispatch_ref: TaskRef) {
 /// interrupts-off from every resume point; see [`execute_task`] for why the
 /// handover travels through the PCR rather than a stack frame.
 pub(crate) fn finish_pending_switch(cpu_id: usize) {
-    let previous = slopos_arch::pcr::take_previous_task().cast::<Task>();
+    let previous = slopos_ostd::cpu::x86_64::pcr::take_previous_task().cast::<Task>();
     let Some(node) = NonNull::new(previous) else {
         return;
     };
@@ -1354,7 +1338,7 @@ impl RestoreInterruptState {
     pub(crate) fn open_window() -> Self {
         let was_enabled = slopos_ostd::cpu::x86_64::interrupts::are_interrupts_enabled();
         if !was_enabled {
-            slopos_arch::cpu::enable_interrupts();
+            slopos_ostd::cpu::x86_64::enable_interrupts();
         }
         Self {
             disable_on_drop: !was_enabled,
@@ -1366,7 +1350,7 @@ impl Drop for RestoreInterruptState {
     #[inline]
     fn drop(&mut self) {
         if self.disable_on_drop {
-            slopos_arch::cpu::disable_interrupts();
+            slopos_ostd::cpu::x86_64::disable_interrupts();
         }
     }
 }
@@ -1393,7 +1377,7 @@ pub(crate) fn drain_previous_task() -> bool {
 /// [`drain_previous_task`] for `runner`, the task whose stack this is; `None`
 /// on a bootstrap stub.
 pub(crate) fn drain_previous_task_for(runner: Option<&Task>) -> bool {
-    let previous = slopos_arch::pcr::take_previous_task().cast::<Task>();
+    let previous = slopos_ostd::cpu::x86_64::pcr::take_previous_task().cast::<Task>();
     let parked = !previous.is_null();
     let corpse = NonNull::new(previous).and_then(|node| {
         let dispatch_ref = TaskRef::from_placement(node);
@@ -1508,7 +1492,7 @@ fn schedule_internal() {
     // Masked first: a caller with preemption enabled can be switched out and
     // resumed on another CPU between the two reads otherwise.
     let irq_flags = cpu::save_flags_cli();
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     crate::profile::switch_begin(cpu_id);
 
     if SCHEDULER_ENABLED.load(Ordering::Acquire) == 0 {
@@ -1543,7 +1527,7 @@ fn schedule_internal() {
         // Before re-enabling interrupts: otherwise a timer-driven re-entrant
         // dispatch parks a second reference into the still-occupied slot.
         let _ = drain_previous_task();
-        crate::profile::switch_end(slopos_arch::pcr::get_current_cpu());
+        crate::profile::switch_end(slopos_ostd::cpu::x86_64::pcr::current_cpu_id());
         cpu::restore_flags(irq_flags);
         return;
     }
@@ -1560,7 +1544,7 @@ fn schedule_internal() {
                 // whatever this task displaced there. Before re-enabling
                 // interrupts, or a timer-driven dispatch parks into the
                 // still-occupied slot.
-                let resumed_on = slopos_arch::pcr::get_current_cpu();
+                let resumed_on = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
                 finish_pending_switch(resumed_on);
                 let _ = drain_previous_task();
                 crate::profile::switch_end(resumed_on);
@@ -1578,7 +1562,7 @@ fn schedule_internal() {
         current.as_ref().map(|current| current.task()),
         idle.task(),
     );
-    let resumed_on = slopos_arch::pcr::get_current_cpu();
+    let resumed_on = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     finish_pending_switch(resumed_on);
     let _ = drain_previous_task();
     crate::profile::switch_end(resumed_on);
@@ -1610,7 +1594,7 @@ pub fn schedule() {
 }
 
 pub fn r#yield() {
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched.increment_yields();
     });
@@ -1631,7 +1615,7 @@ pub fn yield_() {
 /// `Running`-and-on-queue. The matching yield is [`yield_blocked_task`], after
 /// the lock is dropped.
 pub fn mark_current_blocked() -> bool {
-    let task_id = slopos_arch::pcr::current_task_id();
+    let task_id = slopos_ostd::cpu::x86_64::pcr::current_task_id();
     if task_id == INVALID_TASK_ID {
         return false;
     }
@@ -1642,7 +1626,7 @@ pub fn mark_current_blocked() -> bool {
         TaskStatus::Running,
         TaskStatus::Blocked,
         slopos_abi::task::BlockReason::Generic,
-    ) == 0
+    )
 }
 
 /// Whether a kill or a signal reached the current task before its
@@ -1795,22 +1779,27 @@ pub fn set_current_runnable() {
     });
 }
 
-pub fn task_wait_for(task_id: u32) -> c_int {
+/// Wait until `task_id` exits. A task already gone counts as exited.
+///
+/// # Errors
+///
+/// `EINVAL` for [`INVALID_TASK_ID`], `EDEADLK` for the caller's own id, `EINTR`
+/// when the wait is aborted.
+pub fn task_wait_for(task_id: u32) -> Result<(), Errno> {
     if task_id == INVALID_TASK_ID {
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     let Some(target_guard) = super::task::task_find_by_id(task_id) else {
-        // Already gone — waitpid semantics treat this as success.
-        return 0;
+        return Ok(());
     };
     if target_guard.status() == TaskStatus::Invalid {
-        return 0;
+        return Ok(());
     }
 
     let waiter_id = slopos_ostd::cpu::x86_64::pcr::current_task_id();
     if waiter_id == task_id {
-        return -1;
+        return Err(Errno::EDEADLK);
     }
 
     let target_id = target_guard.task_id;
@@ -1825,13 +1814,10 @@ pub fn task_wait_for(task_id: u32) -> c_int {
         })
         .wait_event(|| slopos_ostd::task::parked_task_has_exited(target));
 
-    if waited.is_err() {
-        return -(slopos_abi::Errno::EINTR.raw());
-    }
-    0
+    waited.map_err(|_| Errno::EINTR)
 }
 
-pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
+pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> bool {
     // `Waking` is the explicit publication token: the wake side must either
     // observe an existing scheduler owner (ready queue / remote inbox /
     // migration) or acquire that token before publishing `TaskStatus::Ready`.
@@ -1846,19 +1832,19 @@ pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
     let body: &Task = task;
     loop {
         if body.is_exited() || (body.status() == TaskStatus::Invalid) {
-            return -1;
+            return false;
         }
         if body.status() != TaskStatus::Blocked {
-            return 0;
+            return true;
         }
         match body.sched_placement() {
             // Registered but never published: its creator has not finished
             // building it. Terminal rather than a retry — a nascent task has
             // never executed, so it holds no one-shot wake source, and the
             // senders that can name it set the durable `signal_pending` bit,
-            // which survives this refusal. Returns 0, not -1: -1 means gone, and
-            // `kill` would turn that into ESRCH for a task that exists.
-            SchedPlacement::Nascent => return 0,
+            // which survives this refusal. `true`, not `false`: `false` means
+            // gone, and `kill` would turn that into ESRCH for a task that exists.
+            SchedPlacement::Nascent => return true,
             SchedPlacement::OnCpu => {
                 // `OnCpu` is also the dispatcher's transient claim between a
                 // dequeue and Ready->Running; the status check above already
@@ -1924,7 +1910,7 @@ pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
                 // Scheduler ownership already exists: the state CAS alone makes
                 // the existing queue/inbox/migration owner runnable again.
                 if task_transition_from(body, TaskStatus::Blocked, TaskStatus::Ready) {
-                    return 0;
+                    return true;
                 }
                 core::hint::spin_loop();
                 continue;
@@ -1933,23 +1919,23 @@ pub(crate) fn wake_blocked_task(task: &TaskRef, task_id: u32) -> c_int {
     }
 }
 
-pub fn unblock_task(task: &TaskRef) -> c_int {
+pub fn unblock_task(task: &TaskRef) -> bool {
     let task_id = task.task_id;
     wake_blocked_task(task, task_id)
 }
 
 /// Wake the task named by `task_id`. Resolving the id through the registry keeps
-/// the liveness-checked upgrade in one place instead of once per caller. `-1`
+/// the liveness-checked upgrade in one place instead of once per caller. `false`
 /// when the id names no live task.
-pub fn unblock_task_id(task_id: u32) -> c_int {
+pub fn unblock_task_id(task_id: u32) -> bool {
     let Some(task) = crate::task::task_find_by_id(task_id) else {
-        return -1;
+        return false;
     };
     wake_blocked_task(&task, task_id)
 }
 
-pub fn scheduler_task_exit_impl() -> ! {
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+pub fn scheduler_task_exit() -> ! {
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     // Scoped, and never held across the `schedule()` below: by then the PCR
     // names the successor and the guard would describe the wrong task.
@@ -1965,11 +1951,11 @@ pub fn scheduler_task_exit_impl() -> ! {
         schedule();
         // Stay alive to ack shootdown / reschedule IPIs: halting with IF clear
         // lets the BSP's 500 ms NMI watchdog declare this CPU dead.
-        slopos_arch::cpu::enable_interrupts();
+        slopos_ostd::cpu::x86_64::enable_interrupts();
         slopos_ostd::cpu::x86_64::core::halt_loop();
     }
 
-    if crate::task::task_terminate(u32::MAX) != 0 {
+    if !crate::task::task_terminate(u32::MAX) {
         klog_info!("scheduler_task_exit: Failed to terminate current task");
     }
 
@@ -1983,13 +1969,13 @@ pub fn scheduler_task_exit_impl() -> ! {
         "scheduler_task_exit: Schedule returned unexpectedly on CPU {}",
         cpu_id
     );
-    slopos_arch::cpu::enable_interrupts();
+    slopos_ostd::cpu::x86_64::enable_interrupts();
     slopos_ostd::cpu::x86_64::core::halt_loop();
 }
 
 // ABI shim for `slopos_ostd::task::switch::register_task_exit_hook`.
 extern "sysv64" fn ostd_task_exit_hook() -> ! {
-    scheduler_task_exit_impl()
+    scheduler_task_exit()
 }
 
 /// ABI shim for `register_task_entry_hook`: completes the predecessor's switch
@@ -1998,7 +1984,7 @@ extern "sysv64" fn ostd_task_exit_hook() -> ! {
 /// Runs interrupts-off — the trampoline calls it ahead of its `sti` — so the
 /// tail and the release are ordered the same way as on every other resume path.
 extern "sysv64" fn ostd_task_entry_hook() {
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     finish_pending_switch(cpu_id);
     let _ = drain_previous_task();
 }
@@ -2046,7 +2032,7 @@ fn deferred_reschedule_callback() {
     schedule();
 }
 
-pub fn init_scheduler() -> c_int {
+pub fn init_scheduler() -> bool {
     SCHEDULER_ENABLED.store(0, Ordering::Release);
     PREEMPTION_ENABLED.store(SCHEDULER_PREEMPTION_DEFAULT, Ordering::Release);
 
@@ -2054,10 +2040,10 @@ pub fn init_scheduler() -> c_int {
     // Ensure rather than reset: kthreads parked on deadlines back in `drivers`
     // are still queued when this runs in the `services` phase.
     if !super::sleep::ensure_sleep_queue_allocated() {
-        return -1;
+        return false;
     }
 
-    0
+    true
 }
 
 /// Register the deferred-reschedule callback with OSTD's preempt backend, once
@@ -2067,8 +2053,8 @@ pub fn install_reschedule_callback<'b>(token: &slopos_ostd::sync::BspToken<'b>) 
     slopos_ostd::sync::register_reschedule_callback(token, deferred_reschedule_callback);
 }
 
-pub fn scheduler_is_enabled() -> c_int {
-    SCHEDULER_ENABLED.load(Ordering::Acquire) as c_int
+pub fn scheduler_is_enabled() -> bool {
+    SCHEDULER_ENABLED.load(Ordering::Acquire) != 0
 }
 
 /// ID of the task running on this CPU, or 0 when there is none.
@@ -2076,7 +2062,7 @@ pub fn scheduler_is_enabled() -> c_int {
 /// Reads the id `dispatch()` published in the PCR rather than dereferencing
 /// `current_task`, so it stays correct while the slot names a pre-heap stub.
 pub fn current_task_id() -> u32 {
-    match slopos_arch::pcr::current_task_id() {
+    match slopos_ostd::cpu::x86_64::pcr::current_task_id() {
         INVALID_TASK_ID => 0,
         id => id,
     }
@@ -2089,7 +2075,7 @@ pub fn current_task_id() -> u32 {
 /// queue must tell the two apart or it parks a task that does not exist.
 #[inline]
 pub fn current_task_handle() -> u32 {
-    slopos_arch::pcr::current_task_id()
+    slopos_ostd::cpu::x86_64::pcr::current_task_id()
 }
 
 pub fn current_task_pgid() -> u32 {
@@ -2145,21 +2131,8 @@ pub fn clear_session_controlling_tty(session_id: u32, tty: slopos_abi::syscall::
     crate::task::task_clear_controlling_tty_for_session(session_id, tty)
 }
 
-pub fn scheduler_set_preemption_enabled(enabled: c_int) {
-    let val = if enabled != 0 { 1u8 } else { 0u8 };
-    PREEMPTION_ENABLED.store(val, Ordering::Release);
-    if val == 0 {
-        PreemptGuard::clear_reschedule_pending();
-    }
-    if val != 0 {
-        platform::timer_enable_irq();
-    } else {
-        platform::timer_disable_irq();
-    }
-}
-
-pub fn scheduler_is_preemption_enabled() -> c_int {
-    PREEMPTION_ENABLED.load(Ordering::Acquire) as c_int
+pub fn scheduler_is_preemption_enabled() -> bool {
+    PREEMPTION_ENABLED.load(Ordering::Acquire) != 0
 }
 
 pub fn scheduler_timer_tick() {
@@ -2167,7 +2140,7 @@ pub fn scheduler_timer_tick() {
     // ISR: it fired, and the CPU is back to needing a periodic tick.
     restore_periodic_if_armed();
 
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     // The tick is the only context that reaches every CPU; a peer's PAT/MTRR
     // MSRs are readable only by that peer.
@@ -2373,7 +2346,7 @@ fn task_is_current_on_any_cpu(addr: TaskAddr) -> bool {
 /// `last_cpu`, which is only an enqueue-time placement hint. Teardown only, so
 /// the scan is off the hot path.
 pub(crate) fn cpu_running_task(addr: TaskAddr) -> Option<usize> {
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     (0..cpu_count).find(|&cpu_id| TaskAddr::current_of(cpu_id) == Some(addr))
 }
 
@@ -2413,7 +2386,7 @@ fn rescue_check_task(guard: &crate::task::TaskRef) {
     // Local enqueue, never `schedule_task`: this is the recovery path for a task
     // that already lost the normal enqueue. A leaked `Waking` reservation is
     // completed as `Waking`; Ready+Waking is not a durable scheduler owner.
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let enqueue_status = per_cpu::with_cpu_scheduler(cpu_id, |sched| match placement {
         SchedPlacement::Waking => sched.enqueue_waking(guard),
         SchedPlacement::Migrating => sched.enqueue_migrated_borrowed(guard),

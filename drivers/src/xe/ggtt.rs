@@ -4,8 +4,8 @@
 //! [`super::mmio_map::ggtt_bank`]; byte offset `i * 8` is the PTE for entry `i`.
 
 use slopos_abi::PhysAddr;
-use slopos_mm::mmio::MmioRegion;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
+use slopos_ostd::mm::IoMem;
 
 use crate::xe_logic::{ggtt_pte, regs};
 
@@ -17,7 +17,7 @@ use crate::xe_logic::{ggtt_pte, regs};
 /// The caller must supply a `ggtt_addr` strictly above the firmware framebuffer
 /// extent — see [`crate::xe_logic::ggtt_pte::alloc_above`] — so no firmware PTE
 /// is ever written.
-pub fn map_pages(bank: &MmioRegion, ggtt_addr: u64, phys: PhysAddr, pages: u32) -> bool {
+pub fn map_pages(bank: &IoMem, ggtt_addr: u64, phys: PhysAddr, pages: u32) -> bool {
     let base_entry = ggtt_pte::entry_index(ggtt_addr);
 
     for p in 0..pages {
@@ -65,7 +65,7 @@ pub fn map_pages(bank: &MmioRegion, ggtt_addr: u64, phys: PhysAddr, pages: u32) 
 /// to the engine until it is flushed. `mmio` is the full BAR0 window — the flush
 /// register lives in its low half, not in the GGTT bank. The posting read makes
 /// the flush land before scanout is re-pointed.
-pub fn invalidate_tlb(mmio: &MmioRegion) {
+pub fn invalidate_tlb(mmio: &IoMem) {
     mmio.write::<u32>(regs::GFX_FLSH_CNTL_GEN6, regs::GFX_FLSH_CNTL_EN);
     let _ = mmio.read::<u32>(regs::GFX_FLSH_CNTL_GEN6);
 }

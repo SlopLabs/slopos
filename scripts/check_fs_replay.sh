@@ -98,7 +98,7 @@ self_test() {
     ext4_mkfs_args
     truncate -s 16M "$tmp/base.img"
     mke2fs -F -q "${EXT4_MKFS_ARGS[@]}" "$tmp/base.img" >/dev/null 2>&1
-    printf 'slopos-rude-exit-v1\n' >"$tmp/payload"
+    printf 'slopos-rude-exit\n' >"$tmp/payload"
     printf 'something else\n' >"$tmp/other"
     cp "$tmp/base.img" "$tmp/home.img"
     debugfs -w -R "write \"$tmp/payload\" rude-exit" "$tmp/home.img" >/dev/null 2>&1

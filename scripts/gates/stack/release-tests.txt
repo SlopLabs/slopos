@@ -11,7 +11,7 @@
 #
 # No entry may exceed the 4096 B guard page.
 
-# Measured 2026-10-23: 16401 records, 2 frames over 2048 B.
+# Half the records the ELF carries.
 min-records 8200
 
 expect-test-registry many

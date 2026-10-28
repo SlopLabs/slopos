@@ -14,8 +14,8 @@ use slopos_ostd::lock_class;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_mm::mmio::MmioRegion;
 use slopos_ostd::KArc;
+use slopos_ostd::mm::IoMem;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 /// Gate for the LPSS I²C probe + touchpad bring-up. Disabled with the
@@ -41,11 +41,11 @@ pub struct I2cBus {
     pub bus: u8,
     pub device: u8,
     pub function: u8,
-    ctrl: DesignWareI2c<MmioRegion>,
+    ctrl: DesignWareI2c<IoMem>,
 }
 
 impl I2cBus {
-    pub fn new(bus: u8, device: u8, function: u8, ctrl: DesignWareI2c<MmioRegion>) -> Self {
+    pub fn new(bus: u8, device: u8, function: u8, ctrl: DesignWareI2c<IoMem>) -> Self {
         Self {
             bus,
             device,
@@ -102,13 +102,4 @@ pub fn bus_by_bdf(bus: u8, device: u8, function: u8) -> Option<KArc<I2cBus>> {
         }
     }
     None
-}
-
-/// Resolve an ACPI `_ADR` value (encoding `device << 16 | function`) on
-/// PCI bus 0 to a claimed controller — e.g. the touchpad's parent I²C
-/// device `\_SB.PC00.I2C1`, `_ADR = 0x00150001`.
-pub fn bus_by_acpi_adr(adr: u32) -> Option<KArc<I2cBus>> {
-    let device = ((adr >> 16) & 0xff) as u8;
-    let function = (adr & 0xff) as u8;
-    bus_by_bdf(0, device, function)
 }

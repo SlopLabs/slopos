@@ -109,7 +109,7 @@ impl ResourceKind {
     pub const fn refund(self) -> Refund {
         match self {
             // Neither kind has an on-object home for a linear token: a
-            // `Task`'s destruction is deferred to the graveyard, and ext2
+            // `Task`'s destruction is deferred to the graveyard, and ext4
             // records no owner for a block.
             ResourceKind::Task | ResourceKind::DiskBlocks => Refund::OnExitLatch,
             _ => Refund::OnDrop,
@@ -232,7 +232,7 @@ pub const fn default_process_limit(kind: ResourceKind) -> u32 {
         ResourceKind::CommitPages => NO_LIMIT_SENTINEL,
         // 256 MiB of blocks at 4 KiB, against a measured worst of 22989: the
         // linker writing the 94 MB tests kernel. Bounds a process's
-        // *outstanding* allocations, not its footprint: ext2 records
+        // *outstanding* allocations, not its footprint: ext4 records
         // no owner, so the charge is released when the process is retired and
         // a file it leaves behind costs a later one nothing.
         ResourceKind::DiskBlocks => 65536,

@@ -12,7 +12,7 @@ use slopos_ostd::klog_debug;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
 use super::packetbuf::PacketBuf;
-use super::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
+use super::timer::{self, TimerKind, TimerToken};
 use super::types::{DevIndex, Ipv4Addr, MacAddr, NetError};
 
 const MAX_ENTRIES: usize = 256;
@@ -152,7 +152,7 @@ impl NeighborCache {
         let mut inner = self.inner.lock();
         for entry in inner.entries.iter_mut() {
             if let Some(token) = entry.timer_token.take() {
-                NET_TIMER_WHEEL.cancel(token);
+                timer::wheel().cancel(token);
             }
         }
         inner.entries.clear();
@@ -177,7 +177,7 @@ impl NeighborCache {
             }
             let mut entry = inner.entries.remove(i);
             if let Some(token) = entry.timer_token.take() {
-                NET_TIMER_WHEEL.cancel(token);
+                timer::wheel().cancel(token);
             }
             if let NeighborState::Incomplete { pending, .. } = &mut entry.state {
                 while let Some(pkt) = pending.pop() {
@@ -200,7 +200,7 @@ impl NeighborCache {
             .position(|e| e.dev == dev && e.ip == ip)?;
         let mut entry = inner.entries.remove(pos);
         if let Some(token) = entry.timer_token.take() {
-            NET_TIMER_WHEEL.cancel(token);
+            timer::wheel().cancel(token);
         }
         let mut orphans = KVec::new();
         if let NeighborState::Incomplete { pending, .. } = &mut entry.state {
@@ -343,7 +343,7 @@ impl NeighborCache {
             Self::evict_one(&mut inner);
         }
 
-        let token = NET_TIMER_WHEEL.schedule(REACHABLE_TIME_MS, TimerKind::ArpExpire, entry_id);
+        let token = timer::wheel().schedule(REACHABLE_TIME_MS, TimerKind::ArpExpire, entry_id);
 
         let _ = inner.entries.push(NeighborEntry {
             dev,
@@ -391,7 +391,7 @@ impl NeighborCache {
             .iter_mut()
             .find(|e| e.dev == dev && e.ip == ip)?;
         if let Some(token) = entry.timer_token.take() {
-            NET_TIMER_WHEEL.cancel(token);
+            timer::wheel().cancel(token);
         }
 
         let pending = if let NeighborState::Incomplete { pending, .. } = &mut entry.state {
@@ -415,7 +415,7 @@ impl NeighborCache {
         };
 
         let token =
-            NET_TIMER_WHEEL.schedule(REACHABLE_TIME_MS, TimerKind::ArpExpire, entry.entry_id);
+            timer::wheel().schedule(REACHABLE_TIME_MS, TimerKind::ArpExpire, entry.entry_id);
         entry.timer_token = Some(token);
 
         Some(if pending.is_empty() {
@@ -455,9 +455,9 @@ impl NeighborCache {
                     *last_used_ms = current_time_ms();
 
                     if let Some(token) = entry.timer_token.take() {
-                        NET_TIMER_WHEEL.cancel(token);
+                        timer::wheel().cancel(token);
                     }
-                    let token = NET_TIMER_WHEEL.schedule(
+                    let token = timer::wheel().schedule(
                         STALE_PROBE_TIME_MS,
                         TimerKind::ArpRetransmit,
                         entry.entry_id,
@@ -500,7 +500,7 @@ impl NeighborCache {
             }
 
             let token =
-                NET_TIMER_WHEEL.schedule(RETRANSMIT_TIME_MS, TimerKind::ArpRetransmit, entry_id);
+                timer::wheel().schedule(RETRANSMIT_TIME_MS, TimerKind::ArpRetransmit, entry_id);
 
             let mut pending = KVec::with_capacity(MAX_PENDING_PKTS).expect("neighbor: alloc");
             let _ = pending.push(pkt);
@@ -565,7 +565,7 @@ impl NeighborCache {
                     let ip = entry.ip;
                     let retry_count = *retries;
 
-                    let token = NET_TIMER_WHEEL.schedule(
+                    let token = timer::wheel().schedule(
                         RETRANSMIT_TIME_MS,
                         TimerKind::ArpRetransmit,
                         entry_id,
@@ -652,7 +652,7 @@ impl NeighborCache {
         if let Some(idx) = best_idx {
             let entry = inner.entries.swap_remove(idx);
             if let Some(token) = entry.timer_token {
-                NET_TIMER_WHEEL.cancel(token);
+                timer::wheel().cancel(token);
             }
             klog_debug!(
                 "neighbor: evicted entry {} ({}) on dev {}",

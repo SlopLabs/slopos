@@ -4,9 +4,9 @@
 
 use crate::TestResult;
 use crate::{fail, pass};
-use slopos_arch::cpu::control_regs::{read_cr4, xcr0_read, Cr4Flags, Osxsave, Xcr0Flags};
-use slopos_arch::cpu::cpuid::XsaveFeatures;
-use slopos_arch::cpu::xsave;
+use slopos_ostd::arch::x86_64::cpuid::XsaveFeatures;
+use slopos_ostd::cpu::x86_64::control_regs::{read_cr4, xcr0_read, Cr4Flags, Osxsave, Xcr0Flags};
+use slopos_ostd::cpu::x86_64::xsave;
 use slopos_ostd::KBox;
 
 /// 64-byte aligned XSAVE area large enough to cover up to AVX-512.
@@ -272,7 +272,7 @@ pub fn test_sse_multi_register_isolation() -> TestResult {
 }
 
 pub fn test_xsave_area_size_matches_cpuid() -> TestResult {
-    let cpuid_size = slopos_arch::cpu::cpuid::xsave_area_size();
+    let cpuid_size = slopos_ostd::arch::x86_64::cpuid::xsave_area_size();
     let runtime_size = xsave::area_size();
 
     if cpuid_size == 0 {

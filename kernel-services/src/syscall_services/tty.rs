@@ -1,8 +1,6 @@
 slopos_service_core::define_service! {
     tty => TtyServices {
         read_cooked(tty_index: slopos_abi::syscall::TtyIndex, buf: *mut u8, max: usize, nonblock: bool) -> Result<usize, slopos_abi::tty_error::TtyError>;
-        read_cooked_with_attach(tty_index: slopos_abi::syscall::TtyIndex, buf: *mut u8, max: usize, nonblock: bool, auto_attach: bool) -> Result<usize, slopos_abi::tty_error::TtyError>;
-        has_cooked_data(tty_index: slopos_abi::syscall::TtyIndex) -> bool;
         @no_wrapper set_termios(tty_index: slopos_abi::syscall::TtyIndex, t: &slopos_abi::syscall::UserTermios) -> Result<(), slopos_abi::tty_error::TtyError>;
         @no_wrapper set_termios_wait(tty_index: slopos_abi::syscall::TtyIndex, t: &slopos_abi::syscall::UserTermios) -> Result<(), slopos_abi::tty_error::TtyError>;
         @no_wrapper set_termios_flush(tty_index: slopos_abi::syscall::TtyIndex, t: &slopos_abi::syscall::UserTermios) -> Result<(), slopos_abi::tty_error::TtyError>;
@@ -11,8 +9,6 @@ slopos_service_core::define_service! {
         get_ldisc(tty_index: slopos_abi::syscall::TtyIndex) -> Result<u32, slopos_abi::tty_error::TtyError>;
         get_winsize(tty_index: slopos_abi::syscall::TtyIndex) -> Result<slopos_abi::syscall::UserWinsize, slopos_abi::tty_error::TtyError>;
         @no_wrapper set_winsize(tty_index: slopos_abi::syscall::TtyIndex, ws: &slopos_abi::syscall::UserWinsize) -> Result<(), slopos_abi::tty_error::TtyError>;
-        set_compositor_focus(target: u32) -> Result<(), slopos_abi::tty_error::TtyError>;
-        get_compositor_focus() -> Result<u32, slopos_abi::tty_error::TtyError>;
         switch_active_tty(tty_index: slopos_abi::syscall::TtyIndex) -> Result<(), slopos_abi::tty_error::TtyError>;
         set_foreground_pgrp(tty_index: slopos_abi::syscall::TtyIndex, pgid: u32) -> Result<(), slopos_abi::tty_error::TtyError>;
         get_foreground_pgrp(tty_index: slopos_abi::syscall::TtyIndex) -> Result<u32, slopos_abi::tty_error::TtyError>;
@@ -28,7 +24,6 @@ slopos_service_core::define_service! {
         is_hung_up(tty_index: slopos_abi::syscall::TtyIndex) -> bool;
         alloc_pty(account: slopos_ostd::process::AccountId, owner: (u32, u32)) -> Result<(slopos_abi::syscall::TtyIndex, slopos_ostd::KArc<dyn slopos_ostd::process::quota::FileBacking>), slopos_abi::tty_error::TtyError>;
         grantpt(tty_index: slopos_abi::syscall::TtyIndex) -> Result<(), slopos_abi::tty_error::TtyError>;
-        ptsname(tty_index: slopos_abi::syscall::TtyIndex, buf: *mut u8, buflen: usize) -> i32;
         get_pty_number(tty_index: slopos_abi::syscall::TtyIndex) -> Result<u32, slopos_abi::tty_error::TtyError>;
         is_pty_slave(tty_index: slopos_abi::syscall::TtyIndex) -> bool;
         pty_slave_owner(tty_index: slopos_abi::syscall::TtyIndex) -> Option<(u32, u32)>;

@@ -17,14 +17,12 @@
 //! themselves, and give the claim back to the boot step that follows.
 //!
 //! `slopos_fs::tests::fsperf` sorts after `slopos_fs::tests` and the registry
-//! runs in `(module, name)` order, so `test_ext2_aaa_init` has brought the VFS
+//! runs in `(module, name)` order, so `test_ext4_aaa_init` has brought the VFS
 //! up before either of these.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use slopos_abi::fs::{
-    FS_TYPE_DIRECTORY, FS_TYPE_FILE, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY, UserFsEntry,
-};
+use slopos_abi::fs::{O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY};
 use slopos_abi::io::{IO_FILE_BATCH_SIZE, KernelIoBuf, KernelIoBufRef};
 use slopos_kernel_services::clock::monotonic_ns;
 use slopos_ostd::{KBox, KVec, klog_info};
@@ -37,10 +35,12 @@ use crate::fileio::{
 };
 use crate::vfs::path::RESOLVE_FOLLOW;
 use crate::vfs::{
-    ListCursor, MOUNT_RDONLY, VfsError, VfsResult, mount, vfs_claim_block_device,
-    vfs_ext2_mount_named, vfs_ext2_pool_claim, vfs_ext2_pool_release, vfs_ext2_unmount_named,
-    vfs_list_from, vfs_mkdir, vfs_rmdir, vfs_stat, vfs_unlink,
+    FileType, MOUNT_RDONLY, VfsError, VfsResult, mount, vfs_claim_block_device,
+    vfs_ext4_mount_named, vfs_ext4_pool_claim, vfs_ext4_pool_release, vfs_ext4_unmount_named,
+    vfs_mkdir, vfs_rmdir, vfs_stat, vfs_unlink,
 };
+
+use super::listing::list_dir_from;
 
 /// Bytes each half of the report moves — the same count in both, or their
 /// quotient means nothing.
@@ -55,7 +55,7 @@ const PERF_CHUNK: usize = IO_FILE_BATCH_SIZE;
 /// namespace's two ends; nothing else there outlives the test that wrote it.
 const RAW_OFFSET: u64 = 5 * 1024 * 1024;
 
-/// The ext2 image this boot came from: a real filesystem on a real device,
+/// The ext4 image this boot came from: a real filesystem on a real device,
 /// which is what the report is about. The raw rate beside it is taken on the
 /// same controller.
 const PERF_DEVICE: &[u8] = b"nvme0n1";
@@ -64,12 +64,11 @@ const PERF_PATH: &[u8] = b"/fsperfroot/fsperf.dat";
 const RAW_DEVICE: &[u8] = b"nvme0n2";
 
 /// Transactions per MiB this write is allowed. Staging 4 KiB per filesystem
-/// call — the shape this replaced — is 256 of them; one 256 KiB batch per
-/// transaction is 4.
+/// call would be 256 of them; one 256 KiB batch per transaction is 4.
 const MAX_TXNS_PER_MIB: u64 = 32;
 
-/// Names the capacity report puts in one directory: past the point where the
-/// first-fit insert it replaced was quadratic.
+/// Names the capacity report puts in one directory: past the point where a
+/// first-fit insert turns quadratic.
 const CAP_DIRENTS: u32 = 4000;
 const CAP_BYTES: usize = 4 * 1024 * 1024;
 /// Found by the label `_fs-image-capacity` gives it, the spelling no
@@ -96,11 +95,6 @@ const CAP_VERIFY_BYTES: usize = 128;
 const WALK_MAX_DIRS: usize = 4096;
 const WALK_PATH_MAX: usize = 128;
 const WALK_PENDING_RESERVE: usize = 256;
-
-/// Entries one listing call answers. `UserFsEntry` is 272 bytes, so the page
-/// is heap-allocated; the count trades round trips against that allocation
-/// and bounds no directory, since the cursor pages the rest.
-const WALK_PAGE: usize = 32;
 
 /// Floors on what the walk must find: a staging step that silently produced
 /// nothing looks exactly like a tree that got cheap to walk. Under the repo's
@@ -216,7 +210,7 @@ fn emit_perf(
 }
 
 /// Counts what the measured mount carries, scoped to this one device because
-/// [`stats`] is process-global and the measured write wakes the ext2 flusher,
+/// [`stats`] is process-global and the measured write wakes the ext4 flusher,
 /// which syncs every bound instance inside the window. Transactions and
 /// commits stay global: no device handle sees them, and this is the only mount.
 struct CountedDevice {
@@ -291,37 +285,37 @@ impl BlockDevice for CountedDevice {
     }
 }
 
-/// What [`vfs_ext2_mount_named`] does for `PERF_DEVICE`, with the claimed
+/// What [`vfs_ext4_mount_named`] does for `PERF_DEVICE`, with the claimed
 /// handle wrapped in a [`CountedDevice`] before the instance takes it.
 #[inline(never)]
 fn perf_mount() -> VfsResult<()> {
     // The pool slot before the device: taking a slot is what sweeps a retired
     // instance, and a retired instance still holds the claim on its device.
-    let fs = vfs_ext2_pool_claim().ok_or(VfsError::NoSpace)?;
+    let fs = vfs_ext4_pool_claim().ok_or(VfsError::NoSpace)?;
     let device = match vfs_claim_block_device(PERF_DEVICE) {
         Ok(device) => device,
         Err(e) => {
-            vfs_ext2_pool_release(fs, false);
+            vfs_ext4_pool_release(fs, false);
             return Err(e);
         }
     };
     let counted = match KBox::try_new(CountedDevice { inner: device }) {
         Ok(counted) => counted,
         Err(_) => {
-            vfs_ext2_pool_release(fs, false);
+            vfs_ext4_pool_release(fs, false);
             return Err(VfsError::IoError);
         }
     };
     let info = match fs.attach(counted, false) {
         Ok(info) => info,
         Err(e) => {
-            vfs_ext2_pool_release(fs, false);
+            vfs_ext4_pool_release(fs, false);
             return Err(e);
         }
     };
     let flags = if info.read_only { MOUNT_RDONLY } else { 0 };
     if let Err(e) = mount(PERF_MOUNT, fs, flags) {
-        vfs_ext2_pool_release(fs, false);
+        vfs_ext4_pool_release(fs, false);
         return Err(e);
     }
     Ok(())
@@ -331,16 +325,16 @@ fn perf_mount() -> VfsResult<()> {
 /// bytes cost at the device underneath it.
 pub fn test_fsperf_capacity_write_cost() -> TestResult {
     if !ensure_dir(PERF_MOUNT) {
-        return fail!("could not create the mount point for the ext2 image");
+        return fail!("could not create the mount point for the ext4 image");
     }
     if let Err(e) = perf_mount() {
-        return fail!("could not mount the ext2 image on disk0: {:?}", e);
+        return fail!("could not mount the ext4 image on disk0: {:?}", e);
     }
     let outcome = perf_body();
-    if let Err(e) = vfs_ext2_unmount_named(PERF_MOUNT) {
+    if let Err(e) = vfs_ext4_unmount_named(PERF_MOUNT) {
         // The boot's own `fs init` step claims disk0 after the tests; a claim
         // this test kept would take the machine's root filesystem with it.
-        return fail!("could not unmount the ext2 image: {:?}", e);
+        return fail!("could not unmount the ext4 image: {:?}", e);
     }
     let _ = vfs_rmdir(PERF_MOUNT);
     outcome
@@ -382,7 +376,7 @@ fn perf_body() -> TestResult {
     let removed = vfs_unlink(PERF_PATH);
 
     if wrote != PERF_BYTES as isize {
-        return fail!("writing {} bytes to ext2 returned {}", PERF_BYTES, wrote);
+        return fail!("writing {} bytes to ext4 returned {}", PERF_BYTES, wrote);
     }
     if let Err(e) = removed {
         return fail!("could not remove the measurement file: {:?}", e);
@@ -412,7 +406,7 @@ fn perf_body() -> TestResult {
     if per_mib > MAX_TXNS_PER_MIB {
         return fail!(
             "{} transactions for {} bytes is {} per MiB, above the {} a batched write must stay \
-             under (one per 4 KiB, which this replaced, would be 256)",
+             under (one per 4 KiB would be 256)",
             counters.transactions,
             PERF_BYTES,
             per_mib,
@@ -473,7 +467,7 @@ fn cap_geometry(name: &[u8]) -> Option<(u64, u32, u32, usize)> {
         geometry.blocks_count() as u64,
         geometry.block_size(),
         geometry.groups_count(),
-        crate::ext2_vfs::mount_cache_entries(
+        crate::ext4_vfs::mount_cache_entries(
             geometry.blocks_count() as u64,
             geometry.blocks_per_group(),
         ),
@@ -531,15 +525,6 @@ impl WalkDir {
     };
 }
 
-fn walk_entry_name(entry: &UserFsEntry) -> &[u8] {
-    let end = entry
-        .name
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(entry.name.len());
-    &entry.name[..end]
-}
-
 /// Put `<dir>/<name>` on the work list. Its own frame: the slot is 130 bytes,
 /// which the walk's frame must not carry on top of its path buffer.
 #[inline(never)]
@@ -568,8 +553,6 @@ fn walk_push(work: &mut KVec<WalkDir>, dir: &[u8], name: &[u8]) -> Result<(), &'
 fn cap_walk() -> Result<(u64, u64, usize), &'static str> {
     let mut work = KVec::<WalkDir>::with_capacity(WALK_PENDING_RESERVE)
         .map_err(|_| "the walk's work list did not fit in the heap")?;
-    let mut entries = KVec::filled(UserFsEntry::new(), WALK_PAGE)
-        .map_err(|_| "the listing page did not fit in the heap")?;
     let mut path = [0u8; WALK_PATH_MAX];
     let mut files = 0u64;
     let mut bytes = 0u64;
@@ -598,23 +581,26 @@ fn cap_walk() -> Result<(u64, u64, usize), &'static str> {
             return Err("the staged tree has more directories than the walk's budget");
         }
 
-        let mut cursor = ListCursor::start();
-        while !cursor.is_end() {
-            let n = vfs_list_from(&path[..dlen], entries.as_mut_slice(), &mut cursor)
+        let mut cookie = Some(0);
+        while let Some(from) = cookie {
+            let (fs, entries, next) = list_dir_from(&path[..dlen], from)
                 .map_err(|_| "listing a directory of the staged tree failed")?;
-            if n == 0 {
-                break;
-            }
-            for entry in entries.as_slice().iter().take(n) {
-                let name = walk_entry_name(entry);
+            cookie = next;
+            for entry in entries.iter() {
+                let name = entry.name();
                 if name.is_empty() || name == b"." || name == b".." {
                     continue;
                 }
-                if entry.type_ == FS_TYPE_DIRECTORY {
-                    walk_push(&mut work, &path[..dlen], name)?;
-                } else if entry.type_ == FS_TYPE_FILE {
-                    files += 1;
-                    bytes = bytes.saturating_add(entry.size);
+                match entry.file_type {
+                    FileType::Directory => walk_push(&mut work, &path[..dlen], name)?,
+                    FileType::Regular => {
+                        let stat = fs
+                            .stat(entry.inode)
+                            .map_err(|_| "a file of the staged tree did not stat")?;
+                        files += 1;
+                        bytes = bytes.saturating_add(stat.size);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -670,7 +656,7 @@ fn cap_verify(table: FdTable) -> Result<u64, &'static str> {
         let Ok(found) = vfs_stat(&path[..len]) else {
             return Err(
                 "a file staged at the root of the repo subtree is missing — rebuild the volume: \
-                 rm -f fs/assets/ext2-capacity.img fs/assets/ext2-capacity.img.stamp",
+                 rm -f fs/assets/ext4-capacity.img fs/assets/ext4-capacity.img.stamp",
             );
         };
         let want = (found.size as usize).min(CAP_VERIFY_BYTES);
@@ -743,7 +729,7 @@ pub fn test_fsperf_capacity_volume() -> TestResult {
         .map(|len| &name[..len])
     else {
         klog_info!(
-            "FSPERF: no ext2 capacity volume attached — skipping the capacity report \
+            "FSPERF: no ext4 capacity volume attached — skipping the capacity report \
              (attach one with `just test-capacity`)"
         );
         return TestResult::Pass;
@@ -759,7 +745,7 @@ pub fn test_fsperf_capacity_volume() -> TestResult {
     // volume, and reads are deterministic where wall time is not.
     stats::reset();
     let start = monotonic_ns();
-    let mounted = vfs_ext2_mount_named(name, CAP_MOUNT, false);
+    let mounted = vfs_ext4_mount_named(name, CAP_MOUNT, false);
     let mountns = monotonic_ns().saturating_sub(start);
     let mountreads = stats::snapshot().read_requests;
     if let Err(e) = mounted {
@@ -767,7 +753,7 @@ pub fn test_fsperf_capacity_volume() -> TestResult {
     }
 
     let outcome = cap_body(blocks, blocksize, groups, entries, mountreads, mountns);
-    if let Err(e) = vfs_ext2_unmount_named(CAP_MOUNT) {
+    if let Err(e) = vfs_ext4_unmount_named(CAP_MOUNT) {
         return fail!("unmounting the capacity volume failed: {:?}", e);
     }
     let _ = vfs_rmdir(CAP_MOUNT);

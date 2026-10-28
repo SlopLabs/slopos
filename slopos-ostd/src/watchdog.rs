@@ -344,7 +344,7 @@ pub fn tick() {
     if !is_enabled() {
         return;
     }
-    check_neighbour(pcr::get_current_cpu());
+    check_neighbour(pcr::current_cpu_id());
 }
 
 fn eligible(cpu: usize) -> bool {
@@ -480,7 +480,7 @@ fn report_stalled_cpu(me: usize, target: usize, stale: u32) {
 /// hook takes a lock of its own, and it is the outer wait that describes why
 /// this CPU is stuck.
 pub fn begin_wait(lock_addr: u64) -> bool {
-    let Some(slot) = SLOTS.get(pcr::get_current_cpu()) else {
+    let Some(slot) = SLOTS.get(pcr::current_cpu_id()) else {
         return false;
     };
     let seq = slot.wait_seq.load(Ordering::Relaxed);
@@ -496,7 +496,7 @@ pub fn begin_wait(lock_addr: u64) -> bool {
 /// Republish which CPU holds the lock this one is waiting for. Called as
 /// the spin progresses, because the holder changes as the queue drains.
 pub fn publish_wait_holder(holder: Option<usize>) {
-    let Some(slot) = SLOTS.get(pcr::get_current_cpu()) else {
+    let Some(slot) = SLOTS.get(pcr::current_cpu_id()) else {
         return;
     };
     let next = holder.map_or(NO_CPU, |cpu| cpu as u32);
@@ -514,7 +514,7 @@ pub fn publish_wait_holder(holder: Option<usize>) {
 }
 
 pub fn end_wait() {
-    if let Some(slot) = SLOTS.get(pcr::get_current_cpu()) {
+    if let Some(slot) = SLOTS.get(pcr::current_cpu_id()) {
         slot.blocked_on.store(NO_CPU, Ordering::Relaxed);
         slot.waiting_on.store(0, Ordering::Relaxed);
         let seq = slot.wait_seq.load(Ordering::Relaxed);

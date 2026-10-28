@@ -2,10 +2,11 @@ use slopos_abi::addr::PhysAddr;
 use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 
-use crate::mmio::{MmioRegion, MmioRegionExt};
+use crate::mmio;
+use slopos_ostd::mm::IoMem;
 
 pub fn test_mmio_empty_region_state() -> TestResult {
-    let region = MmioRegion::empty();
+    let region = IoMem::empty();
 
     if region.is_mapped() {
         klog_info!("MMIO_TEST: Empty region should not be mapped");
@@ -31,7 +32,7 @@ pub fn test_mmio_empty_region_state() -> TestResult {
 }
 
 pub fn test_mmio_is_valid_offset_overflow() -> TestResult {
-    let region = MmioRegion::empty();
+    let region = IoMem::empty();
 
     if region.is_valid_offset(usize::MAX, 1) {
         klog_info!("MMIO_TEST: usize::MAX offset should be invalid");
@@ -57,7 +58,7 @@ pub fn test_mmio_is_valid_offset_overflow() -> TestResult {
 }
 
 pub fn test_mmio_sub_region_overflow() -> TestResult {
-    let region = MmioRegion::empty();
+    let region = IoMem::empty();
 
     if region.sub_region(usize::MAX, 1).is_some() {
         klog_info!("MMIO_TEST: sub_region with overflow should return None");
@@ -78,7 +79,7 @@ pub fn test_mmio_sub_region_overflow() -> TestResult {
 }
 
 pub fn test_mmio_empty_region_invalid_reads() -> TestResult {
-    let region = MmioRegion::empty();
+    let region = IoMem::empty();
 
     let would_be_oob = !region.is_valid_offset(0, 4);
     if !would_be_oob {
@@ -90,7 +91,7 @@ pub fn test_mmio_empty_region_invalid_reads() -> TestResult {
 }
 
 pub fn test_mmio_map_zero_size() -> TestResult {
-    let result = MmioRegion::map(PhysAddr::new(0x1000), 0);
+    let result = mmio::map_uncached(PhysAddr::new(0x1000), 0);
     if result.is_some() {
         klog_info!("MMIO_TEST: Mapping zero size should fail");
         return TestResult::Fail;
@@ -100,7 +101,7 @@ pub fn test_mmio_map_zero_size() -> TestResult {
 }
 
 pub fn test_mmio_map_null_addr() -> TestResult {
-    let result = MmioRegion::map(PhysAddr::NULL, 0x1000);
+    let result = mmio::map_uncached(PhysAddr::NULL, 0x1000);
     if result.is_some() {
         klog_info!("MMIO_TEST: Mapping null address should fail");
         return TestResult::Fail;
@@ -110,7 +111,7 @@ pub fn test_mmio_map_null_addr() -> TestResult {
 }
 
 pub fn test_mmio_map_large_size() -> TestResult {
-    let result = MmioRegion::map(PhysAddr::new(0x1000), usize::MAX);
+    let result = mmio::map_uncached(PhysAddr::new(0x1000), usize::MAX);
 
     if result.is_some() {
         klog_info!("MMIO_TEST: Mapping with huge size should fail");
@@ -122,7 +123,7 @@ pub fn test_mmio_map_large_size() -> TestResult {
 
 pub fn test_mmio_map_near_phys_limit() -> TestResult {
     let near_max = PhysAddr::MAX.as_u64() - 0x1000;
-    let result = MmioRegion::map(PhysAddr::new(near_max), 0x3000);
+    let result = mmio::map_uncached(PhysAddr::new(near_max), 0x3000);
 
     if result.is_some() {
         klog_info!("MMIO_TEST: Mapping near PhysAddr::MAX should fail gracefully");

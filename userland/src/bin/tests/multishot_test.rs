@@ -1,16 +1,16 @@
-//! SlopRing multishot (ABI v2) end-to-end test.
+//! SlopRing multishot end-to-end test.
 //!
 //! Driven by `poll_add_multishot` over a pipe: each readiness transition
 //! (not-ready → ready) drives one `MultishotStream` item, with edge-tracking
-//! suppressing the level flood (SLOPRING §1.2).
+//! suppressing the level flood.
 //!
 //! `accept_multishot` is driven over a real loopback TCP connection.
 
 use slopos_abi::net::{AF_INET, SOCK_STREAM, SockAddrIn};
 use slopos_abi::syscall::POLLIN;
+use slopos_rt::{Ring, slopfut};
 use slopos_slibc::test_harness::note;
 use slopos_userland as _;
-use slopos_userland::ring::{Ring, slopfut};
 use slopos_userland::syscall::{fs, net};
 
 /// write → ready, drain → not-ready, write → ready: two writes yield exactly

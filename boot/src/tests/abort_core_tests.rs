@@ -14,8 +14,8 @@ use crate::ist_stacks::{
 };
 
 pub fn test_emergency_stacks_primed() -> TestResult {
-    let safe_sp = slopos_arch::pcr::local_panic_safe_sp();
-    let data_sp = slopos_arch::pcr::local_panic_unsafe_sp();
+    let safe_sp = slopos_ostd::cpu::x86_64::pcr::local_panic_safe_sp();
+    let data_sp = slopos_ostd::cpu::x86_64::pcr::local_panic_unsafe_sp();
     let (sg, su, st) = emergency_safe_bounds_current_cpu();
     let (dg, du, dt) = emergency_dstack_bounds_current_cpu();
 

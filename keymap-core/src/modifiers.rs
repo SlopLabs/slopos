@@ -114,10 +114,6 @@ impl ModTracker {
     pub fn num_lock(&self) -> bool {
         self.num
     }
-    #[inline]
-    pub fn scroll_lock(&self) -> bool {
-        self.scroll
-    }
 
     /// Modifier view for the keymap layer.
     pub fn mods(&self) -> Mods {

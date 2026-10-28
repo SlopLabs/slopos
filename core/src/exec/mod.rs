@@ -6,7 +6,7 @@ pub mod tests;
 #[cfg(feature = "test-hooks")]
 pub mod utest;
 
-use core::ffi::{c_char, c_int};
+use core::ffi::c_int;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 use slopos_fs::fileio::FdTable;
@@ -66,10 +66,9 @@ pub const EXEC_MAX_ELF_SIZE: usize = 512 * 1024 * 1024;
 /// Bytes per `FileSystem::read` while staging an ELF.
 ///
 /// One block per call costs a mount-lock acquisition and a device round trip
-/// each: on ext2 the read runs under `CACHED_EXT2`, so a 712 KiB shell took 178
-/// acquisitions of a lock every path walk on that mount waits behind. Bounded
-/// rather than the whole file, so how long one `exec` may hold that lock stays
-/// a stated number.
+/// each: on ext4 the read runs under the mount's `EXT4_POOL_n` lock, which
+/// every path walk on that mount waits behind. Bounded rather than the whole
+/// file, so how long one `exec` may hold that lock stays a stated number.
 pub const EXEC_READ_CHUNK: usize = 64 * 1024;
 
 pub const INIT_PATH: &[u8] = b"/sbin/init";
@@ -127,10 +126,8 @@ pub enum FdAction {
     Close {
         target_fd: i32,
     },
-    // `Open` is retired: it opened an arbitrary VFS path into the child with
-    // no reference to what the parent held, which is endowment by *name* and
-    // voids this list as an attenuating channel. Open-then-transfer is the
-    // replacement and cannot exceed the spawner's own authority.
+    // No action opens a path: that would endow the child by *name*. The spawner
+    // opens and transfers, which cannot exceed its own authority.
 }
 
 fn trim_nul_bytes(bytes: &[u8]) -> &[u8] {
@@ -468,7 +465,7 @@ pub fn spawn_program_with_cwd(
         // Unregistered and singly owned until `task_commit`, so no lookup,
         // walk or other CPU can observe the field writes below.
         let Some(pending) = task_build_in(
-            task_name.as_ptr() as *const c_char,
+            &task_name,
             user_code_entry,
             ptr::null_mut(),
             priority.as_u8(),
@@ -569,8 +566,6 @@ pub fn spawn_program_with_cwd(
         let Some((fg_handoff, displaced_group)) = spawn.with_child(|child| {
             slopos_ostd::task::ops::task_set_caps(child, endowed.caps);
             child.entry_point = entry;
-            child.context.get_mut().rip = entry;
-            child.context.get_mut().rsp = stack_ptr;
             child.set_fs_base(tls_tp);
             child.set_nice(nice);
 
@@ -634,7 +629,7 @@ pub fn spawn_program_with_cwd(
 
         // `publish_new_task`'s Release status store is what makes every write
         // above visible to the CPU that runs this task.
-        if publish_new_task(&registered) != 0 {
+        if !publish_new_task(&registered) {
             task_terminate(task_id);
             return Err(Errno::ENOMEM);
         }
@@ -827,7 +822,7 @@ fn exec_image(
     let vm_process = table.process().ok_or(Errno::ENOMEM)?;
     let (exec_info, admitted, standing) = load_image(program, vm_process, entry_out, who, reexec)?;
 
-    if process_vm_reset_stack(vm_process) != 0 {
+    if !process_vm_reset_stack(vm_process) {
         return Err(Errno::ENOMEM);
     }
     process_vm_end_prepay(vm_process);
@@ -982,7 +977,7 @@ fn load_image(
     } else {
         process_vm_reset_for_exec(process)
     };
-    if reset != 0 {
+    if !reset {
         return Err(Errno::ENOMEM);
     }
     let standing = Standing(reexec.then_some(process));

@@ -18,8 +18,13 @@ pub use connection::Connection;
 pub use server::Server;
 pub use types::*;
 
-/// Where the compositor of `uid`'s session listens: in the session's runtime
-/// directory, which init makes for it alone.
-pub fn socket_path(uid: u32) -> alloc::vec::Vec<u8> {
-    alloc::format!("/run/user/{uid}/compositor").into_bytes()
+/// Where the session's compositor listens: `compositor` in
+/// `$XDG_RUNTIME_DIR`, which init sets, or in `/run/user/<euid>` when it is
+/// unset or not absolute.
+pub fn socket_path() -> alloc::vec::Vec<u8> {
+    let mut path = slopos_cabi::getenv(c"XDG_RUNTIME_DIR", <[u8]>::to_vec)
+        .filter(|dir| dir.first() == Some(&b'/'))
+        .unwrap_or_else(|| alloc::format!("/run/user/{}", slopos_cabi::geteuid()).into_bytes());
+    path.extend_from_slice(b"/compositor");
+    path
 }

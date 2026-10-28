@@ -9,8 +9,8 @@
 //! flip — so the primary's shrink must latch before the cursor claims the
 //! reclaimed tail.
 
-use slopos_mm::mmio::MmioRegion;
 use slopos_ostd::klog_info;
+use slopos_ostd::mm::IoMem;
 
 use super::pipe;
 use super::plane::PlaneProgram;
@@ -21,7 +21,7 @@ use crate::xe_logic::regs::{self, Pipe};
 /// too small to carve [`CURSOR_DDB_BLOCKS`] off its tail — the caller then keeps
 /// the cursor disabled (a software cursor) rather than risk corrupting scanout.
 pub fn program_cursor_ddb(
-    mmio: &MmioRegion,
+    mmio: &IoMem,
     pipe: Pipe,
     program: &PlaneProgram,
     surf_ggtt: u32,

@@ -1,7 +1,7 @@
 //! Token colours: One Dark's, which read as an editor's to anyone who has used
 //! one.
 
-use slopos_abi::draw::Color32;
+use slopos_appkit::Color32;
 use slopos_editor_core::syntax::TokenKind;
 
 pub const KEYWORD: Color32 = Color32::rgb(0xb4, 0x77, 0xcf);

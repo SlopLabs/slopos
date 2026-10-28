@@ -135,54 +135,47 @@ impl UdpDemuxBucket {
     }
 }
 
-// TODO(tech-debt): a shim — locking `UDP_DEMUX` guards nothing, every method
-// takes the real per-bucket lock; callers should address the buckets directly.
-pub struct UdpDemuxTable;
-
-impl UdpDemuxTable {
-    pub const fn new() -> Self {
-        Self
-    }
+/// The socket demultiplexer: `(local address, local port)` to socket index,
+/// hashed by port into buckets that each carry their own lock.
+pub mod demux {
+    use super::{UDP_DEMUX_BUCKETS_TABLE, udp_demux_hash};
+    use crate::types::{Ipv4Addr, NetError, Port};
 
     pub fn register(
-        &mut self,
         local_ip: Ipv4Addr,
         local_port: Port,
         sock_idx: u32,
         reuse_addr: bool,
     ) -> Result<(), NetError> {
-        let idx = udp_demux_hash(local_port);
-        UDP_DEMUX_BUCKETS_TABLE[idx]
+        UDP_DEMUX_BUCKETS_TABLE[udp_demux_hash(local_port)]
             .lock()
             .register(local_ip, local_port, sock_idx, reuse_addr)
     }
 
-    pub fn unregister(&mut self, local_ip: Ipv4Addr, local_port: Port, sock_idx: u32) {
-        let idx = udp_demux_hash(local_port);
-        UDP_DEMUX_BUCKETS_TABLE[idx]
+    pub fn unregister(local_ip: Ipv4Addr, local_port: Port, sock_idx: u32) {
+        UDP_DEMUX_BUCKETS_TABLE[udp_demux_hash(local_port)]
             .lock()
             .unregister(local_ip, local_port, sock_idx);
     }
 
-    pub fn lookup(&self, dst_ip: Ipv4Addr, dst_port: Port) -> Option<u32> {
-        let [exact, wildcard] = self.candidates(dst_ip, dst_port);
+    pub fn lookup(dst_ip: Ipv4Addr, dst_port: Port) -> Option<u32> {
+        let [exact, wildcard] = candidates(dst_ip, dst_port);
         exact.or(wildcard)
     }
 
     /// The socket bound to exactly `dst_ip`, then the wildcard one, in the
     /// order a datagram is offered to them.
-    pub fn candidates(&self, dst_ip: Ipv4Addr, dst_port: Port) -> [Option<u32>; 2] {
-        let idx = udp_demux_hash(dst_port);
-        let bucket = UDP_DEMUX_BUCKETS_TABLE[idx].lock();
+    pub fn candidates(dst_ip: Ipv4Addr, dst_port: Port) -> [Option<u32>; 2] {
+        let bucket = UDP_DEMUX_BUCKETS_TABLE[udp_demux_hash(dst_port)].lock();
         [
             bucket.lookup_exact(dst_ip, dst_port),
             bucket.lookup_wildcard(dst_port),
         ]
     }
 
-    pub fn clear(&mut self) {
-        for bucket_mutex in UDP_DEMUX_BUCKETS_TABLE.iter() {
-            bucket_mutex.lock().clear();
+    pub fn clear() {
+        for bucket in UDP_DEMUX_BUCKETS_TABLE.iter() {
+            bucket.lock().clear();
         }
     }
 }
@@ -194,11 +187,6 @@ static UDP_DEMUX_BUCKETS_TABLE: [SpinLock<UdpDemuxBucket>; UDP_DEMUX_BUCKETS] = 
     );
     [BUCKET; UDP_DEMUX_BUCKETS]
 };
-
-pub static UDP_DEMUX: SpinLock<UdpDemuxTable> = SpinLock::new(
-    UdpDemuxTable::new(),
-    lock_class!("UDP_DEMUX", LOCK_LEVEL_REGISTRY),
-);
 
 pub(crate) fn parse_udp_header(payload: &[u8]) -> Option<(u16, u16, &[u8])> {
     if payload.len() < 8 {
@@ -221,7 +209,7 @@ pub(crate) fn parse_udp_header(payload: &[u8]) -> Option<(u16, u16, &[u8])> {
 /// must not take a network table lock.
 pub type UdpListener = fn(src_ip: [u8; 4], src_port: u16, payload: &[u8]);
 
-/// Ports the kernel itself listens on: separate from [`UDP_DEMUX`] and
+/// Ports the kernel itself listens on: separate from [`demux`] and
 /// consulted first, because these are not sockets — DHCP needs a listener on
 /// port 68 before there is anything for a socket to bind *to*.  Two entries
 /// cover the foreseeable need, so a fixed array beats a map.
@@ -287,9 +275,7 @@ pub fn handle_rx(src_ip: [u8; 4], dst_ip: [u8; 4], pkt: &PacketBuf) {
         return;
     }
 
-    let candidates = UDP_DEMUX
-        .lock()
-        .candidates(Ipv4Addr(dst_ip), Port(dst_port));
+    let candidates = demux::candidates(Ipv4Addr(dst_ip), Port(dst_port));
     for sock_idx in candidates.into_iter().flatten() {
         if super::socket::socket_deliver_udp(sock_idx, src_ip, src_port, udp_payload) {
             return;
@@ -389,13 +375,11 @@ pub fn udp_bind(
     local_port: Port,
     reuse_addr: bool,
 ) -> Result<(), NetError> {
-    UDP_DEMUX
-        .lock()
-        .register(local_ip, local_port, sock_idx, reuse_addr)
+    demux::register(local_ip, local_port, sock_idx, reuse_addr)
 }
 
 pub fn udp_unbind(sock_idx: u32, local_ip: Ipv4Addr, local_port: Port) {
-    UDP_DEMUX.lock().unregister(local_ip, local_port, sock_idx);
+    demux::unregister(local_ip, local_port, sock_idx);
 }
 
 /// `tos` is the IPv4 TOS byte: the sending socket's `IP_TOS`, zero for the
@@ -594,8 +578,4 @@ pub fn udp_sendto_zerocopy(
         Err(NetError::NoBufferSpace) => ZcSendOutcome::WouldBlock,
         Err(_) => ZcSendOutcome::NotEligible,
     }
-}
-
-pub fn udp_recvfrom() -> Result<(), NetError> {
-    Err(NetError::WouldBlock)
 }

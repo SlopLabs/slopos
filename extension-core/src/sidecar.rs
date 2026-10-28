@@ -1,6 +1,5 @@
 //! `<name>.meta`: what an extension's signer signs, the image's name,
-//! version and root, the SHA-256 of its tree's top block, so the signed
-//! object keeps its shape whatever form the image takes.
+//! version and root, the SHA-256 of its tree's top block.
 //!
 //! ```text
 //! name hello

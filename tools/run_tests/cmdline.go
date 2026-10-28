@@ -8,11 +8,6 @@ import (
 	"strings"
 )
 
-// DefaultBaseCmdline is the kernel cmdline baked into the test ISO. The
-// `mount=` names the labelled volume qemu_run.sh attaches in test mode.
-const DefaultBaseCmdline = "tests=on tests.shutdown=on tests.verbosity=summary " +
-	"boot.debug=on roulette=skip mount=LABEL=slopos-media:/media"
-
 // Args is the parsed CLI flag set after preprocessing + flag.Parse.
 type Args struct {
 	Filters     []string
@@ -101,8 +96,8 @@ func parseArgs(argv []string) (*Args, error) {
 	fs.BoolVar(&a.Quiet, "quiet", false, "Pass tests.verbosity=quiet; render only failures + summary.")
 	fs.BoolVar(&a.Raw, "raw", false, "Passthrough QEMU stdout; no rendering.")
 	fs.StringVar(&a.JsonPath, "json", "", "Append one JSON event per line to PATH.")
-	fs.StringVar(&a.ColorMode, "color", "auto", "Colour mode: auto|always|never.")
-	fs.BoolVar(&a.NoColor, "no-color", false, "Alias for --color=never.")
+	fs.StringVar(&a.ColorMode, "color", "auto", "Colour mode: auto|always.")
+	fs.BoolVar(&a.NoColor, "no-color", false, "Never colour the output.")
 	fs.IntVar(&a.TimeoutSecs, "timeout-secs", 900, "Wall-clock guard for the whole run; 0 disables.")
 	fs.IntVar(&a.SilenceSecs, "silence-secs", 120, "Abort if QEMU stdout is silent for this long; 0 disables.")
 	fs.IntVar(&a.WarnMs, "warn-ms", 500, "Mark tests slower than this as OVER_TIME.")
@@ -119,8 +114,11 @@ func parseArgs(argv []string) (*Args, error) {
 	a.Filters = filterEmpty(filters)
 	a.Skips = filterEmpty(skips)
 
-	if a.NoColor {
-		a.ColorMode = "never"
+	switch {
+	case a.ColorMode != "auto" && a.ColorMode != "always":
+		return nil, fmt.Errorf("--color takes auto or always, not %q", a.ColorMode)
+	case a.NoColor && a.ColorMode == "always":
+		return nil, fmt.Errorf("--color=always and --no-color are mutually exclusive")
 	}
 	if a.RerunFailed && len(a.Filters) > 0 {
 		return nil, fmt.Errorf("--rerun-failed and --filter are mutually exclusive")
@@ -151,8 +149,9 @@ func filterEmpty(in []string) []string {
 	return out
 }
 
-// assembleTestCmdline composes the kernel cmdline baked into the test ISO.
-// Verbosity is substituted in place: base already carries a `tests.verbosity=`.
+// assembleTestCmdline composes the kernel cmdline baked into the test ISO from
+// the justfile's `test_cmdline`. Verbosity is substituted in place: base
+// already carries a `tests.verbosity=`.
 func assembleTestCmdline(base string, filters, skips []string, verbosity, extra string) string {
 	parts := []string{base}
 	if len(filters) > 0 {

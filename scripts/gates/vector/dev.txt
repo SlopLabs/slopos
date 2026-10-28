@@ -10,8 +10,8 @@
 
 # Liveness floors. A wrong --section, a stripped ELF, a triple mismatch or a
 # disassembler that errors after its header all yield zero of each, and a
-# zero-hit count then reads as a clean kernel. Measured 2026-07-31: dev 31098
-# returns / 31472 symbols, tests 44585 / 44970, release 3856 / 4068.
+# zero-hit count then reads as a clean kernel. Dev and tests decode tens of
+# thousands of returns and symbols, release a few thousand.
 min-returns 20000
 min-symbols 20000
 

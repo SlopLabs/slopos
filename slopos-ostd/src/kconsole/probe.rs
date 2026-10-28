@@ -23,7 +23,7 @@ use crate::watchdog::{self, NmiDisposition};
 const ROUNDS_PER_MS: u32 = 20_000;
 
 pub fn fan_out(kc: &mut KConsole<'_>) {
-    let me = pcr::get_current_cpu();
+    let me = pcr::current_cpu_id();
     let count = pcr::get_cpu_count();
     let probe_ms = crate::kconsole::policy().probe_ms;
 

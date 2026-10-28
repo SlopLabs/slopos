@@ -140,7 +140,7 @@ impl CsprngState {
 static CSPRNG: OnceLock<SpinLock<CsprngState>> = OnceLock::new();
 
 /// Shared by both `call_once` closures: whichever wins the race installs this.
-const CSPRNG_CLASS: &slopos_ostd::sync::lock_tracking::LockClassKey =
+const CSPRNG_CLASS: &slopos_ostd::sync::LockClassKey =
     slopos_ostd::lock_class!("CSPRNG", LOCK_LEVEL_REGISTRY);
 
 /// Called once during boot; any later call is a no-op.
@@ -166,8 +166,8 @@ pub fn random_next() -> u64 {
 }
 
 fn emergency_seed() -> [u8; 32] {
-    use slopos_arch::cpu::rdrand;
-    use slopos_arch::tsc;
+    use slopos_ostd::arch::x86_64::tsc;
+    use slopos_ostd::cpu::x86_64::rdrand;
 
     let mut seed = [0u8; 32];
 

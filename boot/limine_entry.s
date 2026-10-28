@@ -17,7 +17,7 @@
 .equ KERNEL_STACK_SIZE, 524288
 
 # Offset of the `current_task` field inside the PCR.  Must match
-# `karch::pcr::offsets::CURRENT_TASK`.  The SafeStack naked
+# `slopos_ostd::cpu::x86_64::pcr::offsets::CURRENT_TASK`.  The SafeStack naked
 # `__safestack_pointer_address` fn loads `gs:[CURRENT_TASK]` to
 # discover the running task's `unsafe_stack_sp` slot; this trampoline
 # must preseed the field to the BSP bootstrap Task stub before any

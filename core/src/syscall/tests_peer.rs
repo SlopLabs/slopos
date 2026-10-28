@@ -16,9 +16,9 @@ use slopos_abi::syscall::{
 };
 use slopos_fs::fileio::fileio_get_handle_and_ops;
 use slopos_mm::user_copy::copy_from_user;
-use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::authority::CAP_UNIVERSAL;
 use slopos_ostd::process::Program;
+use slopos_ostd::user::ptr::UserPtr;
 use slopos_testing::{TestResult, assert_eq_test, assert_test, fail, pass};
 
 use crate::syscall::common::SyscallHandler;
@@ -32,7 +32,7 @@ use crate::syscall::tests_build_floor_fs::{
 };
 use crate::syscall::tests_cred::Principal;
 
-type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
+use slopos_sched::test_fixture::KernelTestScope;
 
 const USER: u32 = 1000;
 const OTHER: u32 = 2000;
@@ -214,7 +214,7 @@ fn readable(who: &Principal, fd: i64) -> bool {
 }
 
 pub fn test_socketpair_attests_its_creator_to_both_ends() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(user) = Principal::with_uids([USER, OTHER, USER], CAP_UNIVERSAL) else {
         return fail!("could not build the principal");
     };
@@ -278,7 +278,7 @@ slopos_testing::stest!(
 /// `socket` does here; none leaves a descriptor behind, so the next pair
 /// takes the very numbers the first did.
 pub fn test_socketpair_refuses_what_linux_refuses() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(user) = Principal::user(USER, CAP_UNIVERSAL) else {
         return fail!("could not build the principal");
     };
@@ -345,7 +345,7 @@ slopos_testing::stest!(
 pub fn test_peer_cred_is_captured_at_listen_and_connect() -> TestResult {
     use crate::syscall::cred_handlers::syscall_setresuid;
     const NAME: &[u8] = b"/tmp/peer-test-capture";
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let (Some(server), Some(client)) = (
         Principal::user(USER, CAP_UNIVERSAL),
         Principal::with_uids([OTHER, OTHER, THIRD], CAP_UNIVERSAL),
@@ -422,7 +422,7 @@ slopos_testing::stest!(
 /// What Linux answers for a socket with no peer, and what a short or negative
 /// length gets.
 pub fn test_peer_options_without_a_peer() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(user) = Principal::user(USER, CAP_UNIVERSAL) else {
         return fail!("could not build the principal");
     };
@@ -487,7 +487,7 @@ slopos_testing::stest!(name = test_peer_options_without_a_peer, suite = peer);
 /// is gone, and is still handed out after.
 pub fn test_peer_pidfd_names_the_peer_and_outlives_it() -> TestResult {
     const NAME: &[u8] = b"/tmp/peer-test-pidfd";
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(server) = Principal::user(USER, CAP_UNIVERSAL) else {
         return fail!("could not build the server");
     };
@@ -542,7 +542,7 @@ slopos_testing::stest!(
 /// Any process's leader may be opened, as on Linux; what is not one is not.
 pub fn test_pidfd_open_names_any_leader() -> TestResult {
     use crate::syscall::pidfd_handlers::syscall_pidfd_open;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let (Some(opener), Some(stranger)) = (
         Principal::user(USER, CAP_UNIVERSAL),
         Principal::user(OTHER, CAP_UNIVERSAL),
@@ -582,7 +582,7 @@ slopos_testing::stest!(name = test_pidfd_open_names_any_leader, suite = peer);
 /// memory that cannot run keeps it.
 pub fn test_executable_mappings_outside_the_base_forfeit_the_program() -> TestResult {
     const FILE: &[u8] = b"/tmp/peer_test_code";
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let _registry = PageSetRegistry::publish();
     let Some(user) = Principal::user(USER, CAP_UNIVERSAL) else {
         return fail!("could not build the principal");
@@ -717,7 +717,7 @@ slopos_testing::stest!(
 
 /// An exec with another thread alive attests nothing.
 pub fn test_an_exec_beside_another_thread_attests_nothing() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(user) = Principal::user(USER, CAP_UNIVERSAL) else {
         return fail!("could not build the principal");
     };
@@ -792,7 +792,7 @@ pub fn test_an_exec_failing_past_the_reset_forfeits_the_program() -> TestResult 
     use slopos_fs::vfs::Subject;
     const BROKEN: &[u8] = b"/tmp/peer_test_broken";
     const NOT_ELF: &[u8] = b"/tmp/peer_test_not_elf";
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(user) = Principal::user(USER, CAP_UNIVERSAL) else {
         return fail!("could not build the principal");
     };
@@ -970,7 +970,7 @@ pub fn test_exec_attests_an_activation_s_files_as_its_own() -> TestResult {
     use crate::exec::resolve_exec;
     use slopos_fs::vfs::Subject;
     const OUTSIDE: &[u8] = b"/tmp/ext-outside";
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let shown = activate_extension(
         b"ext-exec",
         &[
@@ -1019,7 +1019,7 @@ slopos_testing::stest!(
 /// and the base's, and loses it, with what its sockets attest, mapping
 /// another activation's.
 pub fn test_code_of_another_activation_ends_an_extension_program() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let _registry = PageSetRegistry::publish();
     let page = [0xc3u8; 64];
     let root = activate_extension(
@@ -1100,7 +1100,7 @@ slopos_testing::stest!(
 /// itself keeps it, and an exit ends it.
 pub fn test_an_exec_or_an_exit_ends_what_a_socket_attests() -> TestResult {
     use slopos_ostd::process::{Cred, Identity, process_retire, process_spawn, root_account};
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let root = activate_extension(b"ext-life", &[("bin/tool", TOOL, b"\x7fELF tool")]);
     let tool = file_program(b"/opt/ext-life/bin/tool");
     let outcome = (|| {
@@ -1183,7 +1183,7 @@ slopos_testing::stest!(
 /// anything is read.
 pub fn test_an_extension_of_no_file_is_refused() -> TestResult {
     use crate::syscall::fs::syscall_ext_activate;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(holder) = Principal::user(0, slopos_ostd::authority::CAP_MASK_ALL) else {
         return fail!("could not build the principal");
     };

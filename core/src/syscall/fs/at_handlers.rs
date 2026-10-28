@@ -16,7 +16,7 @@ use slopos_fs::fileio::{
 };
 
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
-use slopos_mm::user_ptr::UserPtr as MmUserPtr;
+use slopos_ostd::user::ptr::UserPtr as OstdUserPtr;
 
 use crate::syscall::args::{UserBytes, UserPath, UserPtr};
 use crate::syscall::common::{USER_PATH_MAX, errno_from_neg};
@@ -93,7 +93,7 @@ pub(crate) fn stat_at_into_user(
     path: &[u8],
     cwd: &[u8],
     at_flags: u32,
-    out: MmUserPtr<UserFsStat>,
+    out: OstdUserPtr<UserFsStat>,
     who: &Subject,
 ) -> Result<(), Errno> {
     let mut stat = UserFsStat::default();
@@ -107,7 +107,7 @@ pub(crate) fn stat_at_into_user(
 
 /// Own frame, as [`stat_at_into_user`].
 #[inline(never)]
-fn fstat_fd_into_user(table: FdTable, fd: i32, out: MmUserPtr<UserFsStat>) -> Result<(), Errno> {
+fn fstat_fd_into_user(table: FdTable, fd: i32, out: OstdUserPtr<UserFsStat>) -> Result<(), Errno> {
     let mut stat = UserFsStat::default();
     let rc = file_fstat_fd(table, fd, &mut stat);
     if rc != 0 {

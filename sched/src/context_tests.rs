@@ -1,21 +1,16 @@
 //! Context switch and task lifecycle edge case tests.
 
-use core::ffi::c_char;
 use core::ptr;
-use core::sync::atomic::Ordering;
 
 use slopos_ostd::KBox;
 
 use super::task_struct::Task;
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskStatus};
-use slopos_arch::InterruptFrame;
 use slopos_ostd::klog_info;
 use slopos_testing::{TestResult, assert_eq_test, assert_some, assert_test};
 
 use super::task::{MAX_TASKS, task_create, task_find_by_id, task_set_state, task_terminate};
-use super::task_struct::TaskContext;
 use super::test_fixture::KernelTestScope;
-use slopos_arch::arch::gdt::SegmentSelector;
 
 struct ContextFixture {
     _scope: KernelTestScope,
@@ -32,30 +27,23 @@ impl ContextFixture {
 use crate::test_fixture::dummy_task_entry;
 
 fn create_test_task(name: &[u8], flags: u16) -> u32 {
-    task_create(
-        name.as_ptr() as *const c_char,
-        dummy_task_entry,
-        ptr::null_mut(),
-        1,
-        flags,
-    )
+    task_create(name, dummy_task_entry, ptr::null_mut(), 1, flags)
 }
 
 pub fn test_task_context_initial_state() -> TestResult {
     let _fixture = ContextFixture::new();
 
-    let task_id = create_test_task(b"CtxInit\0", TASK_FLAG_KERNEL_MODE);
+    let task_id = create_test_task(b"CtxInit", TASK_FLAG_KERNEL_MODE);
     assert_test!(task_id != INVALID_TASK_ID);
 
     let task = assert_some!(task_find_by_id(task_id));
 
-    // Diagnostic reads of a live task, so the racy accessors off a shared guard
-    // rather than a witness.
-    let ctx_rsp = task.context_rsp();
-    let ctx_rip = task.context_rip();
-    if ctx_rsp == 0 && ctx_rip == 0 {
-        klog_info!("CONTEXT_TEST: WARNING - Context RSP and RIP both zero");
-    }
+    // The racy reader: the guard is shared, not a witness.
+    let (rip, rsp) = task.switch_ctx_rip_rsp();
+    assert_test!(
+        rip != 0 && rsp != 0,
+        "a new kernel task has no switch frame"
+    );
 
     task_terminate(task_id);
     TestResult::Pass
@@ -64,7 +52,7 @@ pub fn test_task_context_initial_state() -> TestResult {
 pub fn test_task_state_transitions_exhaustive() -> TestResult {
     let _fixture = ContextFixture::new();
 
-    let task_id = create_test_task(b"StateTrans\0", TASK_FLAG_KERNEL_MODE);
+    let task_id = create_test_task(b"StateTrans", TASK_FLAG_KERNEL_MODE);
     assert_test!(task_id != INVALID_TASK_ID);
 
     let task = assert_some!(task_find_by_id(task_id));
@@ -90,7 +78,7 @@ pub fn test_task_state_transitions_exhaustive() -> TestResult {
 pub fn test_task_invalid_state_transition() -> TestResult {
     let _fixture = ContextFixture::new();
 
-    let task_id = create_test_task(b"BadTrans\0", TASK_FLAG_KERNEL_MODE);
+    let task_id = create_test_task(b"BadTrans", TASK_FLAG_KERNEL_MODE);
     assert_test!(task_id != INVALID_TASK_ID);
 
     task_terminate(task_id);
@@ -110,7 +98,7 @@ pub fn test_task_invalid_state_transition() -> TestResult {
 pub fn test_task_double_terminate() -> TestResult {
     let _fixture = ContextFixture::new();
 
-    let task_id = create_test_task(b"DoubleTerm\0", TASK_FLAG_KERNEL_MODE);
+    let task_id = create_test_task(b"DoubleTerm", TASK_FLAG_KERNEL_MODE);
     assert_test!(task_id != INVALID_TASK_ID);
 
     let _r1 = task_terminate(task_id);
@@ -134,7 +122,7 @@ pub fn test_task_terminate_invalid_ids() -> TestResult {
 pub fn test_task_find_after_terminate() -> TestResult {
     let _fixture = ContextFixture::new();
 
-    let task_id = create_test_task(b"FindTerm\0", TASK_FLAG_KERNEL_MODE);
+    let task_id = create_test_task(b"FindTerm", TASK_FLAG_KERNEL_MODE);
     assert_test!(task_id != INVALID_TASK_ID);
 
     assert_test!(
@@ -160,7 +148,7 @@ pub fn test_task_rapid_create_terminate() -> TestResult {
     let _fixture = ContextFixture::new();
 
     for _i in 0..50 {
-        let task_id = create_test_task(b"Rapid\0", TASK_FLAG_KERNEL_MODE);
+        let task_id = create_test_task(b"Rapid", TASK_FLAG_KERNEL_MODE);
         if task_id == INVALID_TASK_ID {
             continue;
         }
@@ -173,7 +161,7 @@ pub fn test_task_rapid_create_terminate() -> TestResult {
 pub fn test_task_process_id_consistency() -> TestResult {
     let _fixture = ContextFixture::new();
 
-    let task_id = create_test_task(b"ProcId\0", TASK_FLAG_KERNEL_MODE);
+    let task_id = create_test_task(b"ProcId", TASK_FLAG_KERNEL_MODE);
     assert_test!(task_id != INVALID_TASK_ID);
 
     let task = assert_some!(task_find_by_id(task_id));
@@ -186,7 +174,7 @@ pub fn test_task_process_id_consistency() -> TestResult {
 pub fn test_task_flags_preserved() -> TestResult {
     let _fixture = ContextFixture::new();
 
-    let task_id = create_test_task(b"FlagsTest\0", TASK_FLAG_KERNEL_MODE);
+    let task_id = create_test_task(b"FlagsTest", TASK_FLAG_KERNEL_MODE);
     assert_test!(task_id != INVALID_TASK_ID);
 
     let task = assert_some!(task_find_by_id(task_id));
@@ -199,11 +187,6 @@ pub fn test_task_flags_preserved() -> TestResult {
     task_terminate(task_id);
     TestResult::Pass
 }
-
-// No layout (size/offset) stests here on purpose: `SwitchContext` aliases
-// `slopos_ostd::task::TaskContext`, whose size and every field offset are
-// pinned by `const _` asserts beside the struct definition in all build
-// configurations. A runtime duplicate can only agree or drift stale.
 
 pub fn test_switch_context_zero_init() -> TestResult {
     use super::task_struct::SwitchContext;
@@ -242,7 +225,7 @@ pub fn test_switch_context_setup_initial() -> TestResult {
 pub fn test_task_has_switch_ctx() -> TestResult {
     let _fixture = ContextFixture::new();
 
-    let task_id = create_test_task(b"SwitchTest\0", TASK_FLAG_KERNEL_MODE);
+    let task_id = create_test_task(b"SwitchTest", TASK_FLAG_KERNEL_MODE);
     assert_test!(task_id != INVALID_TASK_ID);
 
     let task = assert_some!(task_find_by_id(task_id));
@@ -250,181 +233,6 @@ pub fn test_task_has_switch_ctx() -> TestResult {
     assert_eq_test!(rflags, 0x202, "switch_ctx rflags not initialized");
 
     task_terminate(task_id);
-    TestResult::Pass
-}
-
-/// Compare u64 fields by index against a parallel label array. Dozens of inline
-/// `assert_eq_test!` sites would each materialise a `format_args!` slot in the
-/// caller's frame; folding them here keeps the test fn under the 2 KiB gate.
-#[inline(never)]
-fn check_u64_fields(labels: &[&'static str], expected: &[u64], actual: &[u64]) -> Result<(), ()> {
-    for ((label, &exp), &act) in labels.iter().zip(expected.iter()).zip(actual.iter()) {
-        if exp != act {
-            klog_info!("ASSERT_EQ: {} - expected {:#x}, got {:#x}", label, exp, act);
-            return Err(());
-        }
-    }
-    Ok(())
-}
-
-pub fn test_save_task_context_from_interrupt_frame_marks_started() -> TestResult {
-    let mut task: KBox<Task> = KBox::try_init(Task::init_invalid()).expect("alloc");
-    *task.context.get_mut() = TaskContext::zero();
-    *task.user_started.get_mut() = 0;
-    *task.context_from_user.get_mut() = 0;
-
-    let frame = InterruptFrame {
-        r15: 0x15,
-        r14: 0x14,
-        r13: 0x13,
-        r12: 0x12,
-        r11: 0x11,
-        r10: 0x10,
-        r9: 0x9,
-        r8: 0x8,
-        rbp: 0xBEEF,
-        rdi: 0xD1,
-        rsi: 0x51,
-        rdx: 0xD2,
-        rcx: 0xC1,
-        rbx: 0xB1,
-        rax: 0xA1,
-        vector: 0x80,
-        error_code: 0,
-        rip: 0x4000,
-        cs: SegmentSelector::USER_CODE.bits() as u64,
-        rflags: 0x202,
-        rsp: 0x8000,
-        ss: SegmentSelector::USER_DATA.bits() as u64,
-    };
-
-    task.save_from_interrupt_frame_mut(&frame, true);
-
-    let user_data = SegmentSelector::USER_DATA.bits() as u64;
-    let user_code = SegmentSelector::USER_CODE.bits() as u64;
-    static LABELS: [&'static str; 25] = [
-        "rax",
-        "rbx",
-        "rcx",
-        "rdx",
-        "rsi",
-        "rdi",
-        "r8",
-        "r9",
-        "r10",
-        "r11",
-        "r12",
-        "r13",
-        "r14",
-        "r15",
-        "rip",
-        "rsp",
-        "rflags",
-        "cs",
-        "ss",
-        "ds",
-        "es",
-        "fs",
-        "gs",
-        "context_from_user",
-        "user_started",
-    ];
-    // Heap-allocated so two 25 * 8 byte arrays never sit on this frame.
-    let mut expected: KBox<[u64; 25]> = KBox::zeroed().expect("alloc");
-    let mut actual: KBox<[u64; 25]> = KBox::zeroed().expect("alloc");
-    expected[0] = 0xA1;
-    actual[0] = task.context.get_mut().rax;
-    expected[1] = 0xB1;
-    actual[1] = task.context.get_mut().rbx;
-    expected[2] = 0xC1;
-    actual[2] = task.context.get_mut().rcx;
-    expected[3] = 0xD2;
-    actual[3] = task.context.get_mut().rdx;
-    expected[4] = 0x51;
-    actual[4] = task.context.get_mut().rsi;
-    expected[5] = 0xD1;
-    actual[5] = task.context.get_mut().rdi;
-    expected[6] = 0x8;
-    actual[6] = task.context.get_mut().r8;
-    expected[7] = 0x9;
-    actual[7] = task.context.get_mut().r9;
-    expected[8] = 0x10;
-    actual[8] = task.context.get_mut().r10;
-    expected[9] = 0x11;
-    actual[9] = task.context.get_mut().r11;
-    expected[10] = 0x12;
-    actual[10] = task.context.get_mut().r12;
-    expected[11] = 0x13;
-    actual[11] = task.context.get_mut().r13;
-    expected[12] = 0x14;
-    actual[12] = task.context.get_mut().r14;
-    expected[13] = 0x15;
-    actual[13] = task.context.get_mut().r15;
-    expected[14] = 0x4000;
-    actual[14] = task.context.get_mut().rip;
-    expected[15] = 0x8000;
-    actual[15] = task.context.get_mut().rsp;
-    expected[16] = 0x202;
-    actual[16] = task.context.get_mut().rflags;
-    expected[17] = user_code;
-    actual[17] = task.context.get_mut().cs;
-    expected[18] = user_data;
-    actual[18] = task.context.get_mut().ss;
-    expected[19] = user_data;
-    actual[19] = task.context.get_mut().ds;
-    expected[20] = user_data;
-    actual[20] = task.context.get_mut().es;
-    expected[21] = 0;
-    actual[21] = task.context.get_mut().fs;
-    expected[22] = 0;
-    actual[22] = task.context.get_mut().gs;
-    expected[23] = 1;
-    actual[23] = task.context_from_user.load(Ordering::Relaxed) as u64;
-    expected[24] = 1;
-    actual[24] = task.user_started.load(Ordering::Relaxed) as u64;
-    if check_u64_fields(&LABELS, &*expected, &*actual).is_err() {
-        return TestResult::Fail;
-    }
-
-    TestResult::Pass
-}
-
-pub fn test_save_task_context_from_interrupt_frame_keeps_user_started() -> TestResult {
-    let mut task: KBox<Task> = KBox::try_init(Task::init_invalid()).expect("alloc");
-    *task.context.get_mut() = TaskContext::zero();
-    *task.user_started.get_mut() = 0;
-    *task.context_from_user.get_mut() = 0;
-
-    let frame = InterruptFrame {
-        r15: 0,
-        r14: 0,
-        r13: 0,
-        r12: 0,
-        r11: 0,
-        r10: 0,
-        r9: 0,
-        r8: 0,
-        rbp: 0,
-        rdi: 0,
-        rsi: 0,
-        rdx: 0,
-        rcx: 0,
-        rbx: 0,
-        rax: 0,
-        vector: 32,
-        error_code: 0,
-        rip: 0,
-        cs: SegmentSelector::USER_CODE.bits() as u64,
-        rflags: 0,
-        rsp: 0,
-        ss: SegmentSelector::USER_DATA.bits() as u64,
-    };
-
-    task.save_from_interrupt_frame_mut(&frame, false);
-
-    assert_eq_test!(task.context_from_user.load(Ordering::Relaxed), 1);
-    assert_eq_test!(task.user_started.load(Ordering::Relaxed), 0);
-
     TestResult::Pass
 }
 
@@ -568,18 +376,17 @@ pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
     // through the sanctioned test hook. Forging `PCR.current_task` would leave
     // the genuinely running task looking un-pinned to `task_is_dispatch_pinned`,
     // and a concurrent reap could free it underneath this test.
-    let next_id = create_test_task(b"FpuSwitch\0", TASK_FLAG_KERNEL_MODE);
+    let next_id = create_test_task(b"FpuSwitch", TASK_FLAG_KERNEL_MODE);
     assert_test!(next_id != INVALID_TASK_ID, "failed to create incoming task");
     let next_guard = assert_some!(task_find_by_id(next_id));
     if next_guard.status() == TaskStatus::Blocked {
-        assert_eq_test!(
+        assert_test!(
             task_set_state(next_id, TaskStatus::Ready),
-            0,
             "could not make the incoming task Ready"
         );
     }
     next_guard.set_sched_placement(SchedPlacement::OnCpu);
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
     let mut prev: KBox<Task> = KBox::try_init(Task::init_invalid()).expect("alloc");
@@ -670,7 +477,7 @@ pub fn test_fpu_switch_saves_prev_and_restores_next() -> TestResult {
 /// cannot represent the upper 128 bits of YMM, so a save path that regressed to
 /// it would return correct lower halves and zeroed upper ones.
 pub fn test_fpu_avx_upper_halves_survive_task_slot() -> TestResult {
-    use slopos_arch::cpu::control_regs::Xcr0Flags;
+    use slopos_ostd::cpu::x86_64::control_regs::Xcr0Flags;
     use slopos_ostd::test_support::cpu_state as cpu;
 
     let xcr0 = slopos_ostd::cpu::x86_64::xsave::active_xcr0();
@@ -777,14 +584,6 @@ slopos_testing::stest!(name = test_task_flags_preserved, suite = context);
 slopos_testing::stest!(name = test_switch_context_zero_init, suite = context);
 slopos_testing::stest!(name = test_switch_context_setup_initial, suite = context);
 slopos_testing::stest!(name = test_task_has_switch_ctx, suite = context);
-slopos_testing::stest!(
-    name = test_save_task_context_from_interrupt_frame_marks_started,
-    suite = context
-);
-slopos_testing::stest!(
-    name = test_save_task_context_from_interrupt_frame_keeps_user_started,
-    suite = context
-);
 slopos_testing::stest!(name = test_fpu_per_task_slot_isolation, suite = context);
 slopos_testing::stest!(
     name = test_fpu_switch_saves_prev_and_restores_next,

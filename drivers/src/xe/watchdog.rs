@@ -2,7 +2,7 @@
 //! repoint is committed, so a bad repoint never leaves a black screen. The poll
 //! loop holds no `SpinLock` while delaying.
 
-use slopos_mm::mmio::MmioRegion;
+use slopos_ostd::mm::IoMem;
 
 use crate::xe_logic::regs::Pipe;
 
@@ -12,7 +12,7 @@ use crate::xe_logic::regs::Pipe;
 /// `true` means the pipe is scanning out and the caller may commit the repoint;
 /// `false` means it stalled or underran and the caller must roll back to the
 /// firmware framebuffer. `wdog_ms` of `0` declines immediately.
-pub fn confirm_scanning(mmio: &MmioRegion, pipe: Pipe, wdog_ms: u32) -> bool {
+pub fn confirm_scanning(mmio: &IoMem, pipe: Pipe, wdog_ms: u32) -> bool {
     let baseline = super::pipe::scanline(mmio, pipe);
     let mut elapsed_ms = 0;
     while elapsed_ms < wdog_ms {

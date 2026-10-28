@@ -3,8 +3,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
-use slopos_mm::mmio::MmioRegion;
 use slopos_ostd::mm::AllocError;
+use slopos_ostd::mm::IoMem;
 use slopos_ostd::mm::init::{Initialised, SlotPtr, init_struct_with};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, Mutex, MutexGuard, OnceLock, SpinLock};
 use slopos_ostd::{KArc, KVec, klog_info, lock_class, write_field};
@@ -38,13 +38,10 @@ const PORT_WORDS: usize = 256 / 64;
 
 const MAX_HUBS: usize = 8;
 
-/// What a root port last showed, and how often it changed: the USB thread
-/// writes it, tests read it.
+/// What a root port last showed: the USB thread writes it, tests read it.
 #[derive(Default)]
 pub struct RootPort {
     connected: AtomicBool,
-    attaches: AtomicU32,
-    detaches: AtomicU32,
 }
 
 pub(super) struct Service {
@@ -97,7 +94,7 @@ struct Took {
 pub struct Controller {
     number: u8,
     info: PciDeviceInfo,
-    regs: MmioRegion,
+    regs: IoMem,
     caps: Capabilities,
     layout: Layout,
     protocols: Protocols,
@@ -149,7 +146,7 @@ impl Controller {
     pub(super) fn new(
         number: u8,
         info: &PciDeviceInfo,
-        regs: MmioRegion,
+        regs: IoMem,
         caps: Capabilities,
         protocols: &Protocols,
     ) -> Result<KArc<Self>, AllocError> {
@@ -347,18 +344,6 @@ impl Controller {
     pub fn port_connected(&self, port: u8) -> bool {
         self.port(port)
             .is_some_and(|p| p.connected.load(Ordering::Acquire))
-    }
-
-    #[cfg(feature = "test-hooks")]
-    pub fn port_attaches(&self, port: u8) -> u32 {
-        self.port(port)
-            .map_or(0, |p| p.attaches.load(Ordering::Acquire))
-    }
-
-    #[cfg(feature = "test-hooks")]
-    pub fn port_detaches(&self, port: u8) -> u32 {
-        self.port(port)
-            .map_or(0, |p| p.detaches.load(Ordering::Acquire))
     }
 
     pub(super) fn handle_irq(&self) {
@@ -722,11 +707,9 @@ impl Controller {
         let was = state.connected.load(Ordering::Acquire);
         let now = status.connected();
         if was && (!now || status.connect_changed()) {
-            state.detaches.fetch_add(1, Ordering::AcqRel);
             klog_info!("USB: {}-{} detached", self.number, port);
         }
         if now && (!was || status.connect_changed()) {
-            state.attaches.fetch_add(1, Ordering::AcqRel);
             self.log_attach(port, status.speed());
         }
         state.connected.store(now, Ordering::Release);

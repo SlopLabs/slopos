@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use slopos_ostd::lock_class;
-use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_REGISTRY;
+use slopos_ostd::sync::LOCK_LEVEL_REGISTRY;
 
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KArc, KBox, KVec};

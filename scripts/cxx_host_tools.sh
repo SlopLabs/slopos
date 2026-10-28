@@ -15,11 +15,11 @@ set -euo pipefail
 # newer major is therefore accepted and an older one is not — libc++'s sources
 # use its own release's clang.
 #
-# The alternative — demanding the sources' exact major — is what shipped first,
-# and it is unbuildable on a rolling distribution: no Linux ships LLVM 18 by
-# default any more (Arch is at 22, Fedora 20, Debian 13 at 19), Arch has no
-# versioned llvm18 package in either the repositories or the AUR, and building
-# one from source to compile a 700 KiB archive is an hour of CPU for nothing.
+# Demanding the sources' exact major would be unbuildable on a rolling
+# distribution: the distributions default to newer majors (Arch is at 22,
+# Fedora 20, Debian 13 at 19), Arch has no versioned llvm18 package in either
+# the repositories or the AUR, and building one from source to compile a
+# 700 KiB archive is an hour of CPU for nothing.
 #
 # The four tools must come from **one** major: a host with clang 18 and lld 22
 # on PATH would otherwise link the runtime with a mismatched linker. The

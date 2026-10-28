@@ -49,17 +49,9 @@ pub fn run_thunk(desc: &'static TestDesc, principal: Principal) -> TestResult {
         Some(argv_slice)
     };
 
-    let rc: i32 = catch_panic!({
-        match dispatch(bin, argv_opt, principal) {
-            TestResult::Pass => 0,
-            TestResult::Fail => 1,
-            _ => 2,
-        }
-    });
-
-    match rc {
-        0 => TestResult::Pass,
-        1 => TestResult::Fail,
+    match catch_panic!({ dispatch(bin, argv_opt, principal) }) {
+        Some(TestResult::Pass) => TestResult::Pass,
+        Some(TestResult::Fail) => TestResult::Fail,
         _ => TestResult::Panic,
     }
 }

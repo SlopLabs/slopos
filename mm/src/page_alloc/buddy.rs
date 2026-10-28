@@ -13,7 +13,7 @@ use slopos_ostd::lock_class;
 
 use slopos_abi::addr::PhysAddr;
 use slopos_ostd::cpu::x86_64::interrupts::IrqDisabled;
-use slopos_ostd::mm::frame::{FrameAlloc, FrameAllocOptions, Paddr};
+use slopos_ostd::mm::frame::{FrameAlloc, FrameAllocOptions};
 use slopos_ostd::panic::AbortOnUnwind;
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_ALLOCATOR, PreemptGuard, RawTable, SpinLock};
 use slopos_ostd::util::ptr_buf::OneShotBuf;
@@ -40,9 +40,8 @@ pub(super) const PAGE_FRAME_RESERVED: u8 = 0x02;
 pub(super) const PAGE_FRAME_KERNEL: u8 = 0x03;
 pub(super) const PAGE_FRAME_DMA: u8 = 0x04;
 pub(super) const PAGE_FRAME_PCP: u8 = 0x05;
-pub(super) const PAGE_FRAME_NEVER_REUSE: u8 = 0x06;
 /// Freed, but parked until every CPU has invalidated. See [`crate::mmu::quiesce`].
-pub(super) const PAGE_FRAME_QUIESCE: u8 = 0x07;
+pub(super) const PAGE_FRAME_QUIESCE: u8 = 0x06;
 
 pub(super) const INVALID_PAGE_FRAME: u32 = 0xFFFF_FFFF;
 pub(super) const MAX_ORDER: u32 = 24;
@@ -118,7 +117,6 @@ pub(super) struct PageFrame {
 #[derive(Default)]
 pub(super) struct BuddyInner {
     pub(super) total_frames: u32,
-    pub(super) max_supported_frames: u32,
     pub(super) free_frames: u32,
     pub(super) allocated_frames: u32,
     pub(super) free_lists: [u32; (MAX_ORDER as usize) + 1],
@@ -145,7 +143,6 @@ impl BuddyInner {
     const fn new() -> Self {
         Self {
             total_frames: 0,
-            max_supported_frames: 0,
             free_frames: 0,
             allocated_frames: 0,
             free_lists: [INVALID_PAGE_FRAME; (MAX_ORDER as usize) + 1],
@@ -630,20 +627,25 @@ impl BuddyInner {
         }
     }
 
-    fn free_locked(&mut self, table: &RawTable<PageFrame>, cpu: usize, phys_addr: PhysAddr) -> i32 {
+    fn free_locked(
+        &mut self,
+        table: &RawTable<PageFrame>,
+        cpu: usize,
+        phys_addr: PhysAddr,
+    ) -> bool {
         let frame_num = self.phys_to_frame(phys_addr);
         if !self.is_valid_frame(frame_num) {
-            return -1;
+            return false;
         }
 
         let Some(frame) = self.frame_desc_mut(table, frame_num) else {
-            return -1;
+            return false;
         };
         if !BuddyInner::frame_state_is_allocated(frame.state) {
-            return 0;
+            return true;
         }
         if frame.state == PAGE_FRAME_PCP {
-            return 0;
+            return true;
         }
 
         let order = frame.order as u32;
@@ -661,7 +663,7 @@ impl BuddyInner {
             if self.quarantine_frames >= QUARANTINE_ADVANCE_FRAMES {
                 crate::mmu::quiesce::request_advance();
             }
-            return 0;
+            return true;
         }
 
         let is_pcp_candidate = order == 0 && frame.state == PAGE_FRAME_ALLOCATED && pcp::is_live();
@@ -703,7 +705,7 @@ impl BuddyInner {
                 true
             });
             if pushed {
-                return 0;
+                return true;
             }
         }
 
@@ -714,7 +716,7 @@ impl BuddyInner {
             self.allocated_frames = self.allocated_frames.saturating_sub(pages);
             self.insert_block_coalescing(table, frame_num, order);
         }
-        0
+        true
     }
 }
 
@@ -776,7 +778,6 @@ impl BuddyAllocator {
 
         let mut inner = self.inner.lock();
         inner.total_frames = max_frames;
-        inner.max_supported_frames = max_frames;
         inner.free_frames = 0;
         inner.allocated_frames = 0;
         inner.max_order = BuddyInner::derive_max_order(max_frames);
@@ -872,10 +873,6 @@ impl BuddyAllocator {
             inner.free_frames.saturating_add(pcp_cached),
             inner.allocated_frames.saturating_sub(pcp_cached),
         )
-    }
-
-    pub fn max_supported_frames(&self) -> u32 {
-        self.inner.lock().max_supported_frames
     }
 
     pub fn pcp_stats(&self, cpu: usize) -> Option<(u32, u32, u32)> {
@@ -994,7 +991,7 @@ impl BuddyAllocator {
         if use_pcp && scrub {
             let _no_migrate = PreemptGuard::new();
             let frame = IrqDisabled::with(|irq| {
-                self.pcp_try_alloc_zeroed(slopos_arch::pcr::get_current_cpu(), irq)
+                self.pcp_try_alloc_zeroed(slopos_ostd::cpu::x86_64::pcr::current_cpu_id(), irq)
             });
             if frame != INVALID_PAGE_FRAME {
                 return PhysAddr::new((frame as u64) << 12);
@@ -1007,7 +1004,7 @@ impl BuddyAllocator {
             let frame_num = if use_pcp {
                 let _no_migrate = PreemptGuard::new();
                 IrqDisabled::with(|irq| {
-                    let cpu = slopos_arch::pcr::get_current_cpu();
+                    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
                     let mut frame = self.pcp_try_alloc(cpu, irq);
                     if frame == INVALID_PAGE_FRAME {
                         self.pcp_refill(cpu, flags, irq);
@@ -1062,7 +1059,7 @@ impl BuddyAllocator {
             let mut ok = true;
             for i in 0..scrubbed {
                 let page_phys = phys_addr.offset(i as u64 * PAGE_SIZE_4KB);
-                if zero_physical_page(page_phys) != 0 {
+                if !zero_physical_page(page_phys) {
                     klog_info!(
                         "BuddyAllocator::alloc_raw: failed to zero page at phys 0x{:x}",
                         page_phys.as_u64()
@@ -1085,16 +1082,18 @@ impl BuddyAllocator {
 
     /// Free a single allocation back to the buddy. The order is recovered from
     /// the descriptor, so [`FrameAlloc::dealloc`]'s `size_pages` is ignored.
-    pub fn free_phys(&self, phys_addr: PhysAddr) -> i32 {
+    /// `false` when `phys_addr` names no frame the allocator tracks; a frame
+    /// already free is left as it is.
+    pub fn free_phys(&self, phys_addr: PhysAddr) -> bool {
         let _no_migrate = PreemptGuard::new();
-        let cpu = slopos_arch::pcr::get_current_cpu();
+        let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
         self.with_locked(|inner, table| inner.free_locked(table, cpu, phys_addr))
     }
 
     /// [`Self::free_phys`] for each of `pages`, under one hold of the lock.
     fn free_phys_batch(&self, pages: &[PhysAddr]) {
         let _no_migrate = PreemptGuard::new();
-        let cpu = slopos_arch::pcr::get_current_cpu();
+        let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
         self.with_locked(|inner, table| {
             for &phys_addr in pages {
                 let _ = inner.free_locked(table, cpu, phys_addr);
@@ -1138,29 +1137,6 @@ impl BuddyAllocator {
         QUARANTINE_FRAMES.load(Ordering::Relaxed)
     }
 
-    pub fn quarantine_allocated_phys(&self, phys_addr: PhysAddr) {
-        if phys_addr.is_null() {
-            return;
-        }
-        self.with_locked(|inner, table| {
-            let frame_num = inner.phys_to_frame(phys_addr);
-            if !inner.is_valid_frame(frame_num) {
-                return;
-            }
-            let Some(frame) = inner.frame_desc_mut(table, frame_num) else {
-                return;
-            };
-            if !BuddyInner::frame_state_is_allocated(frame.state) {
-                return;
-            }
-            let pages = BuddyInner::order_block_pages(frame.order as u32);
-            frame.flags = 0;
-            frame.next_free = INVALID_PAGE_FRAME;
-            frame.state = PAGE_FRAME_NEVER_REUSE;
-            inner.allocated_frames = inner.allocated_frames.saturating_sub(pages);
-        })
-    }
-
     /// Batch-allocate up to `out.len()` zeroed order-0 pages under a
     /// single [`PreemptGuard`]. Returns the number of slots filled.
     pub fn alloc_pcp_batch(&self, out: &mut [PhysAddr]) -> usize {
@@ -1188,7 +1164,7 @@ impl BuddyAllocator {
         if pcp::is_live() {
             let _no_migrate = PreemptGuard::new();
             IrqDisabled::with(|irq| {
-                let cpu = slopos_arch::pcr::get_current_cpu();
+                let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
                 while filled < out.len() {
                     let frame = self.pcp_try_alloc_zeroed(cpu, irq);
                     if frame == INVALID_PAGE_FRAME {
@@ -1229,7 +1205,7 @@ impl BuddyAllocator {
                 }
             });
             for i in zeroed..filled {
-                if zero_physical_page(out[i]) != 0 {
+                if !zero_physical_page(out[i]) {
                     klog_info!(
                         "alloc_pcp_batch: zero_physical_page failed at 0x{:x}",
                         out[i].as_u64()
@@ -1292,7 +1268,7 @@ impl BuddyAllocator {
             return 0;
         }
         let _no_migrate = PreemptGuard::new();
-        let cpu = slopos_arch::pcr::get_current_cpu();
+        let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
         let mut done = 0usize;
         while done < budget {
             let taken = IrqDisabled::with(|irq| {
@@ -1317,7 +1293,7 @@ impl BuddyAllocator {
             };
             // Scrubbed with interrupts on, off both stacks: its descriptor stays
             // `PAGE_FRAME_PCP`, and nothing else can reach it meanwhile.
-            let scrubbed = zero_physical_page(PhysAddr::new((frame_num as u64) << 12)) == 0;
+            let scrubbed = zero_physical_page(PhysAddr::new((frame_num as u64) << 12));
             let kept = IrqDisabled::with(|irq| {
                 let Some(cache) = pcp::cache_mut(cpu, irq) else {
                     return false;
@@ -1382,7 +1358,7 @@ impl BuddyAllocator {
 }
 
 impl FrameAlloc for BuddyAllocator {
-    fn alloc(&self, opts: FrameAllocOptions) -> Option<Paddr> {
+    fn alloc(&self, opts: FrameAllocOptions) -> Option<PhysAddr> {
         debug_assert_eq!(
             opts.align_pages, 1,
             "BuddyAllocator only supports align_pages == 1"
@@ -1407,11 +1383,11 @@ impl FrameAlloc for BuddyAllocator {
         if phys.is_null() { None } else { Some(phys) }
     }
 
-    fn dealloc(&self, paddr: Paddr, _size_pages: usize) {
+    fn dealloc(&self, paddr: PhysAddr, _size_pages: usize) {
         let _ = self.free_phys(paddr);
     }
 
-    fn dealloc_batch(&self, pages: &[Paddr]) {
+    fn dealloc_batch(&self, pages: &[PhysAddr]) {
         self.free_phys_batch(pages);
     }
 }
@@ -1426,15 +1402,15 @@ fn paint_page_at_virt(ptr: *mut u8, value: u8) {
     });
 }
 
-fn zero_physical_page(phys_addr: PhysAddr) -> i32 {
+fn zero_physical_page(phys_addr: PhysAddr) -> bool {
     if phys_addr.is_null() {
-        return -1;
+        return false;
     }
     match phys_addr.to_virt_checked() {
         Some(virt) => {
             paint_page_at_virt(virt.as_mut_ptr::<u8>(), 0);
-            0
+            true
         }
-        None => -1,
+        None => false,
     }
 }

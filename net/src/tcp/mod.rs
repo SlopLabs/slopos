@@ -46,7 +46,7 @@ pub use seq::{SeqDelta, SeqNum, seq_ge, seq_gt, seq_le, seq_lt};
 pub use table::ConnId;
 
 use self::cong::CongestionControl;
-use crate::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
+use crate::timer::{self, TimerKind, TimerToken};
 use crate::types::{Ipv4Addr, Port, SockAddr};
 
 use slopos_ostd::klog_debug;
@@ -408,7 +408,7 @@ fn input_process_established(
                         key: _,
                         delay_ms,
                     } => {
-                        let token = NET_TIMER_WHEEL.schedule(delay_ms, kind, id.raw());
+                        let token = timer::wheel().schedule(delay_ms, kind, id.raw());
                         match kind {
                             TimerKind::TcpRetransmit => {
                                 set_retransmit_token(pcb, Some(token));
@@ -432,7 +432,7 @@ fn input_process_established(
                         }
                     }
                     TimerOp::Cancel { token } => {
-                        NET_TIMER_WHEEL.cancel(token);
+                        timer::wheel().cancel(token);
                     }
                 }
             }
@@ -452,8 +452,8 @@ fn input_process_established(
         {
             if let PcbState::Data(d) = &mut pcb.state {
                 if let Some((old_token, delay)) = d.reset_keepalive_on_activity() {
-                    NET_TIMER_WHEEL.cancel(old_token);
-                    let token = NET_TIMER_WHEEL.schedule(delay, TimerKind::TcpKeepalive, id.raw());
+                    timer::wheel().cancel(old_token);
+                    let token = timer::wheel().schedule(delay, TimerKind::TcpKeepalive, id.raw());
                     d.keepalive_token = Some(token);
                 }
             }
@@ -475,7 +475,7 @@ fn input_process_established(
         table::with_pcb_mut(id, |pcb| {
             if let PcbState::Data(d) = &mut pcb.state {
                 if let Some(delay) = d.schedule_initial_keepalive(keepalive_enabled) {
-                    let token = NET_TIMER_WHEEL.schedule(delay, TimerKind::TcpKeepalive, id.raw());
+                    let token = timer::wheel().schedule(delay, TimerKind::TcpKeepalive, id.raw());
                     d.keepalive_token = Some(token);
                 }
             }
@@ -547,12 +547,12 @@ pub fn arm_syn_retransmit(id: ConnId) {
             return None;
         };
         let stale = s.retransmit_token.take();
-        let token = NET_TIMER_WHEEL.schedule(s.rto_ms as u64, TimerKind::TcpRetransmit, id.raw());
+        let token = timer::wheel().schedule(s.rto_ms as u64, TimerKind::TcpRetransmit, id.raw());
         s.retransmit_token = Some(token);
         stale
     });
     if let Some(Some(token)) = stale {
-        NET_TIMER_WHEEL.cancel(token);
+        timer::wheel().cancel(token);
     }
 }
 
@@ -669,7 +669,7 @@ fn fin_from_syn_recv(
     let mut ds = slopos_ostd::KBox::try_init(DataState::init_from_syn_recv(s))?;
     ds.close_phase = ClosePhase::FinWait1;
     ds.snd_nxt = ds.snd_nxt.wrapping_add(1);
-    ds.retransmit_token = Some(NET_TIMER_WHEEL.schedule(
+    ds.retransmit_token = Some(timer::wheel().schedule(
         (ds.rtt.rto_ms() as u64).max(1),
         TimerKind::TcpRetransmit,
         id.raw(),
@@ -682,7 +682,7 @@ fn fin_from_syn_recv(
     let window = ds.advertised();
     pcb.state = PcbState::Data(ds);
     if let Some(token) = handshake_timer {
-        NET_TIMER_WHEEL.cancel(token);
+        timer::wheel().cancel(token);
     }
     pcb.assert_invariants();
     let mut seg = SegmentBuilder::fin_ack(tuple, seq, ack, window).with_tos(pcb.tos);
@@ -784,7 +784,7 @@ fn send_fin(d: &mut DataState, tuple: TcpTuple, id: ConnId) -> Option<TcpOutSegm
     d.fin_queued = false;
     cancel_keepalive(d);
     if d.retransmit_token.is_none() {
-        d.retransmit_token = Some(NET_TIMER_WHEEL.schedule(
+        d.retransmit_token = Some(timer::wheel().schedule(
             (d.rtt.rto_ms() as u64).max(1),
             TimerKind::TcpRetransmit,
             id.raw(),
@@ -816,7 +816,7 @@ fn fin_or_queue(
 
 fn cancel_keepalive(d: &mut DataState) {
     if let Some(token) = d.keepalive_token.take() {
-        NET_TIMER_WHEEL.cancel(token);
+        timer::wheel().cancel(token);
     }
 }
 
@@ -1157,7 +1157,7 @@ fn arm_retransmit(d: &mut DataState, deadline_ms: &mut u64, id: ConnId, now_ms: 
     }
     let rto_ms = (d.rtt.rto_ms() as u64).max(1);
     *deadline_ms = now_ms.saturating_add(rto_ms);
-    d.retransmit_token = Some(NET_TIMER_WHEEL.schedule(rto_ms, TimerKind::TcpRetransmit, id.raw()));
+    d.retransmit_token = Some(timer::wheel().schedule(rto_ms, TimerKind::TcpRetransmit, id.raw()));
 }
 
 /// Generate the next outgoing data segment for a connection.
@@ -1318,7 +1318,7 @@ fn on_handshake_retransmit(id: ConnId, fired: Option<TimerToken>) -> Option<Retr
                     .with_timestamp(now_ms as u32, 0)
                     .with_tos(tos);
                 let token =
-                    NET_TIMER_WHEEL.schedule(s.rto_ms as u64, TimerKind::TcpRetransmit, id.raw());
+                    timer::wheel().schedule(s.rto_ms as u64, TimerKind::TcpRetransmit, id.raw());
                 s.retransmit_token = Some(token);
                 SynOutcome::Resend(seg)
             }
@@ -1332,7 +1332,7 @@ fn on_handshake_retransmit(id: ConnId, fired: Option<TimerToken>) -> Option<Retr
 
                 let seg = s.syn_ack(tuple, now_ms).with_tos(tos);
                 let token =
-                    NET_TIMER_WHEEL.schedule(s.rto_ms as u64, TimerKind::TcpRetransmit, id.raw());
+                    timer::wheel().schedule(s.rto_ms as u64, TimerKind::TcpRetransmit, id.raw());
                 s.retransmit_token = Some(token);
                 SynOutcome::Resend(seg)
             }
@@ -1456,7 +1456,7 @@ fn retransmit_fired(conn_id: u32, fired: Option<TimerToken>) -> RetransmitAction
         };
 
         d.retransmit_token =
-            Some(NET_TIMER_WHEEL.schedule(rto_ms.max(1), TimerKind::TcpRetransmit, conn_id));
+            Some(timer::wheel().schedule(rto_ms.max(1), TimerKind::TcpRetransmit, conn_id));
         bufs.send.rto_deadline_ms = now_ms.saturating_add(rto_ms);
         pcb.assert_invariants();
         klog_debug!("tcp: retransmit fired id={} rto_ms={}", conn_id, rto_ms);
@@ -1529,7 +1529,7 @@ fn keepalive_fired(conn_id: u32, fired: Option<TimerToken>) -> RetransmitAction 
 
         d.keepalive_probes_sent = d.keepalive_probes_sent.saturating_add(1);
         let token =
-            NET_TIMER_WHEEL.schedule(TCP_KEEPALIVE_INTERVAL_MS, TimerKind::TcpKeepalive, conn_id);
+            timer::wheel().schedule(TCP_KEEPALIVE_INTERVAL_MS, TimerKind::TcpKeepalive, conn_id);
         d.keepalive_token = Some(token);
         Outcome::Probe(probe_seg)
     });
@@ -1569,7 +1569,7 @@ pub fn on_time_wait_expire(conn_id: u32) {
             Some(left) if left > 0 => left,
             _ => TIME_WAIT_MS,
         };
-        tw.expire_token = Some(NET_TIMER_WHEEL.schedule(delay_ms, TimerKind::TcpTimeWait, conn_id));
+        tw.expire_token = Some(timer::wheel().schedule(delay_ms, TimerKind::TcpTimeWait, conn_id));
         false
     })
     .unwrap_or(false);
@@ -1595,7 +1595,7 @@ pub fn on_fin_wait2_timeout(conn_id: u32) {
             return false;
         }
         if !orphan {
-            d.fin_wait2_token = Some(NET_TIMER_WHEEL.schedule(
+            d.fin_wait2_token = Some(timer::wheel().schedule(
                 FIN_WAIT2_TIMEOUT_MS,
                 TimerKind::TcpFinWait2,
                 conn_id,

@@ -12,71 +12,38 @@ use core::ops::ControlFlow;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::klog_warn;
 use slopos_ostd::mm::KArc;
-use slopos_ostd::mm::frame::{AnonymousMeta, FrameError, Paddr, RingMeta};
-use slopos_ostd::mm::page_property::{CachePolicy, PageProperty};
+use slopos_ostd::mm::frame::{AnonymousMeta, FrameError, RingMeta};
+use slopos_ostd::mm::page_property::PageProperty;
 use slopos_ostd::mm::page_size::Size4Kb;
-use slopos_ostd::mm::page_table::PteFlags;
+use slopos_ostd::mm::page_table::PageTableLevel;
 use slopos_ostd::mm::uframe::{AnyUFrameMeta, UFrame};
 use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 
-use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use crate::paging_defs::PAGE_SIZE_4KB;
 
-/// Bit shift for the AVL software-bits field (PTE bits 9..=11); legacy
-/// [`PageFlags::COW`] sits at bit 9, the low bit of `PageProperty::software`.
-const SOFTWARE_BITS_SHIFT: u32 = 9;
 /// Bound on waiting out the readers of an address space. The readers are user
 /// copies with preemption off, and a holder whose TLB flush waits on this
 /// CPU's ack is served by the wait's own shootdown polling.
 const VM_SPACE_MUT_SPINS: usize = 1_000_000;
 
-/// Convert a legacy `PageFlags` bitfield (passed as `u64`) into an OSTD
-/// `PageProperty`.
-pub fn page_flags_to_property(flags: u64) -> PageProperty {
-    let f = PageFlags::from_bits_truncate(flags);
-    let cache_policy = if f.contains(PageFlags::WRITE_THROUGH) {
-        CachePolicy::WriteCombining
-    } else if f.contains(PageFlags::CACHE_DISABLE) {
-        CachePolicy::Uncacheable
-    } else {
-        CachePolicy::WriteBack
-    };
-    let software = ((flags & PteFlags::SOFTWARE_BITS_MASK) >> SOFTWARE_BITS_SHIFT) as u8;
-    PageProperty {
-        read: f.contains(PageFlags::PRESENT),
-        write: f.contains(PageFlags::WRITABLE),
-        execute: !f.contains(PageFlags::NO_EXECUTE),
-        user: f.contains(PageFlags::USER),
-        cache_policy,
-        global: f.contains(PageFlags::GLOBAL),
-        software,
-    }
+/// The [`PageProperty::software`] bit marking a copy-on-write leaf: read-only,
+/// and shared until the write fault that copies it.
+pub const SOFTWARE_COW: u8 = 0b001;
+
+const _: () = assert!(SOFTWARE_COW & PageProperty::SOFTWARE_NO_FRAME_REF == 0);
+
+/// Whether `prop` marks a copy-on-write leaf.
+#[inline]
+pub fn is_cow(prop: &PageProperty) -> bool {
+    prop.software & SOFTWARE_COW != 0
 }
 
-/// Inverse of [`page_flags_to_property`].
-pub fn property_to_page_flags(prop: PageProperty) -> PageFlags {
-    let mut bits = 0u64;
-    if prop.read {
-        bits |= PageFlags::PRESENT.bits();
-    }
-    if prop.write {
-        bits |= PageFlags::WRITABLE.bits();
-    }
-    if !prop.execute {
-        bits |= PageFlags::NO_EXECUTE.bits();
-    }
-    if prop.user {
-        bits |= PageFlags::USER.bits();
-    }
-    if prop.global {
-        bits |= PageFlags::GLOBAL.bits();
-    }
-    match prop.cache_policy {
-        CachePolicy::WriteBack => {}
-        CachePolicy::WriteCombining => bits |= PageFlags::WRITE_THROUGH.bits(),
-        CachePolicy::Uncacheable => bits |= PageFlags::CACHE_DISABLE.bits(),
-    }
-    bits |= (prop.software as u64) << SOFTWARE_BITS_SHIFT;
-    PageFlags::from_bits_truncate(bits)
+/// `prop` read-only and marked copy-on-write.
+#[inline]
+pub fn cow_marked(mut prop: PageProperty) -> PageProperty {
+    prop.write = false;
+    prop.software |= SOFTWARE_COW;
+    prop
 }
 
 /// Advisory; `KArc::get_mut` is the authoritative check.
@@ -108,7 +75,7 @@ fn vm_space_get_mut(vm_space: &mut KArc<VmSpace>) -> Result<&mut VmSpace, MapErr
 }
 
 fn log_frame_wrap_failure(what: &str, pa: PhysAddr, va: VirtAddr, e: FrameError) {
-    let snap = slopos_ostd::mm::frame::slot_snapshot(Paddr::new(pa.as_u64()));
+    let snap = slopos_ostd::mm::frame::slot_snapshot(pa);
     let (slots, max_pa, inited) = slopos_ostd::mm::frame::meta_slots_coverage();
     klog_warn!(
         "USERMAP: {}(Anon) FAILED pa=0x{:x} va=0x{:x} frame_err={:?} \
@@ -129,23 +96,22 @@ fn log_frame_wrap_failure(what: &str, pa: PhysAddr, va: VirtAddr, e: FrameError)
 ///
 /// Takes the owning [`UFrame`] rather than a `PhysAddr` so the page has one
 /// owner at every instant: on success the leaf PTE holds it, and on refusal it
-/// comes back in the error. A caller holding a bare paddr across this call had
-/// no way to know which, which is what made every error path a double-free.
+/// comes back in the error. A caller holding a bare paddr across the call
+/// could not tell which, so every error path would free the page twice.
 ///
-/// Use [`ostd_map_4kb_user_shared`] for a page owned elsewhere.
+/// Use [`map_4kb_user_shared`] for a page owned elsewhere.
 ///
 /// # Errors
 ///
 /// Returns the frame beside `MapError::Overlap` if a leaf is already present
 /// at `va`, `MapError::IntermediateAllocFailed` on intermediate page-table
 /// allocation failure, or any other variant the cursor surfaces.
-pub fn ostd_map_4kb_user(
+pub fn map_4kb_user(
     vm_space: &mut KArc<VmSpace>,
     va: VirtAddr,
     frame: UFrame<AnonymousMeta>,
-    flags: u64,
+    prop: PageProperty,
 ) -> Result<(), (UFrame<AnonymousMeta>, MapError)> {
-    let prop = page_flags_to_property(flags);
     let vs = match vm_space_get_mut(vm_space) {
         Ok(vs) => vs,
         Err(e) => return Err((frame, e)),
@@ -164,16 +130,16 @@ pub fn ostd_map_4kb_user(
 ///
 /// `Err(MapError::IntermediateAllocFailed)` also covers the buddy being empty,
 /// since to the caller both are "no page is mapped at `va`".
-pub fn ostd_map_4kb_user_fresh(
+pub fn map_4kb_user_fresh(
     vm_space: &mut KArc<VmSpace>,
     va: VirtAddr,
-    flags: u64,
+    prop: PageProperty,
 ) -> Result<PhysAddr, MapError> {
     let pa = crate::page_alloc::alloc_kernel_page();
     if pa.is_null() {
         return Err(MapError::IntermediateAllocFailed);
     }
-    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(Paddr::new(pa.as_u64())) {
+    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(pa) {
         Ok(f) => f,
         Err(e) => {
             log_frame_wrap_failure("claim_user_paddr", pa, va, e);
@@ -182,7 +148,7 @@ pub fn ostd_map_4kb_user_fresh(
         }
     };
     // Sole ref, so dropping the refused frame is the free.
-    ostd_map_4kb_user(vm_space, va, frame, flags).map_err(|(_, e)| e)?;
+    map_4kb_user(vm_space, va, frame, prop).map_err(|(_, e)| e)?;
     Ok(pa)
 }
 
@@ -192,21 +158,21 @@ pub fn ostd_map_4kb_user_fresh(
 /// until every holder drops.
 ///
 /// A refusal drops that added ref and nothing else, so unlike
-/// [`ostd_map_4kb_user`] there is nothing to hand back.
-pub fn ostd_map_4kb_user_shared(
+/// [`map_4kb_user`] there is nothing to hand back.
+pub fn map_4kb_user_shared(
     vm_space: &mut KArc<VmSpace>,
     va: VirtAddr,
     pa: PhysAddr,
-    flags: u64,
+    prop: PageProperty,
 ) -> Result<(), MapError> {
-    let frame = match UFrame::<AnonymousMeta>::alias_user_paddr(Paddr::new(pa.as_u64())) {
+    let frame = match UFrame::<AnonymousMeta>::alias_user_paddr(pa) {
         Ok(f) => f,
         Err(e) => {
             log_frame_wrap_failure("alias_user_paddr", pa, va, e);
             return Err(MapError::PathCorrupt);
         }
     };
-    ostd_map_4kb_user(vm_space, va, frame, flags).map_err(|(_, e)| e)
+    map_4kb_user(vm_space, va, frame, prop).map_err(|(_, e)| e)
 }
 
 /// Swap the 4 KiB user leaf at `va` for the caller-owned `frame`, returning
@@ -217,13 +183,12 @@ pub fn ostd_map_4kb_user_shared(
 /// cross-CPU shootdown of `va`.
 #[must_use = "dropping the displaced frame before the TLB shootdown frees a page a peer may still translate"]
 #[allow(clippy::type_complexity)]
-pub fn ostd_replace_4kb_user(
+pub fn replace_4kb_user(
     vm_space: &mut KArc<VmSpace>,
     va: VirtAddr,
     frame: UFrame<AnonymousMeta>,
-    flags: u64,
+    prop: PageProperty,
 ) -> Result<Option<UFrame<AnonymousMeta>>, (UFrame<AnonymousMeta>, MapError)> {
-    let prop = page_flags_to_property(flags);
     let vs = match vm_space_get_mut(vm_space) {
         Ok(vs) => vs,
         Err(e) => return Err((frame, e)),
@@ -241,7 +206,7 @@ pub fn ostd_replace_4kb_user(
 /// registered [`FrameAlloc`] once that count hits zero.
 ///
 /// `Ok(false)` means the leaf was already absent.
-pub fn ostd_unmap_4kb_user(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result<bool, MapError> {
+pub fn unmap_4kb_user(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result<bool, MapError> {
     let vs = vm_space_get_mut(vm_space)?;
     let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let mut cursor = vs.cursor_mut(range)?;
@@ -256,7 +221,7 @@ pub fn ostd_unmap_4kb_user(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result
 /// still caches a stale translation. The cursor does the local invalidation;
 /// the caller's half is to hold the frames, drop the lock, then issue one
 /// shootdown for the whole range rather than one per page.
-pub fn ostd_unmap_4kb_user_take(
+pub fn unmap_4kb_user_take(
     vm_space: &mut KArc<VmSpace>,
     va: VirtAddr,
 ) -> Result<Option<UFrame<AnonymousMeta>>, MapError> {
@@ -268,22 +233,20 @@ pub fn ostd_unmap_4kb_user_take(
 
 /// Map a 4 KiB SlopRing page into `vm_space` at `va`. The `RingMeta` slot at
 /// `pa` must already be live — the ring object holds the first ref — and this
-/// leaks a second one into the user PTE (SLOPRING § 5.1), so the page is freed
+/// leaks a second one into the user PTE, so the page is freed
 /// only once both drop and a mapping outliving the ring fd cannot UAF.
-pub fn ostd_map_ring_4kb_user(
+pub fn map_ring_4kb_user(
     vm_space: &mut KArc<VmSpace>,
     va: VirtAddr,
     pa: PhysAddr,
-    flags: u64,
+    prop: PageProperty,
 ) -> Result<(), MapError> {
-    let prop = page_flags_to_property(flags);
-    let pa_ostd = Paddr::new(pa.as_u64());
     // A dead `RingMeta` slot and a failed page-table walk both surface as
     // PathCorrupt, so the two failures are logged distinctly.
-    let frame = match UFrame::<RingMeta>::from_in_use(pa_ostd) {
+    let frame = match UFrame::<RingMeta>::from_in_use(pa) {
         Ok(f) => f,
         Err(e) => {
-            let snap = slopos_ostd::mm::frame::slot_snapshot(pa_ostd);
+            let snap = slopos_ostd::mm::frame::slot_snapshot(pa);
             let (slots, max_pa, inited) = slopos_ostd::mm::frame::meta_slots_coverage();
             klog_warn!(
                 "RINGMAP: from_in_use(RingMeta) FAILED pa=0x{:x} va=0x{:x} frame_err={:?} \
@@ -326,10 +289,7 @@ pub fn ostd_map_ring_4kb_user(
 /// Unmap a 4 KiB SlopRing page from `vm_space` at `va`, releasing the PTE's
 /// ref; the frame survives until the ring object drops its own, and vice
 /// versa. `Ok(true)` means a leaf was present.
-pub fn ostd_unmap_ring_4kb_user(
-    vm_space: &mut KArc<VmSpace>,
-    va: VirtAddr,
-) -> Result<bool, MapError> {
+pub fn unmap_ring_4kb_user(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result<bool, MapError> {
     let vs = vm_space_get_mut(vm_space)?;
     let range = va..VirtAddr::new(va.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let mut cursor = vs.cursor_mut(range)?;
@@ -338,13 +298,13 @@ pub fn ostd_unmap_ring_4kb_user(
         .map(|opt| opt.is_some())?)
 }
 
-/// Apply the writable / no-execute bits from `new_flags` to every 4 KiB leaf
-/// in `[start, end)` that is currently present. Huge leaves are skipped.
-pub fn ostd_protect_range_4kb(
+/// Apply `new`'s write and execute permissions to every 4 KiB leaf in
+/// `[start, end)` that is currently present. Huge leaves are skipped.
+pub fn protect_range_4kb(
     vm_space: &mut KArc<VmSpace>,
     start: VirtAddr,
     end: VirtAddr,
-    new_flags: PageFlags,
+    new: PageProperty,
 ) -> Result<(), MapError> {
     if end.as_u64() <= start.as_u64() {
         return Ok(());
@@ -359,12 +319,12 @@ pub fn ostd_protect_range_4kb(
             Err(_) => return Ok(()),
         };
         if cur.paddr.is_some() {
-            if cur.level == slopos_ostd::mm::page_table::PageTableLevel::One {
+            if cur.level == PageTableLevel::One {
                 let mut prop = cur.property;
                 // A COW leaf's frame is shared: it becomes writable only by
                 // the fault that copies it, never by a protection change.
-                prop.write = new_flags.contains(PageFlags::WRITABLE) && prop.software & 0b001 == 0;
-                prop.execute = !new_flags.contains(PageFlags::NO_EXECUTE);
+                prop.write = new.write && !is_cow(&prop);
+                prop.execute = new.execute;
                 cursor.protect::<Size4Kb>(prop)?;
             }
         }
@@ -374,41 +334,9 @@ pub fn ostd_protect_range_4kb(
     Ok(())
 }
 
-/// Set the `USER` bit on every 4 KiB leaf in `[start, end)` that is currently
-/// present, and set `WRITABLE` from `writable`.
-pub fn ostd_mark_range_user_4kb(
-    vm_space: &mut KArc<VmSpace>,
-    start: VirtAddr,
-    end: VirtAddr,
-    writable: bool,
-) -> Result<(), MapError> {
-    if end.as_u64() <= start.as_u64() {
-        return Ok(());
-    }
-    let vs = vm_space_get_mut(vm_space)?;
-    let mut cursor = vs.cursor_mut(start..end)?;
-    let mut va = start.as_u64();
-    while va < end.as_u64() {
-        let entry = cursor.query();
-        let cur = match entry {
-            Ok(e) => e,
-            Err(_) => return Ok(()),
-        };
-        if cur.paddr.is_some() && cur.level == slopos_ostd::mm::page_table::PageTableLevel::One {
-            let mut prop = cur.property;
-            prop.user = true;
-            prop.write = writable;
-            cursor.protect::<Size4Kb>(prop)?;
-        }
-        va = va.wrapping_add(PAGE_SIZE_4KB);
-        cursor.advance(PAGE_SIZE_4KB)?;
-    }
-    Ok(())
-}
-
-/// Mark a single 4 KiB user page as copy-on-write: clear `WRITABLE` and set
-/// the COW software bit (PTE bit 9).
-pub fn ostd_mark_cow_4kb(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result<(), MapError> {
+/// Mark a single 4 KiB user page as copy-on-write: read-only, carrying
+/// [`SOFTWARE_COW`].
+pub fn mark_cow_4kb(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result<(), MapError> {
     let vs = vm_space_get_mut(vm_space)?;
     let aligned = VirtAddr::new(va.as_u64() & !(PAGE_SIZE_4KB - 1));
     let range = aligned..VirtAddr::new(aligned.as_u64().wrapping_add(PAGE_SIZE_4KB));
@@ -417,24 +345,15 @@ pub fn ostd_mark_cow_4kb(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result<(
         Ok(e) => e,
         Err(_) => return Ok(()),
     };
-    if cur.paddr.is_some() && cur.level == slopos_ostd::mm::page_table::PageTableLevel::One {
+    if cur.paddr.is_some() && cur.level == PageTableLevel::One {
         cursor.protect::<Size4Kb>(cow_marked(cur.property))?;
     }
     Ok(())
 }
 
-/// `prop` without `WRITABLE` and with the COW software bit set.
-fn cow_marked(mut prop: PageProperty) -> PageProperty {
-    prop.write = false;
-    // Bit 0 of `software` ↔ PTE bit 9 ↔ legacy `PageFlags::COW`.
-    prop.software |= 0b001;
-    prop
-}
-
-/// Resolve a copy-on-write page for the single-ref case: set `WRITABLE` and
-/// clear the COW software bit. `Ok(true)` if a 4 KiB leaf was present and
-/// updated.
-pub fn ostd_resolve_cow_4kb(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result<bool, MapError> {
+/// Resolve a copy-on-write page for the single-ref case: writable, without
+/// [`SOFTWARE_COW`]. `Ok(true)` if a 4 KiB leaf was present and updated.
+pub fn resolve_cow_4kb(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Result<bool, MapError> {
     let vs = vm_space_get_mut(vm_space)?;
     let aligned = VirtAddr::new(va.as_u64() & !(PAGE_SIZE_4KB - 1));
     let range = aligned..VirtAddr::new(aligned.as_u64().wrapping_add(PAGE_SIZE_4KB));
@@ -443,10 +362,10 @@ pub fn ostd_resolve_cow_4kb(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Resul
         Ok(e) => e,
         Err(_) => return Ok(false),
     };
-    if cur.paddr.is_some() && cur.level == slopos_ostd::mm::page_table::PageTableLevel::One {
+    if cur.paddr.is_some() && cur.level == PageTableLevel::One {
         let mut prop = cur.property;
         prop.write = true;
-        prop.software &= !0b001;
+        prop.software &= !SOFTWARE_COW;
         cursor.protect::<Size4Kb>(prop)?;
         Ok(true)
     } else {
@@ -454,9 +373,9 @@ pub fn ostd_resolve_cow_4kb(vm_space: &mut KArc<VmSpace>, va: VirtAddr) -> Resul
     }
 }
 
-/// Legacy `PageFlags` snapshot of the 4 KiB leaf at `va`, or `None` if no leaf
-/// is present at that level.
-pub fn ostd_get_pte_flags_4kb(vm_space: &KArc<VmSpace>, va: VirtAddr) -> Option<PageFlags> {
+/// The property of the 4 KiB leaf at `va`, or `None` if no leaf is present at
+/// that level.
+pub fn leaf_property_4kb(vm_space: &KArc<VmSpace>, va: VirtAddr) -> Option<PageProperty> {
     let aligned = VirtAddr::new(va.as_u64() & !(PAGE_SIZE_4KB - 1));
     let range = aligned..VirtAddr::new(aligned.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let cursor = match vm_space.cursor(range) {
@@ -467,15 +386,15 @@ pub fn ostd_get_pte_flags_4kb(vm_space: &KArc<VmSpace>, va: VirtAddr) -> Option<
     if cur.paddr.is_none() {
         return None;
     }
-    if cur.level != slopos_ostd::mm::page_table::PageTableLevel::One {
+    if cur.level != PageTableLevel::One {
         return None;
     }
-    Some(property_to_page_flags(cur.property))
+    Some(cur.property)
 }
 
 /// Is the 4 KiB leaf at `va` both mapped and user-accessible? A kernel-half
 /// page (USER bit clear) is mapped but answers `false`.
-pub fn ostd_is_user_accessible_4kb(vm_space: &KArc<VmSpace>, va: VirtAddr) -> bool {
+pub fn is_user_accessible_4kb(vm_space: &KArc<VmSpace>, va: VirtAddr) -> bool {
     let aligned = VirtAddr::new(va.as_u64() & !(PAGE_SIZE_4KB - 1));
     let range = aligned..VirtAddr::new(aligned.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let cursor = match vm_space.cursor(range) {
@@ -486,19 +405,18 @@ pub fn ostd_is_user_accessible_4kb(vm_space: &KArc<VmSpace>, va: VirtAddr) -> bo
         Ok(e) => e,
         Err(_) => return false,
     };
-    cur.paddr.is_some()
-        && cur.level == slopos_ostd::mm::page_table::PageTableLevel::One
-        && cur.property.user
+    cur.paddr.is_some() && cur.level == PageTableLevel::One && cur.property.user
 }
 
-/// The first present 4 KiB leaf in `[from, to)`: its address, frame and flags.
+/// The first present 4 KiB leaf in `[from, to)`: its address, frame and
+/// property.
 /// An empty subtree is stepped over whole, so a sparse range costs what it
 /// maps rather than its span; a huge leaf is stepped over like an empty one.
-pub fn ostd_next_leaf_4kb(
+pub fn next_leaf_4kb(
     vm_space: &KArc<VmSpace>,
     from: VirtAddr,
     to: VirtAddr,
-) -> Result<Option<(VirtAddr, PhysAddr, PageFlags)>, MapError> {
+) -> Result<Option<(VirtAddr, PhysAddr, PageProperty)>, MapError> {
     if from >= to {
         return Ok(None);
     }
@@ -506,12 +424,8 @@ pub fn ostd_next_leaf_4kb(
     loop {
         let entry = cursor.query()?;
         match entry.paddr {
-            Some(paddr) if entry.level == slopos_ostd::mm::page_table::PageTableLevel::One => {
-                return Ok(Some((
-                    entry.vaddr,
-                    PhysAddr::new(paddr.as_u64()),
-                    property_to_page_flags(entry.property),
-                )));
+            Some(paddr) if entry.level == PageTableLevel::One => {
+                return Ok(Some((entry.vaddr, paddr, entry.property)));
             }
             _ => {
                 let Some(next) = (entry.vaddr.as_u64() & entry.level.align_mask())
@@ -527,38 +441,37 @@ pub fn ostd_next_leaf_4kb(
 }
 
 /// Unmap every present 4 KiB leaf of `[start, end)` in one pass over its leaf
-/// tables, handing each frame to `each` as [`ostd_unmap_4kb_user_take`] would,
-/// with the flags its leaf carried. An address space with nothing mapped there
-/// is not waited on. `Err` names the address the failure struck at; every leaf
-/// below it is gone.
-pub fn ostd_unmap_present_4kb<M: AnyUFrameMeta>(
+/// tables, handing each frame to `each` as [`unmap_4kb_user_take`] would,
+/// with the property its leaf carried. An address space with nothing mapped
+/// there is not waited on. `Err` names the address the failure struck at;
+/// every leaf below it is gone.
+pub fn unmap_present_4kb<M: AnyUFrameMeta>(
     vm_space: &mut KArc<VmSpace>,
     start: VirtAddr,
     end: VirtAddr,
-    mut each: impl FnMut(VirtAddr, PageFlags, UFrame<M>),
+    mut each: impl FnMut(VirtAddr, PageProperty, UFrame<M>),
 ) -> Result<(), (MapError, VirtAddr)> {
-    let Some((first, _, _)) = ostd_next_leaf_4kb(vm_space, start, end).map_err(|e| (e, start))?
-    else {
+    let Some((first, _, _)) = next_leaf_4kb(vm_space, start, end).map_err(|e| (e, start))? else {
         return Ok(());
     };
     let vs = vm_space_get_mut(vm_space).map_err(|e| (e, first))?;
     let mut cursor = vs.cursor_mut(first..end).map_err(|e| (e, first))?;
     cursor
-        .unmap_present(|va, property, frame| each(va, property_to_page_flags(property), frame))
+        .unmap_present(|va, property, frame| each(va, property, frame))
         .map_err(|e| (e, cursor.vaddr()))
 }
 
 /// Offer every present 4 KiB leaf of `[start, end)` to `visit` as
-/// `(vaddr, paddr, flags)`, in one pass over its leaf tables, and mark
-/// copy-on-write, as [`ostd_mark_cow_4kb`] does, each one it answers
+/// `(vaddr, paddr, property)`, in one pass over its leaf tables, and mark
+/// copy-on-write, as [`mark_cow_4kb`] does, each one it answers
 /// `Continue(true)` for. `Ok(false)` when `visit` broke off.
-pub fn ostd_visit_mark_cow_4kb(
+pub fn visit_mark_cow_4kb(
     vm_space: &mut KArc<VmSpace>,
     start: VirtAddr,
     end: VirtAddr,
-    mut visit: impl FnMut(VirtAddr, PhysAddr, PageFlags) -> ControlFlow<(), bool>,
+    mut visit: impl FnMut(VirtAddr, PhysAddr, PageProperty) -> ControlFlow<(), bool>,
 ) -> Result<bool, MapError> {
-    let Some((first, _, _)) = ostd_next_leaf_4kb(vm_space, start, end)? else {
+    let Some((first, _, _)) = next_leaf_4kb(vm_space, start, end)? else {
         return Ok(true);
     };
     let vs = vm_space_get_mut(vm_space)?;
@@ -567,8 +480,7 @@ pub fn ostd_visit_mark_cow_4kb(
         let Some(paddr) = entry.paddr else {
             return ControlFlow::Continue(None);
         };
-        let flags = property_to_page_flags(entry.property);
-        match visit(entry.vaddr, PhysAddr::new(paddr.as_u64()), flags) {
+        match visit(entry.vaddr, paddr, entry.property) {
             ControlFlow::Continue(mark) => {
                 ControlFlow::Continue(mark.then(|| cow_marked(entry.property)))
             }
@@ -579,9 +491,9 @@ pub fn ostd_visit_mark_cow_4kb(
 
 /// Which 4 KiB pages of `[start, end)` hold a present leaf, as bit `i` for
 /// the page `i` pages past `start`, from one pass over the range's leaf
-/// tables. A huge leaf reads as absent, as [`ostd_virt_to_phys_4kb`] has it.
+/// tables. A huge leaf reads as absent, as [`virt_to_phys_4kb`] has it.
 /// The range spans at most 64 pages.
-pub fn ostd_present_mask_4kb(
+pub fn present_mask_4kb(
     vm_space: &mut KArc<VmSpace>,
     start: VirtAddr,
     end: VirtAddr,
@@ -597,30 +509,24 @@ pub fn ostd_present_mask_4kb(
     Ok(mask)
 }
 
-/// Map each `(vaddr, frame, flags)` into `[start, end)` as
-/// [`ostd_map_4kb_user`] would, descending once per leaf table the vaddrs
+/// Map each `(vaddr, frame, property)` into `[start, end)` as
+/// [`map_4kb_user`] would, descending once per leaf table the vaddrs
 /// share. Returns how many were mapped; `Err` names the vaddr refused, whose
 /// frame is dropped with the items not reached.
-pub fn ostd_map_each_4kb_user(
+pub fn map_each_4kb_user(
     vm_space: &mut KArc<VmSpace>,
     start: VirtAddr,
     end: VirtAddr,
-    items: impl IntoIterator<Item = (VirtAddr, UFrame<AnonymousMeta>, u64)>,
+    items: impl IntoIterator<Item = (VirtAddr, UFrame<AnonymousMeta>, PageProperty)>,
 ) -> Result<usize, (MapError, VirtAddr)> {
     let vs = vm_space_get_mut(vm_space).map_err(|e| (e, start))?;
     let mut cursor = vs.cursor_mut(start..end).map_err(|e| (e, start))?;
-    cursor
-        .map_each(
-            items
-                .into_iter()
-                .map(|(va, frame, flags)| (va, frame, page_flags_to_property(flags))),
-        )
-        .map_err(|(_, va, e)| (e, va))
+    cursor.map_each(items).map_err(|(_, va, e)| (e, va))
 }
 
 /// Physical address backing the 4 KiB user leaf at `va`, or `PhysAddr::null()`
 /// if no 4 KiB leaf is present — a huge leaf reads as null too.
-pub fn ostd_virt_to_phys_4kb(vm_space: &KArc<VmSpace>, va: VirtAddr) -> PhysAddr {
+pub fn virt_to_phys_4kb(vm_space: &KArc<VmSpace>, va: VirtAddr) -> PhysAddr {
     let aligned = VirtAddr::new(va.as_u64() & !(PAGE_SIZE_4KB - 1));
     let range = aligned..VirtAddr::new(aligned.as_u64().wrapping_add(PAGE_SIZE_4KB));
     let cursor = match vm_space.cursor(range) {
@@ -632,7 +538,7 @@ pub fn ostd_virt_to_phys_4kb(vm_space: &KArc<VmSpace>, va: VirtAddr) -> PhysAddr
         Err(_) => return PhysAddr::new(0),
     };
     match cur.paddr {
-        Some(p) if cur.level == slopos_ostd::mm::page_table::PageTableLevel::One => {
+        Some(p) if cur.level == PageTableLevel::One => {
             // The result is byte-exact, so the page offset goes back in.
             let off = va.as_u64() & (PAGE_SIZE_4KB - 1);
             PhysAddr::new(p.as_u64() | off)

@@ -23,7 +23,7 @@ use slopos_ostd::KVec;
 fn write_record<T: Copy>(base: u64, index: usize, value: &T) -> Result<(), Errno> {
     let offset = (index * core::mem::size_of::<T>()) as u64;
     let addr = base.checked_add(offset).ok_or(Errno::EFAULT)?;
-    let ptr = slopos_mm::user_ptr::UserPtr::<T>::try_new(addr).map_err(|_| Errno::EFAULT)?;
+    let ptr = slopos_ostd::user::ptr::UserPtr::<T>::try_new(addr).map_err(|_| Errno::EFAULT)?;
     copy_to_user(ptr, value).map_err(|_| Errno::EFAULT)
 }
 
@@ -46,8 +46,8 @@ fn write_header(
     hdr.total_count = total_count as u32;
     hdr.what = what;
 
-    let ptr =
-        slopos_mm::user_ptr::UserPtr::<UserNetQueryHdr>::try_new(buf).map_err(|_| Errno::EFAULT)?;
+    let ptr = slopos_ostd::user::ptr::UserPtr::<UserNetQueryHdr>::try_new(buf)
+        .map_err(|_| Errno::EFAULT)?;
     copy_to_user(ptr, &hdr).map_err(|_| Errno::EFAULT)?;
     Ok(buf + core::mem::size_of::<UserNetQueryHdr>() as u64)
 }

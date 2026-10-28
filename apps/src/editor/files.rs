@@ -4,6 +4,7 @@
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 
 use slopos_editor_core::document::DiskStamp;
 use slopos_editor_core::filetree::DirEntry;
@@ -14,9 +15,10 @@ use super::said;
 /// seeming to hang.
 pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
-pub const DOC_PATH: &str = "/usr/share/slopos/doc/editor.md";
-
 const SNIFF_BYTES: usize = 8192;
+
+/// `<limits.h>`'s `NAME_MAX`: the longest name a directory holds.
+const NAME_MAX: usize = 255;
 
 pub fn read_file(path: &str) -> Result<String, String> {
     match fs::metadata(path) {
@@ -75,7 +77,7 @@ fn temp_path(path: &str) -> String {
     };
     let suffix = format!(".editor-{}", std::process::id());
     // The name shortens, so the suffix never pushes it past the limit.
-    let room = slopos_abi::fs::USER_NAME_MAX.saturating_sub(suffix.len() + 1);
+    let room = NAME_MAX.saturating_sub(suffix.len() + 1);
     let mut stem = String::new();
     for (index, ch) in name.char_indices() {
         if index + ch.len_utf8() > room {
@@ -123,8 +125,16 @@ pub fn disk_stamp(path: &str) -> Option<DiskStamp> {
     })
 }
 
-pub fn is_file(path: &str) -> bool {
-    fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
+/// The editor's manual: `slopos/doc/editor.md` in the first share holding it,
+/// ranked as the dock ranks the shares' app entries.
+pub fn manual() -> Option<String> {
+    let person = std::env::home_dir().map(|home| home.join(".local/share"));
+    person
+        .into_iter()
+        .chain(["/usr/local/share", "/usr/share"].map(PathBuf::from))
+        .map(|share| share.join("slopos/doc/editor.md"))
+        .find(|path| path.is_file())
+        .and_then(|path| path.into_os_string().into_string().ok())
 }
 
 pub fn is_dir(path: &str) -> bool {

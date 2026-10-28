@@ -276,7 +276,7 @@ pub fn test_a_large_image_owns_its_segments_and_the_heap_clears_it() -> TestResu
     )
     .expect("test alloc");
     let mut entry = 0;
-    let mapped = process_vm::process_vm_reset_for_exec(process) == 0
+    let mapped = process_vm::process_vm_reset_for_exec(process)
         && process_vm::process_vm_map_elf_image(
             process,
             &elf,
@@ -287,7 +287,7 @@ pub fn test_a_large_image_owns_its_segments_and_the_heap_clears_it() -> TestResu
         .is_ok();
     let sealed = process_vm::process_vm_mprotect(process, DATA_VA, PAGE_SIZE_4KB, PROT_READ);
     let heap = process_vm::process_vm_brk(process, 0);
-    let outlived_exec = process_vm::process_vm_reset_for_exec(process) == 0
+    let outlived_exec = process_vm::process_vm_reset_for_exec(process)
         && process_vm::process_vm_user_va_is_user_accessible(process, DATA_VA);
     process_vm::destroy_process_vm(process);
 
@@ -295,9 +295,9 @@ pub fn test_a_large_image_owns_its_segments_and_the_heap_clears_it() -> TestResu
         klog_info!("EXEC_TEST: the image with a distant data segment did not load");
         return TestResult::Fail;
     }
-    if sealed != 0 {
+    if sealed.is_err() {
         klog_info!(
-            "EXEC_TEST: mprotect of the data segment answered {}",
+            "EXEC_TEST: mprotect of the data segment answered {:?}",
             sealed
         );
         return TestResult::Fail;
@@ -1248,8 +1248,8 @@ pub fn test_setup_user_stack_byte_budget_boundary() -> TestResult {
     TestResult::Pass
 }
 
-/// Argument *count* is no longer capped: 96 arguments, three times the retired
-/// limit, arrive with their strings and their order intact.
+/// Argument *count* is not capped: 96 arguments arrive with their strings and
+/// their order intact.
 pub fn test_setup_user_stack_high_argument_count() -> TestResult {
     const HIGH_ARG_COUNT: usize = 96;
 
@@ -1431,7 +1431,6 @@ slopos_testing::stest!(
 /// where a spawn confers it, `Mount` does not, and an `execve` that gives the
 /// right up holds the process to the ceiling again.
 pub fn test_the_block_ceiling_follows_the_raw_device_right() -> TestResult {
-    use core::ffi::c_char;
     use slopos_abi::quota::{ResourceKind, default_process_limit};
     use slopos_abi::task::TASK_FLAG_USER_MODE;
     use slopos_ostd::authority::{CAP_UNIVERSAL, Capability, mask_permits};
@@ -1440,7 +1439,7 @@ pub fn test_the_block_ceiling_follows_the_raw_device_right() -> TestResult {
     use slopos_sched::task::{task_create, task_find_by_id, task_terminate};
 
     let id = task_create(
-        b"CeilingTest\0".as_ptr() as *const c_char,
+        b"CeilingTest",
         slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
         core::ptr::null_mut(),
         1,
@@ -1488,14 +1487,13 @@ slopos_testing::stest!(
 /// An exec keeps only the universal capabilities a task held, whatever it
 /// held, and the signal relation follows the narrowed mask.
 pub fn test_exec_drops_every_gated_capability() -> TestResult {
-    use core::ffi::c_char;
     use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE};
     use slopos_ostd::authority::{CAP_UNIVERSAL, Capability};
     use slopos_sched::task::{task_create, task_terminate};
 
     let user_task = |caps: u64| {
         let id = task_create(
-            b"ExecDropTest\0".as_ptr() as *const c_char,
+            b"ExecDropTest",
             slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
             core::ptr::null_mut(),
             1,

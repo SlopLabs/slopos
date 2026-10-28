@@ -32,9 +32,6 @@ name = "widget_gallery"
 path = "src/bin/widget_gallery.rs"
 
 [dependencies]
-slopos-abi = { workspace = true }
 slopos-appkit = { workspace = true }
 slopos-editor-core = { workspace = true }
-slopos-gfx = { workspace = true }
 slopos-image = { workspace = true }
-slopos-windowing = { workspace = true }

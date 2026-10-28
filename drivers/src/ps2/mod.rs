@@ -3,28 +3,15 @@
 pub mod keyboard;
 pub mod mouse;
 pub mod platform;
-use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_arch::cpu;
 use slopos_kernel_services::driver_runtime::{
     LEGACY_IRQ_KEYBOARD, LEGACY_IRQ_MOUSE, irq_increment_keyboard_events,
 };
+use slopos_ostd::cpu::x86_64 as cpu;
 use slopos_ostd::io::Ps2Regs;
 use slopos_ostd::io::port::IoPortRegistry;
 use slopos_ostd::sync::OnceLock;
 use slopos_ostd::{klog_debug, klog_info, klog_warn};
-
-/// `i8042.legacy` cmdline escape hatch: when set, [`crate::irq::init`] runs the
-/// hardcoded PS/2 bring-up at boot and the platform-bus i8042 driver declines.
-static LEGACY_MODE: AtomicBool = AtomicBool::new(false);
-
-pub fn set_legacy_mode(on: bool) {
-    LEGACY_MODE.store(on, Ordering::Release);
-}
-
-pub fn legacy_mode() -> bool {
-    LEGACY_MODE.load(Ordering::Acquire)
-}
 
 /// Read the pending byte and route it to the keyboard or mouse handler. `irq_line`
 /// selects the target; for an unexpected line the AUX status bit disambiguates.

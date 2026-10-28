@@ -4,7 +4,8 @@
 //! A keyboard backend decodes its raw byte protocol into canonical [`keycode`]
 //! usages with [`scancode_set1::Set1Decoder`], folds modifier/lock state with
 //! [`modifiers::ModTracker`], and asks a [`keymap::Layout`] for the produced
-//! text / named key. Auto-repeat timing lives in [`repeat::KeyRepeat`].
+//! text / named key. Auto-repeat timing lives in [`repeat::KeyRepeat`], and
+//! [`vt::sequence`] is what a console sends for a named key.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -16,6 +17,7 @@ pub mod parse;
 pub mod repeat;
 pub mod scancode_set1;
 pub mod sysrq;
+pub mod vt;
 
 pub use keymap::{
     DeadKeyState, KeyOutcome, Layout, Locks, Mods, Resolved, UiKey, UsQwerty, char_for,

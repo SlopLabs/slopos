@@ -1,9 +1,6 @@
-use core::ffi::c_char;
-
-use slopos_arch::cpu;
+use slopos_ostd::cpu::x86_64 as cpu;
 use slopos_ostd::io::power as ostd_power;
 use slopos_ostd::klog_info;
-use slopos_ostd::string::cstr_to_str_lossy;
 use slopos_ostd::sync::StateFlag;
 
 static SHUTDOWN_IN_PROGRESS: StateFlag = StateFlag::new();
@@ -45,7 +42,7 @@ fn flush_filesystems_for_shutdown() {
         return;
     }
     klog_info!("Kernel shutdown: flushing filesystem caches");
-    slopos_fs::ext2_vfs_shutdown_sync();
+    slopos_fs::ext4_vfs_shutdown_sync();
 }
 /// Map LAPIC/IOAPIC MMIO: a shutdown path may arrive from user context, where it
 /// is not mapped.
@@ -140,7 +137,7 @@ pub fn kernel_drain_serial_output() {
     klog_info!("Kernel shutdown: draining serial output");
     serial_flush();
 }
-pub fn kernel_shutdown(reason: *const c_char) -> ! {
+pub fn kernel_shutdown(reason: &str) -> ! {
     ensure_shutdown_mmio_mapped();
     // Must precede anything below that perturbs the machine: the summary
     // characterises steady-state kernel behaviour.
@@ -156,9 +153,7 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
     }
 
     klog_info!("=== Kernel Shutdown Requested ===");
-    if !reason.is_null() {
-        klog_info!("Reason: {}", cstr_to_str_lossy(reason));
-    }
+    klog_info!("Reason: {}", reason);
 
     // Teardown runs with the scheduler and interrupts still enabled: a destructor
     // frees to the buddy allocator, whose reuse path waits on synchronous
@@ -167,7 +162,7 @@ pub fn kernel_shutdown(reason: *const c_char) -> ! {
     stop_kernel_io_tasks();
     shutdown_devices();
 
-    if task_shutdown_all() != 0 {
+    if !task_shutdown_all() {
         klog_info!("Warning: Failed to terminate one or more tasks");
     }
 
@@ -226,7 +221,7 @@ const REBOOT_METHODS: &[(&str, fn())] = &[
     ("PS/2 keyboard controller", ostd_power::ps2_reset_pulse),
 ];
 
-pub fn kernel_reboot(reason: *const c_char) -> ! {
+pub fn kernel_reboot(reason: &str) -> ! {
     ensure_shutdown_mmio_mapped();
     slopos_ostd::watchdog::snapshot_max_stalls();
     // Must precede `disable_interrupts`, for the reason `kernel_shutdown`
@@ -238,9 +233,7 @@ pub fn kernel_reboot(reason: *const c_char) -> ! {
     cpu::disable_interrupts();
 
     klog_info!("=== Kernel Reboot Requested ===");
-    if !reason.is_null() {
-        klog_info!("Reason: {}", cstr_to_str_lossy(reason));
-    }
+    klog_info!("Reason: {}", reason);
 
     kernel_quiesce_interrupts();
     kernel_drain_serial_output();

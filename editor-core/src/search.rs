@@ -172,13 +172,20 @@ pub fn fuzzy_score(text: &str, needle: &str) -> Option<i32> {
     Some(score)
 }
 
-/// `candidates` that match `needle`, best first. Ties keep input order.
-pub fn fuzzy_filter<'a>(candidates: &[&'a str], needle: &str) -> Vec<(&'a str, i32)> {
-    let mut scored: Vec<(&str, i32)> = candidates
-        .iter()
-        .filter_map(|c| fuzzy_score(c, needle).map(|s| (*c, s)))
+/// The `candidates` whose `text` matches `needle`, best first; ties keep
+/// the input's order.
+pub fn fuzzy_filter<T>(
+    candidates: impl IntoIterator<Item = T>,
+    needle: &str,
+    text: impl Fn(&T) -> &str,
+) -> Vec<T> {
+    let mut scored: Vec<(T, i32)> = candidates
+        .into_iter()
+        .filter_map(|c| {
+            let score = fuzzy_score(text(&c), needle)?;
+            Some((c, score))
+        })
         .collect();
-    // Stable so equal scores keep the caller's order.
     scored.sort_by(|a, b| b.1.cmp(&a.1));
-    scored
+    scored.into_iter().map(|(c, _)| c).collect()
 }

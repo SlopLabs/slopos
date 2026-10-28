@@ -2,20 +2,11 @@
 //!
 //! An MSI device delivers an interrupt by writing a message straight to the
 //! LAPIC, with no IOAPIC redirection. Register layout per PCI Local Bus Spec
-//! §6.8.
-//!
-//! ```ignore
-//! use slopos_core::irq::{msi_alloc_vector, msi_register_handler};
-//! use slopos_drivers::msi;
-//!
-//! let cap = msi::msi_read_capability(bus, dev, func, cap_offset);
-//! let vector = msi_alloc_vector().expect("MSI vector exhausted");
-//! msi_register_handler(vector, my_handler, ctx, bdf);
-//! msi::msi_configure(bus, dev, func, &cap, vector, apic_id).unwrap();
-//! ```
+//! §6.8. Drivers reach it through [`crate::driver_core::msi`], which allocates
+//! the vector and owns the binding.
 
 use crate::msi_common;
-use crate::pci::{pci_config_read16, pci_config_read32, pci_config_write16, pci_config_write32};
+use crate::pci::{pci_config_read16, pci_config_write16, pci_config_write32};
 use slopos_ostd::klog_info;
 
 const MSI_CTRL_ENABLE: u16 = 1 << 0;
@@ -180,42 +171,4 @@ pub fn msi_configure(
     );
 
     Ok(())
-}
-
-/// Disable MSI for a device and re-enable legacy INTx.
-pub fn msi_disable(bus: u8, dev: u8, func: u8, cap: &MsiCapability) {
-    let cap_off = cap.cap_offset;
-
-    let mut ctrl = pci_config_read16(bus, dev, func, cap_off + MSI_REG_CONTROL);
-    ctrl &= !MSI_CTRL_ENABLE;
-    pci_config_write16(bus, dev, func, cap_off + MSI_REG_CONTROL, ctrl);
-
-    msi_common::restore_intx(bus, dev, func);
-
-    klog_info!("MSI: Disabled for BDF {}:{}.{}", bus, dev, func);
-}
-
-/// Mask a specific MSI vector (only if per-vector masking is supported).
-///
-/// `vector_idx` is 0-based within the device's allocated vectors.
-pub fn msi_mask_vector(bus: u8, dev: u8, func: u8, cap: &MsiCapability, vector_idx: u8) {
-    if let Some(mask_off) = cap.mask_offset() {
-        let mask = pci_config_read32(bus, dev, func, mask_off);
-        pci_config_write32(bus, dev, func, mask_off, mask | (1u32 << vector_idx));
-    }
-}
-
-/// Unmask a specific MSI vector (only if per-vector masking is supported).
-///
-/// `vector_idx` is 0-based within the device's allocated vectors.
-pub fn msi_unmask_vector(bus: u8, dev: u8, func: u8, cap: &MsiCapability, vector_idx: u8) {
-    if let Some(mask_off) = cap.mask_offset() {
-        let mask = pci_config_read32(bus, dev, func, mask_off);
-        pci_config_write32(bus, dev, func, mask_off, mask & !(1u32 << vector_idx));
-    }
-}
-
-/// Re-read the Message Control register to refresh capability state.
-pub fn msi_refresh_control(bus: u8, dev: u8, func: u8, cap: &mut MsiCapability) {
-    cap.control = pci_config_read16(bus, dev, func, cap.cap_offset + MSI_REG_CONTROL);
 }

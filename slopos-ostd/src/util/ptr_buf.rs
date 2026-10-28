@@ -306,19 +306,6 @@ pub fn zero_bytes_at_kernel_va(addr: u64, len: usize) {
     unsafe { core::ptr::write_bytes(p, 0, len) };
 }
 
-/// Append a NUL terminator at `buf[len]` after copying `len` bytes from `src`.
-///
-/// Caller upholds the module-level contract for `buf` over the range
-/// `[buf, buf + len + 1)`.
-#[inline]
-pub fn copy_with_nul_terminator(buf: *mut u8, src: &[u8], len: usize) {
-    // SAFETY: caller-verified bounds; copy plus one trailing NUL.
-    unsafe {
-        core::ptr::copy_nonoverlapping(src.as_ptr(), buf, len);
-        *buf.add(len) = 0;
-    }
-}
-
 /// Copy `len` bytes from `src` to `dst` using
 /// `copy_nonoverlapping`. Caller upholds non-overlap + bounds.
 #[inline]

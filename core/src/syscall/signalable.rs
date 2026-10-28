@@ -2,10 +2,10 @@
 //! step.
 //!
 //! A bare witness proves only that *a* check ran, not that it named this
-//! target. The retired `terminate_task` call was the counterexample: it checked
-//! the compositor bit and then terminated any id, and a `&Cap<ProcSignal>`
-//! would have left it byte-identical. So the witness carries the object —
-//! acting is a method on the target, and there is no other way to name one.
+//! target: a call that checked one capability and then acted on any id would
+//! look the same holding a `&Cap<ProcSignal>`. So the witness carries the
+//! object — acting is a method on the target, and there is no other way to
+//! name one.
 
 use slopos_abi::Errno;
 use slopos_abi::task::INVALID_TASK_ID;
@@ -36,12 +36,6 @@ impl Signalable {
     #[inline]
     pub fn task(&self) -> &TaskRef {
         &self.target
-    }
-
-    /// Consume the witness, yielding the owning reference.
-    #[inline]
-    pub fn into_task(self) -> TaskRef {
-        self.target
     }
 }
 

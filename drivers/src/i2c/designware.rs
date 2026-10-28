@@ -119,7 +119,7 @@ pub trait Mmio32 {
     fn w32(&self, off: usize, val: u32);
 }
 
-impl Mmio32 for slopos_mm::mmio::MmioRegion {
+impl Mmio32 for slopos_ostd::mm::IoMem {
     #[inline]
     fn r32(&self, off: usize) -> u32 {
         self.read::<u32>(off)
@@ -188,11 +188,6 @@ impl<M: Mmio32> DesignWareI2c<M> {
             rx_fifo_depth: 8,
             ic_clk_khz: DEFAULT_IC_CLK_KHZ,
         }
-    }
-
-    /// Override the assumed functional clock (kHz) used for SCL timing.
-    pub fn set_ic_clk_khz(&mut self, khz: u32) {
-        self.ic_clk_khz = khz;
     }
 
     /// Release the LPSS wrapper from reset and point its address-remap register
@@ -390,10 +385,6 @@ impl<M: Mmio32> DesignWareI2c<M> {
                     && (matches!(segs[rx_seg], I2cSegment::Write(_))
                         || rx_byte >= segs[rx_seg].len())
                 {
-                    if matches!(segs[rx_seg], I2cSegment::Read(_)) && rx_byte >= segs[rx_seg].len()
-                    {
-                        // TODO(tech-debt): empty branch — delete it.
-                    }
                     rx_seg += 1;
                     rx_byte = 0;
                 }

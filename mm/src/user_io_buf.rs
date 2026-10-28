@@ -4,7 +4,7 @@ use slopos_abi::io::{IoBufRead, IoBufWrite};
 use slopos_ostd::KVec;
 
 use crate::user_copy::{copy_bytes_from_user, copy_bytes_to_user};
-use crate::user_ptr::{UserBytes, UserVirtAddr};
+use slopos_ostd::user::ptr::{UserBytes, UserVirtAddr};
 
 /// Allocate a kernel buffer and copy user data into it in one step.
 ///

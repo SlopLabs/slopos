@@ -20,10 +20,6 @@ pub fn put_le32(data: &mut [u8], at: usize, value: u32) {
     data[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
 
-pub fn put_le64(data: &mut [u8], at: usize, value: u64) {
-    data[at..at + 8].copy_from_slice(&value.to_le_bytes());
-}
-
 pub fn be16(data: &[u8], at: usize) -> u16 {
     u16::from_be_bytes([data[at], data[at + 1]])
 }

@@ -53,3 +53,8 @@ pub fn test_pty_ixoff_nests_peer_write_lock() -> TestResult {
     }
     TestResult::Pass
 }
+
+slopos_testing::stest!(
+    name = test_pty_ixoff_nests_peer_write_lock,
+    suite = tty_test_pty
+);

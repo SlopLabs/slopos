@@ -10,8 +10,9 @@
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use slopos_abi::addr::PhysAddr;
 use slopos_ostd::mm::frame::{
-    AnonymousMeta, Frame, FrameError, KernelMeta, MetaSlot, Paddr, init_meta_slots,
+    AnonymousMeta, Frame, FrameError, KernelMeta, MetaSlot, init_meta_slots,
 };
 
 const N_PAGES: usize = 8;
@@ -36,7 +37,7 @@ fn setup() -> MutexGuard<'static, ()> {
 #[test]
 fn from_in_use_rejects_wrong_type() {
     let _g = setup();
-    let pa = Paddr::new(0x1000);
+    let pa = PhysAddr::new(0x1000);
     let kernel = Frame::<KernelMeta>::from_unused(pa, KernelMeta).unwrap();
     assert_eq!(kernel.reference_count(), 1);
 
@@ -52,7 +53,7 @@ fn from_in_use_rejects_wrong_type() {
 #[test]
 fn from_in_use_accepts_matching_type_and_bumps() {
     let _g = setup();
-    let pa = Paddr::new(0x2000);
+    let pa = PhysAddr::new(0x2000);
     let first = Frame::<KernelMeta>::from_unused(pa, KernelMeta).unwrap();
     assert_eq!(first.reference_count(), 1);
 
@@ -68,7 +69,7 @@ fn from_in_use_accepts_matching_type_and_bumps() {
 #[test]
 fn from_in_use_rejects_unused_slot() {
     let _g = setup();
-    let pa = Paddr::new(0x3000);
+    let pa = PhysAddr::new(0x3000);
     assert_eq!(
         Frame::<KernelMeta>::from_in_use(pa).err(),
         Some(FrameError::StateMismatch)

@@ -84,7 +84,6 @@ name = "slopos-acpi"
 version = "0.1.0"
 dependencies = [
  "slopos-abi",
- "slopos-arch",
  "slopos-mm",
  "slopos-ostd",
 ]
@@ -106,19 +105,9 @@ dependencies = [
 name = "slopos-apps"
 version = "0.1.0"
 dependencies = [
- "slopos-abi",
  "slopos-appkit",
  "slopos-editor-core",
- "slopos-gfx",
  "slopos-image",
- "slopos-windowing",
-]
-
-[[package]]
-name = "slopos-arch"
-version = "0.1.0"
-dependencies = [
- "slopos-ostd",
 ]
 
 [[package]]
@@ -128,7 +117,6 @@ dependencies = [
  "limine",
  "slopos-abi",
  "slopos-acpi",
- "slopos-arch",
  "slopos-boot-core",
  "slopos-core",
  "slopos-cpufreq-core",
@@ -183,7 +171,6 @@ version = "0.1.0"
 dependencies = [
  "paste",
  "slopos-abi",
- "slopos-arch",
  "slopos-boot-core",
  "slopos-font",
  "slopos-fs",
@@ -218,7 +205,6 @@ dependencies = [
  "bitflags",
  "slopos-abi",
  "slopos-acpi",
- "slopos-arch",
  "slopos-boot-core",
  "slopos-core",
  "slopos-font",
@@ -278,7 +264,6 @@ version = "0.1.0"
 dependencies = [
  "libm",
  "slopos-abi",
- "slopos-gfx",
  "slopos-ostd",
 ]
 
@@ -287,7 +272,6 @@ name = "slopos-fs"
 version = "0.1.0"
 dependencies = [
  "slopos-abi",
- "slopos-arch",
  "slopos-boot-core",
  "slopos-ext4-core",
  "slopos-kernel-services",
@@ -309,7 +293,6 @@ name = "slopos-hermetic"
 version = "0.1.0"
 dependencies = [
  "paste",
- "slopos-arch",
  "slopos-ostd",
  "slopos-service-core",
 ]
@@ -366,7 +349,6 @@ name = "slopos-kernel-services"
 version = "0.1.0"
 dependencies = [
  "slopos-abi",
- "slopos-arch",
  "slopos-ostd",
  "slopos-service-core",
 ]
@@ -382,9 +364,7 @@ dependencies = [
 name = "slopos-mm"
 version = "0.1.0"
 dependencies = [
- "bitflags",
  "slopos-abi",
- "slopos-arch",
  "slopos-kernel-services",
  "slopos-ostd",
  "slopos-testing",
@@ -396,7 +376,6 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "slopos-abi",
- "slopos-arch",
  "slopos-fs",
  "slopos-kernel-services",
  "slopos-ostd",
@@ -504,7 +483,6 @@ version = "0.1.0"
 dependencies = [
  "paste",
  "slopos-abi",
- "slopos-arch",
  "slopos-cpufreq-core",
  "slopos-fs",
  "slopos-hermetic",
@@ -576,6 +554,7 @@ name = "slopos-terminal-core"
 version = "0.1.0"
 dependencies = [
  "slopos-abi",
+ "slopos-keymap-core",
  "slopos-vt",
 ]
 
@@ -583,7 +562,6 @@ dependencies = [
 name = "slopos-testing"
 version = "0.1.0"
 dependencies = [
- "slopos-arch",
  "slopos-kernel-services",
  "slopos-ostd",
  "slopos-service-core",
@@ -662,7 +640,6 @@ name = "slopos-video"
 version = "0.1.0"
 dependencies = [
  "slopos-abi",
- "slopos-arch",
  "slopos-core",
  "slopos-drivers",
  "slopos-font",

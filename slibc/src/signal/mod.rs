@@ -10,7 +10,6 @@
 //! `sigset_t` is all that can mean anything: a signal *number* outside that
 //! range is `EINVAL`, and higher mask words are dropped, as they block nothing.
 
-pub mod tests;
 pub mod wait;
 
 use core::ffi::{c_char, c_int, c_uint};
@@ -75,8 +74,6 @@ pub const SIG_SETMASK: c_int = slopos_abi::signal::SIG_SETMASK as c_int;
 
 pub const SS_ONSTACK: c_int = slopos_abi::signal::SS_ONSTACK as c_int;
 pub const SS_DISABLE: c_int = slopos_abi::signal::SS_DISABLE as c_int;
-
-pub type SigHandler = unsafe extern "C" fn(i32);
 
 /// The kernel's `sigsetsize` argument: it accepts its own set's size and
 /// nothing else.

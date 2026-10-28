@@ -9,8 +9,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
 
-use slopos_abi::handle::{DisplayHandle, HasDisplayHandle, RawDisplayHandle};
-use slopos_abi::pixel::PixelFormat;
 use slopos_abi::syscall::posix::POLLIN;
 use slopos_abi::syscall::types::UserPollFd;
 use slopos_protocol::client::Client;
@@ -23,9 +21,6 @@ pub struct Protocol {
     pending_destroys: RefCell<PendingDestroys>,
     ui_queue: Arc<UiQueue>,
     compositor_fd: i32,
-    display_format: PixelFormat,
-    display_width: u32,
-    display_height: u32,
 }
 
 pub type ProtocolHandle = Rc<Protocol>;
@@ -54,7 +49,7 @@ impl core::fmt::Display for ConnectError {
 /// version refuses it every time.
 pub fn connect() -> Result<ProtocolHandle, ConnectError> {
     for _ in 0..10 {
-        let connected = Client::connect(&slopos_protocol::socket_path(slopos_cabi::geteuid()))
+        let connected = Client::connect(&slopos_protocol::socket_path())
             .and_then(|mut client| client.ensure_output_info().map(|()| client));
         let client = match connected {
             Ok(client) => client,
@@ -65,33 +60,15 @@ pub fn connect() -> Result<ProtocolHandle, ConnectError> {
             }
         };
         let compositor_fd = client.fd();
-        let display_format =
-            PixelFormat::from_u32(client.display_format()).unwrap_or(PixelFormat::Argb8888);
-        let display_width = client.display_width();
-        let display_height = client.display_height();
 
         return Ok(Rc::new(Protocol {
             client: RefCell::new(client),
             pending_destroys: RefCell::new(PendingDestroys::new()),
             ui_queue: UiQueue::new().map_err(|()| ConnectError::WakeupPipe)?,
             compositor_fd,
-            display_format,
-            display_width,
-            display_height,
         }));
     }
     Err(ConnectError::NotRunning)
-}
-
-impl HasDisplayHandle for Protocol {
-    fn display_handle(&self) -> DisplayHandle<'_> {
-        DisplayHandle::new(RawDisplayHandle {
-            fd: self.compositor_fd,
-            format: self.display_format,
-            width: self.display_width,
-            height: self.display_height,
-        })
-    }
 }
 
 impl Protocol {
@@ -335,8 +312,7 @@ impl UiSender {
         self.queue.wake();
     }
 
-    /// Queues `message` for [`Protocol::take_messages`] and wakes the UI
-    /// thread; appkit's loop takes them, [`crate::run`]'s never does.
+    /// Queues `message` for [`Protocol::take_messages`] and wakes the UI thread.
     pub fn send(&self, message: impl Any + Send) {
         if let Ok(mut q) = self.queue.messages.lock() {
             q.push(Box::new(message));

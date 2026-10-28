@@ -1,12 +1,12 @@
 //! Primary-plane read-back and the linear repoint program.
 
-use slopos_mm::mmio::MmioRegion;
+use slopos_ostd::mm::IoMem;
 
 use crate::xe_logic::plane_config::{self, PlaneConfig};
 use crate::xe_logic::regs::{self, Pipe};
 
 /// Decode the active pipe's live primary-plane configuration. Reads only.
-pub fn read_live(mmio: &MmioRegion, pipe: Pipe) -> PlaneConfig {
+pub fn read_live(mmio: &IoMem, pipe: Pipe) -> PlaneConfig {
     let ctl = mmio.read::<u32>(regs::plane_ctl(pipe));
     let size = mmio.read::<u32>(regs::plane_size(pipe));
     let pos = mmio.read::<u32>(regs::plane_pos(pipe));
@@ -34,7 +34,7 @@ pub struct PlaneProgram {
 impl PlaneProgram {
     /// Flip the plane to `surf_ggtt`, binding the stored geometry to
     /// [`program_repoint`].
-    pub fn flip(&self, mmio: &MmioRegion, surf_ggtt: u32) {
+    pub fn flip(&self, mmio: &IoMem, surf_ggtt: u32) {
         program_repoint(
             mmio,
             self.pipe,
@@ -57,7 +57,7 @@ impl PlaneProgram {
 /// every pipe/transcoder/DDI/PLL/power-well register are left as firmware
 /// programmed them.
 pub fn program_repoint(
-    mmio: &MmioRegion,
+    mmio: &IoMem,
     pipe: Pipe,
     surf_ggtt: u32,
     width: u32,

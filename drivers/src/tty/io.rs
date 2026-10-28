@@ -5,7 +5,6 @@
 //! `TTY_WRITE_LOCKS[slot]` after the guard drops: the write lock stays outside
 //! every slot lock, and echo serialises against user output (POSIX §11.1.9).
 
-use core::ffi::c_int;
 use core::sync::atomic::Ordering;
 
 use slopos_abi::signal::{SIGTTIN, SIGTTOU};
@@ -73,6 +72,7 @@ pub use super::pty::{
     pty_slave_owner, queue_packet_event, set_packet_mode, set_pty_lock,
 };
 
+#[cfg(feature = "test-hooks")]
 pub fn push_input<E: Into<InputEvent>>(idx: TtyIndex, event: E) {
     let event = event.into();
     push_input_batch(idx, core::slice::from_ref(&event));
@@ -196,7 +196,7 @@ fn push_input_through_signal(idx: TtyIndex, events: &[InputEvent], nesting: Writ
 }
 
 fn notify_input_ready(idx: TtyIndex) {
-    if scheduler_is_enabled() == 0 {
+    if !scheduler_is_enabled() {
         return;
     }
     let slot = idx.0 as usize;
@@ -319,24 +319,13 @@ fn try_read_packet_mode(
     Some(Ok(1 + got))
 }
 
-/// Read cooked data from a specific TTY.
+/// Read cooked data from a specific TTY. A read never claims a controlling
+/// terminal.
 ///
 /// `TtySession::check_read()` is the sole read-side gate; a background process
 /// receives `SIGTTIN` instead of silently blocking.
 #[must_use]
 pub fn read(idx: TtyIndex, buf: &mut [u8], nonblock: bool) -> Result<usize, TtyError> {
-    read_with_attach(idx, buf, nonblock, true)
-}
-
-/// `_auto_attach` is dead: a read never claims a controlling terminal.  It stays
-/// for ABI compatibility with the kernel-services `read_cooked_with_attach`.
-
-pub fn read_with_attach(
-    idx: TtyIndex,
-    buf: &mut [u8],
-    nonblock: bool,
-    _auto_attach: bool,
-) -> Result<usize, TtyError> {
     if buf.is_empty() {
         return Ok(0);
     }
@@ -894,6 +883,7 @@ pub fn write(idx: TtyIndex, data: &[u8], nonblock: bool) -> Result<usize, TtyErr
 }
 
 /// Check whether a TTY has cooked data available for reading.
+#[cfg(feature = "test-hooks")]
 pub fn has_data(idx: TtyIndex) -> bool {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {
@@ -962,7 +952,7 @@ pub fn output_queued_bytes(idx: TtyIndex) -> Result<usize, TtyError> {
 /// Idle-loop callback: drain hardware input and wake its readers. Only input
 /// that arrived here is work: a line nobody reads, such as an Enter typed while
 /// nothing has keyboard focus, would otherwise keep every idle CPU out of `hlt`.
-pub(crate) fn input_available_cb() -> c_int {
+pub(crate) fn input_available_cb() -> bool {
     let mut arrived = false;
     let mut bits = super::table::active_slots_bitmap();
     while bits != 0 {
@@ -978,7 +968,7 @@ pub(crate) fn input_available_cb() -> c_int {
         }
         deferred.execute();
     }
-    arrived as c_int
+    arrived
 }
 
 pub(super) fn register_idle_callback() {

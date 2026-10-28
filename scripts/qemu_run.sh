@@ -15,7 +15,7 @@ set -euo pipefail
 #   QEMU_FB_WIDTH, QEMU_FB_HEIGHT, QEMU_FB_AUTO,
 #   QEMU_FB_AUTO_POLICY, QEMU_FB_AUTO_OUTPUT,
 #   QEMU_GTK_ZOOM_TO_FIT,
-#   QEMU_ENABLE_ISA_EXIT, QEMU_PCI_DEVICES,
+#   QEMU_PCI_DEVICES,
 #   OVMF_DIR, OVMF_VARS_FILE,
 #   BOOT_DISK_IMG, INSTALL_STICK, INSTALL_STICK_WRITABLE, INSTALL_CDROM, QEMU_ALLOW_REBOOT,
 #   QEMU_TEST_DISKS,
@@ -37,9 +37,7 @@ FS_IMAGE="${3:?Usage: qemu_run.sh <mode> <iso> <fs_image>}"
 QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
 QEMU_SMP="${QEMU_SMP:-4}"
 # The suite needs more than an interactive boot: `bigprog_test` holds ~170 MiB
-# resident to cross the threshold above which `fork`'s PTE snapshot used to ask
-# the 1 MiB slab for one allocation and panic, and it runs beside a 74 MB
-# kernel and a 39 MB initramfs.
+# resident beside a 74 MB kernel and a 39 MB initramfs.
 if [ "$MODE" = "test" ]; then
     QEMU_MEM="${QEMU_MEM:-1G}"
 else
@@ -96,7 +94,6 @@ QEMU_FB_AUTO_POLICY="${QEMU_FB_AUTO_POLICY:-primary}"
 QEMU_FB_AUTO_OUTPUT="${QEMU_FB_AUTO_OUTPUT:-}"
 QEMU_FB_DETECT_SCRIPT="${QEMU_FB_DETECT_SCRIPT:-${SCRIPT_DIR}/detect_qemu_resolution.sh}"
 QEMU_GTK_ZOOM_TO_FIT="${QEMU_GTK_ZOOM_TO_FIT:-off}"
-QEMU_ENABLE_ISA_EXIT="${QEMU_ENABLE_ISA_EXIT:-0}"
 QEMU_PCI_DEVICES="${QEMU_PCI_DEVICES:-}"
 
 NET="${NET:-0}"
@@ -319,14 +316,9 @@ fi
 
 case "$MODE" in
     test)
-        # `-nographic` historically combined "no GUI" with implicit
-        # `-serial mon:stdio`. Combined with our explicit `-serial stdio`,
-        # QEMU's chardev layer silently mirrors every UART byte to BOTH
-        # the explicit and the implicit stdio backend — every kernel
-        # klog line shows up TWICE on the host pipe, corrupting the
-        # KTAP wire stream the test harness emits. Use the modern
-        # `-display none` instead so only the explicit `-serial stdio`
-        # backend is wired to COM1.
+        # Not `-nographic`: its implicit `-serial mon:stdio` beside the
+        # explicit `-serial stdio` mirrors every UART byte twice, which
+        # corrupts the KTAP stream.
         DISPLAY_ARGS=(-display none)
         ADD_ISA_EXIT=1
         ADD_NO_REBOOT=1
@@ -351,7 +343,7 @@ case "$MODE" in
                 { rm -rf "$media_stage"; exit 1; }
             rm -rf "$media_stage"
             ADD_MEDIA_DISK=1
-            VERIFIED_IMG="${VERIFIED_IMG:-${REPO_ROOT}/fs/assets/ext2.img}"
+            VERIFIED_IMG="${VERIFIED_IMG:-${REPO_ROOT}/fs/assets/ext4.img}"
             if [ -f "$VERIFIED_IMG" ]; then
                 ADD_VERIFIED_DISK=1
             else
@@ -360,9 +352,6 @@ case "$MODE" in
         fi
         ;;
     interactive|logged)
-        if [ "$QEMU_ENABLE_ISA_EXIT" != "0" ]; then
-            ADD_ISA_EXIT=1
-        fi
         if [ "$VIDEO" != "0" ]; then
             if [ "$QEMU_DISPLAY" = "cocoa" ] && [ "$HAS_COCOA" = "1" ]; then
                 DISPLAY_ARGS=(-display cocoa)

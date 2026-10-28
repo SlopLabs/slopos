@@ -5,8 +5,8 @@
 //! Linux, Redox or Asterinas: the shell asks something that holds the
 //! authority. Started without `Power`, this asks privd to run it.
 //!
-//! `argv[0]` or else the first argument names the action, which is how
-//! `halt`, `reboot` and `poweroff` have always been one executable.
+//! `argv[0]` or else the first argument names the action, so `halt`,
+//! `reboot` and `poweroff` are one executable, as on Unix.
 
 use crate::privd::{self, Input};
 use crate::syscall::core as sys_core;

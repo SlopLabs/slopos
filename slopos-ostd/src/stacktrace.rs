@@ -1,5 +1,3 @@
-use core::ffi::c_int;
-
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct StacktraceEntry {
@@ -29,19 +27,12 @@ fn basic_sanity_check(current_rbp: u64, next_rbp: u64) -> bool {
     true
 }
 
-pub fn stacktrace_capture_from(
-    mut rbp: u64,
-    entries: *mut StacktraceEntry,
-    max_entries: c_int,
-) -> c_int {
-    if entries.is_null() || max_entries <= 0 {
-        return 0;
-    }
-
+/// Walk the frame-pointer chain from `rbp` into `entries`, answering how many
+/// frames it filled.
+pub fn stacktrace_capture_from(mut rbp: u64, entries: &mut [StacktraceEntry]) -> usize {
     let mut count = 0;
-    let max_entries = max_entries as usize;
 
-    while rbp != 0 && count < max_entries {
+    while rbp != 0 && count < entries.len() {
         if rbp & 0x7 != 0 || !is_kernel_address(rbp) {
             break;
         }
@@ -65,13 +56,10 @@ pub fn stacktrace_capture_from(
             break;
         };
 
-        // SAFETY: `entries` + `count < max_entries` bounds were validated
-        // by the caller contract at function entry.
-        unsafe {
-            let entry_ptr = entries.add(count);
-            (*entry_ptr).frame_pointer = rbp;
-            (*entry_ptr).return_address = return_address;
-        }
+        entries[count] = StacktraceEntry {
+            frame_pointer: rbp,
+            return_address,
+        };
         count += 1;
 
         if next_rbp == 0 {
@@ -87,5 +75,5 @@ pub fn stacktrace_capture_from(
         rbp = next_rbp;
     }
 
-    count as c_int
+    count
 }

@@ -1,5 +1,5 @@
-//! `ring_register(2)` entry points (SLOPRING § 13, ABI v2): registered fixed
-//! buffers + provided buffer rings.
+//! `ring_register(2)` entry points: registered fixed buffers + provided buffer
+//! rings.
 //!
 //! The `core` syscall handler validates and copies the typed argument out of
 //! user memory before calling these; each re-checks ownership and runs the pin

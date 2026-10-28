@@ -5,9 +5,11 @@
 //! HHDM alias.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_mm::kernel_mappings::{kernel_is_mapped, kernel_map_io_4kb};
-use slopos_mm::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use slopos_mm::kernel_mappings::kernel_map_io_4kb;
+use slopos_mm::paging::is_mapped;
+use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_ostd::klog_info;
+use slopos_ostd::mm::page_property::{CachePolicy, PageProperty};
 use slopos_ostd::util::packed_view::read_packed;
 
 use crate::limine_protocol;
@@ -32,11 +34,11 @@ const MAX_PAGES_PER_DESC: u64 = 0x10000; // 256 MiB
 /// Install one alias of a runtime-services page, unless the address already
 /// resolves. Firmware memory is not allocator memory, so the mapping owns no
 /// frame reference.
-fn map_alias_if_absent(virt: VirtAddr, phys: PhysAddr, flags: u64) {
-    if kernel_is_mapped(virt) {
+fn map_alias_if_absent(virt: VirtAddr, phys: PhysAddr, prop: PageProperty) {
+    if is_mapped(virt) {
         return;
     }
-    let _ = kernel_map_io_4kb(virt, phys, flags);
+    let _ = kernel_map_io_4kb(virt, phys, prop);
 }
 
 /// Map every UEFI runtime region (identity + HHDM aliases). Runs after paging
@@ -72,11 +74,17 @@ pub fn map_runtime_regions(hhdm_offset: u64) {
             continue;
         }
 
-        // Runtime code must execute, so code/data gets KERNEL_RW (NX clear).
-        let flags = if typ == EFI_MEMORY_MAPPED_IO {
-            PageFlags::MMIO.bits()
+        let prop = if typ == EFI_MEMORY_MAPPED_IO {
+            PageProperty {
+                cache_policy: CachePolicy::Uncacheable,
+                ..PageProperty::KERNEL_RW
+            }
         } else {
-            PageFlags::KERNEL_RW.bits()
+            // Runtime code must execute.
+            PageProperty {
+                execute: true,
+                ..PageProperty::KERNEL_RW
+            }
         };
 
         let pages = if num_pages > MAX_PAGES_PER_DESC {
@@ -93,9 +101,9 @@ pub fn map_runtime_regions(hhdm_offset: u64) {
             else {
                 break;
             };
-            map_alias_if_absent(VirtAddr::new(phys), PhysAddr::new(phys), flags);
+            map_alias_if_absent(VirtAddr::new(phys), PhysAddr::new(phys), prop);
             if let Some(hhdm_virt) = phys.checked_add(hhdm_offset) {
-                map_alias_if_absent(VirtAddr::new(hhdm_virt), PhysAddr::new(phys), flags);
+                map_alias_if_absent(VirtAddr::new(hhdm_virt), PhysAddr::new(phys), prop);
             }
             mapped_pages += 1;
         }

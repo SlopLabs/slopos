@@ -16,10 +16,9 @@
 //! Running the kernel-phase AF_UNIX socket tests first leaves UDP DNS dead for
 //! the rest of the run: `test_unix_socket_send_recv_basic` alone reproduces
 //! it, the queries go out, and no reply ever reaches `udp::handle_rx` — so the
-//! loss is below the UDP layer, not in the resolver's expectation check. It
-//! reproduces identically on a tree from before this test existed, so it is
-//! older than the resolver work and is tracked separately. `just test
-//! '*dns_resolve*'` is green, which is what proves the resolver itself works.
+//! loss is below the UDP layer, not in the resolver's expectation check, and
+//! is tracked separately. `just test '*dns_resolve*'` is green, which is what
+//! proves the resolver itself works.
 
 use slopos_userland as _;
 

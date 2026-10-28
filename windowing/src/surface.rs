@@ -1,8 +1,5 @@
 //! A window's compositor objects: its surface and toplevel, made and torn down.
 
-use slopos_abi::handle::{
-    DisplayHandle, HasDisplayHandle, HasWindowHandle, RawWindowHandle, WindowHandle,
-};
 use slopos_abi::pixel::PixelFormat;
 use slopos_protocol::types::{SurfaceId, ToplevelId};
 
@@ -107,21 +104,6 @@ impl Surface {
     #[inline]
     pub fn bytes_pp(&self) -> u8 {
         self.bytes_pp
-    }
-}
-
-impl HasWindowHandle for Surface {
-    fn window_handle(&self) -> WindowHandle<'_> {
-        WindowHandle::new(RawWindowHandle {
-            surface_id: self.protocol_surface_id.raw(),
-            toplevel_id: self.protocol_toplevel_id.raw(),
-        })
-    }
-}
-
-impl HasDisplayHandle for Surface {
-    fn display_handle(&self) -> DisplayHandle<'_> {
-        self.handle.display_handle()
     }
 }
 

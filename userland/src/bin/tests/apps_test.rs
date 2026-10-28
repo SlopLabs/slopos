@@ -12,7 +12,7 @@ use slopos_abi::pixel::PixelFormat;
 use slopos_abi::syscall::{O_CLOEXEC, POLLIN, UserPollFd};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_priv_core::consent::Refusal;
-use slopos_protocol::{Event, PROTOCOL_VERSION, Request, Server};
+use slopos_protocol::{Event, Request, Server};
 use slopos_tree_core::MANIFEST_DIR;
 use slopos_userland::init_control::{self, Command as InitCommand};
 use slopos_userland::privd::WAITING;
@@ -89,7 +89,7 @@ fn exited(child: &mut Child) -> Option<String> {
 
 /// The app id `program` names its window with, and the title before it.
 fn app_id_of(program: &str) -> Result<(String, String), String> {
-    let path = slopos_protocol::socket_path(slopos_userland::syscall::process::geteuid());
+    let path = slopos_protocol::socket_path();
     let shown = String::from_utf8_lossy(&path).into_owned();
     let _ = std::fs::remove_file(&shown);
     let mut server = Server::bind(&path).map_err(|e| format!("listening on {shown}: {e:?}"))?;
@@ -122,12 +122,8 @@ fn serve(server: &mut Server, child: &mut Child) -> Result<(String, String), Str
         }
         std::thread::sleep(RETRY);
     };
-    let hello = Event::Hello {
-        version: PROTOCOL_VERSION,
-        capabilities: 0,
-    };
     server
-        .queue_event(client, &hello)
+        .greet(client)
         .map_err(|e| format!("greeting: {e:?}"))?;
     server.flush_clients();
     while start.elapsed() < DEADLINE {

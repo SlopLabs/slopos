@@ -19,7 +19,7 @@ fn records(store: &Store) -> Result<Vec<Record>, String> {
 }
 
 /// Give `record` each uid its name and its images' users lack.
-pub fn give_uids(store: &Store, record: &mut Record) -> Result<bool, String> {
+pub fn give_uids(store: &Store, record: &mut Record) -> Result<(), String> {
     let others: Vec<Record> = records(store)?
         .into_iter()
         .filter(|other| other.name != record.name)

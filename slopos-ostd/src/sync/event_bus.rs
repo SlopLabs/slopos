@@ -16,7 +16,7 @@
 //! publish therefore observes all of the producer's prior writes.
 
 use crate::lock_class;
-use crate::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
+use crate::sync::lock_graph::LOCK_LEVEL_RESOURCE;
 use crate::sync::once_lock::OnceLock;
 use slopos_abi::event::{
     CHILD_EXIT_BUCKETS, KernelEvent, MAX_NETMON, MAX_PIPES, MAX_TTYS, MAX_UNIX_SOCKETS,

@@ -16,7 +16,7 @@ use slopos_abi::syscall::{
 use slopos_mm::user_msghdr::{
     msghdr_report_ctrunc, msghdr_write_out, put_scm_rights, scm_rights_fits,
 };
-use slopos_mm::user_ptr::UserPtr;
+use slopos_ostd::user::ptr::UserPtr;
 
 use crate::pipe;
 use crate::pipe::FifoNode;
@@ -579,22 +579,6 @@ pub fn file_seek_fd(table: FdTable, fd: c_int, offset: i64, whence: u32) -> i64 
     new_pos
 }
 
-pub fn file_get_size_fd(table: FdTable, fd: c_int) -> usize {
-    let snap = {
-        let Some(inner) = lock_table_slot(table) else {
-            return usize::MAX;
-        };
-        match snapshot_fd(&inner, fd) {
-            Some(s) => s,
-            None => return usize::MAX,
-        }
-    };
-    snap.ops()
-        .size(snap.handle())
-        .map(|v| v as usize)
-        .unwrap_or(usize::MAX)
-}
-
 pub fn file_unlink_at(path: &[u8], cwd: &[u8], who: &Subject) -> c_int {
     errno_of(vfs_unlink_at(path, cwd, who))
 }
@@ -794,19 +778,6 @@ pub fn file_access_at(
         return Errno::EACCES.raw() as _;
     }
     0
-}
-
-pub fn file_is_console_fd(table: FdTable, fd: c_int) -> bool {
-    let snap = {
-        let Some(inner) = lock_table_slot(table) else {
-            return false;
-        };
-        match snapshot_fd(&inner, fd) {
-            Some(s) => s,
-            None => return false,
-        }
-    };
-    kind_is_tty(snap.ops().kind())
 }
 
 pub fn file_get_tty_index(table: FdTable, fd: c_int) -> Option<TtyIndex> {

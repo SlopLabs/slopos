@@ -62,16 +62,6 @@ impl PixelFormat {
         }
     }
 
-    #[inline]
-    pub fn has_alpha(self) -> bool {
-        matches!(self, Self::Argb8888 | Self::Rgba8888 | Self::Bgra8888)
-    }
-
-    #[inline]
-    pub fn is_bgr_order(self) -> bool {
-        matches!(self, Self::Argb8888 | Self::Xrgb8888 | Self::Bgra8888)
-    }
-
     /// Encode a `Color32` (0xAARRGGBB) into the native pixel format.
     #[inline]
     pub fn encode(self, color: Color32) -> EncodedPixel {
@@ -125,17 +115,6 @@ impl PixelFormat {
                 Color32(0xFF000000 | (r << 16) | (g << 8) | b)
             }
         }
-    }
-
-    /// Bit N is set when the format with discriminant N is supported.
-    #[inline]
-    pub fn supported_formats_bitmap() -> u32 {
-        (1 << Self::Argb8888 as u32)
-            | (1 << Self::Xrgb8888 as u32)
-            | (1 << Self::Rgb888 as u32)
-            | (1 << Self::Bgr888 as u32)
-            | (1 << Self::Rgba8888 as u32)
-            | (1 << Self::Bgra8888 as u32)
     }
 }
 

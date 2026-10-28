@@ -136,8 +136,7 @@ impl<R: StackRegion> TaskStack<R> {
 
         for i in 0..page_count {
             let va = VirtAddr::new(base + (i as u64) * PAGE_SIZE_4KB);
-            let map_rc = kernel_map_4kb(va, frames[i], R::PAGE_FLAGS);
-            if map_rc != 0 {
+            if kernel_map_4kb(va, frames[i], R::PAGE_PROPERTY).is_err() {
                 // The loop starts at `i + 1`: `kernel_map_4kb` took ownership
                 // of `frames[i]` and returned it on failure.
                 for j in (i + 1)..page_count {

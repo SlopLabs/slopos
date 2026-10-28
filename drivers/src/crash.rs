@@ -504,7 +504,7 @@ impl<'a> PanicRecord<'a> {
             build: store.build,
             time: slopos_kernel_services::clock::realtime_ns().map(|ns| ns / 1_000_000_000),
             uptime_ms: slopos_kernel_services::clock::uptime_ms(),
-            cpu: slopos_arch::get_current_cpu() as u32,
+            cpu: slopos_ostd::cpu::x86_64::pcr::current_cpu_id() as u32,
             panic,
         };
         let _ = summary.write(&mut record);

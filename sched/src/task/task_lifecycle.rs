@@ -1,11 +1,11 @@
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::c_void;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
 use slopos_abi::signal::{SigInfo, SigSet};
 
-use slopos_arch::cpu;
 use slopos_ostd::KArc;
+use slopos_ostd::cpu::x86_64 as cpu;
 use slopos_ostd::kdiag_timestamp;
 use slopos_ostd::process::{
     AccountId, Cred, PROCESS_HANDLE_NONE, Process, ProcessId, process_retire, process_spawn,
@@ -32,7 +32,7 @@ use super::task_table::{
 use super::{
     INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
     TASK_KERNEL_STACK_SIZE, TASK_NAME_MAX_LEN, TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE, Task,
-    TaskContext, TaskEntry, TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus,
+    TaskEntry, TaskExitReason, TaskFaultReason, TaskPriority, TaskStatus,
 };
 use crate::exit_info::ExitInfo;
 use crate::scheduler;
@@ -49,8 +49,8 @@ use slopos_mm::process_vm::{
     process_vm_get_stack_top,
 };
 use slopos_mm::user_copy::copy_to_user;
-use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::task::TaskAddr;
+use slopos_ostd::user::ptr::UserPtr;
 
 fn user_entry_is_allowed(addr: u64) -> bool {
     const PROCESS_CODE_END: u64 = 0x0000_0000_0050_0000;
@@ -526,7 +526,7 @@ extern "sysv64" fn kernel_task_entry_shim(task_id: u64) {
         Ok(()) => {}
         Err(oops) => {
             klog_info!(
-                "panic recovery: legacy kthread task={} {}:{}:{}: {} (oops total={})",
+                "panic recovery: kernel task={} {}:{}:{}: {} (oops total={})",
                 oops.task_id,
                 oops.file.as_str(),
                 oops.line,
@@ -539,7 +539,6 @@ extern "sysv64" fn kernel_task_entry_shim(task_id: u64) {
 }
 
 fn init_task_context(task: &mut Task) {
-    *task.context.get_mut() = TaskContext::default();
     super::task_ops::task_reset_fpu_state(task);
 
     if task.flags & TASK_FLAG_KERNEL_MODE != 0 {
@@ -549,15 +548,6 @@ fn init_task_context(task: &mut Task) {
         super::task_ops::task_kernel_stack_seed_ret(task.kernel_stack_top, trampoline);
         *task.switch_ctx.get_mut() =
             SwitchContext::new_for_task(shim, shim_arg, task.kernel_stack_top, trampoline);
-        task.context.get_mut().rip = trampoline;
-        task.context.get_mut().rsi = shim_arg;
-        task.context.get_mut().rdi = shim;
-        task.context.get_mut().rsp = task.stack_pointer;
-        task.context.get_mut().rflags = 0x202;
-        task.context.get_mut().cs = 0x08;
-        task.context.get_mut().ds = 0x10;
-        task.context.get_mut().es = 0x10;
-        task.context.get_mut().ss = 0x10;
     } else {
         crate::task::init_user_ctx_for_new_task(
             task.user_ctx.get_mut(),
@@ -567,29 +557,16 @@ fn init_task_context(task: &mut Task) {
         );
         // SAFETY: kernel_stack region was just allocated and is writable.
         *task.switch_ctx.get_mut() = build_user_task_entry_frame(task.kernel_stack_top);
-        task.context.get_mut().rip = task.entry_point;
-        task.context.get_mut().rsp = task.stack_pointer;
-        task.context.get_mut().rflags = 0x202;
-        task.context.get_mut().cs = 0x23;
-        task.context.get_mut().ds = 0x1B;
-        task.context.get_mut().es = 0x1B;
-        task.context.get_mut().fs = 0x1B;
-        task.context.get_mut().gs = 0x1B;
-        task.context.get_mut().ss = 0x1B;
-        task.context.get_mut().rdi = task.entry_arg as u64;
     }
-
-    task.context.get_mut().cr3 = 0;
 }
 
-/// The NUL-terminated `src`, truncated to `TASK_NAME_MAX_LEN-1` bytes and
-/// zero-padded. A null `src` is the empty name.
-fn name_from_cstr(src: *const c_char) -> [u8; TASK_NAME_MAX_LEN] {
+/// `src` up to its first NUL, truncated to `TASK_NAME_MAX_LEN-1` bytes and
+/// zero-padded.
+fn task_name_buffer(src: &[u8]) -> [u8; TASK_NAME_MAX_LEN] {
+    let len = src.iter().position(|&b| b == 0).unwrap_or(src.len());
+    let take = core::cmp::min(len, TASK_NAME_MAX_LEN - 1);
     let mut name = [0u8; TASK_NAME_MAX_LEN];
-    if let Some(bytes) = slopos_ostd::util::cstr::cstr_from_kernel_ptr(src) {
-        let take = core::cmp::min(bytes.len(), TASK_NAME_MAX_LEN - 1);
-        name[..take].copy_from_slice(&bytes[..take]);
-    }
+    name[..take].copy_from_slice(&src[..take]);
     name
 }
 
@@ -601,7 +578,7 @@ fn name_from_cstr(src: *const c_char) -> [u8; TASK_NAME_MAX_LEN] {
 /// half-built task is ever visible to a registry lookup or an active-task walk.
 /// [`task_create`] is the two with no gap between them.
 pub fn task_build(
-    name: *const c_char,
+    name: &[u8],
     entry_point: TaskEntry,
     arg: *mut c_void,
     priority: u8,
@@ -619,7 +596,7 @@ pub fn task_build(
 
 /// [`task_build`], a user task's process debiting through `account`.
 pub fn task_build_in(
-    name: *const c_char,
+    name: &[u8],
     entry_point: TaskEntry,
     arg: *mut c_void,
     priority: u8,
@@ -691,7 +668,7 @@ pub fn task_build_in(
 
     let task_ref = pending.as_mut();
     task_ref.task_id = task_id;
-    task_ref.name.set(&name_from_cstr(name));
+    task_ref.name.set(&task_name_buffer(name));
     // Status stays Blocked (set during allocation) until fully initialised.
     task_ref.priority = TaskPriority::from_u8(priority);
     task_ref.flags = flags;
@@ -747,23 +724,20 @@ pub fn task_build_in(
     task_ref.entry_arg = arg;
     task_ref.set_time_slice(10);
     task_ref.reset_runtime_state();
-    task_ref.user_started.store(0, Ordering::Relaxed);
-    task_ref.context_from_user.store(0, Ordering::Relaxed);
 
     init_task_context(task_ref);
 
-    if flags & TASK_FLAG_KERNEL_MODE != 0 {
-        task_ref.context.get_mut().cr3 = cpu::read_cr3() & !0xFFF;
+    let cr3 = if flags & TASK_FLAG_KERNEL_MODE != 0 {
+        cpu::read_cr3() & !0xFFF
     } else {
-        // `context.cr3` holds the OSTD PML4 paddr: what `VmSpace::activate`
-        // writes at switch time and what the user-fault dispatcher compares
-        // against hardware CR3.
-        task_ref.context.get_mut().cr3 = resources
+        // The OSTD PML4 paddr: what `VmSpace::activate` writes at switch time.
+        resources
             .process
             .as_deref()
             .and_then(ProcessId::of)
-            .map_or(0, slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr);
-    }
+            .map_or(0, slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr)
+    };
+    task_ref.set_cr3(cr3);
 
     Some(pending)
 }
@@ -824,7 +798,7 @@ pub fn task_abandon(mut pending: PendingTask) {
 /// Build and commit a task in one step, for callers with nothing to add
 /// between the two. Returns the new task's id, or [`INVALID_TASK_ID`].
 pub fn task_create(
-    name: *const c_char,
+    name: &[u8],
     entry_point: TaskEntry,
     arg: *mut c_void,
     priority: u8,
@@ -840,7 +814,9 @@ pub fn task_create(
     }
 }
 
-pub fn task_terminate(task_id: u32) -> c_int {
+/// Terminate `task_id`, or the current task for `u32::MAX`. A task already
+/// gone counts as terminated; `false` when the id was never allocated.
+pub fn task_terminate(task_id: u32) -> bool {
     // `u32::MAX` means "me": the handle is minted from this CPU's current-task
     // pointer, sound because the dispatch reference the scheduler parked on the
     // idle stack keeps the current task alive.
@@ -854,16 +830,16 @@ pub fn task_terminate(task_id: u32) -> c_int {
     let Some(target) = target else {
         if task_id == u32::MAX {
             klog_info!("task_terminate: No current task to terminate");
-            return -1;
+            return false;
         }
         // An unresolvable id either named a task already terminated and
         // reclaimed (idempotent success) or one that never existed; monotonic
         // non-reused ids tell the two apart.
         if super::task_table::task_id_was_allocated(task_id) {
-            return 0;
+            return true;
         }
         klog_info!("task_terminate: Task not found");
-        return -1;
+        return false;
     };
 
     let task: &Task = &target;
@@ -879,7 +855,7 @@ pub fn task_terminate(task_id: u32) -> c_int {
     // `Invalid -> Ready`-only transition rule.
 
     if matches!(task.status(), TaskStatus::Terminated | TaskStatus::Zombie) {
-        return 0;
+        return true;
     }
 
     klog_debug!(
@@ -932,7 +908,7 @@ pub fn task_terminate(task_id: u32) -> c_int {
     // guard above is still live, so the destructor must not run here.
     // `task_put` parks it for the graveyard instead.
     super::task_put(target);
-    0
+    true
 }
 
 #[inline]
@@ -1288,14 +1264,12 @@ fn collect_shutdown_task_ids(
     }
 }
 
-fn terminate_task_ids(task_ids: &slopos_ostd::KVec<u32>) -> c_int {
-    let mut result = 0;
+fn terminate_task_ids(task_ids: &slopos_ostd::KVec<u32>) -> bool {
+    let mut all = true;
     for task_id in task_ids.iter() {
-        if task_terminate(*task_id) != 0 {
-            result = -1;
-        }
+        all &= task_terminate(*task_id);
     }
-    result
+    all
 }
 
 fn refresh_num_tasks_after_shutdown() {
@@ -1476,7 +1450,7 @@ const KERNEL_IO_JOIN_MS: u64 = 250;
 ///
 /// Must run while every CPU is still scheduling: a thread parked on a paused
 /// CPU cannot reach its own exit point, and its last act is the one that
-/// matters (the ext2 flusher's final sync). Not part of the task sweep, which
+/// matters (the ext4 flusher's final sync). Not part of the task sweep, which
 /// also runs per test scope.
 pub fn stop_kernel_io_tasks() {
     use slopos_ostd::sync::kernel_io_task::{
@@ -1502,17 +1476,17 @@ pub fn stop_kernel_io_tasks() {
     });
 }
 
-pub fn task_shutdown_population() -> c_int {
+pub fn task_shutdown_population() -> bool {
     task_shutdown(ShutdownScope::Population)
 }
 
 /// Power-off only, and only after [`stop_kernel_io_tasks`]: a thread torn down
 /// here never reached its own exit path.
-pub fn task_shutdown_all() -> c_int {
+pub fn task_shutdown_all() -> bool {
     task_shutdown(ShutdownScope::Terminal)
 }
 
-fn task_shutdown(scope: ShutdownScope) -> c_int {
+fn task_shutdown(scope: ShutdownScope) -> bool {
     // A pause that cannot be taken is stepped over rather than propagated:
     // refusing to tear tasks down would leave the machine up with no way
     // forward.
@@ -1717,14 +1691,11 @@ pub fn task_fork(
     child.user_ctx.get_mut().set_regs(regs);
     // SAFETY: child kernel stack was just allocated and is writable.
     *child.switch_ctx.get_mut() = build_user_task_entry_frame(child.kernel_stack_top);
-    child.context_from_user.store(0, Ordering::Relaxed);
-    child.context.get_mut().rax = 0;
 
     // `clone_from_raw` copied the parent's whole `TaskInner`, so `cr3` still
     // names the parent's root until this write; 0 is what the dispatcher and
     // `task_find_by_cr3` read as "no VM".
-    child.context.get_mut().cr3 =
-        child_vm_id.map_or(0, slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr);
+    child.set_cr3(child_vm_id.map_or(0, slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr));
 
     child.reset_runtime_state();
     if let (_, Some(process)) = child_process.disarm() {
@@ -1754,7 +1725,7 @@ pub fn task_fork(
         super::link_child(parent, child_nn);
     }
 
-    if scheduler::publish_new_task(&registered) != 0 {
+    if !scheduler::publish_new_task(&registered) {
         klog_info!("fork: initial runnable publish failed for task {child_task_id}");
         let _ = task_terminate(child_task_id);
         return INVALID_TASK_ID;
@@ -1921,8 +1892,7 @@ pub fn task_clone(
     child.kernel_stack_size = TASK_KERNEL_STACK_SIZE;
 
     // Seeded from the parent's live syscall-time `UserContext`, whose `rip` is
-    // the instruction after the `clone` trap; the legacy `context` would resume
-    // the child at a stale rip (the ELF entry) and re-run `main`.
+    // the instruction after the `clone` trap.
     {
         let mut regs = match parent_user_ctx {
             Some(parent_ctx) => parent_ctx.regs(),
@@ -1939,11 +1909,6 @@ pub fn task_clone(
         // SAFETY: child kernel stack was just allocated and is writable.
         *child.switch_ctx.get_mut() = build_user_task_entry_frame(child.kernel_stack_top);
     }
-    child.context_from_user.store(0, Ordering::Relaxed);
-    child.context.get_mut().rax = 0;
-    if child_stack != 0 {
-        child.context.get_mut().rsp = child_stack;
-    }
 
     if flags & CLONE_CHILD_CLEARTID != 0 && child_tidptr != 0 {
         child.set_clear_child_tid(child_tidptr);
@@ -1958,8 +1923,7 @@ pub fn task_clone(
     // A VM-sharing child keeps the parent's root, already copied by
     // `clone_from_raw`.
     if !share_vm {
-        child.context.get_mut().cr3 =
-            child_vm_id.map_or(0, slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr);
+        child.set_cr3(child_vm_id.map_or(0, slopos_mm::process_vm::process_vm_get_ostd_pml4_paddr));
     }
 
     child.reset_runtime_state();
@@ -2034,7 +1998,7 @@ pub fn task_clone(
         }
     }
 
-    if scheduler::publish_new_task(&registered) != 0 {
+    if !scheduler::publish_new_task(&registered) {
         klog_info!("clone: initial runnable publish failed for task {child_task_id}");
         let _ = task_terminate(child_task_id);
         return Err(ERRNO_EAGAIN);
@@ -2512,7 +2476,7 @@ pub fn task_group_continue(tid: u32) -> bool {
         }
         let _ = member.take_stop_report();
         if member.mark_ready() {
-            if scheduler::schedule_task(member) != 0 {
+            if !scheduler::schedule_task(member) {
                 klog_info!(
                     "task_group_continue: resume publish failed for task {}",
                     member.task_id
@@ -2643,7 +2607,7 @@ pub fn task_resume_if_stopped(task: &TaskRef) -> bool {
     if !task.is_stopped() || !task.mark_ready() {
         return false;
     }
-    if scheduler::schedule_task(task) != 0 {
+    if !scheduler::schedule_task(task) {
         klog_info!(
             "task_resume_if_stopped: resume publish failed for task {}",
             task.task_id
@@ -2710,7 +2674,7 @@ pub fn task_group_exit(group_leader_tid: u32, code: u32) -> usize {
         if let Some(task) = task_find_by_id(id) {
             stamp_group_end(&task, GroupEnd::Exit(code));
         }
-        if task_terminate(id) == 0 {
+        if task_terminate(id) {
             ended += 1;
         }
     }

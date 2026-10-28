@@ -9,7 +9,7 @@
 use core::fmt;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use slopos_arch::pcr::{current_cpu_id, MAX_CPUS};
+use slopos_ostd::cpu::x86_64::pcr::{current_cpu_id, MAX_CPUS};
 use slopos_ostd::sync::append_log::AppendLog;
 use slopos_ostd::util::fn_ptr::fn_ptr_decode_opt;
 use slopos_ostd::{klog_info, klog_swap_backend, KlogBackend};

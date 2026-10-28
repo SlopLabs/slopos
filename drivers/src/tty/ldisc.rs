@@ -515,7 +515,7 @@ impl LineDisc {
         if canonical {
             self.line_count > 0
         } else {
-            self.cooked.count() > 0
+            self.cooked.len() > 0
         }
     }
 
@@ -546,7 +546,7 @@ impl LineDisc {
         }
         // Draining the last cooked byte without a newline means an EOF-flushed
         // chunk; a merely-full caller buffer is mid-line and must not decrement.
-        if canonical && copied > 0 && self.cooked.count() == 0 && self.line_count > 0 {
+        if canonical && copied > 0 && self.cooked.len() == 0 && self.line_count > 0 {
             self.line_count -= 1;
         }
 
@@ -555,7 +555,7 @@ impl LineDisc {
 
     /// Bytes available to read; backs the FIONREAD / TIOCINQ ioctl.
     pub fn bytes_available(&self) -> usize {
-        self.cooked.count()
+        self.cooked.len()
     }
 
     /// Both buffers full — PTY slave writes read this as back-pressure rather
@@ -618,7 +618,7 @@ impl LineDisc {
     /// Clears `no_room` once occupancy drops below `THROTTLE_LOW_WATER`;
     /// `true` means the caller should wake waiters to re-arm the producer path.
     pub fn check_no_room_recovery(&mut self) -> bool {
-        if self.no_room && self.cooked.count() <= THROTTLE_LOW_WATER {
+        if self.no_room && self.cooked.len() <= THROTTLE_LOW_WATER {
             self.no_room = false;
             true
         } else {
@@ -639,7 +639,7 @@ impl LineDisc {
             return false;
         }
 
-        if self.cooked.count() > 0 {
+        if self.cooked.len() > 0 {
             self.wake_chars_pending = 0;
             return true;
         }
@@ -649,7 +649,7 @@ impl LineDisc {
 
     pub fn flush_all(&mut self) {
         self.edit_len = 0;
-        self.cooked.flush();
+        self.cooked.reset();
         self.line_count = 0;
         self.stopped = false;
         self.literal_next = false;
@@ -715,7 +715,7 @@ impl LineDisc {
 
     pub fn flush_input(&mut self) {
         self.edit_len = 0;
-        self.cooked.flush();
+        self.cooked.reset();
         self.line_count = 0;
         self.literal_next = false;
         self.utf8_remaining = 0;
@@ -1511,7 +1511,7 @@ impl LineDisc {
     }
 
     fn cooked_free(&self) -> usize {
-        self.cooked.free()
+        self.cooked.free_space()
     }
 
     /// The XOFF byte, once IXOFF is on and pending input crosses high water.
@@ -1522,7 +1522,7 @@ impl LineDisc {
         if self.xoff_sent {
             return None;
         }
-        let pending = self.edit_len + self.cooked.count();
+        let pending = self.edit_len + self.cooked.len();
         if pending >= IXOFF_HIGH_WATER {
             self.xoff_sent = true;
             Some(self.cc(CcIndex::Vstop))
@@ -1546,7 +1546,7 @@ impl LineDisc {
         if !self.xoff_sent {
             return None;
         }
-        let pending = self.edit_len + self.cooked.count();
+        let pending = self.edit_len + self.cooked.len();
         if pending < IXOFF_LOW_WATER {
             self.xoff_sent = false;
             Some(self.cc(CcIndex::Vstart))
@@ -1734,7 +1734,7 @@ impl RawDisc {
     }
 
     pub fn bytes_available(&self) -> usize {
-        self.buf.count()
+        self.buf.len()
     }
 
     pub fn input_full(&self) -> bool {
@@ -1755,7 +1755,7 @@ impl RawDisc {
     }
 
     pub fn check_no_room_recovery(&mut self) -> bool {
-        if self.no_room && self.buf.count() <= THROTTLE_LOW_WATER {
+        if self.no_room && self.buf.len() <= THROTTLE_LOW_WATER {
             self.no_room = false;
             true
         } else {
@@ -1769,7 +1769,7 @@ impl RawDisc {
         if self.buf.is_empty() {
             return false;
         }
-        let near_full = self.buf.count() >= self.buf.capacity().saturating_sub(64);
+        let near_full = self.buf.len() >= self.buf.capacity().saturating_sub(64);
         if self.wake_chars_pending >= WAKEUP_CHARS || near_full {
             self.wake_chars_pending = 0;
             return true;
@@ -1778,14 +1778,14 @@ impl RawDisc {
     }
 
     pub fn flush_all(&mut self) {
-        self.buf.flush();
+        self.buf.reset();
         self.wake_chars_pending = 0;
         self.no_room = false;
         self.overflow_count = 0;
     }
 
     pub fn flush_input(&mut self) {
-        self.buf.flush();
+        self.buf.reset();
         self.wake_chars_pending = 0;
         self.no_room = false;
         self.overflow_count = 0;

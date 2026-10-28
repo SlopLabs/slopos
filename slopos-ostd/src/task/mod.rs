@@ -1,7 +1,7 @@
 //! Kernel task control block + context-switch primitives.
 //!
 //! The live control block is [`kernel_task::TaskInner`], aliased `Task` in the
-//! scheduling crate. OSTD owns [`TaskContext`], the switch assembly, the
+//! scheduling crate. OSTD owns [`SwitchContext`], the switch assembly, the
 //! kernel-thread spawner, and the [`LinkProvider`] hook that keeps the unsafe
 //! intrusive-list `Linked` impls inside the trusted core.
 
@@ -76,4 +76,4 @@ pub use switch::{
     register_user_task_entry, run_switch, run_task_entry_hook, switch_context, switch_registers,
     task_entry_trampoline, user_task_entry_addr,
 };
-pub use task::TaskContext;
+pub use task::SwitchContext;

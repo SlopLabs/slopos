@@ -41,7 +41,7 @@ use slopos_slibc::conf::{_SC_NPROCESSORS_CONF, _SC_NPROCESSORS_ONLN, _SC_PAGESIZ
 use slopos_slibc::errno::{
     EAGAIN, EBUSY, EINVAL, ENOSYS, EPROTONOSUPPORT, ERANGE, ESOCKTNOSUPPORT, ETIMEDOUT,
 };
-use slopos_slibc::ffi::syscalls::{mmap, mprotect, munmap, realpath, slopos_getdents64, utime};
+use slopos_slibc::ffi::syscalls::{mmap, mprotect, munmap, realpath, utime};
 use slopos_slibc::ffi::{O_DIRECTORY, O_RDONLY, close, open, read, write};
 use slopos_slibc::io::dirent::DirentIter;
 use slopos_slibc::net::netdb::__h_errno_location;
@@ -51,6 +51,7 @@ use slopos_slibc::net::{
     SOCK_SEQPACKET, SOCK_STREAM, SockAddrIn, accept, accept4, bind, connect, getsockname,
     getsockopt, listen, recvmsg, sendmsg, socket, socketpair,
 };
+use slopos_slibc::pal::{Pal, Sys};
 use slopos_slibc::process::ids::{ITIMER_REAL, getgroups, getitimer, setgroups, setitimer};
 use slopos_slibc::process::{
     _exit, WEXITSTATUS, WIFEXITED, execl, execle, fork, getegid, geteuid, waitpid,
@@ -460,16 +461,16 @@ fn read_dir_names_match_getdents64() -> bool {
     }
     let mut buf = [0u8; 4096];
     loop {
-        let n = unsafe { slopos_getdents64(fd, buf.as_mut_ptr(), buf.len()) };
-        if n < 0 {
-            eprintln!("libc_abi_test: slopos_getdents64 failed");
-            close(fd);
-            return false;
-        }
-        if n == 0 {
-            break;
-        }
-        for rec in DirentIter::new(&buf[..n as usize]) {
+        let n = match Sys::getdents64(fd, buf.as_mut_ptr(), buf.len()) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("libc_abi_test: getdents64 failed: {}", e.raw());
+                close(fd);
+                return false;
+            }
+        };
+        for rec in DirentIter::new(&buf[..n]) {
             if rec.name == b"." || rec.name == b".." {
                 continue;
             }

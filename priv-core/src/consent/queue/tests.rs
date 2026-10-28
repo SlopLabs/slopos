@@ -300,7 +300,7 @@ fn random_steps_settle_each_asker_once() {
 #[test]
 fn an_agent_of_another_version_is_asked_nothing() {
     let mut q = Questions::default();
-    for version in [0, VERSION - 1, VERSION + 1] {
+    for version in [0, VERSION + 1, u32::MAX] {
         q.ready(version);
         assert_eq!(q.offer(ask(1), 1, 0), Err((1, Refusal::Outdated)));
     }

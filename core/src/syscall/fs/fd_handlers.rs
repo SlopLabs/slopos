@@ -8,7 +8,7 @@ use slopos_fs::fileio::{
 };
 
 use slopos_mm::user_copy::{copy_from_user, copy_to_user};
-use slopos_mm::user_ptr::UserPtr as MmUserPtr;
+use slopos_ostd::user::ptr::UserPtr as OstdUserPtr;
 
 use crate::syscall::args::{Fd, UserPtr};
 use crate::syscall::common::{errno_from_neg, errno_from_neg64};
@@ -48,7 +48,7 @@ define_syscall!(syscall_dup3
 /// in the dispatch frame.
 #[inline(never)]
 fn fcntl_lock(table: FdTable, fd: i32, cmd: u64, arg: u64) -> Result<u64, Errno> {
-    let ptr = MmUserPtr::<UserFlock>::try_new(arg).map_err(|_| Errno::EFAULT)?;
+    let ptr = OstdUserPtr::<UserFlock>::try_new(arg).map_err(|_| Errno::EFAULT)?;
     let mut lock = copy_from_user(ptr).map_err(|_| Errno::EFAULT)?;
     let rc = file_fcntl_lock_fd(table, fd, cmd, &mut lock);
     if rc < 0 {

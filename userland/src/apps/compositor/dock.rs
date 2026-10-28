@@ -8,9 +8,9 @@ use slopos_gfx::rounded::Rounded;
 use slopos_image::Image;
 use slopos_theme_core::{Icon, TextRole, radius, space, stroke};
 
+use super::window_info::WindowInfo;
 use crate::app_entry::AppEntry;
 use crate::gfx::{self, DamageRect, DrawBuffer};
-use crate::syscall::UserWindowInfo;
 
 const MAX_ENTRIES: usize = 16;
 
@@ -44,7 +44,8 @@ pub struct DockEntry {
     pub app_id: String,
     pub pinned: bool,
     pub running: bool,
-    pub task_id: u32,
+    /// The window it runs as, or 0.
+    pub window: u32,
     /// The icon the entry names, or the template drawn for an app that
     /// ships none.
     picture: Image,
@@ -84,7 +85,7 @@ impl DockEntry {
             app_id,
             pinned,
             running: false,
-            task_id: 0,
+            window: 0,
             picture,
             has_icon,
         }
@@ -185,11 +186,11 @@ impl Dock {
 
     /// Mark the pinned apps running, and add the running apps no entry
     /// names after them: by app id, or by window for one without.
-    pub fn sync_running_apps(&mut self, windows: &[UserWindowInfo], count: u32) {
+    pub fn sync_running_apps(&mut self, windows: &[WindowInfo], count: u32) {
         let shown = |entries: &[DockEntry]| -> Vec<(bool, u32, String)> {
             entries
                 .iter()
-                .map(|e| (e.running, e.task_id, e.name.clone()))
+                .map(|e| (e.running, e.window, e.name.clone()))
                 .collect()
         };
         let before = shown(&self.entries);
@@ -198,18 +199,18 @@ impl Dock {
         self.entries = pinned;
         for entry in &mut self.entries {
             entry.running = false;
-            entry.task_id = 0;
+            entry.window = 0;
         }
 
         for win in &windows[..(count as usize).min(windows.len())] {
             let app_id = win.app_id.as_str();
             let same_app = |entry: &DockEntry| match app_id.is_empty() {
-                true => entry.app_id.is_empty() && entry.task_id == win.task_id,
+                true => entry.app_id.is_empty() && entry.window == win.id,
                 false => entry.app_id == app_id,
             };
             if let Some(entry) = self.entries.iter_mut().find(|e| same_app(e)) {
                 entry.running = true;
-                entry.task_id = win.task_id;
+                entry.window = win.id;
             } else if self.entries.len() < MAX_ENTRIES {
                 let title = win.title_str();
                 let mut entry = match loose.iter().position(|e| same_app(e)) {
@@ -218,7 +219,7 @@ impl Dock {
                 };
                 entry.name = title.into();
                 entry.running = true;
-                entry.task_id = win.task_id;
+                entry.window = win.id;
                 self.entries.push(entry);
             }
         }

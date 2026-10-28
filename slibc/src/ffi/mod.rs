@@ -1,10 +1,7 @@
 //! The C entry points that are neither file metadata nor a subsystem of their
 //! own: `read`/`write`/`open`/`close`, the break, and the allocator.
 
-#[allow(dead_code)]
-pub(crate) mod shim;
 pub mod syscalls;
-pub mod tests;
 
 use core::ffi::{c_char, c_int, c_void};
 
@@ -67,8 +64,7 @@ pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: size_t) -> 
 }
 
 /// `open(2)`, variadic as C has it: the mode argument exists only for a call
-/// that can create, and reading one the caller never pushed is what the old
-/// hard-coded `0o666` was standing in for.
+/// that can create.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn open(path: *const c_char, oflag: c_int, mut args: ...) -> c_int {
     let mode = if oflag_creates(oflag) {

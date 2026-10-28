@@ -178,38 +178,6 @@ pub fn test_foreground_pgrp() -> TestResult {
     TestResult::Pass
 }
 
-/// Verifies that compositor focus only sets `focused_task_id`, NOT `fg_pgrp`.
-pub fn test_compositor_focus() -> TestResult {
-    tty::table::tty_table_init();
-    let _ = tty::set_compositor_focus(99);
-    let focus = tty::get_compositor_focus().unwrap_or(0);
-    let _ = tty::set_compositor_focus(0);
-
-    if focus != 99 {
-        klog_info!(
-            "TTY_TEST: BUG - compositor focus round-trip failed (got {})",
-            focus
-        );
-        return TestResult::Fail;
-    }
-
-    tty::table::tty_table_init();
-    let fg_before = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
-    let _ = tty::set_compositor_focus(42);
-    let fg_after = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
-    let _ = tty::set_compositor_focus(0);
-
-    if fg_before != fg_after {
-        klog_info!(
-            "TTY_TEST: BUG - set_compositor_focus changed fg_pgrp ({} -> {})",
-            fg_before,
-            fg_after
-        );
-        return TestResult::Fail;
-    }
-    TestResult::Pass
-}
-
 pub fn test_keyboard_enter_scancode_reaches_active_tty() -> TestResult {
     tty::table::tty_table_init();
     tty::set_active_tty(TtyIndex(0));
@@ -274,7 +242,7 @@ pub fn test_unread_line_is_not_idle_work() -> TestResult {
     let work = tty::io::input_available_cb();
     drain_tty_nonblock(TtyIndex(0));
 
-    if !pending || work != 0 {
+    if !pending || work {
         klog_info!(
             "TTY_TEST: BUG - an unread line counted as idle work (pending={}, work={})",
             pending,
@@ -301,14 +269,51 @@ pub fn test_keyboard_extended_up_arrow_reaches_tty() -> TestResult {
     let mut out = [0u8; 8];
     let n = tty::read(TtyIndex(0), &mut out, true);
     tty::set_termios(TtyIndex(0), &saved).unwrap();
-    if n != Ok(1) || out[0] != 0x82 {
+    if n != Ok(3) || out[..3] != *b"\x1b[A" {
         klog_info!(
-            "TTY_TEST: BUG - extended up arrow not delivered (n={:?}, b0=0x{:02x})",
+            "TTY_TEST: BUG - extended up arrow not delivered (n={:?}, bytes={:02x?})",
             n,
-            out[0]
+            &out[..3]
         );
         return TestResult::Fail;
     }
 
     TestResult::Pass
 }
+
+slopos_testing::stest!(name = test_pty_data_roundtrip, suite = tty_test_integration);
+slopos_testing::stest!(
+    name = test_pty_hangup_propagation,
+    suite = tty_test_integration
+);
+slopos_testing::stest!(
+    name = test_errno_background_maps_to_eio,
+    suite = tty_test_integration
+);
+slopos_testing::stest!(
+    name = test_ldisc_ringbuf_integration,
+    suite = tty_test_integration
+);
+slopos_testing::stest!(
+    name = test_echo_batching_correctness,
+    suite = tty_test_integration
+);
+slopos_testing::stest!(name = test_active_tty_default, suite = tty_test_integration);
+slopos_testing::stest!(name = test_set_active_tty, suite = tty_test_integration);
+slopos_testing::stest!(name = test_foreground_pgrp, suite = tty_test_integration);
+slopos_testing::stest!(
+    name = test_keyboard_enter_scancode_reaches_active_tty,
+    suite = tty_test_integration
+);
+slopos_testing::stest!(
+    name = test_keyboard_scancode_routes_to_active_tty_index,
+    suite = tty_test_integration
+);
+slopos_testing::stest!(
+    name = test_unread_line_is_not_idle_work,
+    suite = tty_test_integration
+);
+slopos_testing::stest!(
+    name = test_keyboard_extended_up_arrow_reaches_tty,
+    suite = tty_test_integration
+);

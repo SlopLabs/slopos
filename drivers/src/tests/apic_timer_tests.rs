@@ -3,8 +3,8 @@
 //! These tests run after the full boot sequence, so the LAPIC timer has
 //! already been calibrated by `BOOT_STEP_LAPIC_CALIBRATION`.
 
-use slopos_arch::arch::idt::LAPIC_TIMER_VECTOR;
-use slopos_arch::pcr;
+use slopos_ostd::cpu::x86_64::pcr;
+use slopos_ostd::irq::idt::LAPIC_TIMER_VECTOR;
 use slopos_ostd::klog_info;
 use slopos_ostd::sync::PreemptGuard;
 use slopos_testing::TestResult;
@@ -38,7 +38,7 @@ fn restore_timer_programming(saved: &TimerProgramming) {
 
 // Per-CPU, unlike `irq_get_timer_ticks()`, which every CPU's ISR bumps.
 fn local_ticks() -> u64 {
-    pcr::heartbeat_for_cpu(pcr::get_current_cpu())
+    pcr::heartbeat_for_cpu(pcr::current_cpu_id())
 }
 
 fn await_local_ticks(want: u64, failsafe_ms: u32) -> u64 {

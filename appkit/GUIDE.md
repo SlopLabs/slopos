@@ -124,6 +124,7 @@ A view of many things, or a document, takes a widget the app steers:
 | `Node::EditorTabs` | The documents an app has open, each with a dot for unsaved changes and a close button. |
 | `Node::MenuBar` | Menu titles across a window's top; the app opens the menu it reports as a `Node::Popup` holding a `Node::Menu`. |
 | `Node::DragHandle` | A divider between panes, which reports where the pointer drags it; the app sizes the panes. |
+| `Node::Picture` | A picture the person zooms and pans, over the checks its transparent pixels are judged against. The pointer over it, a left-button press, drag and release, a vertical wheel turn, and a character typed while it has focus come back as a `PictureInput`; the app keeps the zoom and the pan. |
 
 A menu over the view is a `Node::ZStack` whose last child is a `Node::Popup`
 at the point the menu opens from, holding a `Node::Menu`; that is how a menu

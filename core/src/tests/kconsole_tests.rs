@@ -78,27 +78,19 @@ fn with_sole_drain<R>(f: impl FnOnce() -> R) -> Result<R, ApPauseError> {
     with_aps_parked(|| IrqDisabled::with(|_irq| f()))
 }
 
-/// `klog_len` saturates once the ring is full, so an offset captured earlier cannot start a scan.
 const SCAN_TAIL: usize = 16 * 1024;
 
-/// Windows overlap by `needle.len() - 1` so a needle straddling a read boundary is still found.
+/// Read in one pass under the ring's lock: once the ring is full, a byte's
+/// offset moves with every line another CPU logs.
 fn klog_holds(needle: &[u8]) -> Option<bool> {
-    const WINDOW: usize = 8192;
-
-    let mut buf = slopos_ostd::KBox::<[u8; WINDOW]>::zeroed().ok()?;
-    let end = slopos_ostd::klog::klog_len();
-    let mut offset = end.saturating_sub(SCAN_TAIL);
-    while offset < end {
-        let read = slopos_ostd::klog::klog_read(offset, &mut buf[..]);
-        if read < needle.len() {
-            break;
+    let mut buf = slopos_ostd::KBox::<[u8; SCAN_TAIL]>::zeroed().ok()?;
+    let read = loop {
+        if let Some(read) = slopos_ostd::klog::klog_tail(&mut buf[..]) {
+            break read;
         }
-        if buf[..read].windows(needle.len()).any(|w| w == needle) {
-            return Some(true);
-        }
-        offset += read - (needle.len() - 1);
-    }
-    Some(false)
+        core::hint::spin_loop();
+    };
+    Some(buf[..read].windows(needle.len()).any(|w| w == needle))
 }
 
 /// Swap in a policy for the duration of a test and put the old one back.
@@ -447,7 +439,7 @@ pub fn test_kcon_probe_slot_protocol() -> TestResult {
     use slopos_ostd::watchdog::{self, NmiDisposition};
 
     // An index no machine this runs on has, so the lockup detector's own probes cannot contend.
-    const VICTIM: usize = slopos_arch::MAX_CPUS - 1;
+    const VICTIM: usize = slopos_ostd::cpu::x86_64::pcr::MAX_CPUS - 1;
 
     if watchdog::probe_disposition(VICTIM) != NmiDisposition::Unsolicited {
         return fail!("cpu {} already had a probe armed before the test", VICTIM);

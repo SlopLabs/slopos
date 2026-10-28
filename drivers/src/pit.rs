@@ -17,9 +17,9 @@ fn pit_read_count() -> u16 {
         IoPortRegistry::reserve::<u8>(0x43).expect("PIT command port"),
         IoPortRegistry::reserve::<u8>(0x40).expect("PIT channel 0 port"),
     );
-    let flags = slopos_arch::cpu::save_flags_cli();
+    let flags = slopos_ostd::cpu::x86_64::save_flags_cli();
     let count = pit.read_count();
-    slopos_arch::cpu::restore_flags(flags);
+    slopos_ostd::cpu::x86_64::restore_flags(flags);
     count
 }
 

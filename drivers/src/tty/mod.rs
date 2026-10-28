@@ -15,12 +15,6 @@ pub mod session;
 pub mod table;
 pub mod vconsole;
 
-/// VT100/ANSI escape-sequence parser, re-exported from `slopos-vt` so the kernel
-/// virtual console and the userland terminal emulator share one state machine.
-pub mod vtparser {
-    pub use slopos_vt::{Direction, EraseMode, MouseTracking, SgrAttr, VtAction, VtParser};
-}
-
 pub(crate) mod io;
 mod job_control;
 mod lifecycle;
@@ -297,10 +291,9 @@ impl Drop for PostLockWork {
 
 pub use slopos_abi::tty_error::TtyError;
 
-pub use self::io::{
-    bytes_available, has_data, output_queued_bytes, push_input, push_input_batch, read,
-    read_with_attach, write,
-};
+pub use self::io::{bytes_available, output_queued_bytes, push_input_batch, read, write};
+#[cfg(feature = "test-hooks")]
+pub use self::io::{has_data, push_input};
 
 pub use self::io::{
     get_packet_mode, get_pty_lock, get_pty_number, is_pty_slave, is_slave_locked, pty_alloc,
@@ -329,8 +322,6 @@ pub use self::lifecycle::{
     set_default_console_tty, set_exclusive, switch_active_tty, vhangup,
 };
 
-pub use self::poll::{
-    get_compositor_focus, poll_dequeue, poll_enqueue, poll_events, set_compositor_focus,
-};
+pub use self::poll::{poll_dequeue, poll_enqueue, poll_events};
 
 pub use self::session::detach_session_by_id;

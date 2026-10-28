@@ -19,7 +19,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_abi::addr::PhysAddr;
-use slopos_arch::cpu;
+use slopos_ostd::cpu::x86_64 as cpu;
 
 /// 12-bit hardware process-context identifier: the CPU tags TLB entries with
 /// the PCID in CR3[11:0] so entries from different address spaces can coexist.
@@ -83,8 +83,8 @@ impl MmContextId {
         self.0 != 0
     }
 
-    /// For a context ID derived from the legacy `process_id` surface rather
-    /// than freshly allocated by `alloc_mm_context_id`.
+    /// The context ID a `VmSpace` carries as its `mm_ctx_handle`, which
+    /// `alloc_mm_context_id` minted.
     #[inline]
     pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
@@ -106,7 +106,7 @@ pub fn alloc_mm_context_id() -> MmContextId {
 pub struct Cr3Value(u64);
 
 impl Cr3Value {
-    /// Isolates the 52-bit physical frame; matches `PageFlags::ADDRESS_MASK`.
+    /// Isolates the 52-bit physical frame; matches `PteFlags::ADDRESS_MASK`.
     pub const PHYS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
     /// PCID field, bits `[11:0]`.
     pub const PCID_MASK: u64 = 0x0000_0000_0000_0FFF;
@@ -133,16 +133,6 @@ impl Cr3Value {
     #[inline]
     pub fn kernel(pml4_phys: PhysAddr) -> Self {
         Self::new(pml4_phys, Pcid::KERNEL, false)
-    }
-
-    #[inline]
-    pub const fn with_noflush(self) -> Self {
-        Self(self.0 | Self::NOFLUSH_BIT)
-    }
-
-    #[inline]
-    pub const fn without_noflush(self) -> Self {
-        Self(self.0 & !Self::NOFLUSH_BIT)
     }
 
     #[inline]

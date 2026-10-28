@@ -11,18 +11,64 @@
 use slopos_ostd::cpu::preempt::PreemptGuard;
 use slopos_ostd::sync::InitFlag;
 
+use slopos_ostd::user::ptr::{UserBytes, UserPtr};
+
 use crate::page_fault::FileIo;
-use crate::user_ptr::{UserBytes, UserPtr, UserPtrError};
+
+/// A user pointer that failed OSTD's validation
+/// ([`slopos_ostd::user::ptr::UserPtrError`]) or faulted mid-copy.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum UserPtrError {
+    /// Pointer is null (address == 0).
+    Null = 1,
+    /// Address is not canonical (bits 48-63 don't match bit 47).
+    NonCanonical = 2,
+    /// Address is outside `[USER_SPACE_START_VA, USER_SPACE_END_VA)`.
+    OutOfUserRange = 3,
+    /// `addr + len` overflows or leaves the user range.
+    Overflow = 4,
+    /// Page is not mapped or not user-accessible in the page tables.
+    NotMapped = 5,
+    /// `rep movsb` faulted mid-copy (the user pages were unmapped or
+    /// the permissions changed concurrently).
+    CopyFailed = 6,
+}
+
+impl From<slopos_ostd::user::ptr::UserPtrError> for UserPtrError {
+    fn from(e: slopos_ostd::user::ptr::UserPtrError) -> Self {
+        use slopos_ostd::user::ptr::UserPtrError as O;
+        match e {
+            O::Null => Self::Null,
+            O::NonCanonical => Self::NonCanonical,
+            O::OutOfUserRange => Self::OutOfUserRange,
+            O::Overflow => Self::Overflow,
+        }
+    }
+}
+
+impl From<slopos_ostd::user::copy::UserCopyError> for UserPtrError {
+    fn from(e: slopos_ostd::user::copy::UserCopyError) -> Self {
+        use slopos_ostd::user::copy::UserCopyError as C;
+        match e {
+            C::NotMapped | C::NotUserAccessible | C::NotUserWritable | C::InvalidSpace => {
+                Self::NotMapped
+            }
+            C::OutOfUserRange => Self::OutOfUserRange,
+            C::Fault { .. } => Self::CopyFailed,
+        }
+    }
+}
 
 static KERNEL_GUARD_CHECKED: InitFlag = InitFlag::new();
 
 #[inline]
 fn current_process_id() -> u32 {
-    slopos_arch::pcr::current_syscall_pid()
+    slopos_ostd::cpu::x86_64::pcr::current_syscall_pid()
 }
 
 pub fn set_test_process_id(pid: u32) {
-    slopos_arch::pcr::set_current_syscall_pid(pid);
+    slopos_ostd::cpu::x86_64::pcr::set_current_syscall_pid(pid);
 }
 
 /// One-shot probe (latched after the first run) confirming the kernel half
@@ -74,7 +120,7 @@ fn populate_inner(access: Access, addr: u64, len: usize) -> Option<()> {
     let process = slopos_ostd::process::ProcessId::resolve(current_process_id())?;
     let handle = crate::process_vm::process_vm_handle(process)?;
     let packed = crate::process_vm::pack_process_vm_handle(handle);
-    let task_id = slopos_arch::pcr::current_task_id();
+    let task_id = slopos_ostd::cpu::x86_64::pcr::current_task_id();
     let io = file_io();
     let ok = match access {
         Access::Read => {

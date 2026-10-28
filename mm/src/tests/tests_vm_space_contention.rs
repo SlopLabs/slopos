@@ -10,28 +10,29 @@ use slopos_testing::{assert_test, fail, pass};
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::task::TaskPriority;
 use slopos_kernel_services::clock::uptime_ms;
-use slopos_ostd::mm::frame::{AnonymousMeta, Frame, Paddr};
+use slopos_ostd::mm::frame::{AnonymousMeta, Frame};
 
 use crate::error::MmError;
 use crate::page_fault::{
     FaultOutcome, FileIo, RETRY_WARN_MS, RetryEpisode, note_retry, populate_user_range_for_read,
     try_resolve_user_fault,
 };
-use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm::{
     pack_process_vm_handle, process_vm_alloc, process_vm_get_vm_space, process_vm_handle,
 };
 use crate::tests::test_fixtures::ProcessVmGuard;
+use slopos_ostd::mm::page_property::PageProperty;
 
 const WRITE_USER_ABSENT: u64 = 0x06;
 
 fn lazy_anon_page(vm: &ProcessVmGuard) -> Option<u64> {
-    let addr = process_vm_alloc(vm.process, PAGE_SIZE_4KB, PageFlags::WRITABLE.bits() as u32);
+    let addr = process_vm_alloc(vm.process, PAGE_SIZE_4KB, true);
     if addr == 0 { None } else { Some(addr) }
 }
 
 fn cow_page(vm: &ProcessVmGuard) -> Option<PhysAddr> {
-    let phys = vm.map_test_page(0x5000, PageFlags::USER_RO.bits())?;
+    let phys = vm.map_test_page(0x5000, PageProperty::USER_RO)?;
     vm.mark_cow(0x5000);
     Some(phys)
 }
@@ -109,7 +110,7 @@ pub fn test_cow_fault_retries_while_a_reader_holds_the_space() -> TestResult {
         return fail!("map and mark a COW page");
     };
     // A second reference to the paddr is what selects the copying arm.
-    let shared = match Frame::<AnonymousMeta>::from_in_use(Paddr::new(phys.as_u64())) {
+    let shared = match Frame::<AnonymousMeta>::from_in_use(phys) {
         Ok(frame) => frame,
         Err(e) => return fail!("take a second reference to the COW frame: {:?}", e),
     };
@@ -135,7 +136,7 @@ pub fn test_cow_retry_leaves_the_page_mapped_and_cow() -> TestResult {
     let Some(phys) = cow_page(&vm) else {
         return fail!("map and mark a COW page");
     };
-    let shared = match Frame::<AnonymousMeta>::from_in_use(Paddr::new(phys.as_u64())) {
+    let shared = match Frame::<AnonymousMeta>::from_in_use(phys) {
         Ok(frame) => frame,
         Err(e) => return fail!("take a second reference to the COW frame: {:?}", e),
     };
@@ -218,18 +219,22 @@ pub fn test_map_user_range_leaves_nothing_mapped_on_would_block() -> TestResult 
     };
     let start = crate::memory_layout_defs::PROCESS_MMAP_START_VA;
     let end = start + 2 * PAGE_SIZE_4KB;
-    let flags = crate::paging_defs::PageFlags::USER_RW.bits();
 
     let Some(reader) = process_vm_get_vm_space(vm.process) else {
         return fail!("clone the address space");
     };
-    let mapped = crate::process_vm::process_vm_map_range_for_test(vm.process, start, end, flags);
+    let mapped = crate::process_vm::process_vm_map_range_for_test(
+        vm.process,
+        start,
+        end,
+        PageProperty::USER_RW,
+    );
     let first = vm.virt_to_phys(start);
     let second = vm.virt_to_phys(start + PAGE_SIZE_4KB);
     drop(reader);
 
     assert_test!(
-        mapped.is_err(),
+        mapped.is_none(),
         "the range mapped while a reader held the address space"
     );
     assert_test!(
@@ -255,7 +260,7 @@ fn populate_from_a_task() {
         POPULATE_HANDLE.load(Ordering::Acquire),
         POPULATE_TARGET.load(Ordering::Acquire),
         PAGE_SIZE_4KB,
-        slopos_arch::pcr::current_task_id(),
+        slopos_ostd::cpu::x86_64::pcr::current_task_id(),
         FileIo::Read,
     );
     let outcome = if populated {

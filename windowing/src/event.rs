@@ -4,6 +4,11 @@ use slopos_protocol::types::Event as ProtocolEvent;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Event {
+    /// The pointer came over the window, which may now set its cursor.
+    PointerEnter {
+        x: i32,
+        y: i32,
+    },
     PointerMotion {
         x: i32,
         y: i32,
@@ -33,6 +38,10 @@ pub enum Event {
         codepoint: u32,
         modifiers: u8,
     },
+    /// The modifiers changed while the window has the keyboard.
+    Modifiers {
+        modifiers: u8,
+    },
     CloseRequest,
     Configure {
         width: u32,
@@ -53,8 +62,8 @@ pub enum Event {
 impl Event {
     pub fn from_protocol(evt: &ProtocolEvent) -> Option<Self> {
         match evt {
-            ProtocolEvent::PointerEnter { x, y, .. }
-            | ProtocolEvent::PointerMotion { x, y, .. } => {
+            ProtocolEvent::PointerEnter { x, y, .. } => Some(Event::PointerEnter { x: *x, y: *y }),
+            ProtocolEvent::PointerMotion { x, y, .. } => {
                 Some(Event::PointerMotion { x: *x, y: *y })
             }
             ProtocolEvent::PointerLeave { .. } => Some(Event::PointerLeave),
@@ -98,6 +107,9 @@ impl Event {
                     },
                 })
             }
+            ProtocolEvent::Modifiers { mods } => Some(Event::Modifiers {
+                modifiers: u8::try_from(*mods).unwrap_or(0),
+            }),
             ProtocolEvent::PasteReady { len, .. } => Some(Event::ClipboardOffer { len: *len }),
             ProtocolEvent::PasteResult { len, .. } => Some(Event::ClipboardData { len: *len }),
             ProtocolEvent::Close { .. } => Some(Event::CloseRequest),

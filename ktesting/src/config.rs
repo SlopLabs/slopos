@@ -4,7 +4,6 @@ const DEFAULT_ENABLED: bool = false;
 const DEFAULT_VERBOSITY: Verbosity = Verbosity::Summary;
 const DEFAULT_WARN_MS: u32 = 0;
 const DEFAULT_SHUTDOWN: bool = false;
-const DEFAULT_STACKTRACE_DEMO: bool = false;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verbosity {
@@ -47,7 +46,6 @@ pub struct TestConfig {
     pub verbosity: Verbosity,
     pub warn_ms: u32,
     pub shutdown: bool,
-    pub stacktrace_demo: bool,
     pub run_globs: KVec<KVec<u8>>,
     pub skip_globs: KVec<KVec<u8>>,
 }
@@ -80,22 +78,10 @@ impl TestConfig {
 }
 
 fn parse_bool(value: &str) -> Option<bool> {
-    if value.eq_ignore_ascii_case("on")
-        || value.eq_ignore_ascii_case("true")
-        || value.eq_ignore_ascii_case("yes")
-        || value.eq_ignore_ascii_case("enabled")
-        || value == "1"
-    {
-        Some(true)
-    } else if value.eq_ignore_ascii_case("off")
-        || value.eq_ignore_ascii_case("false")
-        || value.eq_ignore_ascii_case("no")
-        || value.eq_ignore_ascii_case("disabled")
-        || value == "0"
-    {
-        Some(false)
-    } else {
-        None
+    match value {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
     }
 }
 
@@ -119,7 +105,6 @@ pub fn config_from_cmdline(cmdline: Option<&str>) -> TestConfig {
         verbosity: DEFAULT_VERBOSITY,
         warn_ms: DEFAULT_WARN_MS,
         shutdown: DEFAULT_SHUTDOWN,
-        stacktrace_demo: DEFAULT_STACKTRACE_DEMO,
         run_globs: KVec::new(),
         skip_globs: KVec::new(),
     };
@@ -131,18 +116,9 @@ pub fn config_from_cmdline(cmdline: Option<&str>) -> TestConfig {
                     if !enabled {
                         cfg.shutdown = false;
                     }
-                } else {
-                    cfg.enabled = true;
                 }
-            } else if let Some(value) = match_tests_prefix(token, "suite=") {
-                cfg.enabled = true;
-                push_suite_glob(&mut cfg.run_globs, value);
             } else if let Some(value) = match_tests_prefix(token, "verbosity=") {
                 cfg.verbosity = Verbosity::from_str(value);
-            } else if let Some(value) = match_tests_prefix(token, "timeout=") {
-                if let Ok(parsed) = value.trim_end_matches("ms").parse::<u32>() {
-                    cfg.warn_ms = parsed;
-                }
             } else if let Some(value) = match_tests_prefix(token, "warn_ms=") {
                 if let Ok(parsed) = value.trim_end_matches("ms").parse::<u32>() {
                     cfg.warn_ms = parsed;
@@ -163,30 +139,8 @@ pub fn config_from_cmdline(cmdline: Option<&str>) -> TestConfig {
                 if let Some(shutdown) = parse_bool(value) {
                     cfg.shutdown = shutdown;
                 }
-            } else if let Some(value) = match_tests_prefix(token, "stacktrace_demo=") {
-                if let Some(demo) = parse_bool(value) {
-                    cfg.stacktrace_demo = demo;
-                }
             }
         }
     }
     cfg
-}
-
-/// Translate `tests.suite=foo` into `*foo*`, a convenience alias for the more
-/// general `tests.run=` form.
-fn push_suite_glob(target: &mut KVec<KVec<u8>>, suite: &str) {
-    let mut owned = KVec::<u8>::new();
-    if owned.push(b'*').is_err() {
-        return;
-    }
-    for &b in suite.as_bytes() {
-        if owned.push(b).is_err() {
-            return;
-        }
-    }
-    if owned.push(b'*').is_err() {
-        return;
-    }
-    let _ = target.push(owned);
 }

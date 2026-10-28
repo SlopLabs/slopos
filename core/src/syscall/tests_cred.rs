@@ -4,7 +4,6 @@
 //! refusal sits beside the positive control that shows the same caller one bit
 //! away succeeding.
 
-use core::ffi::c_char;
 use core::ptr;
 
 use slopos_abi::Errno;
@@ -24,7 +23,7 @@ use slopos_testing::{TestResult, assert_eq_test, assert_test, fail, pass};
 use crate::syscall::common::SyscallHandler;
 use crate::syscall::tests_build_floor_fs::{call_syscall, map_user_pages, stage_cstr};
 
-type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
+use slopos_sched::test_fixture::KernelTestScope;
 
 const ROOT: &[u8] = b"/cred_tests";
 const USER: u32 = 1000;
@@ -62,13 +61,7 @@ impl Principal {
         let entry = slopos_sched::task::task_entry_from_kernel_va(
             slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA as u64,
         );
-        let id = task_create(
-            b"CredTest\0".as_ptr() as *const c_char,
-            entry,
-            ptr::null_mut(),
-            1,
-            TASK_FLAG_USER_MODE,
-        );
+        let id = task_create(b"CredTest", entry, ptr::null_mut(), 1, TASK_FLAG_USER_MODE);
         if id == INVALID_TASK_ID {
             return None;
         }
@@ -252,7 +245,7 @@ pub fn test_id_calls_follow_posix_without_set_id() -> TestResult {
     use crate::syscall::cred_handlers::{
         syscall_getgroups, syscall_setgroups, syscall_setresuid, syscall_setuid,
     };
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(user) = Principal::with_uids([USER, OTHER, USER], CAP_UNIVERSAL) else {
         return fail!("could not build the principal");
     };
@@ -329,7 +322,7 @@ slopos_testing::stest!(
 );
 
 pub fn test_mode_bits_refuse_open_and_create() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     assert_test!(fixtures_root(), "could not lay out the fixture root");
     let (Some(secret), Some(public), Some(closed)) = (
         root_file(b"secret", 0o600),
@@ -424,7 +417,7 @@ slopos_testing::stest!(name = test_mode_bits_refuse_open_and_create, suite = cre
 
 pub fn test_a_sticky_directory_keeps_names_to_their_owners() -> TestResult {
     use crate::syscall::fs::path_handlers::syscall_unlink;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     assert_test!(fixtures_root(), "could not lay out the fixture root");
     let (Some(shared), Some(theirs)) = (
         root_dir(b"shared", 0o1777),
@@ -489,7 +482,7 @@ slopos_testing::stest!(
 
 pub fn test_a_shared_directory_follows_a_link_for_its_owners() -> TestResult {
     use crate::syscall::fs::path_handlers::syscall_symlink;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     assert_test!(fixtures_root(), "could not lay out the fixture root");
     let (Some(shared), Some(target)) = (root_dir(b"links", 0o1777), root_file(b"followed", 0o644))
     else {
@@ -554,7 +547,7 @@ slopos_testing::stest!(
 
 pub fn test_chmod_and_chown_are_the_owners() -> TestResult {
     use crate::syscall::fs::path_handlers::{syscall_chmod, syscall_chown};
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     assert_test!(fixtures_root(), "could not lay out the fixture root");
     let (Some(_), Some(theirs)) = (root_dir(b"owned", 0o777), root_file(b"owned/theirs", 0o644))
     else {
@@ -630,7 +623,7 @@ slopos_testing::stest!(name = test_chmod_and_chown_are_the_owners, suite = cred)
 
 pub fn test_access_checks_the_real_ids_unless_asked() -> TestResult {
     use crate::syscall::fs::at_handlers::syscall_faccessat2;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     assert_test!(fixtures_root(), "could not lay out the fixture root");
     let Some(secret) = root_file(b"access_secret", 0o600) else {
         return fail!("could not lay out the fixture");
@@ -665,7 +658,7 @@ slopos_testing::stest!(
 );
 
 pub fn test_signals_need_the_uid_rule() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let (Some(sender), Some(same), Some(stranger), Some(privileged)) = (
         Principal::user(USER, CAP_UNIVERSAL),
         Principal::user(USER, CAP_UNIVERSAL),
@@ -730,7 +723,7 @@ slopos_testing::stest!(name = test_signals_need_the_uid_rule, suite = cred);
 pub fn test_a_new_name_needs_write_and_search() -> TestResult {
     use crate::syscall::fs::at_handlers::syscall_link;
     use crate::syscall::fs::path_handlers::{syscall_mkdir, syscall_symlink};
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     assert_test!(fixtures_root(), "could not lay out the fixture root");
     let (Some(names), Some(target)) =
         (root_dir(b"names", 0o755), root_file(b"names_target", 0o644))
@@ -788,7 +781,7 @@ slopos_testing::stest!(name = test_a_new_name_needs_write_and_search, suite = cr
 
 pub fn test_a_setgid_directory_hands_down_its_group() -> TestResult {
     use crate::syscall::fs::path_handlers::syscall_mkdir;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     assert_test!(fixtures_root(), "could not lay out the fixture root");
     let Some(team) = root_dir(b"team", 0o777) else {
         return fail!("could not lay out the fixture");
@@ -843,7 +836,7 @@ slopos_testing::stest!(
 );
 
 pub fn test_moving_a_directory_needs_write_on_it() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     assert_test!(fixtures_root(), "could not lay out the fixture root");
     let (Some(from), Some(to), Some(theirs)) = (
         root_dir(b"from", 0o777),
@@ -881,7 +874,7 @@ slopos_testing::stest!(
 pub fn test_times_size_and_flags_follow_the_bits() -> TestResult {
     use crate::syscall::fs::at_handlers::syscall_utimensat;
     use crate::syscall::fs::path_handlers::syscall_truncate;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     assert_test!(fixtures_root(), "could not lay out the fixture root");
     let (Some(shared), Some(read_only)) = (
         root_file(b"times_shared", 0o666),
@@ -950,7 +943,7 @@ slopos_testing::stest!(
 /// on the running task, which here is the test's own.
 pub fn test_chdir_needs_search() -> TestResult {
     use crate::syscall::process_handlers::resolve_new_cwd;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     assert_test!(fixtures_root(), "could not lay out the fixture root");
     let Some(locked) = root_dir(b"locked", 0o700) else {
         return fail!("could not lay out the fixture");
@@ -980,7 +973,7 @@ slopos_testing::stest!(name = test_chdir_needs_search, suite = cred);
 
 /// uid 0 owns the system's files and passes no mode bit on its own.
 pub fn test_uid_zero_meets_the_mode_bits() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     assert_test!(fixtures_root(), "could not lay out the fixture root");
     let Some(sealed_off) = root_file(b"read_only_to_root", 0o444) else {
         return fail!("could not lay out the fixture");
@@ -1010,7 +1003,7 @@ slopos_testing::stest!(name = test_uid_zero_meets_the_mode_bits, suite = cred);
 pub fn test_exec_needs_the_execute_bit_of_its_class() -> TestResult {
     use crate::exec::resolve_exec;
     use crate::tests::helpers::install_static_program;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let tool = join(b"tool");
     assert_test!(
         fixtures_root()
@@ -1049,7 +1042,7 @@ slopos_testing::stest!(
 pub fn test_a_negative_nice_takes_sched_high() -> TestResult {
     use crate::syscall::priority_handlers::syscall_setpriority;
     use slopos_abi::syscall::PRIO_PROCESS;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let sched_high = Capability::SchedHigh.bit();
     let (Some(root), Some(user)) = (
         Principal::user(0, CAP_MASK_ALL & !sched_high),
@@ -1082,7 +1075,7 @@ slopos_testing::stest!(name = test_a_negative_nice_takes_sched_high, suite = cre
 /// A spawned child saves its effective ids, as an exec does.
 pub fn test_spawn_saves_the_effective_ids() -> TestResult {
     use crate::tests::helpers::install_static_program;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let spin = join(b"spin");
     assert_test!(
         fixtures_root() && install_static_program(&spin, &[0xeb, 0xfe]),
@@ -1120,7 +1113,7 @@ pub fn test_spawn_delegates_within_the_spawner() -> TestResult {
     const RAW_BLOCK: u64 = Capability::RawBlock.bit();
     const SET_ID: u64 = Capability::SetId.bit();
 
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let spin = join(b"spin");
     assert_test!(
         fixtures_root() && install_static_program(&spin, &[0xeb, 0xfe]),
@@ -1319,7 +1312,7 @@ fn spawned_uids(program: &[u8], parent: &Principal) -> Option<[u32; 3]> {
 pub fn test_a_login_tag_is_set_only_with_set_id() -> TestResult {
     use crate::tests::helpers::install_static_program;
 
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let spin = join(b"spin");
     assert_test!(
         fixtures_root() && install_static_program(&spin, &[0xeb, 0xfe]),

@@ -9,14 +9,14 @@
 # this file adds is the tarball's checksum and four patches.
 #
 # 0001 makes `x86_64-unknown-slopos` a built-in target rather than a JSON
-# file — the one thing bootstrap's `--host` cannot resolve without. 0003
-# belongs to the same PR and is separate only because the first bootstrap run
-# is what found it: bootstrap maps a cross target's triple to a
-# `CMAKE_SYSTEM_NAME` by hand, and an unrecognised one falls back to
-# `Generic`, which loses `LLVM_ON_UNIX` and with it every `Unix/*.inc` file
-# the LLVM port patches.
+# file — the one thing bootstrap's `--host` cannot resolve without.
 #
-# 0004 lets `llvm.static-libstdcpp` build a `rustc_llvm` that links `c++`:
+# 0002 maps the target to a `CMAKE_SYSTEM_NAME`: bootstrap names a cross
+# target's system by hand, and an unrecognised one falls back to `Generic`,
+# which loses `LLVM_ON_UNIX` and with it every `Unix/*.inc` file the LLVM port
+# patches.
+#
+# 0003 lets `llvm.static-libstdcpp` build a `rustc_llvm` that links `c++`:
 # bootstrap asks the target's C++ compiler where `libstdc++.a` is and hands
 # the directory to `rustc_llvm`, which then links `static=c++` out of it —
 # and a SlopOS sysroot has `libc++.a` and no `libstdc++.a`. It names the
@@ -37,6 +37,6 @@
 # hunk.
 rustc_src_sha256=83e1649371c2b85317974ead0c9786766c090dc1b79afe41c8e7091f009da478
 patch_sha256=toolchain/compiler/0001-slopos-target.patch:3b6baf7d1c5134ee437b88b24cd068e25248309186c1fdb5f912c348befeec03
-patch_sha256=toolchain/compiler/0003-bootstrap-cmake-system-name.patch:16989f469122ffa26e9a88349756e6ce4dc93c6dec7bbe874e8319a9490971fc
-patch_sha256=toolchain/compiler/0004-bootstrap-static-libcxx.patch:1f11a25951d3d5c3800977bb731b7f1c2d439e444c0a685c11a41e84b6f6e591
+patch_sha256=toolchain/compiler/0002-bootstrap-cmake-system-name.patch:16989f469122ffa26e9a88349756e6ce4dc93c6dec7bbe874e8319a9490971fc
+patch_sha256=toolchain/compiler/0003-bootstrap-static-libcxx.patch:1f11a25951d3d5c3800977bb731b7f1c2d439e444c0a685c11a41e84b6f6e591
 patch_sha256=toolchain/llvm-rustc/0001-slopos-support.patch:98965e5f5f80f7b08463558e42acec8e2d056652b98543065c9b368d32be6cf2

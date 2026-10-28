@@ -11,15 +11,13 @@
 //! [`kernel_authority`]. That is the one seam in the compile-error claim, held
 //! closed by `scripts/check_authority_reachability.sh` rather than by types.
 
-use core::ffi::c_char;
-
 use crate::authority::{Cap, Power};
 use crate::sync::OnceLock;
 
 /// The machine-specific implementation, registered by `boot` at init.
 pub struct PowerOps {
-    pub shutdown: fn(reason: *const c_char) -> !,
-    pub reboot: fn(reason: *const c_char) -> !,
+    pub shutdown: fn(reason: &str) -> !,
+    pub reboot: fn(reason: &str) -> !,
 }
 
 static POWER_OPS: OnceLock<PowerOps> = OnceLock::new();
@@ -39,12 +37,12 @@ fn ops() -> Option<&'static PowerOps> {
 }
 
 /// Power the machine off.
-pub fn shutdown(_cap: &Cap<'_, Power>, reason: *const c_char) -> ! {
+pub fn shutdown(_cap: &Cap<'_, Power>, reason: &str) -> ! {
     dispatch_shutdown(reason)
 }
 
 /// Reboot the machine. See [`shutdown`].
-pub fn reboot(_cap: &Cap<'_, Power>, reason: *const c_char) -> ! {
+pub fn reboot(_cap: &Cap<'_, Power>, reason: &str) -> ! {
     dispatch_reboot(reason)
 }
 
@@ -58,14 +56,14 @@ pub fn kernel_authority() -> Cap<'static, Power> {
     crate::authority::mint_kernel_power()
 }
 
-fn dispatch_shutdown(reason: *const c_char) -> ! {
+fn dispatch_shutdown(reason: &str) -> ! {
     match ops() {
         Some(ops) => (ops.shutdown)(reason),
         None => halt_forever(),
     }
 }
 
-fn dispatch_reboot(reason: *const c_char) -> ! {
+fn dispatch_reboot(reason: &str) -> ! {
     match ops() {
         Some(ops) => (ops.reboot)(reason),
         None => halt_forever(),

@@ -12,21 +12,9 @@ pub const DEFAULT_PATH: &CStr = c"/bin:/sbin:/usr/local/bin:/opt/bin";
 /// large for a kernel frame, so the syscall layer stages paths on the heap.
 pub const USER_PATH_MAX: usize = 4096;
 
-/// Longest single path component, NUL excluded. ext2's on-disk ceiling:
+/// Longest single path component, NUL excluded. ext4's on-disk ceiling:
 /// `name_len` is one byte.
 pub const USER_NAME_MAX: usize = 255;
-
-/// Entries one `fs_list` call may return. Not a bound on a directory: the
-/// call carries a cursor, so a larger directory is read in successive calls
-/// rather than truncated at this number.
-pub const USER_FS_MAX_ENTRIES: u32 = 64;
-
-pub const FS_TYPE_FILE: u8 = 0;
-pub const FS_TYPE_DIRECTORY: u8 = 1;
-pub const FS_TYPE_CHARDEV: u8 = 2;
-pub const FS_TYPE_SYMLINK: u8 = 3;
-pub const FS_TYPE_BLOCKDEV: u8 = 4;
-pub const FS_TYPE_UNKNOWN: u8 = 0xFF;
 
 /// `mount(2)` flags, Linux values.
 pub const MS_RDONLY: u32 = 1;
@@ -62,59 +50,6 @@ pub const O_DSYNC: u32 = 0x1000;
 pub const O_SYNC: u32 = 0x101000;
 pub const O_DIRECTORY: u32 = 0o200_000;
 pub const O_NOFOLLOW: u32 = 0o400_000;
-
-/// Directory entry returned by the fs_list syscall.
-///
-/// Every hole is a named field: `copy_to_user` copies `size_of::<Self>()`
-/// bytes, so an implicit one would carry kernel stack to userland.
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct UserFsEntry {
-    /// Entry name as UTF-8 bytes (null-terminated)
-    pub name: [u8; USER_NAME_MAX + 1],
-    pub type_: u8,
-    pub _pad: [u8; 7],
-    pub size: u64,
-}
-
-const _: () = assert!(
-    core::mem::size_of::<UserFsEntry>() == 272,
-    "UserFsEntry must carry no implicit padding"
-);
-
-impl UserFsEntry {
-    pub const fn new() -> Self {
-        Self {
-            name: [0; USER_NAME_MAX + 1],
-            type_: 0,
-            _pad: [0; 7],
-            size: 0,
-        }
-    }
-
-    pub fn name_str(&self) -> &str {
-        let len = self
-            .name
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(self.name.len());
-        core::str::from_utf8(&self.name[..len]).unwrap_or("<invalid>")
-    }
-
-    pub fn is_directory(&self) -> bool {
-        self.type_ == FS_TYPE_DIRECTORY
-    }
-
-    pub fn is_file(&self) -> bool {
-        self.type_ == FS_TYPE_FILE
-    }
-}
-
-impl Default for UserFsEntry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// A device number in the `dev_t` layout `major` and `minor` decode on the
 /// Linux ABI: twelve bits of major and eight of minor low, the rest above.
@@ -389,38 +324,6 @@ const _: () = assert!(
     core::mem::size_of::<UserFlock>() == 32,
     "UserFlock must match the Linux x86-64 struct flock"
 );
-
-/// Caller-provided entry buffer for the fs_list syscall.
-///
-/// `cursor` makes the call resumable: zero it to start, pass it back
-/// unmodified to continue, and stop when [`FS_LIST_CURSOR_END`] comes back.
-/// A directory larger than `max_entries` is therefore listed in full rather
-/// than silently cut off at the buffer.
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct UserFsList {
-    pub entries: *mut UserFsEntry,
-    pub max_entries: u32,
-    /// Actual number of entries returned
-    pub count: u32,
-    /// Opaque resumption point, updated by the kernel on return. Its meaning
-    /// belongs to the filesystem; userland must only carry it back verbatim.
-    pub cursor: u64,
-}
-
-/// `cursor` value meaning the directory has been listed to its end.
-pub const FS_LIST_CURSOR_END: u64 = u64::MAX;
-
-impl Default for UserFsList {
-    fn default() -> Self {
-        Self {
-            entries: core::ptr::null_mut(),
-            max_entries: 0,
-            count: 0,
-            cursor: 0,
-        }
-    }
-}
 
 /// Filesystem statistics returned by `statfs(2)` and `fstatfs(2)`.
 ///

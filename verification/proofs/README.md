@@ -20,42 +20,42 @@ toolchain over each one and fails on any unverified obligation.
   into `slopos-ostd` (Verus emits a normal build for the kernel) so
   `just build` + `just test` still pass.
 
-`frame_refcount.rs` (Phase 3B) is the first proof to land: 10 obligations
-machine-checking the `Frame<M>` reference-count invariants (I1 allocated-
-while-referenced, I2 release-exactly-once, I3 no clone/drop use-after-free,
-I4 free-listed ⇒ slot reset-before-free) plus two load-bearing witnesses:
-the broken `fetch_add(1)` clone violates I1–I3, and the pre-fix
-free-before-reset `Drop` ordering violates I4 (the SMP `from_unused` /
-`PathCorrupt` bug).
+`frame_refcount.rs` machine-checks the `Frame<M>` reference-count invariants
+in 10 obligations (I1 allocated-while-referenced, I2 release-exactly-once, I3
+no clone/drop use-after-free, I4 free-listed ⇒ slot reset-before-free) plus two
+load-bearing witnesses: a `fetch_add(1)` clone violates I1–I3, and a `Drop`
+that frees before it resets the slot violates I4 (a concurrent `from_unused`
+then claims a slot still carrying the old metadata and answers
+`PathCorrupt`).
 
-`slab_lifetime.rs` (Phase 3C) is the second: 11 obligations machine-checking
-the slab object lifecycle — Inv. 9 (a slot cannot outlive its parent slab:
-an outstanding cell pins its page) and Inv. 10 (a slot is only used for an
-object that fits its size + alignment) — plus load-bearing witnesses that an
+`slab_lifetime.rs` machine-checks the slab object lifecycle in 11
+obligations — Inv. 9 (a slot cannot outlive its parent slab: an outstanding
+cell pins its page) and Inv. 10 (a slot is only used for an object that fits
+its size + alignment) — plus load-bearing witnesses that an
 unconditional page reclaim breaks Inv. 9 and an always-smallest size class
 breaks Inv. 10.
 
-`vm_space_cursor.rs` (Phase 3D) is the third: 12 obligations machine-checking
-the `VmSpace::cursor` page-table mutation path — (WF) page-table
+`vm_space_cursor.rs` machine-checks the `VmSpace::cursor` page-table mutation
+path in 17 obligations — (WF) page-table
 well-formedness (no dangling intermediate frames; CortenMM SOSP '25 Fig. 12
 for the 4-level x86_64 walk), (REF) `map` leaks one `UFrame` ref and `unmap`
 reclaims one exactly, and (Inv. 4 + Inv. 5) a present user leaf is always an
 insensitive `UFrame` — plus load-bearing witnesses that removing the
 `Overlap` guard double-leaks and that accepting a raw `Frame` lets a
 sensitive frame reach a user PTE. The proof uses the coarse
-lock-per-`VmSpace` model (the Phase-3D.3 fallback: `CursorMut` holds
-`&mut VmSpace`, so the borrow checker serializes mutators); see
+lock-per-`VmSpace` model (`CursorMut` holds `&mut VmSpace`, so the borrow
+checker serializes mutators); see
 `../notes/cortenmm.md` for the design mapping and the gap vs. CortenMM's
 fine-grained per-PT-page locking. See `../STATUS.md` for the per-obligation
 summaries.
 
-`ring_cursor.rs` (Phase 7) is the fourth: ~13 obligations machine-checking
-the SlopRing SQ/CQ cursor + in-flight state machine — INV-CQ-no-overwrite
+`ring_cursor.rs` machine-checks the SlopRing SQ/CQ cursor + in-flight state
+machine in 13 obligations — INV-CQ-no-overwrite
 (`cq_tail - cq_head <= cq_entries`), INV-CQ-full-correctness (the post /
 overflow branches are mutually exclusive + exhaustive), INV-overflow-monotone
 -latch (the dropped-CQE counter only grows; the sticky flag is one-way),
 INV-cq-tail-advance-exactly-one, INV-inflight-cap (no over-push, no
-underflow-on-remove; the SLOPRING § 9 / slab Inv. 9 analogue), and
+underflow-on-remove; the slab Inv. 9 analogue), and
 INV-submit-consume-bound (`sq_head` never passes the user-published
 `sq_tail`) — plus a load-bearing, non-vacuous witness that a `post_cqe`
 without the `cq_full` check overwrites an unharvested CQE. The user-owned
@@ -66,18 +66,16 @@ The proof verifies the index/state-machine **logic only**; the volatile
 protocol beneath it remain audited-only / KernMiri-covered (Verus has no
 weak-memory model) — see the file header and `../STATUS.md`.
 
-`ring_layout.rs` (Phase 7) is the fifth: ~5 obligations machine-checking the
-SlopRing layout + masking arithmetic — LEMMA-mask-in-bounds (for power-of-two
-`n`, `i & (n - 1) < n`, via the `bit_vector` backend, with a documented
-`i % n` nat-arithmetic fallback model the orchestrator can switch to if the
-bit-vector lemma proves brittle on the pin) and LEMMA-locate-safe
-(`RingRegion::locate`'s no-OOB / no-straddle guard as pure arithmetic). It
-isolates the bit-vector friction in a separate file so it can never block
-`ring_cursor.rs`, and carries an optional STRETCH `layout_disjoint_fits`
-block (delete it if it does not discharge). See `../STATUS.md`.
+`ring_layout.rs` machine-checks the SlopRing layout + masking arithmetic in 6
+obligations — LEMMA-mask-in-bounds (for power-of-two `n`, `i & (n - 1) < n`,
+via the `bit_vector` backend, with an `i % n` nat-arithmetic model beside it
+for a pin on which the bit-vector lemma is brittle) and LEMMA-locate-safe
+(`RingRegion::locate`'s no-OOB / no-straddle guard as pure arithmetic), plus
+`layout_disjoint_fits`. It keeps the bit-vector reasoning in a file of its own
+so it can never block `ring_cursor.rs`. See `../STATUS.md`.
 
 `tcp_zc_pin.rs` machine-checks the TCP `MSG_ZEROCOPY` send-queue pin lifetime:
-~8 obligations over an abstract `SendQ` state machine
+8 obligations over an abstract `SendQ` state machine
 (`Send`/`Transmit`/`Reclaim`/`Ack`/`Teardown`) proving
 INV-TCPZC-PIN-IN-BOUNDS (every in-flight zero-copy segment's read window stays
 inside its pin, so every transmit / retransmit re-DMA / copy-fallback reads only
@@ -116,8 +114,8 @@ state-machine **logic only**: the flag CAS and `KArc` CAS-loop memory ordering,
 the intrusive links, pointer provenance, and `KArc` saturation stay audited-only
 / KernMiri-covered — see the file header and `../STATUS.md`.
 
-`resource_ledger.rs` is the tenth: 18 obligations over an abstract three-level
-account chain driven by a 12-variant `Step` — (L1) `used == live_sum` as an
+`resource_ledger.rs` states 21 obligations over an abstract three-level account
+chain driven by a 12-variant `Step` — (L1) `used == live_sum` as an
 **equality**, because an inequality cannot catch a phantom refund, which is the
 failure the linear token exists to eliminate; (L2) no successful `try_charge`
 leaves a row over its ceiling, stated as a *step* property because the global
@@ -137,6 +135,4 @@ state-machine **logic only**: the per-row atomic ordering and the token's
 placement in the tree stay audited-only — see the file header and
 `../STATUS.md`.
 
-The narrative obligation total is 125 across the ten files, confirmed by
-`just verify` on the pinned Verus — `verify.sh` auto-sums the exact `N verified`
-count it reports per file.
+`just verify` reports the exact `N verified` count per file and their sum.

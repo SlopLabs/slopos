@@ -333,14 +333,15 @@ pub fn test_keyboard_input_event_delivery() -> TestResult {
     drain_tty_nonblock(TtyIndex(0));
 
     let dummy_task: u32 = 9999;
-    crate::input_event::input_set_keyboard_focus(dummy_task);
+    let restore = crate::input_event::input_compositor_task_id();
+    crate::input_event::input_register_compositor(dummy_task);
 
     crate::ps2::keyboard::handle_scancode(0x1E);
 
     let has_events = crate::input_event::input_has_events(dummy_task);
 
-    crate::input_event::input_set_keyboard_focus(0);
     crate::input_event::input_cleanup_task(dummy_task);
+    crate::input_event::input_register_compositor(restore);
     drain_tty_nonblock(TtyIndex(0));
 
     if !has_events {
@@ -717,50 +718,6 @@ pub fn test_signal_constants() -> TestResult {
         return TestResult::Fail;
     }
     TestResult::Pass
-}
-
-pub fn test_set_compositor_focus_does_not_set_fg_pgrp() -> TestResult {
-    tty::table::tty_table_init();
-    let scope = SessionScope::new(42, 42);
-    tty::session::test_install_session(TtyIndex(0), scope.session_weak(), scope.pgrp_weak());
-    let fg_before = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
-
-    let _ = tty::set_compositor_focus(99);
-    let fg_after = tty::get_foreground_pgrp(TtyIndex(0)).unwrap_or(0);
-    let _ = tty::set_compositor_focus(0);
-    tty::detach_session(TtyIndex(0));
-
-    if fg_before != fg_after {
-        klog_info!(
-            "TTY_TEST: BUG - set_compositor_focus changed fg_pgrp: {} -> {}",
-            fg_before,
-            fg_after
-        );
-        return TestResult::Fail;
-    }
-    if fg_before != 42 {
-        klog_info!("TTY_TEST: BUG - fg_pgrp should be 42, got {}", fg_before);
-        return TestResult::Fail;
-    }
-    TestResult::Pass
-}
-
-pub fn test_check_read_sole_gate_background() -> TestResult {
-    let scope = SessionScope::new(10, 10);
-    let mut s = TtySession::new();
-    scope.attach_to(&mut s);
-    s.focused_task_id = 42;
-
-    match s.check_read(99, 10) {
-        ForegroundCheck::BackgroundRead => TestResult::Pass,
-        other => {
-            klog_info!(
-                "TTY_TEST: BUG - compositor-focused but bg pgrp should be BackgroundRead, got {:?}",
-                other
-            );
-            TestResult::Fail
-        }
-    }
 }
 
 pub fn test_backing_strong_count_is_open_count() -> TestResult {
@@ -1870,39 +1827,7 @@ pub fn test_tcsetsf_flushes_pending_input() -> TestResult {
     }
 }
 
-pub fn test_read_with_attach_false_skips_auto_attach() -> TestResult {
-    tty::table::tty_table_init();
-    tty::detach_session(TtyIndex(0));
-    drain_tty_nonblock(TtyIndex(0));
-
-    let saved = tty::get_termios(TtyIndex(0)).unwrap();
-    let mut raw = saved;
-    raw.c_lflag &= !LocalFlags::ICANON;
-    raw.c_cc[slopos_abi::syscall::VMIN] = 1;
-    raw.c_cc[slopos_abi::syscall::VTIME] = 0;
-    tty::set_termios(TtyIndex(0), &raw).unwrap();
-
-    tty::push_input(TtyIndex(0), b'z');
-
-    let mut out = [0u8; 8];
-    let result = tty::read_with_attach(TtyIndex(0), &mut out, true, false);
-    let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
-    tty::set_termios(TtyIndex(0), &saved).unwrap();
-
-    if result != Ok(1) || out[0] != b'z' || sid != 0 {
-        klog_info!(
-            "TTY_TEST: BUG - read_with_attach(false) should not auto-attach (result={:?}, sid={}, b0=0x{:02x})",
-            result,
-            sid,
-            out[0]
-        );
-        return TestResult::Fail;
-    }
-
-    TestResult::Pass
-}
-
-pub fn test_read_with_attach_true_skips_durable_attach() -> TestResult {
+pub fn test_read_never_claims_a_controlling_terminal() -> TestResult {
     tty::table::tty_table_init();
     tty::detach_session(TtyIndex(0));
     drain_tty_nonblock(TtyIndex(0));
@@ -1917,13 +1842,13 @@ pub fn test_read_with_attach_true_skips_durable_attach() -> TestResult {
     tty::push_input(TtyIndex(0), b'y');
 
     let mut out = [0u8; 8];
-    let result = tty::read_with_attach(TtyIndex(0), &mut out, true, true);
+    let result = tty::read(TtyIndex(0), &mut out, true);
     let sid = tty::get_session_id(TtyIndex(0)).unwrap_or(0);
     tty::set_termios(TtyIndex(0), &saved).unwrap();
 
     if result != Ok(1) || out[0] != b'y' || sid != 0 {
         klog_info!(
-            "TTY_TEST: BUG - read_with_attach(true) should no longer claim ownership (result={:?}, sid={}, b0=0x{:02x})",
+            "TTY_TEST: BUG - a read claimed the terminal (result={:?}, sid={}, b0=0x{:02x})",
             result,
             sid,
             out[0]
@@ -2595,6 +2520,7 @@ pub fn test_tty_error_to_errno() -> TestResult {
         (TtyError::HungUp, -5),
         (TtyError::WouldBlock, -11),
         (TtyError::PermissionDenied, -1),
+        (TtyError::InvalidArg, -22),
         (TtyError::UnsupportedLineDiscipline, -22),
         (TtyError::CrossSessionDenied, -5),
         (TtyError::SignalInterrupt, -4),
@@ -2633,20 +2559,6 @@ pub fn test_user_termios_typed_accessors() -> TestResult {
         || t.cc(CcIndex::Vintr) != 0x03
     {
         klog_info!("TTY_TEST: BUG - UserTermios typed accessors mismatch");
-        return TestResult::Fail;
-    }
-    TestResult::Pass
-}
-
-pub fn test_ldisc_typed_flags_behavioral_equivalence() -> TestResult {
-    let mut ld = LineDisc::new();
-    for &c in b"abc\n" {
-        ld.input_char(c);
-    }
-    let mut out = [0u8; 8];
-    let n = ld.read(&mut out);
-    if n != 4 || &out[..4] != b"abc\n" {
-        klog_info!("TTY_TEST: BUG - typed flag migration changed canonical behavior");
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -2796,7 +2708,7 @@ pub fn test_dispatch_macro_raw_routing() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_from_id_still_works() -> TestResult {
+pub fn test_ldisc_from_id() -> TestResult {
     let default_termios = LineDisc::new().termios().clone();
     let ntty = LdiscKind::from_id(slopos_abi::syscall::N_TTY, default_termios).expect("alloc");
     if ntty.is_none() {
@@ -3144,13 +3056,13 @@ pub fn test_no_opost_tab_passthrough() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_existing_output_unaffected() -> TestResult {
+pub fn test_xtabs_default_keeps_onlcr() -> TestResult {
     let mut ld = LineDisc::new();
 
     match ld.process_output_byte(b'\n') {
         OutputAction::Emit { buf, len } => {
             if len != 2 || buf[0] != b'\r' || buf[1] != b'\n' {
-                klog_info!("TTY_TEST: BUG - ONLCR regression with XTABS default");
+                klog_info!("TTY_TEST: BUG - NL should emit CR NL under the XTABS default");
                 return TestResult::Fail;
             }
         }
@@ -3163,7 +3075,9 @@ pub fn test_existing_output_unaffected() -> TestResult {
     match ld.process_output_byte(b'A') {
         OutputAction::Emit { buf, len } => {
             if len != 1 || buf[0] != b'A' {
-                klog_info!("TTY_TEST: BUG - printable char regression with XTABS default");
+                klog_info!(
+                    "TTY_TEST: BUG - a printable should pass through under the XTABS default"
+                );
                 return TestResult::Fail;
             }
         }
@@ -3281,14 +3195,6 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(name = test_tty_index_abi_type, suite = tty_test_ldisc_core);
 slopos_testing::stest!(name = test_signal_constants, suite = tty_test_ldisc_core);
-slopos_testing::stest!(
-    name = test_set_compositor_focus_does_not_set_fg_pgrp,
-    suite = tty_test_ldisc_core
-);
-slopos_testing::stest!(
-    name = test_check_read_sole_gate_background,
-    suite = tty_test_ldisc_core
-);
 slopos_testing::stest!(
     name = test_backing_strong_count_is_open_count,
     suite = tty_test_ldisc_core
@@ -3461,11 +3367,7 @@ slopos_testing::stest!(
     suite = tty_test_ldisc_core
 );
 slopos_testing::stest!(
-    name = test_read_with_attach_false_skips_auto_attach,
-    suite = tty_test_ldisc_core
-);
-slopos_testing::stest!(
-    name = test_read_with_attach_true_skips_durable_attach,
+    name = test_read_never_claims_a_controlling_terminal,
     suite = tty_test_ldisc_core
 );
 slopos_testing::stest!(
@@ -3578,10 +3480,6 @@ slopos_testing::stest!(
     name = test_user_termios_typed_accessors,
     suite = tty_test_ldisc_core
 );
-slopos_testing::stest!(
-    name = test_ldisc_typed_flags_behavioral_equivalence,
-    suite = tty_test_ldisc_core
-);
 slopos_testing::stest!(name = test_control_flags_empty, suite = tty_test_ldisc_core);
 slopos_testing::stest!(
     name = test_ldisc_ops_linedisc_trait_delegation,
@@ -3599,7 +3497,7 @@ slopos_testing::stest!(
     name = test_dispatch_macro_raw_routing,
     suite = tty_test_ldisc_core
 );
-slopos_testing::stest!(name = test_from_id_still_works, suite = tty_test_ldisc_core);
+slopos_testing::stest!(name = test_ldisc_from_id, suite = tty_test_ldisc_core);
 slopos_testing::stest!(
     name = test_process_output_byte_dispatch,
     suite = tty_test_ldisc_core
@@ -3641,6 +3539,6 @@ slopos_testing::stest!(
     suite = tty_test_ldisc_core
 );
 slopos_testing::stest!(
-    name = test_existing_output_unaffected,
+    name = test_xtabs_default_keeps_onlcr,
     suite = tty_test_ldisc_core
 );

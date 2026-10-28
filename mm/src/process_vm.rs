@@ -1,12 +1,13 @@
-use core::ffi::c_int;
 use core::ops::ControlFlow;
 use slopos_ostd::lock_class;
 
+use slopos_abi::Errno;
 use slopos_abi::quota::CommitPagesAxis;
 use slopos_ostd::KVec;
 use slopos_ostd::handle::{Handle, HandleError, PROCESS_VM_SLOT_BITS};
 use slopos_ostd::mm::KArc;
-use slopos_ostd::mm::frame::{AnonymousMeta, FrameReturnBatch, Paddr, RingMeta};
+use slopos_ostd::mm::frame::{AnonymousMeta, FrameReturnBatch, RingMeta};
+use slopos_ostd::mm::page_property::PageProperty;
 use slopos_ostd::mm::uframe::{AnyUFrameMeta, UFrame};
 use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 use slopos_ostd::panic::AbortOnUnwind;
@@ -24,12 +25,12 @@ use crate::elf::{ElfError, ElfValidator, PF_R, PF_W, PF_X, SegmentBudget, Valida
 use crate::hhdm::PhysAddrHhdm;
 use crate::memory_layout_defs::DEFAULT_PROCESS_LAYOUT;
 use crate::memory_layout_defs::MAX_PROCESSES;
-use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::tlb;
 use crate::tlb::TlbProcessKey;
 use crate::user_mappings::{
-    ostd_map_4kb_user_fresh, ostd_map_4kb_user_shared, ostd_map_each_4kb_user,
-    ostd_protect_range_4kb, ostd_unmap_4kb_user, ostd_unmap_present_4kb, ostd_visit_mark_cow_4kb,
+    cow_marked, is_cow, map_4kb_user_fresh, map_4kb_user_shared, map_each_4kb_user,
+    protect_range_4kb, unmap_4kb_user, unmap_present_4kb, visit_mark_cow_4kb,
 };
 use crate::vma_region::{
     Commit, FileMapRef, ProtectError, Protection, RegionBacking, RegionPurpose, Unmapped, VmaMap,
@@ -181,38 +182,39 @@ fn vma_range_valid(start: u64, end: u64) -> bool {
     start < end && (start & (PAGE_SIZE_4KB - 1)) == 0 && (end & (PAGE_SIZE_4KB - 1)) == 0
 }
 
-/// Maps `[start_addr, end_addr)`. On failure the range is rolled back, so
-/// `Err` always means nothing was left mapped.
+/// Maps `[start_addr, end_addr)` with fresh pages, answering how many. On
+/// failure the range is rolled back, so `None` always means nothing was left
+/// mapped.
 fn map_user_range(
     vm_space: &mut KArc<VmSpace>,
     start_addr: u64,
     end_addr: u64,
-    map_flags: u64,
-) -> Result<u32, c_int> {
+    prop: PageProperty,
+) -> Option<u32> {
     if (start_addr & (PAGE_SIZE_4KB - 1)) != 0
         || (end_addr & (PAGE_SIZE_4KB - 1)) != 0
         || end_addr <= start_addr
     {
         klog_info!("map_user_range: Unaligned or invalid range");
-        return Err(-1);
+        return None;
     }
 
     let mut current = start_addr;
     let mut mapped: u32 = 0;
 
     while current < end_addr {
-        if let Err(err) = ostd_map_4kb_user_fresh(vm_space, VirtAddr::new(current), map_flags) {
+        if let Err(err) = map_4kb_user_fresh(vm_space, VirtAddr::new(current), prop) {
             klog_info!("map_user_range: OSTD cursor map failed: {:?}", err);
             if let Err(rollback_err) = rollback_range(vm_space, current, start_addr, &mut mapped) {
                 klog_info!("map_user_range: rollback failed: {:?}", rollback_err);
             }
-            return Err(-1);
+            return None;
         }
         mapped += 1;
         current += PAGE_SIZE_4KB;
     }
 
-    Ok(mapped)
+    Some(mapped)
 }
 
 /// Caller contract: `virt` is a fresh resolution of a 4 KiB user-mapped
@@ -243,7 +245,7 @@ fn rollback_range(
 ) -> Result<(), MapError> {
     while *mapped > 0 {
         current -= PAGE_SIZE_4KB;
-        ostd_unmap_4kb_user(vm_space, VirtAddr::new(current))?;
+        unmap_4kb_user(vm_space, VirtAddr::new(current))?;
         *mapped -= 1;
     }
     let _ = start_addr;
@@ -312,28 +314,6 @@ pub fn process_vm_with_handle<R>(
         return Err(HandleError::NoEntry);
     }
     if guard.generation != handle.generation() {
-        return Err(HandleError::Stale);
-    }
-    let out = f(&mut guard);
-    guard.sync_resident_charge();
-    Ok(out)
-}
-
-/// The shape every caller should reach for: a process whose slot has been
-/// rebound answers `Stale` instead of handing back a stranger's page tables.
-#[track_caller]
-pub fn process_vm_with_process<R>(
-    process: Handle<Process>,
-    f: impl FnOnce(&mut ProcessVm) -> R,
-) -> Result<R, HandleError> {
-    let slot = slot_for_handle(process).ok_or(HandleError::Stale)?;
-    let mut guard = PROCESS_VMS[slot].lock();
-    // Re-checked under the lock: `slot_for_handle` released it between the
-    // resolution and this acquisition, and a teardown can land in that window.
-    if guard.process_id == INVALID_PROCESS_ID {
-        return Err(HandleError::NoEntry);
-    }
-    if guard.generation != process.generation() {
         return Err(HandleError::Stale);
     }
     let out = f(&mut guard);
@@ -472,8 +452,7 @@ pub fn process_vm_user_va_to_paddr(process: ProcessId, va: u64) -> u64 {
     let Some(vm_space) = guard.vm_space.as_ref() else {
         return 0;
     };
-    crate::user_mappings::ostd_virt_to_phys_4kb(vm_space, slopos_abi::addr::VirtAddr::new(va))
-        .as_u64()
+    crate::user_mappings::virt_to_phys_4kb(vm_space, slopos_abi::addr::VirtAddr::new(va)).as_u64()
 }
 
 /// A clone rather than a borrow through the per-slot lock, so `user_copy`'s
@@ -515,7 +494,7 @@ pub fn process_vm_user_va_is_user_accessible(process: ProcessId, va: u64) -> boo
     let Some(vm_space) = guard.vm_space.as_ref() else {
         return false;
     };
-    crate::user_mappings::ostd_is_user_accessible_4kb(vm_space, slopos_abi::addr::VirtAddr::new(va))
+    crate::user_mappings::is_user_accessible_4kb(vm_space, slopos_abi::addr::VirtAddr::new(va))
 }
 
 /// Read the `VmSpace`'s PML4 paddr for `process`; 0 means "no VM". Once
@@ -622,30 +601,21 @@ pub fn process_vm_with_vm_space_and_area<R>(
     Some(out)
 }
 
-/// Drive [`map_user_range`] directly. Test-only: the invariant under test — an
-/// `Err` leaves nothing mapped — is not observable from any production caller.
+/// Drive [`map_user_range`] directly. Test-only: the invariant under test — a
+/// `None` leaves nothing mapped — is not observable from any production caller.
 #[cfg(feature = "test-hooks")]
 pub fn process_vm_map_range_for_test(
     process: ProcessId,
     start: u64,
     end: u64,
-    flags: u64,
-) -> Result<u32, c_int> {
-    let Some(slot) = find_slot_for_pid(process) else {
-        return Err(-1);
-    };
+    prop: PageProperty,
+) -> Option<u32> {
+    let slot = find_slot_for_pid(process)?;
     let mut guard = PROCESS_VMS[slot].lock();
     if guard.process_id != process.id() {
-        return Err(-1);
+        return None;
     }
-    let vm_space = guard.vm_space.as_mut().ok_or(-1)?;
-    map_user_range(vm_space, start, end, flags)
-}
-
-/// Read the PML4 physical address for a process. `0` means "no VM", on which
-/// the scheduler refuses to dispatch.
-pub fn process_vm_get_cr3_phys(process: ProcessId) -> u64 {
-    process_vm_get_ostd_pml4_paddr(process)
+    map_user_range(guard.vm_space.as_mut()?, start, end, prop)
 }
 
 /// The stable 64-bit `MmContextId` for this process, or
@@ -666,41 +636,10 @@ pub fn process_vm_get_mm_ctx_id(process: ProcessId) -> crate::mmu::MmContextId {
     crate::mmu::MmContextId::from_raw(vm_space.mm_ctx_handle())
 }
 
-pub fn process_vm_find_pid_by_cr3(cr3: u64) -> u32 {
-    let cr3_phys = cr3 & !0xFFF;
-    if cr3_phys == 0 {
-        return INVALID_PROCESS_ID;
-    }
-
-    for i in 0..MAX_PROCESSES {
-        let pid = slot_pid_lock_free(PROCESS_VMS[i].raw());
-        if pid == INVALID_PROCESS_ID {
-            continue;
-        }
-        let guard = PROCESS_VMS[i].lock();
-        if guard.process_id != pid {
-            continue;
-        }
-        if let Some(vm_space) = guard.vm_space.as_ref() {
-            if vm_space.pml4_paddr().as_u64() == cr3_phys {
-                return pid;
-            }
-        }
-    }
-
-    INVALID_PROCESS_ID
-}
-
 /// Caller guarantees the range does not overlap an existing VMA — for
 /// non-MAP_FIXED mmaps the gap finder provides that by construction.
-fn add_vma_to_inner(inner: &mut ProcessVm, start: u64, end: u64, region: VmaRegion) -> c_int {
-    if !vma_range_valid(start, end) {
-        return -1;
-    }
-    if inner.vma_map.insert(start, end, region).is_err() {
-        return -1;
-    }
-    0
+fn add_vma_to_inner(inner: &mut ProcessVm, start: u64, end: u64, region: VmaRegion) -> bool {
+    vma_range_valid(start, end) && inner.vma_map.insert(start, end, region).is_ok()
 }
 
 fn protection_from(prot: u64) -> Protection {
@@ -761,13 +700,13 @@ fn unmap_present_leaves<M: AnyUFrameMeta>(
 ) -> Result<Unmapped, UnmapRegionError> {
     let mut unmapped = Unmapped::default();
     let mut returns = FrameReturnBatch::new();
-    ostd_unmap_present_4kb::<M>(
+    unmap_present_4kb::<M>(
         vm_space,
         VirtAddr::new(start),
         VirtAddr::new(end),
-        |_, flags, frame| {
+        |_, prop, frame| {
             unmapped.present += 1;
-            if !flags.contains(PageFlags::COW) {
+            if !is_cow(&prop) {
                 unmapped.private += 1;
             }
             returns.drop_frame(frame);
@@ -847,20 +786,20 @@ pub fn process_vm_end_prepay(process: ProcessId) {
 /// Runs before the new image is loaded, so a failure here is still
 /// recoverable — the caller has not yet destroyed anything the old program
 /// needs. Once the old image goes, so does the program it attested.
-pub fn process_vm_reset_for_exec(process: ProcessId) -> c_int {
+pub fn process_vm_reset_for_exec(process: ProcessId) -> bool {
     reset_for_exec(process, true)
 }
 
 /// [`process_vm_reset_for_exec`] for init re-executing itself, whose program
 /// instance stands until the new image is attested in its place.
-pub fn process_vm_reset_for_reexec(process: ProcessId) -> c_int {
+pub fn process_vm_reset_for_reexec(process: ProcessId) -> bool {
     reset_for_exec(process, false)
 }
 
-fn reset_for_exec(process: ProcessId, forfeit: bool) -> c_int {
+fn reset_for_exec(process: ProcessId, forfeit: bool) -> bool {
     let slot = match find_slot_for_pid(process) {
         Some(s) => s,
-        None => return -1,
+        None => return false,
     };
 
     // Stack and heap are re-randomised; `code_start` is **not**:
@@ -872,7 +811,7 @@ fn reset_for_exec(process: ProcessId, forfeit: bool) -> c_int {
 
     let mut proc = PROCESS_VMS[slot].lock();
     if proc.process_id != process.id() {
-        return -1;
+        return false;
     }
 
     let key = slot_tlb_key(slot);
@@ -881,7 +820,7 @@ fn reset_for_exec(process: ProcessId, forfeit: bool) -> c_int {
     let regions =
         match collect_overlapping_vmas(inner, 0, crate::memory_layout_defs::USER_SPACE_END_VA) {
             Ok(v) => v,
-            Err(_) => return -1,
+            Err(_) => return false,
         };
 
     let abort_guard = AbortOnUnwind::new();
@@ -889,7 +828,7 @@ fn reset_for_exec(process: ProcessId, forfeit: bool) -> c_int {
         Some(v) => v,
         None => {
             abort_guard.disarm();
-            return -1;
+            return false;
         }
     };
     // A re-executing init keeps its program only past a reset that
@@ -912,7 +851,7 @@ fn reset_for_exec(process: ProcessId, forfeit: bool) -> c_int {
             inner.vm_space = Some(vm_space_taken);
             lapse(inner);
             abort_guard.disarm();
-            return -1;
+            return false;
         }
     }
 
@@ -935,8 +874,8 @@ fn reset_for_exec(process: ProcessId, forfeit: bool) -> c_int {
     // The stack's pages are not mapped here: `do_exec` calls
     // `process_vm_reset_stack` straight after loading the image, which maps
     // the whole extent against a settled address space.
-    let rc = seed_fresh_layout(inner);
-    if rc != 0 {
+    let seeded = seed_fresh_layout(inner);
+    if !seeded {
         lapse(inner);
     }
     abort_guard.disarm();
@@ -946,7 +885,7 @@ fn reset_for_exec(process: ProcessId, forfeit: bool) -> c_int {
     if released_page_set {
         crate::filemap_hook::filemap_drain();
     }
-    rc
+    seeded
 }
 
 fn stack_region() -> VmaRegion {
@@ -960,12 +899,12 @@ fn stack_region() -> VmaRegion {
 
 /// A new image's stack VMAs; nothing is mapped. The image's own segments get
 /// theirs from the loader, since only its headers say where they end.
-fn seed_fresh_layout(inner: &mut ProcessVm) -> c_int {
+fn seed_fresh_layout(inner: &mut ProcessVm) -> bool {
     let stack_s = inner.stack_start;
     let stack_e = inner.stack_end;
 
-    if add_vma_to_inner(inner, stack_s, stack_e, stack_region()) != 0 {
-        return -1;
+    if !add_vma_to_inner(inner, stack_s, stack_e, stack_region()) {
+        return false;
     }
 
     // The stack grows by faulting, not by a handler that widens a VMA: the
@@ -980,16 +919,12 @@ fn seed_fresh_layout(inner: &mut ProcessVm) -> c_int {
             true,
             RegionPurpose::Stack,
         );
-        if add_vma_to_inner(inner, growth_low, stack_s, growth_region) != 0 {
-            return -1;
+        if !add_vma_to_inner(inner, growth_low, stack_s, growth_region) {
+            return false;
         }
     }
 
-    0
-}
-
-fn stack_page_flag_bits() -> u64 {
-    stack_region().to_page_flags().bits()
+    true
 }
 
 /// The caller drops the slot's `KArc<VmSpace>`; the shootdown issued here is
@@ -1328,13 +1263,12 @@ fn install_segments(inner: &mut ProcessVm, mapped: &[ValidatedSegment]) -> Resul
             }
         }
         if start < segment.vaddr_end {
-            if add_vma_to_inner(
+            if !add_vma_to_inner(
                 inner,
                 start,
                 segment.vaddr_end,
                 segment_region(segment.flags),
-            ) != 0
-            {
+            ) {
                 return Err(ElfError::NullPointer);
             }
             linked = segment.vaddr_end;
@@ -1529,7 +1463,7 @@ pub fn process_vm_read_user_bytes(
         let page_off = (va & (PAGE_SIZE_4KB - 1)) as usize;
         let chunk = core::cmp::min(dst.len() - read, PAGE_SIZE_4KB as usize - page_off);
 
-        let phys = crate::user_mappings::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(page_va));
+        let phys = crate::user_mappings::virt_to_phys_4kb(vm_space, VirtAddr::new(page_va));
         if phys.is_null() {
             return Err(ElfError::NullPointer);
         }
@@ -1561,7 +1495,7 @@ fn write_user_bytes(vm_space: &KArc<VmSpace>, dst_addr: u64, data: &[u8]) -> Res
         let page_off = (va & (PAGE_SIZE_4KB - 1)) as usize;
         let chunk = core::cmp::min(data.len() - written, PAGE_SIZE_4KB as usize - page_off);
 
-        let phys = crate::user_mappings::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(page_va));
+        let phys = crate::user_mappings::virt_to_phys_4kb(vm_space, VirtAddr::new(page_va));
         if phys.is_null() {
             return Err(ElfError::NullPointer);
         }
@@ -1624,20 +1558,17 @@ fn map_segment_pages(
         // From the segment's own `p_flags`, so a `PT_LOAD` that does not ask
         // to be executed is not: the VMA the interpreter loader installs says
         // so, and a leaf that disagreed would make that statement false.
-        let map_flags = segment_region(shared_page_flags(segment, neighbours, dst))
-            .to_page_flags()
-            .bits();
+        let prop = segment_region(shared_page_flags(segment, neighbours, dst)).page_property();
 
         // Two ELF segments can overlap within a page, so an existing mapping
         // here is expected, and must keep the earlier segment's bytes — which
         // is why only a fresh page is zeroed. Its permissions are already the
         // union, because the segment that mapped it resolved the same one.
-        let existing_phys =
-            crate::user_mappings::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(dst));
+        let existing_phys = crate::user_mappings::virt_to_phys_4kb(vm_space, VirtAddr::new(dst));
         let (phys, fresh) = if !existing_phys.is_null() {
             (existing_phys, false)
         } else {
-            match ostd_map_4kb_user_fresh(vm_space, VirtAddr::new(dst), map_flags) {
+            match map_4kb_user_fresh(vm_space, VirtAddr::new(dst), prop) {
                 Ok(pa) => (pa, true),
                 Err(err) => {
                     klog_info!("map_segment_pages: OSTD map failed: {:?}", err);
@@ -1673,7 +1604,7 @@ pub fn create_process_vm() -> u32 {
 /// Register a process and give it an address space, for callers that have no
 /// process object of their own — tests and boot paths. A real spawn goes
 /// through the scheduler's lease, so its accounting edge names its spawner.
-fn create_process_vm_standalone() -> Option<ProcessVmRef> {
+pub fn create_process_vm_ref() -> Option<ProcessVmRef> {
     let process = slopos_ostd::process::process_spawn_root().ok()?;
     let vm = create_process_vm_for(process.clone());
     if vm.is_none() {
@@ -1682,10 +1613,6 @@ fn create_process_vm_standalone() -> Option<ProcessVmRef> {
         }
     }
     vm
-}
-
-pub fn create_process_vm_ref() -> Option<ProcessVmRef> {
-    create_process_vm_standalone()
 }
 
 /// Give `process` an address space, in the slot its registry handle names.
@@ -1712,7 +1639,7 @@ pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
             return None;
         }
     };
-    // The `CursorUnmapHook` / `on_activate` callbacks route LUF policy by this
+    // The `CursorUnmapHook` callbacks route LUF policy by this
     // handle, and read 0 as "not a per-process space".
     vm_space.set_mm_ctx_handle(mm_ctx_id.raw());
     let vm_space_arc = match KArc::try_new(vm_space) {
@@ -1764,9 +1691,9 @@ pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
             RegionPurpose::Data,
         );
 
-        if add_vma_to_inner(&mut proc, code_s, data_s, code_region) != 0
-            || add_vma_to_inner(&mut proc, data_s, heap_s, data_region) != 0
-            || add_vma_to_inner(&mut proc, stack_s, stack_e, stack_region()) != 0
+        if !add_vma_to_inner(&mut proc, code_s, data_s, code_region)
+            || !add_vma_to_inner(&mut proc, data_s, heap_s, data_region)
+            || !add_vma_to_inner(&mut proc, stack_s, stack_e, stack_region())
         {
             klog_info!("create_process_vm: Failed to seed initial VMAs");
             teardown_inner_mappings(&mut proc, slot_tlb_key(slot));
@@ -1782,11 +1709,8 @@ pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
             return None;
         }
 
-        let stack_page_flags = stack_region().to_page_flags();
-
         let stack_start = proc.stack_start;
         let stack_end = proc.stack_end;
-        let stack_flags_bits = stack_page_flags.bits();
         let stack_pages = ((stack_end - stack_start) / PAGE_SIZE_4KB) as u32;
         let stack_mapped = proc.vma_map.charge_frames(stack_pages).is_ok()
             && map_user_range(
@@ -1795,9 +1719,9 @@ pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
                     .expect("create_process_vm: vm_space present before stack map"),
                 stack_start,
                 stack_end,
-                stack_flags_bits,
+                stack_region().page_property(),
             )
-            .is_ok();
+            .is_some();
         if !stack_mapped {
             klog_info!("create_process_vm: Failed to map process stack");
             teardown_inner_mappings(&mut proc, slot_tlb_key(slot));
@@ -1819,12 +1743,11 @@ pub fn create_process_vm_for(process: KArc<Process>) -> Option<ProcessVmRef> {
     })
 }
 
-pub fn destroy_process_vm(process: ProcessId) -> c_int {
+pub fn destroy_process_vm(process: ProcessId) {
     if let Some(unbound) = unbind_process_vm(process) {
         drop(unbound);
         klog_debug!("destroy_process_vm({}): page table cleanup done", process);
     }
-    0
 }
 
 /// An address space unbound from its slot whose frames are not back yet.
@@ -1894,7 +1817,7 @@ pub(crate) fn unbind_process_vm(process: ProcessId) -> Option<Unbound> {
     })
 }
 
-pub fn process_vm_alloc(process: ProcessId, size: u64, flags: u32) -> u64 {
+pub fn process_vm_alloc(process: ProcessId, size: u64, writable: bool) -> u64 {
     let slot = match find_slot_for_pid(process) {
         Some(s) => s,
         None => return 0,
@@ -1917,7 +1840,7 @@ pub fn process_vm_alloc(process: ProcessId, size: u64, flags: u32) -> u64 {
     let heap_region = VmaRegion::new(
         Protection {
             read: true,
-            write: flags & PageFlags::WRITABLE.bits() as u32 != 0,
+            write: writable,
             exec: false,
         },
         RegionBacking::Anonymous,
@@ -1925,7 +1848,7 @@ pub fn process_vm_alloc(process: ProcessId, size: u64, flags: u32) -> u64 {
         RegionPurpose::Heap,
     );
 
-    if add_vma_to_inner(&mut proc, start_addr, end_addr, heap_region) != 0 {
+    if !add_vma_to_inner(&mut proc, start_addr, end_addr, heap_region) {
         klog_info!("process_vm_alloc: Failed to record VMA");
         return 0;
     }
@@ -1935,54 +1858,8 @@ pub fn process_vm_alloc(process: ProcessId, size: u64, flags: u32) -> u64 {
     start_addr
 }
 
-pub fn process_vm_free(process: ProcessId, vaddr: u64, size: u64) -> c_int {
-    let slot = match find_slot_for_pid(process) {
-        Some(s) => s,
-        None => return -1,
-    };
-    if size == 0 {
-        return -1;
-    }
-    let mut proc = PROCESS_VMS[slot].lock();
-    if proc.process_id != process.id() {
-        return -1;
-    }
-
-    let start = vaddr & !(PAGE_SIZE_4KB - 1);
-    let end = (vaddr + size + PAGE_SIZE_4KB - 1) & !(PAGE_SIZE_4KB - 1);
-    if !vma_range_valid(start, end) {
-        klog_info!("process_vm_free: Invalid or unaligned range");
-        return -1;
-    }
-
-    if proc.vma_map.find_covering(start, end).is_none() {
-        klog_info!("process_vm_free: Range not covered by a VMA");
-        return -1;
-    }
-
-    match unmap_and_free_range_inner(&mut *proc, start, end) {
-        Ok(_) => {}
-        Err(err) => {
-            klog_info!("process_vm_free: unmap failed: {:?}", err);
-            return -1;
-        }
-    };
-
-    proc.vma_map
-        .remove_range(start, end, |_overlap_start, _overlap_end, _region| {
-            // The pages were freed above by `unmap_and_free_range_inner`.
-        });
-
-    if proc.heap_end == end && end > proc.heap_start {
-        proc.heap_end = start;
-        proc.heap_break = start;
-    }
-
-    0
-}
-
 /// Tear down every bound address space.
-pub fn init_process_vm() -> c_int {
+pub fn init_process_vm() {
     slopos_ostd::process::quota::register_pages_reconciler(reconcile_page_charges);
     for i in 0..MAX_PROCESSES {
         // The slot's own process, so the teardown names the object rather than
@@ -1999,8 +1876,6 @@ pub fn init_process_vm() -> c_int {
         PROCESS_VMS[i].lock().reset();
     }
     klog_info!("Process VM manager initialized");
-
-    0
 }
 
 /// Report every bound address space's mapped-versus-charged page counts.
@@ -2079,12 +1954,6 @@ pub(crate) fn process_vm_released(handle: Handle<ProcessVm>) -> bool {
     guard.releasing != Some(handle.generation())
 }
 
-pub fn get_current_process_id() -> u32 {
-    // TODO(tech-debt): always returns 0 — the VM layer has no "current"
-    // process, the scheduler does; callers should ask it and this should go.
-    0
-}
-
 pub fn process_vm_get_region(process: ProcessId, addr: u64) -> Option<VmaRegion> {
     let slot = find_slot_for_pid(process)?;
     let guard = PROCESS_VMS[slot].lock();
@@ -2131,8 +2000,7 @@ pub fn process_vm_shared_futex_word(
             // Through the page table rather than the region's start: a split
             // region keeps the handle but not where in the object it begins.
             let vm_space = guard.vm_space.as_ref().ok_or(())?;
-            let pa =
-                crate::user_mappings::ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(va)).as_u64();
+            let pa = crate::user_mappings::virt_to_phys_4kb(vm_space, VirtAddr::new(va)).as_u64();
             let (identity, base, size) = crate::memfd::memfd_futex_object(*handle);
             let offset = pa.checked_sub(base.as_u64()).ok_or(())?;
             if pa == 0 || base.is_null() || offset >= size as u64 {
@@ -2181,7 +2049,7 @@ fn gather_stack_frames(
 ) -> Result<(), ()> {
     let mut addr = start;
     while addr < end {
-        match crate::user_mappings::ostd_unmap_4kb_user_take(vm_space, VirtAddr::new(addr)) {
+        match crate::user_mappings::unmap_4kb_user_take(vm_space, VirtAddr::new(addr)) {
             Ok(Some(frame)) => gathered.push(frame).map_err(|_| ())?,
             Ok(None) => {}
             Err(err) => {
@@ -2194,10 +2062,10 @@ fn gather_stack_frames(
     Ok(())
 }
 
-pub fn process_vm_reset_stack(process: ProcessId) -> c_int {
+pub fn process_vm_reset_stack(process: ProcessId) -> bool {
     let slot = match find_slot_for_pid(process) {
         Some(s) => s,
-        None => return -1,
+        None => return false,
     };
 
     // Read the extent before taking the slot lock: allocating under that
@@ -2206,7 +2074,7 @@ pub fn process_vm_reset_stack(process: ProcessId) -> c_int {
         (inner.stack_start, inner.stack_end)
     });
     if stack_end <= stack_start {
-        return -1;
+        return false;
     }
     let page_count = ((stack_end - stack_start) / PAGE_SIZE_4KB) as usize;
 
@@ -2214,15 +2082,15 @@ pub fn process_vm_reset_stack(process: ProcessId) -> c_int {
     // replacement mapping is installed against a settled address space.
     let mut gathered: KVec<UFrame<AnonymousMeta>> = match KVec::with_capacity(page_count) {
         Ok(v) => v,
-        Err(_) => return -1,
+        Err(_) => return false,
     };
 
     let result = {
         let mut guard = PROCESS_VMS[slot].lock();
         if guard.process_id != process.id() {
-            -1
+            false
         } else if guard.vma_map.charge_frames(page_count as u32).is_err() {
-            -1
+            false
         } else {
             let inner = &mut *guard;
             let remapped = match inner.vm_space.as_mut() {
@@ -2232,20 +2100,20 @@ pub fn process_vm_reset_stack(process: ProcessId) -> c_int {
                             vm_space_ref,
                             stack_start,
                             stack_end,
-                            stack_page_flag_bits(),
+                            stack_region().page_property(),
                         )
-                        .is_ok()
+                        .is_some()
                 }
                 None => false,
             };
             if remapped {
                 inner.vma_map.refund_frames(gathered.len() as u32);
-                0
+                true
             } else {
                 inner
                     .vma_map
                     .refund_frames((page_count as u32).saturating_add(gathered.len() as u32));
-                -1
+                false
             }
         }
     };
@@ -2303,7 +2171,7 @@ pub fn process_vm_brk(process: ProcessId, new_brk: u64) -> u64 {
             RegionPurpose::Heap,
         );
 
-        if add_vma_to_inner(&mut proc, start_addr, end_addr, heap_region) != 0 {
+        if !add_vma_to_inner(&mut proc, start_addr, end_addr, heap_region) {
             return 0;
         }
         proc.heap_end = new_end;
@@ -2378,13 +2246,13 @@ pub fn process_vm_mmap_shared(
     )
 }
 
-/// Map a SlopRing region into `process` (SLOPRING § 5.1). `paddrs` lists the
-/// `RingMeta` frame physical addresses, one per 4 KiB page in region order.
+/// Map a SlopRing region into `process`. `paddrs` lists the `RingMeta` frame
+/// physical addresses, one per 4 KiB page in region order.
 /// Each PTE takes an independent ref on its frame, so a mapping that outlives
 /// the ring fd cannot UAF. Returns the user virtual base address, or `0` on
 /// failure — partial maps are rolled back.
 pub fn process_vm_map_ring(process: ProcessId, paddrs: &[PhysAddr]) -> u64 {
-    use crate::user_mappings::{ostd_map_ring_4kb_user, ostd_unmap_ring_4kb_user};
+    use crate::user_mappings::{map_ring_4kb_user, unmap_ring_4kb_user};
 
     if paddrs.is_empty() {
         return 0;
@@ -2428,15 +2296,15 @@ pub fn process_vm_map_ring(process: ProcessId, paddrs: &[PhysAddr]) -> u64 {
         .as_mut()
         .expect("process_vm_map_ring: vm_space present for live pid");
 
-    let pte_flags = region.to_page_flags().bits();
+    let prop = region.page_property();
 
     for (i, pa) in paddrs.iter().enumerate() {
         let vaddr = start_addr + (i as u64) * PAGE_SIZE_4KB;
-        if let Err(err) = ostd_map_ring_4kb_user(vm_space, VirtAddr::new(vaddr), *pa, pte_flags) {
+        if let Err(err) = map_ring_4kb_user(vm_space, VirtAddr::new(vaddr), *pa, prop) {
             klog_info!("process_vm_map_ring: cursor map failed: {:?}", err);
             for j in 0..i {
                 let rv = start_addr + (j as u64) * PAGE_SIZE_4KB;
-                if let Err(rollback_err) = ostd_unmap_ring_4kb_user(vm_space, VirtAddr::new(rv)) {
+                if let Err(rollback_err) = unmap_ring_4kb_user(vm_space, VirtAddr::new(rv)) {
                     klog_info!(
                         "process_vm_map_ring: rollback unmap failed: {:?}",
                         rollback_err
@@ -2664,22 +2532,19 @@ fn process_vm_mmap_inner(
             .expect("process_vm_mmap shared: vm_space present for live pid");
         let page_count = (size / PAGE_SIZE_4KB) as u32;
 
-        let pte_flags = shared_region.to_page_flags().bits();
+        let prop = shared_region.page_property();
 
         for i in 0..page_count {
             let vaddr = start_addr + (i as u64) * PAGE_SIZE_4KB;
             let paddr = PhysAddr::new(phys.as_u64() + (i as u64) * PAGE_SIZE_4KB);
-            if let Err(err) = ostd_map_4kb_user_shared(
-                vm_space_for_shared,
-                VirtAddr::new(vaddr),
-                paddr,
-                pte_flags,
-            ) {
+            if let Err(err) =
+                map_4kb_user_shared(vm_space_for_shared, VirtAddr::new(vaddr), paddr, prop)
+            {
                 klog_info!("process_vm_mmap shared: OSTD cursor map failed: {:?}", err);
                 for j in 0..i {
                     let rv = start_addr + (j as u64) * PAGE_SIZE_4KB;
                     if let Err(rollback_err) =
-                        ostd_unmap_4kb_user(vm_space_for_shared, VirtAddr::new(rv))
+                        unmap_4kb_user(vm_space_for_shared, VirtAddr::new(rv))
                     {
                         klog_info!(
                             "process_vm_mmap shared: rollback unmap failed: {:?}",
@@ -2706,7 +2571,7 @@ fn process_vm_mmap_inner(
             prot_to_region(prot)
         };
 
-        if add_vma_to_inner(&mut proc, start_addr, end_addr, region) != 0 {
+        if !add_vma_to_inner(&mut proc, start_addr, end_addr, region) {
             klog_info!("process_vm_mmap: Failed to insert VMA");
             return 0;
         }
@@ -2837,34 +2702,41 @@ pub fn process_vm_collect_filemaps(
     Some(maps)
 }
 
-pub fn process_vm_munmap(process: ProcessId, addr: u64, length: u64) -> i32 {
+/// Unmap `[addr, addr + length)`, rounded up to whole pages.
+///
+/// # Errors
+///
+/// `EINVAL` for an unaligned, empty or out-of-range span or a process with no
+/// address space, `EPERM` when the span covers executable code, `ENOMEM` when
+/// the bookkeeping cannot be allocated or the unmap fails part-way.
+pub fn process_vm_munmap(process: ProcessId, addr: u64, length: u64) -> Result<(), Errno> {
     if length == 0 || (addr & (PAGE_SIZE_4KB - 1)) != 0 {
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     let size = match length.checked_add(PAGE_SIZE_4KB - 1) {
         Some(v) => v & !(PAGE_SIZE_4KB - 1),
-        None => return -1,
+        None => return Err(Errno::EINVAL),
     };
 
     let end = match addr.checked_add(size) {
         Some(v) => v,
-        None => return -1,
+        None => return Err(Errno::EINVAL),
     };
 
     let slot = match find_slot_for_pid(process) {
         Some(s) => s,
-        None => return -1,
+        None => return Err(Errno::EINVAL),
     };
     let mut proc = PROCESS_VMS[slot].lock();
     if proc.process_id != process.id() {
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     if addr >= crate::memory_layout_defs::USER_SPACE_END_VA
         || end > crate::memory_layout_defs::USER_SPACE_END_VA
     {
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
     let inner = &mut *proc;
@@ -2872,7 +2744,7 @@ pub fn process_vm_munmap(process: ProcessId, addr: u64, length: u64) -> i32 {
     // munmap of an executable mapping is forbidden.
     for (s, e, r) in inner.vma_map.iter() {
         if s < end && e > addr && r.protection.exec {
-            return -1;
+            return Err(Errno::EPERM);
         }
     }
 
@@ -2881,7 +2753,7 @@ pub fn process_vm_munmap(process: ProcessId, addr: u64, length: u64) -> i32 {
         Ok(overlaps) => overlaps,
         Err(_) => {
             klog_info!("process_vm_munmap: overlap allocation failed");
-            return -1;
+            return Err(Errno::ENOMEM);
         }
     };
     let abort_guard = AbortOnUnwind::new();
@@ -2919,7 +2791,7 @@ pub fn process_vm_munmap(process: ProcessId, addr: u64, length: u64) -> i32 {
                 klog_info!("process_vm_munmap: unmap failed: {:?}", err.err);
                 inner.vm_space = Some(vm_space_taken);
                 abort_guard.disarm();
-                return -1;
+                return Err(Errno::ENOMEM);
             }
         }
     }
@@ -2936,44 +2808,53 @@ pub fn process_vm_munmap(process: ProcessId, addr: u64, length: u64) -> i32 {
     abort_guard.disarm();
     drop(proc);
     // The per-process lock is gone; complete the writeback the release queued
-    // rather than leaving it to the next `acquire` or the ext2 flusher.
+    // rather than leaving it to the next `acquire` or the ext4 flusher.
     if released_page_set {
         crate::filemap_hook::filemap_drain();
     }
-    0
+    Ok(())
 }
 
 /// Making a page executable that was not forfeits the process's program,
 /// under the lock that applies it, so no other thread can make the page
 /// writable between the test and the change.
-pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64) -> i32 {
-    if length == 0 || (addr & (PAGE_SIZE_4KB - 1)) != 0 {
-        return -1;
+///
+/// # Errors
+///
+/// An empty span succeeds, as on Linux. `EINVAL` for an unaligned address or
+/// a process with no address space, `ENOMEM` for a span that is not wholly
+/// mapped user space, a commit the ledger refuses or page tables refused
+/// part-way, `EACCES` for making a shared file mapping writable.
+pub fn process_vm_mprotect(
+    process: ProcessId,
+    addr: u64,
+    length: u64,
+    prot: u64,
+) -> Result<(), Errno> {
+    if (addr & (PAGE_SIZE_4KB - 1)) != 0 {
+        return Err(Errno::EINVAL);
+    }
+    if length == 0 {
+        return Ok(());
     }
 
-    let size = match length.checked_add(PAGE_SIZE_4KB - 1) {
-        Some(v) => v & !(PAGE_SIZE_4KB - 1),
-        None => return -1,
-    };
-
-    let end = match addr.checked_add(size) {
-        Some(v) => v,
-        None => return -1,
-    };
+    let end = length
+        .checked_add(PAGE_SIZE_4KB - 1)
+        .map(|v| v & !(PAGE_SIZE_4KB - 1))
+        .and_then(|size| addr.checked_add(size))
+        .ok_or(Errno::ENOMEM)?;
 
     let slot = match find_slot_for_pid(process) {
         Some(s) => s,
-        None => return -1,
+        None => return Err(Errno::EINVAL),
     };
     let mut proc = PROCESS_VMS[slot].lock();
     if proc.process_id != process.id() {
-        return -1;
+        return Err(Errno::EINVAL);
     }
 
-    if addr >= crate::memory_layout_defs::USER_SPACE_END_VA
-        || end > crate::memory_layout_defs::USER_SPACE_END_VA
-    {
-        return -1;
+    if end > crate::memory_layout_defs::USER_SPACE_END_VA {
+        return Err(Errno::ENOMEM);
     }
 
     let new_prot = prot_to_region(prot);
@@ -2986,14 +2867,14 @@ pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64
     while cursor < end {
         let Some((_, vma_end, region)) = proc.vma_map.find_containing(cursor) else {
             klog_info!("process_vm_mprotect: Range not covered by VMA");
-            return -1;
+            return Err(Errno::ENOMEM);
         };
         if region.is_shared()
             && region.filemap_ref().is_some()
             && new_prot.protection.write
             && !region.protection.write
         {
-            return slopos_abi::Errno::EACCES.raw();
+            return Err(Errno::EACCES);
         }
         makes_code |= new_prot.protection.exec && !region.protection.exec;
         cursor = vma_end;
@@ -3002,7 +2883,7 @@ pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64
         owner.forfeit_program();
     }
 
-    // Splits at both ends, so a sub-range no longer rewrites the protection of
+    // Splits at both ends, so a sub-range does not rewrite the protection of
     // every page of its enclosing VMA.
     match proc.vma_map.protect_range(addr, end, new_prot.protection) {
         Ok(()) => {}
@@ -3011,18 +2892,16 @@ pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64
                 "process_vm_mprotect: no VMA covers 0x{:x} in the requested range",
                 hole
             );
-            return -1;
+            return Err(Errno::ENOMEM);
         }
-        Err(ProtectError::Commit(_)) => return slopos_abi::Errno::ENOMEM.raw(),
+        Err(ProtectError::Commit(_)) => return Err(Errno::ENOMEM),
     }
-    let new_page_flags = new_prot.to_page_flags();
-
     if let Some(vm_space) = proc.vm_space.as_mut() {
-        if let Err(err) = ostd_protect_range_4kb(
+        if let Err(err) = protect_range_4kb(
             vm_space,
             VirtAddr::new(addr),
             VirtAddr::new(end),
-            new_page_flags,
+            new_prot.page_property(),
         ) {
             klog_info!("process_vm_mprotect: OSTD protect failed: {:?}", err);
             // The partial walk already narrowed some entries, so the peers must
@@ -3030,7 +2909,7 @@ pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64
             // rather than what landed; a half-applied `mprotect` has no correct
             // rollback to offer, and the next fault reconciles them.
             tlb::flush_all_for_process(slot_tlb_key(slot));
-            return -1;
+            return Err(Errno::ENOMEM);
         }
         // The cursor issues only a local INVLPG. Without this, a peer CPU
         // keeps the old wider translation and a page just made read-only
@@ -3038,14 +2917,15 @@ pub fn process_vm_mprotect(process: ProcessId, addr: u64, length: u64, prot: u64
         tlb::flush_all_for_process(slot_tlb_key(slot));
     }
 
-    0
+    Ok(())
 }
 
-/// `(vaddr, a reference on the page's frame, PageFlags bits)`, captured under
-/// the parent's per-process lock. The reference is what the child maps: taken
-/// once the lock is dropped, a sibling thread's `munmap` could free the frame
-/// first, and its write could find the page unshared and land in the child.
-type ClonePageSnapshot = (u64, UFrame<AnonymousMeta>, u64);
+/// `(vaddr, a reference on the page's frame, the leaf's property)`, captured
+/// under the parent's per-process lock. The reference is what the child maps:
+/// taken once the lock is dropped, a sibling thread's `munmap` could free the
+/// frame first, and its write could find the page unshared and land in the
+/// child.
+type ClonePageSnapshot = (u64, UFrame<AnonymousMeta>, PageProperty);
 
 /// Snapshot entries per chunk. The walk is O(resident pages), so a single
 /// `KVec` passes the slab's 1 MiB ceiling once the parent holds ~40 MiB;
@@ -3149,9 +3029,9 @@ fn snapshot_parent_vmas(
     for (vma_start, vma_end, region) in vmas_iter.iter() {
         let vma_start = *vma_start;
         let vma_end = *vma_end;
-        // SlopRing regions are not inherited (SLOPRING § 14): the SQ/CQ is
-        // SPSC, so a second producer in the child is forbidden. Neither the
-        // snapshot here nor the child-side walk touches one.
+        // SlopRing regions are not inherited: the SQ/CQ is SPSC, so a second
+        // producer in the child is forbidden. Neither the snapshot here nor the
+        // child-side walk touches one.
         if region.is_ring() {
             vmas.push((vma_start, vma_end, region.clone(), KVec::new()))
                 .ok()?;
@@ -3160,26 +3040,24 @@ fn snapshot_parent_vmas(
         let mut snapshot: ClonePageChunks = KVec::new();
         let is_shared = region.is_shared();
         let forked = region.commit == Commit::Forked;
-        let walked = ostd_visit_mark_cow_4kb(
+        let walked = visit_mark_cow_4kb(
             parent_vm_space_ref,
             VirtAddr::new(vma_start),
             VirtAddr::new(vma_end),
-            |vaddr, phys, flags| {
-                if !is_shared && !flags.contains(PageFlags::USER) {
+            |vaddr, phys, prop| {
+                if !is_shared && !prop.user {
                     return ControlFlow::Continue(false);
                 }
                 let Some(frame) = snapshot_frame(vaddr, phys) else {
                     return ControlFlow::Break(());
                 };
-                if push_clone_snapshot(&mut snapshot, (vaddr.as_u64(), frame, flags.bits()))
-                    .is_err()
-                {
+                if push_clone_snapshot(&mut snapshot, (vaddr.as_u64(), frame, prop)).is_err() {
                     return ControlFlow::Break(());
                 }
                 // Read-only pages too: an `mprotect` that later widens the
                 // range must not make a frame the child also maps writable
                 // here.
-                let mark = !is_shared && !flags.contains(PageFlags::COW);
+                let mark = !is_shared && !is_cow(&prop);
                 if mark {
                     *marked += 1;
                     if forked {
@@ -3205,7 +3083,7 @@ fn snapshot_parent_vmas(
 
 /// A reference on the frame the parent maps at `vaddr`, for the child to map.
 fn snapshot_frame(vaddr: VirtAddr, phys: PhysAddr) -> Option<UFrame<AnonymousMeta>> {
-    match UFrame::<AnonymousMeta>::alias_user_paddr(Paddr::new(phys.as_u64())) {
+    match UFrame::<AnonymousMeta>::alias_user_paddr(phys) {
         Ok(frame) => Some(frame),
         Err(err) => {
             klog_info!(
@@ -3230,8 +3108,8 @@ fn clone_cow_walk_shared_vma(
     let pages = snapshot
         .into_iter()
         .flatten()
-        .map(|(addr, frame, flags_bits)| (VirtAddr::new(addr), frame, flags_bits));
-    ostd_map_each_4kb_user(
+        .map(|(addr, frame, prop)| (VirtAddr::new(addr), frame, prop));
+    map_each_4kb_user(
         child_vm_space,
         VirtAddr::new(start),
         VirtAddr::new(end),
@@ -3241,8 +3119,8 @@ fn clone_cow_walk_shared_vma(
     .map_err(|(err, _)| klog_info!("clone_cow shared: OSTD child map failed: {:?}", err))
 }
 
-/// Maps the captured parent pages into the child with `WRITABLE` cleared and
-/// the COW marker set; the parent side was marked during the snapshot phase.
+/// Maps the captured parent pages into the child read-only and marked
+/// copy-on-write; the parent side was marked during the snapshot phase.
 /// `Err(())` on the first failure.
 #[inline(never)]
 fn clone_cow_walk_anon_vma(
@@ -3254,17 +3132,9 @@ fn clone_cow_walk_anon_vma(
     let pages = snapshot
         .into_iter()
         .flatten()
-        .filter(|(_, _, flags_bits)| {
-            PageFlags::from_bits_truncate(*flags_bits).contains(PageFlags::USER)
-        })
-        .map(|(addr, frame, flags_bits)| {
-            let child_flags = (flags_bits & !PageFlags::WRITABLE.bits())
-                | PageFlags::COW.bits()
-                | PageFlags::USER.bits()
-                | PageFlags::PRESENT.bits();
-            (VirtAddr::new(addr), frame, child_flags)
-        });
-    ostd_map_each_4kb_user(
+        .filter(|(_, _, prop)| prop.user)
+        .map(|(addr, frame, prop)| (VirtAddr::new(addr), frame, cow_marked(prop)));
+    map_each_4kb_user(
         child_vm_space,
         VirtAddr::new(start),
         VirtAddr::new(end),

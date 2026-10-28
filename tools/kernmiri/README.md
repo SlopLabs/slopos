@@ -45,7 +45,7 @@ just check-miri     # adds the miri component and runs `miri setup` if needed
 `just check-miri` runs the full slopos-ostd unit + integration test
 suite under Miri with isolation on, so the clock is virtual, runs replay
 bit for bit, and the caller's environment never reaches the tests (a
-`RUST_BACKTRACE=1` in a shell used to make every expected panic print an
+`RUST_BACKTRACE=1` in a shell would make every expected panic print an
 interpreted backtrace). One flag is added:
 
 - `-Zmiri-ignore-leaks` — host scratch allocations in
@@ -114,17 +114,17 @@ HHDM offset, MMIO virt base, ACPI table base) and there is no live
 source pointer in the real kernel for those values — strict
 provenance would require restructuring `FrameAlloc`, `IoMemMapper`,
 and the HHDM contract to carry a `*mut u8` alongside every u64,
-which is a Phase 2-scale refactor. Sentinel-token tests in
+which is a large refactor. Sentinel-token tests in
 `tests/lock_graph.rs` and `tests/panic_recovery.rs` already use
 `core::ptr::without_provenance(...)` (the strict-provenance-clean
 construction for "opaque integer that is never dereferenced").
 
 ## CI integration
 
-`.github/workflows/ci.yml` runs `just check-miri` in a dedicated `miri`
-job that executes in parallel with the existing `Build, Format & Test`
-job. UB caught by Miri blocks merge to `develop` the same way a failed
-kernel build or test failure does.
+`.github/workflows/ci.yml` runs `just check-miri` in the `ostd-verify`
+job, beside the Verus proofs and in parallel with the other jobs. UB caught
+by Miri blocks merge to `develop` the same way a failed kernel build or test
+failure does.
 
 Two cache layers and a trimmed setup keep the CI job short. The job
 installs the pinned toolchain with `scripts/ensure_toolchain.sh
@@ -152,7 +152,7 @@ CI (subject to runner-side cache misses extending the wall time).
 |---|---|---|
 | Host-vs-kernel impl pivot | `cfg(target_os = "none")` vs `cfg(not(target_os = "none"))` | Body-level fallbacks for `read_cr3`, `wrmsr`, port I/O, `cli`/`sti`, `invlpg`, etc. Miri uses the host triple, so the not-none branch is automatically chosen. |
 | Miri-only impl pivot | `cfg(miri)` (auto-set by cargo-miri) | A handful of test-support fns whose real impl is `unsafe { asm!(...) }` — `read_cs`, `sgdt`, `read_lsr`, etc. |
-| Miri-only test skip | `#[cfg_attr(miri, ignore)]` | Tests that exercise the heaviest naked-asm sites (`panic_recovery.rs`, parts of `task_handles.rs`), the `__ostd_usercopy_start/_end` binary layout, and a handful of `extern static` lookups that Miri does not model. |
+| Miri-only test skip | `#[cfg_attr(miri, ignore)]` | Tests that depend on the binary layout of a `global_asm!` block (`__ostd_usercopy_start/_end`, the FPU `xrstor` range), on `extern static` addresses, or on `KernelSync`'s external invariants, none of which Miri models. |
 | Dev wiring | `test-helpers` feature, auto-enabled by `dev-dependencies` | Exposes test-only constructors. `cargo miri test` picks it up automatically; no `--features` flag needed. |
 
 We do **not** fork Miri. We do **not** ship a separate harness crate. The
@@ -183,25 +183,13 @@ deliberate misuse is rejected. Both are claims about the compiler, not
 about what the machine does at run time, and `just test-host` runs them
 natively in well under a second.
 
-## Where `MIRI_FINDINGS.md` is
+## Findings
 
-There isn't one. By project convention, any UB Miri surfaces is **fixed
-inline in `slopos-ostd/` source** and reported in the PR description rather
-than accumulated in a findings file. The findings recorded when the harness
-was first built were:
-
-1. **Real UB**: `slopos-ostd/src/util/ptr_buf.rs::with_at_mut` could
-   construct an unaligned `&mut [T]` if a caller passed a misaligned
-   byte offset. Fix: `debug_assert!` on alignment + the in-tree test
-   now uses a `#[repr(align(4))]` backing buffer.
-2. **Soundness gap in a test (not in OSTD itself)**:
-   `tests/kernel_sync.rs::refcell_u64_round_trips_across_threads` had
-   four threads concurrently call `RefCell::borrow()`, racing on the
-   non-atomic borrow counter. Benign on x86_64 but UB per the Rust
-   memory model. Test ignored under Miri with an explanatory comment.
-3. **Miri limitations** (not bugs, ignored under Miri): a handful of
-   tests that depend on the real binary layout of `global_asm!`
-   blocks or on `unsafe extern static` resolution.
+By project convention, any UB Miri surfaces is **fixed inline in
+`slopos-ostd/` source** and reported in the PR description rather than
+accumulated in a findings file. A test that depends on the real binary
+layout of `global_asm!` blocks or on `unsafe extern static` resolution is
+ignored under Miri with a comment saying why, as the table above lists.
 
 ## Background
 

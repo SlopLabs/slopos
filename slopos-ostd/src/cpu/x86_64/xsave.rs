@@ -104,7 +104,7 @@ fn detect_mxcsr_feature_mask() -> u32 {
 /// # Contract
 /// * Must be called **once**, on the BSP, **before** SMP AP startup.
 /// * Interrupts should be disabled (boot context).
-pub fn init() -> i32 {
+pub fn init() {
     let features = XsaveFeatures::detect();
 
     if !features.supported {
@@ -143,9 +143,6 @@ pub fn init() -> i32 {
     XSAVEOPT_AVAILABLE.store(features.xsaveopt, Ordering::Release);
 
     MXCSR_FEATURE_MASK.store(detect_mxcsr_feature_mask(), Ordering::Release);
-
-    let _ = (area_size, supported);
-    0
 }
 
 /// Replicate the BSP's XSAVE configuration on the current CPU.

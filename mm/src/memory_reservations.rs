@@ -1,8 +1,6 @@
-use core::ffi::{c_char, c_int};
 use slopos_ostd::lock_class;
 
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
-use slopos_ostd::util::cstr::cstr_from_kernel_ptr;
 use slopos_ostd::{align_down_u64, align_up_u64, klog_info};
 
 use crate::memory_layout_defs::KERNEL_VIRTUAL_BASE;
@@ -90,11 +88,8 @@ fn clear_store_inner(store: &mut RegionStoreInner) {
     store.overflows = 0;
 }
 
-fn copy_label(dest: &mut [u8; 32], src: *const c_char) {
-    let Some(bytes) = cstr_from_kernel_ptr(src) else {
-        dest[0] = 0;
-        return;
-    };
+fn copy_label(dest: &mut [u8; 32], src: &str) {
+    let bytes = src.as_bytes();
     let take = bytes.len().min(31);
     dest[..take].copy_from_slice(&bytes[..take]);
     dest[take] = 0;
@@ -216,30 +211,30 @@ fn overlay_region(
     kind: MmRegionKind,
     type_: MmReservationType,
     flags: u32,
-    label: *const c_char,
-) -> c_int {
+    label: &str,
+) -> bool {
     if length == 0 {
-        return -1;
+        return false;
     }
 
     if phys_base >= KERNEL_VIRTUAL_BASE {
         klog_info!("MM: rejecting virtual overlay base 0x{:x}", phys_base);
-        return -1;
+        return false;
     }
     if crate::hhdm::is_available() && phys_base >= crate::hhdm::offset() {
         klog_info!("MM: rejecting virtual overlay base 0x{:x}", phys_base);
-        return -1;
+        return false;
     }
 
     let end = phys_base.wrapping_add(length);
     if end <= phys_base {
-        return -1;
+        return false;
     }
 
     let aligned_base = align_down_u64(phys_base, PAGE_SIZE_4KB);
     let aligned_end = align_up_u64(end, PAGE_SIZE_4KB);
     if aligned_end <= aligned_base {
-        return -1;
+        return false;
     }
 
     with_store(|store| {
@@ -256,7 +251,7 @@ fn overlay_region(
                     aligned_end
                 };
                 if insert_slot(store, idx).is_err() {
-                    return -1;
+                    return false;
                 }
                 let i = idx as usize;
                 let region = &mut store.regions[i];
@@ -272,11 +267,11 @@ fn overlay_region(
             }
 
             if split_region(store, idx, cursor).is_err() {
-                return -1;
+                return false;
             }
             let idx = find_region_index(store, cursor);
             if idx >= store.count {
-                return -1;
+                return false;
             }
             let i = idx as usize;
             let region_end = store.regions[i].phys_base + store.regions[i].length;
@@ -286,7 +281,7 @@ fn overlay_region(
                 region_end
             };
             if split_region(store, idx, apply_end).is_err() {
-                return -1;
+                return false;
             }
 
             let i = idx as usize;
@@ -299,7 +294,7 @@ fn overlay_region(
 
             cursor = apply_end;
         }
-        0
+        true
     })
 }
 
@@ -307,9 +302,9 @@ pub fn mm_region_map_reset() {
     with_store(clear_store_inner);
 }
 
-pub fn mm_region_add_usable(phys_base: u64, length: u64, label: *const c_char) -> c_int {
+pub fn mm_region_add_usable(phys_base: u64, length: u64, label: &str) -> bool {
     if length == 0 {
-        return -1;
+        return false;
     }
     overlay_region(
         phys_base,
@@ -326,10 +321,10 @@ pub fn mm_region_reserve(
     length: u64,
     type_: MmReservationType,
     flags: u32,
-    label: *const c_char,
-) -> c_int {
+    label: &str,
+) -> bool {
     if length == 0 {
-        return -1;
+        return false;
     }
     overlay_region(
         phys_base,

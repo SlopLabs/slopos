@@ -87,14 +87,6 @@ impl<'a> DrawBuffer<'a> {
         &self.damage
     }
 
-    pub fn damage_mut(&mut self) -> &mut DamageTracker {
-        &mut self.damage
-    }
-
-    pub fn clear_damage(&mut self) {
-        self.damage.clear();
-    }
-
     /// Confine every subsequent primitive to `scissor`; `None` lifts the clip.
     #[inline]
     pub fn set_scissor(&mut self, scissor: Option<damage::DamageRect>) {

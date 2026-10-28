@@ -7,6 +7,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use slopos_abi::Errno;
 use slopos_abi::quota::ResourceKind;
 use slopos_abi::syscall::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 use slopos_abi::task::{INVALID_PROCESS_ID, TASK_NAME_MAX_LEN};
@@ -400,8 +401,8 @@ pub fn test_oom_an_orphaned_memfd_stays_charged_to_nobody() -> TestResult {
     };
     let sizer_account = sizer.account();
     let bound = create_process_vm_for(sizer.clone()).is_some();
-    let memfd = memfd_create(0, account);
-    let sized = memfd.as_ref().map_or(-1, |(handle, _, _)| {
+    let memfd = memfd_create(account);
+    let sized = memfd.as_ref().map_or(Err(Errno::EBADF), |(handle, _, _)| {
         memfd_ftruncate(
             *handle,
             PAGES as usize * PAGE_SIZE_4KB as usize,
@@ -438,8 +439,8 @@ pub fn test_oom_an_orphaned_memfd_stays_charged_to_nobody() -> TestResult {
     drop(made);
 
     assert_test!(
-        baseline && bound && sized == 0,
-        "could not touch the baselines, bind the sizer and size the memfd: {}",
+        baseline && bound && sized.is_ok(),
+        "could not touch the baselines, bind the sizer and size the memfd: {:?}",
         sized
     );
     assert_test!(

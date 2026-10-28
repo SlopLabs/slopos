@@ -26,11 +26,10 @@
 //!   and `bootctl commit` makes it the default.
 //!
 //! Booted from the medium again with SlopOS on the disk, it leaves a file in
-//! the root and a base in slot a, as a boot partition laid out before the
-//! bases moved beside the slots holds. In the medium's rescue shell it checks
-//! the root, reads the file through a mount and rolls the disk's base back
-//! through `bootctl --boot`, and at a terminal interrupts what a rescue shell
-//! runs. Then it reinstalls over the same partitions, keeping the root:
+//! the root. In the medium's rescue shell it checks the root, reads the file
+//! through a mount and rolls the disk's base back through `bootctl --boot`,
+//! and at a terminal interrupts what a rescue shell runs. Then it reinstalls
+//! over the same partitions, keeping the root:
 //!
 //! 3 (`slopos-a` again): the file and the root's people are there, and what
 //!   the slots said of the system they held is gone.
@@ -125,7 +124,7 @@ const GIB: u64 = 1 << 30;
 const MIB: u64 = 1 << 20;
 /// What the installed system boots with: this test again, and a slot that
 /// panics falls back.
-const INSTALLED_CMDLINE: &str = "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=off roulette=skip panic=reboot watchdog.miss_threshold=300 tests.run=*ext2_aaa*,*installer*";
+const INSTALLED_CMDLINE: &str = "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=off roulette=skip panic=reboot watchdog.miss_threshold=300 tests.run=*ext4_aaa*,*installer*";
 
 fn var(name: &str) -> Option<Vec<u8>> {
     let mut buf = [0u8; 64];
@@ -257,21 +256,6 @@ fn register_foreign(esp: &Partition) -> Result<u16, String> {
     )
     .map_err(|e| format!("writing BootOrder: {e:?}"))?;
     Ok(number)
-}
-
-/// Leave a base in slot a, where a boot partition laid out before the bases
-/// moved beside the slots kept one, for the reinstall to remove.
-fn leave_slot_base(disk: &str, partitions: &[Partition]) -> Result<(), String> {
-    let boot = partitions
-        .iter()
-        .find(|p| p.entry.type_guid == layout::BOOT_TYPE)
-        .ok_or("the disk has no boot partition")?;
-    let path = format!("{}/a/base.img", layout::SLOTS_DIR);
-    open_fat(&partition_node(disk, boot)?)?
-        .write_file(&path, b"a base kept per slot\n")
-        .map_err(|e| format!("{path}: {e:?}"))?;
-    println!("INSTALLER-LEFT-SLOT-BASE {path}");
-    Ok(())
 }
 
 /// Leave [`KEPT`] on the root partition `node`, as a person's work would be.
@@ -1033,7 +1017,6 @@ fn install() -> bool {
             };
             if reinstall
                 && let Err(why) = leave_kept_file(&node)
-                    .and_then(|()| leave_slot_base(&disk, &partitions))
                     .and_then(|()| rescue(&disk, &partitions, &node))
                     .and_then(|()| rescue_at_a_terminal())
             {

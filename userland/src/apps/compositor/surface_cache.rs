@@ -1,16 +1,17 @@
 //! The clients' buffers, mapped once rather than every frame, by surface
 //! incarnation and buffer slot; the mapping outlives the fd it borrows.
 
-use crate::syscall::{CachedShmMapping, UserWindowInfo};
+use crate::syscall::CachedShmMapping;
 
 use super::MAX_WINDOWS;
+use super::window_info::WindowInfo;
 
-const BUFFERS_PER_TASK: usize = 2;
-const CACHE_SLOTS: usize = MAX_WINDOWS * BUFFERS_PER_TASK;
+const BUFFERS_PER_WINDOW: usize = 2;
+const CACHE_SLOTS: usize = MAX_WINDOWS * BUFFERS_PER_WINDOW;
 
 /// `token` is the fd mapped, which a slot registered again changes.
 struct ClientSurfaceEntry {
-    task_id: u32,
+    window: u32,
     generation: u32,
     buffer_id: u8,
     token: u32,
@@ -20,7 +21,7 @@ struct ClientSurfaceEntry {
 impl ClientSurfaceEntry {
     const fn empty() -> Self {
         Self {
-            task_id: 0,
+            window: 0,
             generation: 0,
             buffer_id: 0,
             token: 0,
@@ -32,9 +33,9 @@ impl ClientSurfaceEntry {
         self.mapping.is_none()
     }
 
-    fn keyed(&self, task_id: u32, generation: u32, buffer_id: u8) -> bool {
+    fn keyed(&self, window: u32, generation: u32, buffer_id: u8) -> bool {
         self.mapping.is_some()
-            && self.task_id == task_id
+            && self.window == window
             && self.generation == generation
             && self.buffer_id == buffer_id
     }
@@ -54,7 +55,7 @@ impl ClientSurfaceCache {
     /// A slot whose fd changed is mapped again in place.
     pub fn get_or_create_index(
         &mut self,
-        task_id: u32,
+        window: u32,
         generation: u32,
         buffer_id: u8,
         token: u32,
@@ -67,7 +68,7 @@ impl ClientSurfaceCache {
         if let Some(i) = self
             .entries
             .iter()
-            .position(|e| e.keyed(task_id, generation, buffer_id))
+            .position(|e| e.keyed(window, generation, buffer_id))
         {
             if self.entries[i].token == token {
                 return Some(i);
@@ -81,7 +82,7 @@ impl ClientSurfaceCache {
         let slot = self.entries.iter().position(|e| e.is_empty())?;
         let mapping = CachedShmMapping::map_readonly_fd_borrowed(token as i32, buffer_size)?;
         self.entries[slot] = ClientSurfaceEntry {
-            task_id,
+            window,
             generation,
             buffer_id,
             token,
@@ -100,13 +101,13 @@ impl ClientSurfaceCache {
 
     /// Drop the mappings of surfaces no longer shown, both of a surface's
     /// buffers kept, though it shows only one.
-    pub fn cleanup_stale(&mut self, windows: &[UserWindowInfo; MAX_WINDOWS], window_count: u32) {
+    pub fn cleanup_stale(&mut self, windows: &[WindowInfo; MAX_WINDOWS], window_count: u32) {
         for entry in &mut self.entries {
             if entry.is_empty() {
                 continue;
             }
             let still_present = (0..window_count as usize).any(|i| {
-                windows[i].task_id == entry.task_id && windows[i].generation == entry.generation
+                windows[i].id == entry.window && windows[i].generation == entry.generation
             });
             if !still_present {
                 *entry = ClientSurfaceEntry::empty();

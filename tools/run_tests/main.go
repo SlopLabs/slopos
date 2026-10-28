@@ -20,10 +20,9 @@ import (
 	"time"
 )
 
-// PostAbortSilenceSec is how long a run gets after a kernel abort. Long enough
+// PostAbortSilenceSec is how long a run gets after a kernel abort: long enough
 // for a surviving BSP to finish its phase and emit its summaries, short enough
-// that a fully dead machine costs ~20 s instead of the whole wall budget — the
-// recorded case sat idle for 134 s before the 900 s guard killed QEMU.
+// that a dead machine costs ~20 s rather than the whole wall budget.
 const PostAbortSilenceSec = 20
 
 // repoRoot resolves the SlopOS repo root by walking up for a `justfile`,
@@ -80,7 +79,7 @@ func run(rawArgv []string) int {
 	root := repoRoot()
 	buildDir := filepath.Join(root, "builddir")
 	defaultIso := filepath.Join(buildDir, "slop-tests.iso")
-	defaultFsImage := filepath.Join(root, "fs/assets/ext2-tests.img")
+	defaultFsImage := filepath.Join(root, "fs/assets/ext4-tests.img")
 	lastFailList := filepath.Join(buildDir, "last-fail.list")
 
 	filters := append([]string(nil), args.Filters...)
@@ -103,7 +102,15 @@ func run(rawArgv []string) int {
 	if args.WarnMs != 0 {
 		extra = fmt.Sprintf("tests.warn_ms=%d", args.WarnMs)
 	}
-	cmdline := assembleTestCmdline(DefaultBaseCmdline, filters, args.Skips, verbosity, extra)
+	cmdline := ""
+	if args.DryRun || !args.NoBuild {
+		base, err := justTestCmdline(root)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "run_tests:", err)
+			return 64
+		}
+		cmdline = assembleTestCmdline(base, filters, args.Skips, verbosity, extra)
+	}
 
 	if args.DryRun {
 		fmt.Printf("TEST_CMDLINE=%q\n", cmdline)
@@ -146,7 +153,7 @@ func run(rawArgv []string) int {
 
 	stdoutFd := os.Stdout.Fd()
 	tty := IsTTY(stdoutFd)
-	colour := UseColour(args.ColorMode, stdoutFd)
+	colour := UseColour(args.ColorMode, args.NoColor, stdoutFd)
 	cols := TerminalCols(stdoutFd)
 
 	rawPassthrough := args.Raw
@@ -304,6 +311,19 @@ func writeLastFailList(path string, failures []*TestRecord) error {
 		return fmt.Errorf("last-fail.list: write: %w", err)
 	}
 	return nil
+}
+
+// justTestCmdline reads the justfile's `test_cmdline`, the one statement of
+// the test ISO's command line.
+func justTestCmdline(root string) (string, error) {
+	cmd := exec.Command("just", "--evaluate", "test_cmdline")
+	cmd.Dir = root
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("just --evaluate test_cmdline failed: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func runJustIsoTests(root, cmdline string) error {

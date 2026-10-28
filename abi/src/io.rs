@@ -8,7 +8,7 @@ pub const IO_STAGING_SIZE: usize = 4096;
 
 /// Staging bound for a regular file, where the cost that matters is per
 /// *round trip* rather than per byte: one filesystem call is one mount-lock
-/// hold and one transaction, so a 4 KiB bound made a 60 MB link ~15 000
+/// hold and one transaction, so a 4 KiB bound would make a 60 MB link ~15 000
 /// transactions. 256 KiB is 64 blocks per transaction, past the point where a
 /// transaction's data is written home once and barriered once instead of
 /// going into the log, and well under the block cache so a batch cannot evict

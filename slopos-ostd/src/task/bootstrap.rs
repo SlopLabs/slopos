@@ -22,11 +22,11 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::task::abi::TASK_UNSAFE_STACK_SP_OFFSET;
 
 /// Maximum number of statically-allocated AP bootstrap stubs.
-/// Matches `slopos_arch::pcr::MAX_STATIC_APS`.
+/// Matches `slopos_ostd::cpu::x86_64::pcr::MAX_STATIC_APS`.
 pub const MAX_STATIC_APS: usize = 16;
 
 /// Size of each bootstrap data-stack buffer, sized for the early-boot
-/// instrumented prologues on the path to `kernel_main` / `ap_entry_rust`.
+/// instrumented prologues on the path to `kernel_main` / `ap_late_entry`.
 pub const BOOTSTRAP_UNSAFE_STACK_SIZE: usize = 0x10000;
 
 crate::no_mangle_static! {

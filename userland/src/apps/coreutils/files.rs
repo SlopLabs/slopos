@@ -245,7 +245,7 @@ fn mkdir(ctx: &mut Ctx, argv: &[&[u8]]) -> i32 {
         }
         // `-m` applies to the operands, never to the parents `-p` invents.
         if let Some(mode) = mode {
-            if let Err(error) = fsutil::chmod(path, mode) {
+            if let Err(error) = fs::set_permissions(path, Permissions::from_mode(mode)) {
                 ctx.warn_io(path.as_bytes(), &error);
                 status = 1;
             }
@@ -332,7 +332,7 @@ fn ln(ctx: &mut Ctx, argv: &[&[u8]]) -> i32 {
         let result = if symbolic {
             fsutil::symlink(target, &link)
         } else {
-            fsutil::hard_link(name, &link)
+            fs::hard_link(name, &link)
         };
         if let Err(error) = result {
             ctx.warn_io(link.as_bytes(), &error);
@@ -421,7 +421,7 @@ fn install(ctx: &mut Ctx, argv: &[&[u8]]) -> i32 {
                 status = 1;
                 continue;
             }
-            if let Err(error) = fsutil::chmod(path, mode) {
+            if let Err(error) = fs::set_permissions(path, Permissions::from_mode(mode)) {
                 ctx.warn_io(path.as_bytes(), &error);
                 status = 1;
             }
@@ -458,7 +458,7 @@ fn install(ctx: &mut Ctx, argv: &[&[u8]]) -> i32 {
             status = 1;
             continue;
         }
-        if let Err(error) = fsutil::chmod(&dest, mode) {
+        if let Err(error) = fs::set_permissions(&dest, Permissions::from_mode(mode)) {
             ctx.warn_io(dest.as_bytes(), &error);
             status = 1;
         }

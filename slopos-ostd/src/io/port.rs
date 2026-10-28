@@ -1,9 +1,9 @@
 //! `IoPort<T>`: typed safe wrapper for x86 port I/O.
 //!
 //! Construction is gated behind [`IoPortRegistry`] so only ports the platform
-//! has marked insensitive (Inv. 7) are reachable. `slopos-utils::io::Port`
-//! stays alive in parallel: the early-boot panic logger needs port I/O before
-//! any registry exists.
+//! has marked insensitive (Inv. 7) are reachable. [`crate::io::raw_port::Port`]
+//! serves what runs before any registry exists, the early-boot panic logger
+//! among it.
 
 use core::arch::asm;
 use core::marker::PhantomData;

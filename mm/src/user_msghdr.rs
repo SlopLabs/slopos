@@ -16,7 +16,7 @@ use slopos_ostd::util::byte_view::{pod_slice_as_bytes, pod_slice_as_bytes_mut};
 
 use crate::user_copy::{copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user};
 use crate::user_io_buf::{UserIovecBuf, stage_iovec};
-use crate::user_ptr::{UserBytes, UserPtr};
+use slopos_ostd::user::ptr::{UserBytes, UserPtr};
 
 /// Control-buffer bytes one `sendmsg` may declare, past which
 /// [`scm_rights_fds`] answers `ENOBUFS`.

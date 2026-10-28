@@ -1,7 +1,7 @@
 //! Tests for the ingress pipeline: IPv4 dispatch and malformed-frame drops.
 
 use slopos_ostd::lock_class;
-use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_REGISTRY;
+use slopos_ostd::sync::LOCK_LEVEL_REGISTRY;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KArc, KBox, KVec};
 use slopos_testing::TestResult;

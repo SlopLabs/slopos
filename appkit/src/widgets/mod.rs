@@ -16,6 +16,7 @@ pub mod list;
 pub mod menu;
 pub mod menu_bar;
 pub mod partition_bar;
+pub mod picture;
 pub mod popup;
 pub mod progress_bar;
 pub mod property_list;

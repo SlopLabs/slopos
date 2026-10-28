@@ -37,17 +37,6 @@ pub fn is_set(name: &[u8]) -> bool {
     with_vars(|vars| vars.iter().any(|v| v.name == name))
 }
 
-/// Copy a value into a caller-owned buffer, returning its length.
-pub fn get_into(name: &[u8], dst: &mut [u8]) -> Option<usize> {
-    with_vars(|vars| {
-        vars.iter().find(|v| v.name == name).map(|v| {
-            let len = v.value.len().min(dst.len());
-            dst[..len].copy_from_slice(&v.value[..len]);
-            len
-        })
-    })
-}
-
 /// Assign a value, leaving whether the variable is exported alone.
 pub fn set(name: &[u8], value: &[u8]) {
     assign(name, value, None);

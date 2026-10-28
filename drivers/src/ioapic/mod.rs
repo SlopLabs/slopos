@@ -12,7 +12,8 @@ use slopos_acpi::madt::{InterruptOverride, Madt, MadtEntry, Polarity, TriggerMod
 use slopos_acpi::tables::AcpiTables;
 use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
-use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
+use slopos_mm::mmio;
+use slopos_ostd::mm::IoMem;
 
 const IOAPIC_REGION_SIZE: usize = 0x20;
 
@@ -23,7 +24,7 @@ struct IoapicController {
     gsi_count: u32,
     version: u32,
     phys_addr: u64,
-    mmio: Option<MmioRegion>,
+    mmio: Option<IoMem>,
 }
 
 impl IoapicController {
@@ -116,11 +117,11 @@ static IOAPIC_READY: InitFlag = InitFlag::new();
 static IOAPIC_INIT_IN_PROGRESS: StateFlag = StateFlag::new();
 
 #[inline]
-fn map_ioapic_mmio(phys: u64) -> Option<MmioRegion> {
+fn map_ioapic_mmio(phys: u64) -> Option<IoMem> {
     if phys == 0 {
         return None;
     }
-    MmioRegion::map(PhysAddr::new(phys), IOAPIC_REGION_SIZE)
+    mmio::map_uncached(PhysAddr::new(phys), IOAPIC_REGION_SIZE)
 }
 
 /// Run `f` against the controller owning `gsi`, with `IOAPIC_TABLE` held.
@@ -190,11 +191,11 @@ fn find_iso(irq: u8) -> Option<IoapicIso> {
         .copied()
 }
 
-fn ioapic_update_mask(gsi: u32, mask: bool) -> i32 {
+fn ioapic_update_mask(gsi: u32, mask: bool) -> bool {
     let outcome = with_controller(gsi, |ctrl| {
         let pin = gsi.saturating_sub(ctrl.gsi_base);
         if pin >= ctrl.gsi_count {
-            return -1;
+            return false;
         }
 
         let reg = ioapic_entry_low_index(pin);
@@ -206,18 +207,18 @@ fn ioapic_update_mask(gsi: u32, mask: bool) -> i32 {
         }
 
         ctrl.write_reg(reg, value);
-        0
+        true
     });
     match outcome {
         None => {
             klog_info!("IOAPIC: No controller for requested GSI");
-            -1
+            false
         }
-        Some(-1) => {
+        Some(false) => {
             klog_info!("IOAPIC: Pin out of range for mask request");
-            -1
+            false
         }
-        Some(rc) => rc,
+        Some(true) => true,
     }
 }
 
@@ -270,20 +271,22 @@ fn populate_from_madt(madt: &Madt) {
     }
 }
 
-pub fn init() -> i32 {
+/// Discover the controllers and source overrides from the MADT. Idempotent;
+/// `false` when no controller can be found.
+pub fn init() -> bool {
     if IOAPIC_READY.is_set() {
-        return 0;
+        return true;
     }
     if !IOAPIC_INIT_IN_PROGRESS.enter() {
         while !IOAPIC_READY.is_set() {
             core::hint::spin_loop();
         }
-        return 0;
+        return true;
     }
 
     let init_fail = || {
         IOAPIC_INIT_IN_PROGRESS.leave();
-        -1
+        false
     };
 
     if !hhdm::is_available() {
@@ -317,13 +320,13 @@ pub fn init() -> i32 {
     klog_info!("IOAPIC: Discovery complete");
     IOAPIC_READY.mark_set();
     IOAPIC_INIT_IN_PROGRESS.leave();
-    0
+    true
 }
 
-pub fn config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
+pub fn config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> bool {
     if !IOAPIC_READY.is_set() {
         klog_info!("IOAPIC: Driver not initialized");
-        return -1;
+        return false;
     }
 
     let writable_flags = flags & IOAPIC_REDIR_WRITABLE_MASK;
@@ -342,11 +345,11 @@ pub fn config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
     let pin = match outcome {
         None => {
             klog_info!("IOAPIC: No IOAPIC handles requested GSI");
-            return -1;
+            return false;
         }
         Some(None) => {
             klog_info!("IOAPIC: Calculated pin outside controller range");
-            return -1;
+            return false;
         }
         Some(Some(pin)) => pin,
     };
@@ -361,37 +364,47 @@ pub fn config_irq(gsi: u32, vector: u8, lapic_id: u8, flags: u32) -> i32 {
         high
     );
 
-    0
+    true
 }
 
-pub fn mask_gsi(gsi: u32) -> i32 {
+pub fn mask_gsi(gsi: u32) -> bool {
     ioapic_update_mask(gsi, true)
 }
 
-pub fn unmask_gsi(gsi: u32) -> i32 {
+pub fn unmask_gsi(gsi: u32) -> bool {
     ioapic_update_mask(gsi, false)
 }
 
-pub fn is_ready() -> i32 {
-    if IOAPIC_READY.is_set() { 1 } else { 0 }
+pub fn is_ready() -> bool {
+    IOAPIC_READY.is_set()
 }
 
-pub fn legacy_irq_info(legacy_irq: u8, out_gsi: &mut u32, out_flags: &mut u32) -> i32 {
+/// Where a legacy (ISA) IRQ arrives on the IOAPIC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IrqRoute {
+    pub gsi: u32,
+    /// Redirection-entry polarity and trigger bits.
+    pub flags: u32,
+}
+
+/// `legacy_irq`'s route: its MADT source override, else the identity GSI,
+/// active-high and edge-triggered. `None` before [`init`].
+pub fn legacy_irq_route(legacy_irq: u8) -> Option<IrqRoute> {
     if !IOAPIC_READY.is_set() {
         klog_info!("IOAPIC: Legacy route query before initialization");
-        return -1;
+        return None;
     }
-
-    let mut gsi = legacy_irq as u32;
-    let mut flags = IOAPIC_FLAG_POLARITY_HIGH | IOAPIC_FLAG_TRIGGER_EDGE;
-
-    if let Some(iso) = find_iso(legacy_irq) {
-        gsi = iso.gsi;
-        flags = iso.redir_flags;
-        ioapic_log_iso(&iso);
-    }
-
-    *out_gsi = gsi;
-    *out_flags = flags;
-    0
+    Some(match find_iso(legacy_irq) {
+        Some(iso) => {
+            ioapic_log_iso(&iso);
+            IrqRoute {
+                gsi: iso.gsi,
+                flags: iso.redir_flags,
+            }
+        }
+        None => IrqRoute {
+            gsi: legacy_irq as u32,
+            flags: IOAPIC_FLAG_POLARITY_HIGH | IOAPIC_FLAG_TRIGGER_EDGE,
+        },
+    })
 }

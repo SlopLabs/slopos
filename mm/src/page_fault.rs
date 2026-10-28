@@ -9,9 +9,9 @@ use slopos_ostd::{klog_info, klog_warn, lock_class};
 
 use crate::error::MmError;
 use crate::oom::{OomTrigger, OomVerdict};
-use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm::ProcessVm;
-use crate::user_mappings::ostd_get_pte_flags_4kb;
+use crate::user_mappings::{is_cow, leaf_property_4kb};
 use crate::{cow, demand, filemap_hook, oom, process_vm};
 use slopos_ostd::handle::Handle;
 
@@ -147,16 +147,16 @@ fn fault_is_spurious(error_code: u64, vm_space: &KArc<VmSpace>, fault_addr: u64)
     let is_write = (error_code & 0x02) != 0;
     let is_ifetch = (error_code & 0x10) != 0;
 
-    let Some(flags) = ostd_get_pte_flags_4kb(vm_space, VirtAddr::new(fault_addr)) else {
+    let Some(leaf) = leaf_property_4kb(vm_space, VirtAddr::new(fault_addr)) else {
         return false;
     };
-    if !flags.contains(PageFlags::PRESENT) || !flags.contains(PageFlags::USER) {
+    if !leaf.user {
         return false;
     }
-    if is_write && !flags.contains(PageFlags::WRITABLE) {
+    if is_write && !leaf.write {
         return false;
     }
-    !(is_ifetch && flags.contains(PageFlags::NO_EXECUTE))
+    !(is_ifetch && !leaf.execute)
 }
 
 /// Try to service a user page fault in the address space named by
@@ -473,20 +473,11 @@ enum PageWriteState {
 }
 
 fn page_write_state(handle: Handle<ProcessVm>, page: u64) -> Option<PageWriteState> {
-    use crate::paging_defs::PageFlags;
     let va = slopos_abi::addr::VirtAddr::new(page);
-    process_vm::process_vm_with_vm_space_by_handle(handle, |vs| {
-        match crate::user_mappings::ostd_get_pte_flags_4kb(vs, va) {
-            Some(flags)
-                if flags.contains(PageFlags::USER)
-                    && flags.contains(PageFlags::WRITABLE)
-                    && !flags.contains(PageFlags::COW) =>
-            {
-                PageWriteState::Writable
-            }
-            Some(_) => PageWriteState::Present,
-            None => PageWriteState::Absent,
-        }
+    process_vm::process_vm_with_vm_space_by_handle(handle, |vs| match leaf_property_4kb(vs, va) {
+        Some(leaf) if leaf.user && leaf.write && !is_cow(&leaf) => PageWriteState::Writable,
+        Some(_) => PageWriteState::Present,
+        None => PageWriteState::Absent,
     })
     .ok()
 }

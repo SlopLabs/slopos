@@ -44,22 +44,8 @@ pub fn kernel_io_dispatchable_count() -> usize {
 
 #[must_use = "dropping the token publishes the held threads again"]
 pub struct KernelIoHold {
-    swept: usize,
-    unsettled: usize,
     /// !Send: the release must run on the CPU that armed the hold.
     _not_send: PhantomData<*mut ()>,
-}
-
-impl KernelIoHold {
-    #[inline]
-    pub fn swept(&self) -> usize {
-        self.swept
-    }
-
-    #[inline]
-    pub fn unsettled(&self) -> usize {
-        self.unsettled
-    }
 }
 
 /// An AP that dequeued before the pause hands the task back on resume; one sweep is not enough.
@@ -79,17 +65,13 @@ pub fn hold_kernel_io_all(_freeze: &KernelIoFreeze, paused: &ApPauseToken) -> Ke
         }
         core::hint::spin_loop();
     }
-    let unsettled = if settled {
-        0
-    } else {
-        let left = kernel_io_dispatchable_count();
+    if !settled {
         slopos_ostd::klog_info!(
             "SCHED: KERNEL_IO_HOLD_UNSETTLED left={} spins={}",
-            left,
+            kernel_io_dispatchable_count(),
             HOLD_SETTLE_SPINS
         );
-        left
-    };
+    }
     if swept != 0 {
         klog_debug!(
             "SCHED: kernel-io hold took {} thread(s) off a run queue",
@@ -97,8 +79,6 @@ pub fn hold_kernel_io_all(_freeze: &KernelIoFreeze, paused: &ApPauseToken) -> Ke
         );
     }
     KernelIoHold {
-        swept,
-        unsettled,
         _not_send: PhantomData,
     }
 }
@@ -120,7 +100,7 @@ pub fn republish_held_kernel_io(held: &KernelIoTaskIds) {
         if !body.sched_placement_compare_exchange(SchedPlacement::Held, SchedPlacement::Waking) {
             continue;
         }
-        if crate::scheduler::schedule_task(&task) != 0 {
+        if !crate::scheduler::schedule_task(&task) {
             klog_debug!(
                 "SCHED: kernel-io hold could not republish task {}",
                 body.task_id

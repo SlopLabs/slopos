@@ -12,7 +12,8 @@ use slopos_testing::TestResult;
 use crate::cpufreq;
 
 fn online_cpus() -> impl Iterator<Item = usize> {
-    (0..slopos_arch::pcr::get_cpu_count()).filter(|&cpu| slopos_arch::pcr::is_cpu_online(cpu))
+    (0..slopos_ostd::cpu::x86_64::pcr::get_cpu_count())
+        .filter(|&cpu| slopos_ostd::cpu::x86_64::pcr::is_cpu_online(cpu))
 }
 
 /// Each online CPU ran its own bring-up: it is recorded, under its own APIC ID,

@@ -194,8 +194,7 @@ impl Capability {
         self.bit() != 0
     }
 
-    /// Diagnostic name. Used by the dispatcher's `warn` mode, so a boot with
-    /// `authority=warn` names the capability a program lacked.
+    /// Diagnostic name.
     #[inline]
     pub const fn name(self) -> &'static str {
         match self {
@@ -406,104 +405,6 @@ pub const fn mask_permits(mask: u64, cap: Capability) -> bool {
     bit == 0 || (mask & bit) != 0
 }
 
-/// Policy for what a failed authority check does.
-///
-/// Both modes exist because both OpenBSD and FreeBSD ended up needing them.
-/// The failure mode is split by kind: invoking an operation your authority
-/// does not name is a program bug and is loud; acting on an object you were
-/// not given is a quiet `EPERM`.
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
-#[repr(u8)]
-pub enum AuthorityMode {
-    /// No checks. The measurement mode: the per-check cost is measured
-    /// without a separate build.
-    Off = 0,
-    /// Report each distinct denial once and permit it, so one boot enumerates
-    /// every capability the real desktop needs.
-    Warn = 1,
-    /// Refuse with `EPERM`.
-    #[default]
-    Enforce = 2,
-}
-
-impl AuthorityMode {
-    #[inline]
-    pub const fn as_u8(self) -> u8 {
-        self as u8
-    }
-
-    #[inline]
-    pub const fn from_u8(raw: u8) -> Self {
-        match raw {
-            0 => Self::Off,
-            1 => Self::Warn,
-            _ => Self::Enforce,
-        }
-    }
-}
-
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-
-static MODE: AtomicU8 = AtomicU8::new(AuthorityMode::Enforce as u8);
-
-/// One bit per gated capability, so `warn` reports each distinct denial once
-/// rather than once per call — a frame-rate denial would otherwise bury the
-/// enumeration it exists to produce.
-static WARNED: AtomicU64 = AtomicU64::new(0);
-
-#[inline]
-pub fn mode() -> AuthorityMode {
-    AuthorityMode::from_u8(MODE.load(Ordering::Relaxed))
-}
-
-/// Set from the `authority=` cmdline knob, before userland runs.
-#[inline]
-pub fn set_mode(mode: AuthorityMode) {
-    MODE.store(mode.as_u8(), Ordering::Relaxed);
-    WARNED.store(0, Ordering::Relaxed);
-}
-
-/// Whether `cap`'s denial has already been reported. Marks it reported.
-///
-/// Returns `true` the first time only, so the caller logs once per capability.
-pub fn warn_once(cap: Capability) -> bool {
-    let bit = cap.bit();
-    bit != 0 && WARNED.fetch_or(bit, Ordering::Relaxed) & bit == 0
-}
-
-/// The decision a dispatcher makes for one call.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum AuthorityDecision {
-    /// Proceed.
-    Allow,
-    /// Proceed, but this is the first denial of `cap` and it should be logged.
-    WarnAndAllow,
-    /// Refuse with `EPERM`.
-    Deny,
-}
-
-/// Decide whether a caller holding `mask` may invoke an operation classified
-/// `cap`, under the live mode.
-///
-/// Total and allocation-free: this is on the syscall entry path.
-#[inline]
-pub fn decide(mask: u64, cap: Capability) -> AuthorityDecision {
-    if mask_permits(mask, cap) {
-        return AuthorityDecision::Allow;
-    }
-    match mode() {
-        AuthorityMode::Off => AuthorityDecision::Allow,
-        AuthorityMode::Warn => {
-            if warn_once(cap) {
-                AuthorityDecision::WarnAndAllow
-            } else {
-                AuthorityDecision::Allow
-            }
-        }
-        AuthorityMode::Enforce => AuthorityDecision::Deny,
-    }
-}
-
 /// Mint a `Power` witness for a kernel-initiated action.
 ///
 /// `pub(crate)` so only [`crate::platform::power`] can reach it, and that
@@ -578,62 +479,5 @@ mod tests {
         assert!(check_mask::<Power, _>(&holder, CAP_NONE).is_err());
         // A different capability's bit does not mint this one.
         assert!(check_mask::<Power, _>(&holder, Capability::Mount.bit()).is_err());
-    }
-
-    #[test]
-    fn enforce_denies_and_off_allows() {
-        set_mode(AuthorityMode::Enforce);
-        assert_eq!(decide(CAP_NONE, Capability::Power), AuthorityDecision::Deny);
-        set_mode(AuthorityMode::Off);
-        assert_eq!(
-            decide(CAP_NONE, Capability::Power),
-            AuthorityDecision::Allow
-        );
-        set_mode(AuthorityMode::Enforce);
-    }
-
-    /// `warn` must report each distinct capability once, not once per call: a
-    /// frame-rate denial would otherwise bury the enumeration it exists to
-    /// produce.
-    #[test]
-    fn warn_reports_each_capability_once() {
-        set_mode(AuthorityMode::Warn);
-        assert_eq!(
-            decide(CAP_NONE, Capability::Power),
-            AuthorityDecision::WarnAndAllow
-        );
-        assert_eq!(
-            decide(CAP_NONE, Capability::Power),
-            AuthorityDecision::Allow
-        );
-        assert_eq!(
-            decide(CAP_NONE, Capability::Fate),
-            AuthorityDecision::WarnAndAllow,
-            "a different capability still reports"
-        );
-        for expected in [AuthorityDecision::WarnAndAllow, AuthorityDecision::Allow] {
-            assert_eq!(decide(CAP_NONE, Capability::RawBlock), expected);
-        }
-        set_mode(AuthorityMode::Enforce);
-    }
-
-    #[test]
-    fn a_permitted_call_never_warns() {
-        set_mode(AuthorityMode::Warn);
-        let mask = Capability::Power.bit();
-        assert_eq!(decide(mask, Capability::Power), AuthorityDecision::Allow);
-        set_mode(AuthorityMode::Enforce);
-    }
-
-    #[test]
-    fn mode_round_trips_through_its_encoding() {
-        for mode in [
-            AuthorityMode::Off,
-            AuthorityMode::Warn,
-            AuthorityMode::Enforce,
-        ] {
-            assert_eq!(AuthorityMode::from_u8(mode.as_u8()), mode);
-        }
-        assert_eq!(AuthorityMode::from_u8(200), AuthorityMode::Enforce);
     }
 }

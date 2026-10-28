@@ -5,7 +5,7 @@
 //! from `AP_PCR_PTRS[slot - 1]` and direct-jumps into [`ap_early_entry`];
 //! that tail-calls the kernel-registered late entry, where all architectural
 //! and policy setup lives. The split keeps OSTD free of `slopos-mm` /
-//! `slopos-drivers` / `slopos-arch` runtime deps for AP startup.
+//! `slopos-drivers` runtime deps for AP startup.
 //!
 //! The cross-crate hand-off must stay a plain Rust call from instrumented
 //! code: an asm tail-jump from naked code into a cross-crate Rust symbol

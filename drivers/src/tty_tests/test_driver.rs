@@ -23,3 +23,9 @@ pub fn test_vconsole_drain_returns_zero() -> TestResult {
     }
     TestResult::Pass
 }
+
+slopos_testing::stest!(name = test_driver_none_no_panic, suite = tty_test_driver);
+slopos_testing::stest!(
+    name = test_vconsole_drain_returns_zero,
+    suite = tty_test_driver
+);

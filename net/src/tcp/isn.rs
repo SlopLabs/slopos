@@ -51,7 +51,7 @@ fn isn_key() -> (u64, u64) {
     }
 }
 
-/// Reset the key to the uninitialized sentinel, so [`super::tcp_reset_all`]
+/// Reset the key to the uninitialized sentinel, so [`super::reset_all`]
 /// callers see a freshly seeded key on the next call.
 pub(crate) fn reset_for_tests() {
     ISN_KEY_STATE.store(KEY_UNSET, Ordering::Release);

@@ -22,8 +22,8 @@ LIMINE_TARBALL_SHA256="${LIMINE_TARBALL_SHA256:-e02a473c6dc6df25159697f949302723
 
 # Already populated with the pinned release (downloaded earlier or pre-staged
 # for offline builds). The version is read out of the EFI binary itself: a
-# directory left by an earlier pin passes a presence check and boots the old
-# loader, which is how a v11 Limine survived the move to v12.
+# directory left by another pin passes a presence check and boots that
+# loader.
 # Only the default location is replaced; a directory the caller named is
 # theirs, so a wrong version there is an error rather than a deletion.
 STALE=0

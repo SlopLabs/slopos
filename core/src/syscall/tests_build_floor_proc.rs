@@ -1,6 +1,5 @@
 //! Coverage for the process-result and futex surface a build system needs.
 
-use core::ffi::c_char;
 use core::ptr;
 use core::sync::atomic::Ordering;
 
@@ -21,11 +20,11 @@ use slopos_abi::task::{
 use slopos_fs::fileio::FdTable;
 use slopos_fs::vfs::ops::{vfs_mkdir, vfs_symlink};
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
-use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::process_vm_alloc;
 use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
-use slopos_mm::user_ptr::UserPtr;
+use slopos_ostd::mm::page_property::PageProperty;
 use slopos_ostd::user::context::UserContext;
+use slopos_ostd::user::ptr::UserPtr;
 use slopos_ostd::{KBox, klog_info};
 use slopos_sched::scheduler::{clear_nascent_for_test, dispatch_task_for_test};
 use slopos_sched::task::{
@@ -46,28 +45,28 @@ use crate::syscall::process_handlers::{
 };
 use crate::tests::helpers::dummy_task_entry;
 
-type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
+use slopos_sched::test_fixture::KernelTestScope;
 
 fn park_bootstrap_on_current_cpu() {
-    slopos_arch::pcr::park_bootstrap_task(
-        slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut ()
+    slopos_ostd::cpu::x86_64::pcr::park_bootstrap_task(
+        slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut (),
     );
 }
 
 /// `task_create` leaves a fresh task `Blocked` and `Nascent`; `dispatch`
 /// asserts `Ready | Running`, so both have to be cleared first.
 fn make_task_current(task_id: u32) -> bool {
-    if !clear_nascent_for_test(task_id) || task_set_state(task_id, TaskStatus::Ready) != 0 {
+    if !clear_nascent_for_test(task_id) || !task_set_state(task_id, TaskStatus::Ready) {
         return false;
     }
-    dispatch_task_for_test(slopos_arch::pcr::get_current_cpu(), task_id)
+    dispatch_task_for_test(slopos_ostd::cpu::x86_64::pcr::current_cpu_id(), task_id)
 }
 
 /// What a spawned program holds, so a test principal is an ordinary one.
 fn create_user_task() -> u32 {
     let user_entry = slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
     let id = task_create(
-        b"BuildFloorProc\0".as_ptr() as *const c_char,
+        b"BuildFloorProc",
         user_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -81,7 +80,7 @@ fn create_user_task() -> u32 {
 
 fn create_kernel_task() -> u32 {
     task_create(
-        b"BuildFloorKern\0".as_ptr() as *const c_char,
+        b"BuildFloorKern",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -127,15 +126,15 @@ fn user_copy_in<T: Copy>(table: FdTable, addr: u64) -> Option<T> {
 
 fn map_user_rw_page(table: FdTable) -> Option<u64> {
     let process = table.process()?;
-    let base = process_vm_alloc(process, 4096, PageFlags::USER_RW.bits() as u32);
+    let base = process_vm_alloc(process, 4096, true);
     if base == 0 {
         return None;
     }
     let mapped = slopos_mm::process_vm::process_vm_with_vm_space(process, |vs| {
-        slopos_mm::user_mappings::ostd_map_4kb_user_fresh(
+        slopos_mm::user_mappings::map_4kb_user_fresh(
             vs,
             slopos_abi::addr::VirtAddr::new(base),
-            PageFlags::USER_RW.bits(),
+            PageProperty::USER_RW,
         )
         .is_ok()
     });
@@ -204,7 +203,7 @@ fn build_wait_fixture() -> Option<WaitFixture> {
     // User-mode: `task_group_stop`'s group walk skips a kernel task, so a
     // kernel child could never carry a job-control report.
     let child_id = create_user_task();
-    if child_id == INVALID_TASK_ID || task_set_parent(child_id, parent_id) != 0 {
+    if child_id == INVALID_TASK_ID || !task_set_parent(child_id, parent_id) {
         return None;
     }
     Some(WaitFixture {
@@ -248,7 +247,7 @@ impl WaitFixture {
 }
 
 pub fn test_waitpid_returns_the_pid_and_writes_an_exited_status() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_wait_fixture() else {
         return fail!("could not build the wait fixture");
     };
@@ -272,7 +271,7 @@ pub fn test_waitpid_returns_the_pid_and_writes_an_exited_status() -> TestResult 
 /// caller's `rusage`.
 pub fn test_wait4_reports_the_reaped_childs_usage() -> TestResult {
     const RAN: u64 = 1 << 34;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_wait_fixture() else {
         return fail!("could not build the wait fixture");
     };
@@ -324,7 +323,7 @@ pub fn test_wait4_reports_the_reaped_childs_usage() -> TestResult {
 
 /// A signal death must be distinguishable from an exit with the same number.
 pub fn test_waitpid_reports_a_signal_death_in_the_low_seven_bits() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_wait_fixture() else {
         return fail!("could not build the wait fixture");
     };
@@ -352,10 +351,10 @@ pub fn test_waitpid_reports_a_signal_death_in_the_low_seven_bits() -> TestResult
     pass!()
 }
 
-/// The old bug: `waitpid` took the status pointer as its flags word, so
-/// `WNOHANG` never arrived.
+/// `waitpid`'s flags are its third argument, not the status pointer, so
+/// `WNOHANG` arrives.
 pub fn test_waitpid_wnohang_on_a_live_child_returns_zero() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_wait_fixture() else {
         return fail!("could not build the wait fixture");
     };
@@ -372,7 +371,7 @@ pub fn test_waitpid_wnohang_on_a_live_child_returns_zero() -> TestResult {
 /// `WNOHANG` must not outrank `ECHILD`: a caller with no children is told so,
 /// not told to try again.
 pub fn test_waitpid_without_children_is_echild() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let parent_id = create_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "no parent task");
     let parent = assert_some!(task_find_by_id(parent_id), "parent lookup failed");
@@ -413,7 +412,7 @@ pub fn test_waitpid_without_children_is_echild() -> TestResult {
 }
 
 pub fn test_waitpid_wuntraced_reports_a_stop_exactly_once() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_wait_fixture() else {
         return fail!("could not build the wait fixture");
     };
@@ -453,7 +452,7 @@ pub fn test_waitpid_wuntraced_reports_a_stop_exactly_once() -> TestResult {
 /// A stop report is consume-once, so the status write comes first: an
 /// `EFAULT` that consumed the report would lose it forever.
 pub fn test_waitpid_stop_report_survives_a_faulting_status_pointer() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_wait_fixture() else {
         return fail!("could not build the wait fixture");
     };
@@ -491,7 +490,7 @@ pub fn test_waitpid_stop_report_survives_a_faulting_status_pointer() -> TestResu
 }
 
 pub fn test_waitpid_wcontinued_reports_a_resume() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_wait_fixture() else {
         return fail!("could not build the wait fixture");
     };
@@ -534,7 +533,7 @@ pub fn test_waitpid_wcontinued_reports_a_resume() -> TestResult {
 
 /// A null status pointer is POSIX's "discard the status", not an error.
 pub fn test_waitpid_accepts_a_null_status_pointer() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_wait_fixture() else {
         return fail!("could not build the wait fixture");
     };
@@ -554,7 +553,7 @@ pub fn test_waitpid_accepts_a_null_status_pointer() -> TestResult {
 
 /// An exit status lost to a bad pointer is lost forever.
 pub fn test_waitpid_bad_status_pointer_faults_without_reaping() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_wait_fixture() else {
         return fail!("could not build the wait fixture");
     };
@@ -609,7 +608,7 @@ pub fn test_waitpid_bad_status_pointer_faults_without_reaping() -> TestResult {
 /// Not silently ignored: a caller asking for `WNOWAIT` must not be answered
 /// with a reap.
 pub fn test_waitpid_rejects_unknown_option_bits() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_wait_fixture() else {
         return fail!("could not build the wait fixture");
     };
@@ -636,7 +635,7 @@ pub fn test_waitpid_rejects_unknown_option_bits() -> TestResult {
 /// Every member is killed with the group's code and left to exit from its own
 /// context; the handler adds only the caller's own exit on top of the fan-out.
 pub fn test_exit_group_terminates_every_thread_of_the_group() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let leader_id = create_user_task();
     assert_test!(leader_id != INVALID_TASK_ID, "no group leader task");
@@ -689,7 +688,7 @@ pub fn test_exit_group_terminates_every_thread_of_the_group() -> TestResult {
 }
 
 pub fn test_getpid_is_the_tgid_and_gettid_is_the_task_id() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let leader_id = create_user_task();
     assert_test!(leader_id != INVALID_TASK_ID, "no group leader task");
@@ -745,7 +744,7 @@ pub fn test_getpid_is_the_tgid_and_gettid_is_the_task_id() -> TestResult {
 /// it — another thread of the same process — so answering from it makes two
 /// threads disagree about who their parent is.
 pub fn test_getppid_is_the_group_parent_for_every_thread() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let grandparent_id = create_user_task();
     let leader_id = create_user_task();
@@ -753,7 +752,7 @@ pub fn test_getppid_is_the_group_parent_for_every_thread() -> TestResult {
         grandparent_id != INVALID_TASK_ID && leader_id != INVALID_TASK_ID,
         "could not create the process tasks"
     );
-    if task_set_parent(leader_id, grandparent_id) != 0 {
+    if !task_set_parent(leader_id, grandparent_id) {
         task_terminate(leader_id);
         task_terminate(grandparent_id);
         return fail!("could not parent the leader");
@@ -811,7 +810,7 @@ pub fn test_getppid_is_the_group_parent_for_every_thread() -> TestResult {
 /// `exit_group` reports `NoReturn`, so the caller must be terminated on every
 /// path — including one the group fan-out never reached.
 pub fn test_exit_group_terminates_the_caller_when_the_fanout_misses() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let caller_id = create_user_task();
     let foreign_id = create_user_task();
@@ -871,10 +870,10 @@ impl PageFixture {
     }
 }
 
-/// `FUTEX_PRIVATE_FLAG` is set by every glibc- and std-shaped caller, and
-/// matching `op` exactly made all of them `ENOSYS`.
+/// `FUTEX_PRIVATE_FLAG` is set by every glibc- and std-shaped caller, so the
+/// command is `op` with it masked off, never `ENOSYS` for it.
 pub fn test_futex_private_flag_is_not_enosys() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_page_fixture() else {
         return fail!("could not build the page fixture");
     };
@@ -923,7 +922,7 @@ pub fn test_futex_private_flag_is_not_enosys() -> TestResult {
 /// `FUTEX_CLOCK_REALTIME` only means anything on an absolute timeout;
 /// ignoring it elsewhere would silently reinterpret a relative one.
 pub fn test_futex_clock_realtime_needs_an_absolute_timeout() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_page_fixture() else {
         return fail!("could not build the page fixture");
     };
@@ -964,7 +963,7 @@ pub fn test_futex_clock_realtime_needs_an_absolute_timeout() -> TestResult {
 
 /// A zero bitset is a waiter no wake could ever match.
 pub fn test_futex_zero_bitset_is_einval() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_page_fixture() else {
         return fail!("could not build the page fixture");
     };
@@ -999,7 +998,7 @@ pub fn test_futex_zero_bitset_is_einval() -> TestResult {
 /// `FUTEX_WAIT_BITSET`'s timeout is absolute: read as a relative duration, a
 /// deadline in the past would be a ~55-year sleep.
 pub fn test_futex_wait_bitset_past_absolute_deadline_times_out() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_page_fixture() else {
         return fail!("could not build the page fixture");
     };
@@ -1054,7 +1053,7 @@ pub fn test_futex_wait_bitset_past_absolute_deadline_times_out() -> TestResult {
 }
 
 pub fn test_futex_wake_bitset_wakes_only_the_intersecting_waiter() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let addr = 0x5000_0000u64;
     let first = create_kernel_task();
@@ -1112,7 +1111,7 @@ pub fn test_futex_wake_bitset_wakes_only_the_intersecting_waiter() -> TestResult
 /// shifts by 21 slots per 4-byte step, so `addr` and `addr + 4` never
 /// collide.
 pub fn test_futex_requeue_moves_the_surplus_to_the_second_word() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let src = 0x5100_0000u64;
     let dst = src + 4;
@@ -1173,7 +1172,7 @@ pub fn test_futex_requeue_moves_the_surplus_to_the_second_word() -> TestResult {
 /// waiter's `futex_addr`, after which the victim's own `FUTEX_WAKE` can never
 /// match it and a `std` park with no timeout blocks forever.
 pub fn test_futex_key_carries_the_address_space() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let addr = 0x5200_0000u64;
     let dst = addr + 4;
@@ -1213,7 +1212,8 @@ pub fn test_futex_key_carries_the_address_space() -> TestResult {
 
     // Not `make_task_current`: its nascent CAS only fires on a task's first
     // dispatch, and the victim has already had one.
-    let switched = dispatch_task_for_test(slopos_arch::pcr::get_current_cpu(), victim_id);
+    let switched =
+        dispatch_task_for_test(slopos_ostd::cpu::x86_64::pcr::current_cpu_id(), victim_id);
     let victim_left =
         slopos_sched::futex::futex_waiters_for_test(slopos_sched::futex::FutexKey::private(addr));
     let victim_moved =
@@ -1266,7 +1266,7 @@ pub fn test_futex_requeue_moves_waiters_between_key_kinds() -> TestResult {
         FutexKey, futex_keys_share_bucket_for_test, futex_park_for_test,
         futex_remove_self_for_test, futex_requeue, futex_waiters_for_test,
     };
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let id = create_kernel_task();
     if id == INVALID_TASK_ID {
@@ -1403,12 +1403,12 @@ fn wake_across_spaces(
 /// memfd and offset, so spaces mapping it at different addresses meet; private
 /// anonymous memory keeps its per-space key.
 pub fn test_shared_futex_keys_on_the_backing_object() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let (Some(a), Some(b)) = (build_page_fixture(), build_page_fixture()) else {
         return fail!("could not build two page fixtures");
     };
     let Some((memfd, _ops, backing)) =
-        slopos_mm::memfd::memfd_create(0, slopos_ostd::process::quota::root())
+        slopos_mm::memfd::memfd_create(slopos_ostd::process::quota::root())
     else {
         a.teardown();
         b.teardown();
@@ -1429,7 +1429,7 @@ pub fn test_shared_futex_keys_on_the_backing_object() -> TestResult {
     b.teardown();
     drop(backing);
 
-    assert_eq_test!(sized, 0, "memfd_ftruncate failed");
+    assert_test!(sized.is_ok(), "memfd_ftruncate failed");
     let words = assert_some!(words, "the memfd did not map at both addresses");
     let word_a = assert_some!(
         words.a.ok().flatten(),
@@ -1473,7 +1473,7 @@ pub fn test_shared_futex_keys_on_the_backing_object() -> TestResult {
 
 /// The clock counts the settled total plus the slice in progress.
 pub fn test_thread_cputime_is_nondecreasing() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_page_fixture() else {
         return fail!("could not build the page fixture");
     };
@@ -1525,7 +1525,7 @@ pub fn test_thread_cputime_is_nondecreasing() -> TestResult {
 
 /// Only the wall clock is settable, and only with a legal `tv_nsec`.
 pub fn test_clock_settime_refuses_unsettable_clocks() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_page_fixture() else {
         return fail!("could not build the page fixture");
     };
@@ -1588,7 +1588,7 @@ fn uts_field_is(field: &[u8; 65], want: &[u8]) -> bool {
 }
 
 pub fn test_uname_reports_a_nul_terminated_identity() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_page_fixture() else {
         return fail!("could not build the page fixture");
     };
@@ -1644,7 +1644,7 @@ fn current_cwd_copy(buf: &mut [u8; 128]) -> usize {
 /// The stored cwd is prefixed onto every relative lookup, so a `..` left in
 /// it would name a different directory than the one that was checked.
 pub fn test_chdir_validates_and_canonicalises() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_page_fixture() else {
         return fail!("could not build the page fixture");
     };
@@ -1717,7 +1717,7 @@ pub fn test_chdir_validates_and_canonicalises() -> TestResult {
 /// `link -> /tmp/cd_real/inner`, so `link/..` is `/tmp/cd_real` by the walk
 /// and `/tmp/cd_other` by the spelling.
 pub fn test_chdir_stores_the_walked_path_not_the_lexical_one() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_page_fixture() else {
         return fail!("could not build the page fixture");
     };
@@ -1761,7 +1761,7 @@ pub fn test_chdir_stores_the_walked_path_not_the_lexical_one() -> TestResult {
 /// `fchdir` takes the directory an open descriptor names, and refuses one
 /// that names no directory.
 pub fn test_fchdir_moves_to_the_descriptors_directory() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(fx) = build_page_fixture() else {
         return fail!("could not build the page fixture");
     };

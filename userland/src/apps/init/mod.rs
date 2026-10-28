@@ -29,9 +29,8 @@ use self::service::{
     runtime_dir, start, start_ready,
 };
 use self::session::{Sessions, Then, Want};
-use crate::apps::privd::{LINKS_FD, SESSIONS_FD};
 use crate::base_watch::BaseWatch;
-use crate::init_control::{self, At, Command, SOCKET};
+use crate::init_control::{self, At, Command, SOCKET, fds};
 use crate::root_layout::{LOCAL, Owners};
 use crate::syscall::process::{self, Endowment, WaitStatus};
 use crate::syscall::{OwnedFd, RawFd, core as sys_core, fs, net, tty};
@@ -45,7 +44,7 @@ fn upgrade_console_font() {
         payload.extend_from_slice(chunk);
     }
     payload.extend_from_slice(atlas.replacement());
-    tty::font_set_coverage(
+    tty::font_set(
         &payload,
         atlas.cell_width() as u16,
         atlas.cell_height() as u16,
@@ -114,10 +113,6 @@ const MAX_WAITING: usize = 8;
 /// How long init sleeps with nothing due, and while a session ends.
 const TICK_MS: u64 = 1000;
 const ENDING_TICK_MS: u64 = 50;
-
-/// In the sealed base of a machine the host built paired; the daemon runs
-/// only there.
-const REMOTE_CONF: &str = "/usr/share/slopos/remote/remote.conf";
 
 /// A boot from the install medium onto a RAM root, which keeps nothing.
 fn live() -> bool {
@@ -299,8 +294,8 @@ struct Init {
     sessions: Sessions,
     /// The people whose runtime directories init made.
     runtime: Vec<u32>,
-    /// The sessions ended for an image that keeps none, to be wanted again
-    /// should the re-execution fail.
+    /// The sessions ended for an image that cannot read init's state, to be
+    /// wanted again should the re-execution fail.
     wanted_after_reexec: bool,
     tests: Option<Child>,
     units: Units,
@@ -331,9 +326,7 @@ impl Init {
             privd_ready: None,
             retired: Vec::new(),
             remote_ending: None,
-            remoted: std::path::Path::new(REMOTE_CONF)
-                .exists()
-                .then(|| Supervised::new(&REMOTED, remote_person())),
+            remoted: init_control::paired().then(|| Supervised::new(&REMOTED, remote_person())),
             login: None,
             sessions: Sessions::new(wanted, 0),
             runtime: Vec::new(),
@@ -390,22 +383,18 @@ impl Init {
                 budget,
             }
         };
-        let first = state.legacy.is_some() || state.links.len() < LINKS;
-        let mut links: Vec<(OwnedFd, OwnedFd)> = state
+        let links: Vec<(OwnedFd, OwnedFd)> = state
             .links
             .iter()
             .map(|&(privd, agent)| (adopt(privd), adopt(agent)))
             .collect();
-        while links.len() < LINKS {
-            match net::socketpair(SOCK_CLOEXEC | SOCK_NONBLOCK) {
-                Ok(pair) => links.push(pair),
-                Err(_) => break,
-            }
-        }
         let sessions_link = state
             .sessions_link
-            .map(|(init, privd)| (adopt(init), adopt(privd)))
-            .or_else(|| net::socketpair(SOCK_CLOEXEC | SOCK_NONBLOCK).ok());
+            .map(|(init, privd)| (adopt(init), adopt(privd)));
+        let consent = (!links.is_empty()).then_some(Consent {
+            links,
+            sessions: sessions_link,
+        });
         let mut sessions = Sessions::new(state.wanted, state.next_tag);
         sessions.held = state.held;
         sessions.fresh = state.fresh;
@@ -442,32 +431,9 @@ impl Init {
             );
         }
         sessions.front = state.front.filter(|tag| sessions.find(*tag).is_some());
-        if let Some(legacy) = state.legacy {
-            sessions.wanted = true;
-            if let Some(pid) = legacy.pid {
-                let who = Identity::first_person();
-                sessions.adopt(
-                    init_control::DESKTOP,
-                    who,
-                    Class::User,
-                    Some(pid),
-                    Some(0),
-                    false,
-                    None,
-                    None,
-                    legacy.starts,
-                    now,
-                );
-                sessions.front = Some(init_control::DESKTOP);
-                sessions.fresh = false;
-            }
-        }
         let session_runs = sessions.first_person_runs();
-        let mut init = Init {
-            consent: Some(Consent {
-                links,
-                sessions: sessions_link,
-            }),
+        let init = Init {
+            consent,
             control,
             base: watch_base(),
             reexec_due: None,
@@ -491,17 +457,12 @@ impl Init {
         if let Some(reply) = state.reply {
             answer(adopt(reply), "ok");
         }
-        if first {
-            println!("init: privd starts again to hear the sessions");
-            init.privd.restart(now);
-        }
         println!("init: re-executed");
         init
     }
 
-    /// What privd is started with: a consent link per desktop, the first
-    /// where a privd from before the session table finds its one, and the
-    /// pair it hears the table on.
+    /// What privd is started with: a consent link per desktop or login
+    /// screen, and the pair it hears the table on.
     fn privd_fds(&self) -> Vec<(RawFd, RawFd)> {
         let Some(consent) = &self.consent else {
             return Vec::new();
@@ -510,11 +471,11 @@ impl Init {
             .links
             .iter()
             .enumerate()
-            .map(|(i, (privd, _))| (privd.raw(), LINKS_FD + i as RawFd));
+            .map(|(i, (privd, _))| (privd.raw(), fds::PRIVD_LINKS + i as RawFd));
         let sessions = consent
             .sessions
             .iter()
-            .map(|(_, privd)| (privd.raw(), SESSIONS_FD));
+            .map(|(_, privd)| (privd.raw(), fds::PRIVD_TABLE));
         links.chain(sessions).collect()
     }
 
@@ -705,7 +666,7 @@ impl Init {
                 println!("init: the new base changes privd; it drains and starts again");
                 self.privd.restart(now);
             }
-            if switch.changed(&[service::PAIRING]) {
+            if switch.changed(&[init_control::PAIRING]) {
                 self.end_remote(now);
             } else if let Some(remoted) = self.remoted.as_mut().filter(|r| r.changed_by(&switch)) {
                 remoted.restart(now);
@@ -778,7 +739,7 @@ impl Init {
     /// End remoted and what it ran for a broker the base no longer pairs
     /// with, as a session ends: remoted for a new pairing starts after.
     fn end_remote(&mut self, now: u64) {
-        let paired = std::path::Path::new(REMOTE_CONF).exists();
+        let paired = init_control::paired();
         let mut remoted = self.remoted.take();
         if let Some(remoted) = remoted.as_mut() {
             self.retired.extend(remoted.child.take());
@@ -1029,8 +990,9 @@ impl Init {
     }
 
     /// The new image answers `reply`; this one only when the exec failed, or
-    /// when the new image keeps no services or sessions and they end first.
-    /// True when this has decided when the re-execution is next due.
+    /// when the new image cannot read init's state or its services' and the
+    /// sessions or the services end first. True when this has decided when
+    /// the re-execution is next due.
     fn reexec(&mut self, reply: Option<OwnedFd>, now: u64) -> bool {
         if !self.may_reexec() {
             if let Some(reply) = reply {
@@ -1051,8 +1013,8 @@ impl Init {
                 return false;
             }
         };
-        if !reads.sessions && !self.sessions.list.is_empty() {
-            eprintln!("init: the new init keeps no session table; the sessions end first");
+        if !reads.state && !self.sessions.list.is_empty() {
+            eprintln!("init: the new init cannot read this state; the sessions end first");
             self.wanted_after_reexec |= std::mem::take(&mut self.sessions.wanted);
             self.sessions.end_all(Then::Stay, None, now);
             self.reexec_due = Some(now);
@@ -1065,7 +1027,7 @@ impl Init {
             return true;
         }
         if !reads.units && !self.units.is_empty() {
-            eprintln!("init: the new init keeps no extensions' services; they end first");
+            eprintln!("init: the new init cannot read the extensions' services; they end first");
             self.units.retire(now);
             self.reexec_due = Some(now);
             if let Some(reply) = reply {
@@ -1119,10 +1081,9 @@ impl Init {
             fresh: self.sessions.fresh,
             default_starts: self.sessions.default_budget.starts().collect(),
             tests: self.tests.as_ref().map(|tests| tests.pid),
-            legacy: None,
         };
         let units = reads.units.then(|| self.units.carry());
-        let why = reexec::reexec(&state, reads.sessions, units.as_ref());
+        let why = reexec::reexec(&state, units.as_ref());
         eprintln!("init: cannot re-execute: {why}");
         if let Some(reply) = reply {
             answer(reply, &format!("refused: {why}"));

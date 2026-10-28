@@ -7,48 +7,6 @@ use slopos_ostd::{KArc, KBTreeMap, KWeak};
 
 use super::*;
 
-pub fn file_poll_register_pipes(table: FdTable, fds: &[(c_int, u16)]) -> usize {
-    let mut registered = 0usize;
-    let _ = with_table_slot(table, |inner| {
-        for &(fd, events) in fds {
-            let Some(open_file) = snapshot_open_file(inner, fd) else {
-                continue;
-            };
-            let ops = open_file.ops;
-            match ops.kind() {
-                FileKind::PipeRead if (events & POLLIN) != 0 => {
-                    if ops.poll_wait(open_file.handle) {
-                        registered += 1;
-                    }
-                }
-                FileKind::PipeWrite if (events & POLLOUT) != 0 => {
-                    if ops.poll_wait(open_file.handle) {
-                        registered += 1;
-                    }
-                }
-                _ => {}
-            }
-        }
-    });
-    registered
-}
-
-pub fn file_poll_unregister_pipes(table: FdTable, fds: &[(c_int, u16)]) {
-    let _ = with_table_slot(table, |inner| {
-        for &(fd, events) in fds {
-            let Some(open_file) = snapshot_open_file(inner, fd) else {
-                continue;
-            };
-            let ops = open_file.ops;
-            match ops.kind() {
-                FileKind::PipeRead if (events & POLLIN) != 0 => ops.poll_unwait(open_file.handle),
-                FileKind::PipeWrite if (events & POLLOUT) != 0 => ops.poll_unwait(open_file.handle),
-                _ => {}
-            }
-        }
-    });
-}
-
 /// Clone the `KArc<OpenFile>` behind `fd` (or `None` if the fd is bad).
 fn snapshot_open_file(inner: &FileTableSlotInner, fd: c_int) -> Option<KArc<OpenFile>> {
     Some(get_fd_entry(inner, fd)?.open_file.clone())

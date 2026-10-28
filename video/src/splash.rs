@@ -268,7 +268,7 @@ pub fn splash_update_progress(progress: i32, message: &[u8]) -> GraphicsResult<(
         progress,
     );
     // A GPU backend only reaches the screen once flushed.
-    framebuffer::framebuffer_flush(core::ptr::null(), 0);
+    framebuffer::framebuffer_flush(&[]);
     Ok(())
 }
 
@@ -282,25 +282,5 @@ pub fn splash_report_progress(progress: i32, message: &[u8]) -> GraphicsResult<(
 
     state.progress = progress.min(100);
     splash_update_progress(state.progress, message)?;
-    Ok(())
-}
-
-pub fn splash_finish() -> GraphicsResult<()> {
-    let mut state = STATE.lock();
-    if state.active {
-        splash_report_progress(100, b"Boot complete\0")?;
-        state.active = false;
-    }
-    Ok(())
-}
-
-pub fn splash_clear() -> GraphicsResult<()> {
-    if slopos_ostd::fblog::is_active() {
-        return Ok(());
-    }
-    ensure_framebuffer_ready()?;
-    let mut ctx = GraphicsContext::new()?;
-    let bg_px = ctx.pixel_format().encode(SPLASH_BG_COLOR);
-    ctx.clear_canvas(bg_px);
     Ok(())
 }

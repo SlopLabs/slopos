@@ -14,7 +14,7 @@
 
 use slopos_userland as _;
 
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::time::{Duration, Instant};
 
@@ -276,10 +276,4 @@ fn main() {
     }
     let exit_code = failed.min(255) as i32;
     slopos_userland::syscall::core::exit_with_code(exit_code)
-}
-
-// Avoid unused-import warning when no helpers below need it.
-#[allow(dead_code)]
-fn _unused_kind() -> ErrorKind {
-    ErrorKind::Other
 }

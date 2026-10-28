@@ -580,10 +580,9 @@ pub fn fit_disk_blocks(id: AccountId, caps: u64) {
 /// with an amount equal to its fixed capacity, so a full queue is a bound its
 /// owner already paid for.
 ///
-/// That rule is deliberately not a runtime assertion: this kernel enters
-/// syscalls through an interrupt gate, so `in_interrupt_context` is true on
-/// every sanctioned charge site and false on none, and nothing else in the PCR
-/// separates a syscall that arrived via a trap gate from a device IRQ.
+/// That rule is not a runtime assertion: a charge the netpoll thread made for
+/// a remote peer would run outside interrupt context just as a syscall does,
+/// so `in_interrupt_context` could not tell the two apart.
 pub fn try_charge<A: Refundable>(
     account: AccountId,
     n: u32,

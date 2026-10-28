@@ -10,7 +10,7 @@
 #   slopos-ostd/src/cpu/preempt.rs: PreemptGuard::drop keeps its always-on
 #   `preempt_count underflow` invariant assert. This script prevents that
 #   single checked invariant from expanding into a broader Drop-panic surface.
-#   drivers/src/tty/mod.rs and fs/src/ext2/inode.rs keep debug-only Drop
+#   drivers/src/tty/mod.rs and fs/src/ext4/inode.rs keep debug-only Drop
 #   assertions that catch missing explicit cleanup during development.
 #   boot/src/early_init.rs: the `panic.nested_drop_smoke` boot hook's guard
 #   Drop panics BY DESIGN — it is the fault injection that proves a Drop
@@ -65,7 +65,7 @@ scan_sources() {
                     && line ~ /preempt_count underflow/ \
                     || fname == "drivers/src/tty/mod.rs" \
                     && line ~ /^[[:space:]]*debug_assert![[:space:]]*\(/ \
-                    || fname == "fs/src/ext2/inode.rs" \
+                    || fname == "fs/src/ext4/inode.rs" \
                     && line ~ /^[[:space:]]*debug_assert![[:space:]]*\(/ \
                     || fname == "boot/src/early_init.rs" \
                     && line ~ /panic\.nested_drop_smoke: Drop panic during unwind/
@@ -176,7 +176,7 @@ impl Drop for Tty {
     }
 }
 FIXTURE
-    cat > "$(gate_fixture fs/src/ext2/inode.rs)" <<'FIXTURE'
+    cat > "$(gate_fixture fs/src/ext4/inode.rs)" <<'FIXTURE'
 impl Drop for Inode {
     fn drop(&mut self) {
         debug_assert!(self.flushed);

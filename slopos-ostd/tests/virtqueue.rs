@@ -2,9 +2,10 @@
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use slopos_abi::addr::PhysAddr;
 use slopos_ostd::Pod as PodDerive;
 use slopos_ostd::dma::VirtqueueRegion;
-use slopos_ostd::mm::frame::{Frame, KernelMeta, MetaSlot, Paddr, init_meta_slots};
+use slopos_ostd::mm::frame::{Frame, KernelMeta, MetaSlot, init_meta_slots};
 use slopos_ostd::mm::phys::init_phys_window;
 
 const N_PAGES: usize = 8;
@@ -42,7 +43,7 @@ struct Desc {
 }
 
 fn frame_at(paddr: u64) -> Frame<KernelMeta> {
-    Frame::<KernelMeta>::from_unused(Paddr::new(paddr), KernelMeta).expect("frame setup")
+    Frame::<KernelMeta>::from_unused(PhysAddr::new(paddr), KernelMeta).expect("frame setup")
 }
 
 #[test]

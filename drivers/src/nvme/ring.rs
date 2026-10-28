@@ -4,17 +4,17 @@
 
 use core::sync::atomic::{Ordering, fence};
 
-use slopos_mm::mmio::MmioRegion;
 use slopos_mm::page_alloc::OwnedPageFrame;
 use slopos_nvme_core::command::{Command, SQE_BYTES};
 use slopos_nvme_core::completion::{CQE_BYTES, Completion};
 use slopos_nvme_core::regs::{self, Cap, PAGE_SIZE};
+use slopos_ostd::mm::IoMem;
 
 /// The deepest queue one page holds.
 pub const MAX_DEPTH: u16 = (PAGE_SIZE / SQE_BYTES) as u16;
 
 pub struct Ring {
-    regs: MmioRegion,
+    regs: IoMem,
     sq: OwnedPageFrame,
     cq: OwnedPageFrame,
     depth: u16,
@@ -28,7 +28,7 @@ pub struct Ring {
 }
 
 impl Ring {
-    pub fn new(regs: &MmioRegion, cap: Cap, qid: u16, depth: u16) -> Option<Self> {
+    pub fn new(regs: &IoMem, cap: Cap, qid: u16, depth: u16) -> Option<Self> {
         Some(Self {
             regs: regs.clone(),
             sq: OwnedPageFrame::alloc_zeroed()?,

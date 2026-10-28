@@ -7,9 +7,8 @@ use slopos_priv_core::{People, Person};
 
 use super::sessions::Seen;
 use crate::accounts::Store;
-use crate::init_control::Tasks;
 
-pub fn now(tasks: Option<&Tasks>, seen: &Seen) -> Result<People, String> {
+pub fn now(seen: &Seen) -> Result<People, String> {
     let accounts = Store::read(Path::new("/"))
         .accounts()
         .map_err(|why| format!("who the people are is unknown: {why}"))?;
@@ -24,7 +23,7 @@ pub fn now(tasks: Option<&Tasks>, seen: &Seen) -> Result<People, String> {
         })
         .collect();
     let logged_in = seen
-        .logged_in(tasks)?
+        .logged_in()?
         .into_iter()
         .filter(|uid| people.iter().any(|p| p.uid == *uid))
         .collect();

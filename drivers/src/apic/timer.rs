@@ -160,7 +160,7 @@ pub fn is_calibrated() -> bool {
 fn write_timer_lvt(lvt: u32) {
     write_register(LAPIC_LVT_TIMER, lvt);
     let ticking = (lvt & LAPIC_TIMER_PERIODIC) != 0 && (lvt & LAPIC_LVT_MASKED) == 0;
-    slopos_arch::pcr::set_timer_armed(ticking);
+    slopos_ostd::cpu::x86_64::pcr::set_timer_armed(ticking);
 }
 
 /// Mask the LAPIC timer LVT entry (suppress interrupts without stopping the counter).

@@ -5,7 +5,8 @@
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use slopos_ostd::mm::frame::{AnonymousMeta, MetaSlot, Paddr, init_meta_slots};
+use slopos_abi::addr::PhysAddr;
+use slopos_ostd::mm::frame::{AnonymousMeta, MetaSlot, init_meta_slots};
 use slopos_ostd::mm::phys::init_phys_window;
 use slopos_ostd::mm::uframe::{UFrame, UFrameError, USegment};
 
@@ -38,21 +39,23 @@ fn setup() -> MutexGuard<'static, ()> {
 #[test]
 fn round_trip_u64_pod() {
     let _g = setup();
-    let f = UFrame::<AnonymousMeta>::from_unused(Paddr::new(0), AnonymousMeta::default()).unwrap();
+    let f =
+        UFrame::<AnonymousMeta>::from_unused(PhysAddr::new(0), AnonymousMeta::default()).unwrap();
     f.write_pod::<u64>(8, 0xdead_beef_cafe_babe).unwrap();
     let v = f.read_pod::<u64>(8).unwrap();
     assert_eq!(v, 0xdead_beef_cafe_babe);
     drop(f);
     // Re-arm the slot for tests reusing this paddr: `from_unused` requires the
     // UNUSED → TYPED transition.
-    let _ = UFrame::<AnonymousMeta>::from_unused(Paddr::new(0), AnonymousMeta::default()).unwrap();
+    let _ =
+        UFrame::<AnonymousMeta>::from_unused(PhysAddr::new(0), AnonymousMeta::default()).unwrap();
 }
 
 #[test]
 fn round_trip_array_pod() {
     let _g = setup();
-    let f =
-        UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x1000), AnonymousMeta::default()).unwrap();
+    let f = UFrame::<AnonymousMeta>::from_unused(PhysAddr::new(0x1000), AnonymousMeta::default())
+        .unwrap();
     let val: [u8; 16] = *b"abcdefghijklmnop";
     f.write_pod(0, val).unwrap();
     assert_eq!(f.read_pod::<[u8; 16]>(0).unwrap(), val);
@@ -61,8 +64,8 @@ fn round_trip_array_pod() {
 #[test]
 fn round_trip_bytes() {
     let _g = setup();
-    let f =
-        UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x2000), AnonymousMeta::default()).unwrap();
+    let f = UFrame::<AnonymousMeta>::from_unused(PhysAddr::new(0x2000), AnonymousMeta::default())
+        .unwrap();
     let src: [u8; 64] = core::array::from_fn(|i| i as u8);
     f.write_bytes(100, &src).unwrap();
     let mut dst = [0u8; 64];
@@ -73,8 +76,8 @@ fn round_trip_bytes() {
 #[test]
 fn out_of_bounds_returns_err() {
     let _g = setup();
-    let f =
-        UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x3000), AnonymousMeta::default()).unwrap();
+    let f = UFrame::<AnonymousMeta>::from_unused(PhysAddr::new(0x3000), AnonymousMeta::default())
+        .unwrap();
     let mut buf = [0u8; 16];
     assert_eq!(f.read_bytes(4090, &mut buf), Err(UFrameError::OutOfBounds));
     assert_eq!(
@@ -86,8 +89,8 @@ fn out_of_bounds_returns_err() {
 #[test]
 fn misaligned_pod_returns_err() {
     let _g = setup();
-    let f =
-        UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x4000), AnonymousMeta::default()).unwrap();
+    let f = UFrame::<AnonymousMeta>::from_unused(PhysAddr::new(0x4000), AnonymousMeta::default())
+        .unwrap();
     assert_eq!(f.read_pod::<u64>(1).unwrap_err(), UFrameError::Misaligned);
     assert_eq!(
         f.write_pod::<u32>(2, 0).unwrap_err(),
@@ -106,8 +109,8 @@ fn round_trip_derive_pod() {
     }
 
     let _g = setup();
-    let f =
-        UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x5000), AnonymousMeta::default()).unwrap();
+    let f = UFrame::<AnonymousMeta>::from_unused(PhysAddr::new(0x5000), AnonymousMeta::default())
+        .unwrap();
     let h = Header {
         magic: 0xfeed_face,
         version: 7,
@@ -120,8 +123,8 @@ fn round_trip_derive_pod() {
 #[test]
 fn volatile_u32_index_round_trip() {
     let _g = setup();
-    let f =
-        UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x5000), AnonymousMeta::default()).unwrap();
+    let f = UFrame::<AnonymousMeta>::from_unused(PhysAddr::new(0x5000), AnonymousMeta::default())
+        .unwrap();
     f.store_u32_release(0, 0xabad_1dea).unwrap();
     assert_eq!(f.load_u32_acquire(0).unwrap(), 0xabad_1dea);
     f.store_u32_release(64, 7).unwrap();
@@ -131,8 +134,8 @@ fn volatile_u32_index_round_trip() {
 #[test]
 fn volatile_u32_rejects_misaligned_and_oob() {
     let _g = setup();
-    let f =
-        UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x4000), AnonymousMeta::default()).unwrap();
+    let f = UFrame::<AnonymousMeta>::from_unused(PhysAddr::new(0x4000), AnonymousMeta::default())
+        .unwrap();
     assert_eq!(f.load_u32_acquire(1).unwrap_err(), UFrameError::Misaligned);
     assert_eq!(
         f.store_u32_release(2, 0).unwrap_err(),
@@ -147,8 +150,8 @@ fn volatile_u32_rejects_misaligned_and_oob() {
 #[test]
 fn volatile_byte_copy_round_trip() {
     let _g = setup();
-    let f =
-        UFrame::<AnonymousMeta>::from_unused(Paddr::new(0x3000), AnonymousMeta::default()).unwrap();
+    let f = UFrame::<AnonymousMeta>::from_unused(PhysAddr::new(0x3000), AnonymousMeta::default())
+        .unwrap();
     let src: [u8; 64] = core::array::from_fn(|i| (i as u8).wrapping_mul(3));
     f.copy_in_volatile(128, &src).unwrap();
     let mut dst = [0u8; 64];
@@ -168,7 +171,7 @@ fn volatile_byte_copy_round_trip() {
 #[test]
 fn usegment_round_trip_crosses_page_boundary() {
     let _g = setup();
-    let seg = USegment::<AnonymousMeta>::from_unused_run(Paddr::new(0x6000), 2).unwrap();
+    let seg = USegment::<AnonymousMeta>::from_unused_run(PhysAddr::new(0x6000), 2).unwrap();
     assert_eq!(seg.len_pages(), 2);
     assert_eq!(seg.len_bytes(), 8192);
 

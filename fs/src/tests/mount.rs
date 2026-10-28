@@ -1,9 +1,8 @@
-//! Mount identity, the mount table's child queries, and the paged listing's
-//! mount pass.
+//! Mount identity, the mount pools, ext4 mounts side by side and of one
+//! device again, and the directories the kernel keeps where they are.
 
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use slopos_abi::fs::{FS_TYPE_DIRECTORY, UserFsEntry};
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::{KArc, KBox, KVec};
@@ -12,26 +11,25 @@ use slopos_testing::TestResult;
 use super::{Ext2ImageSpec, FIX_FILE_BLOCK, build_ext2_image};
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
 use crate::devfs::{devfs_register_block_device, devfs_standalone_block_device};
-use crate::ext2::ReadOnlyReason;
-use crate::ext2_vfs::{Ext2Mount, WRITEBACK_CHUNK};
+use crate::ext4::ReadOnlyReason;
+use crate::ext4_vfs::{Ext4Mount, WRITEBACK_CHUNK};
 use crate::ramfs::RamFs;
 use crate::vfs::init::{
-    vfs_claim_block_device, vfs_ext2_mount_named, vfs_ext2_pool_claim, vfs_ext2_pool_release,
-    vfs_ext2_unmount_named,
+    vfs_claim_block_device, vfs_ext4_mount_named, vfs_ext4_pool_claim, vfs_ext4_pool_release,
+    vfs_ext4_unmount_named,
 };
 use crate::vfs::traits::{FileStat, FileSystem, FileType, InodeId, VfsResult, same_filesystem};
 use crate::vfs::{
-    ListCursor, VfsError, mount, mount_at, unmount, vfs_init_builtin_filesystems, vfs_list_from,
-    vfs_mkdir, vfs_open, vfs_rmdir, vfs_stat, vfs_statfs, with_mount_table,
+    VfsError, mount, mount_at, unmount, vfs_init_builtin_filesystems, vfs_mkdir, vfs_open,
+    vfs_rmdir, vfs_stat, vfs_statfs,
 };
 
-/// Four fixture filesystems, each with its own lock class: a path walk
+/// Three fixture filesystems, each with its own lock class: a path walk
 /// crossing a mount holds one mount's lock while taking the next one's.
-static FIXTURE_FS: [RamFs; 4] = [
+static FIXTURE_FS: [RamFs; 3] = [
     RamFs::new_const(lock_class!("RAMFS_MOUNT_TEST_0", LOCK_LEVEL_RESOURCE)),
     RamFs::new_const(lock_class!("RAMFS_MOUNT_TEST_1", LOCK_LEVEL_RESOURCE)),
     RamFs::new_const(lock_class!("RAMFS_MOUNT_TEST_2", LOCK_LEVEL_RESOURCE)),
-    RamFs::new_const(lock_class!("RAMFS_MOUNT_TEST_3", LOCK_LEVEL_RESOURCE)),
 ];
 
 fn ready() -> bool {
@@ -46,21 +44,8 @@ fn ensure_dir(path: &[u8]) -> bool {
         || crate::vfs::vfs_stat(path).map(|s| s.file_type) == Ok(FileType::Directory)
 }
 
-fn entry_name(entry: &UserFsEntry) -> &[u8] {
-    let end = entry
-        .name
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(entry.name.len());
-    &entry.name[..end]
-}
-
-fn page_contains(page: &[UserFsEntry], name: &[u8]) -> bool {
-    page.iter().any(|e| entry_name(e) == name)
-}
-
-/// A mount id is handed out once. Slot indices are reused the instant a mount
-/// is released — which is exactly why the listing cursor may not be an ordinal.
+/// A mount id is handed out once, though its slot is reused the instant the
+/// mount is released.
 pub fn test_mount_id_is_never_reused() -> TestResult {
     const MP: &[u8] = b"/tmp/mount_id_mp";
 
@@ -93,212 +78,6 @@ pub fn test_mount_id_is_never_reused() -> TestResult {
 
     let _ = unmount(MP);
     let _ = vfs_rmdir(MP);
-    match outcome {
-        Ok(()) => TestResult::Pass,
-        Err(msg) => slopos_testing::fail!(msg),
-    }
-}
-
-/// `has_child_mount` answers for a *direct* child only, under either spelling
-/// of the parent, and stops answering the moment the mount is released.
-pub fn test_mount_table_child_queries() -> TestResult {
-    const DIR: &[u8] = b"/tmp/child_q";
-    const CHILD: &[u8] = b"/tmp/child_q/leaf";
-    const DEEPER: &[u8] = b"/tmp/child_q/leaf/deeper";
-
-    if !ready() || !ensure_dir(DIR) {
-        return slopos_testing::fail!("could not create the fixture directory");
-    }
-
-    let outcome = (|| -> Result<(), &'static str> {
-        mount(CHILD, &FIXTURE_FS[0], 0).map_err(|_| "mount failed")?;
-        mount(DEEPER, &FIXTURE_FS[1], 0).map_err(|_| "deep mount failed")?;
-
-        let checks = with_mount_table(|mt| {
-            (
-                mt.has_child_mount(DIR, b"leaf"),
-                mt.has_child_mount(b"/tmp/child_q/", b"leaf"),
-                mt.has_child_mount(DIR, b"deeper"),
-                mt.has_child_mount(DIR, b"lea"),
-            )
-        });
-        if !checks.0 {
-            return Err("a direct child mount was not reported");
-        }
-        if !checks.1 {
-            return Err("a trailing slash on the parent hid its child mount");
-        }
-        if checks.2 {
-            return Err("a grandchild mount was reported as a direct child");
-        }
-        if checks.3 {
-            return Err("a name prefix matched a child mount");
-        }
-
-        unmount(DEEPER).map_err(|_| "deep unmount failed")?;
-        unmount(CHILD).map_err(|_| "unmount failed")?;
-        if with_mount_table(|mt| mt.has_child_mount(DIR, b"leaf")) {
-            return Err("a released mount is still reported as a child");
-        }
-        Ok(())
-    })();
-
-    let _ = unmount(DEEPER);
-    let _ = unmount(CHILD);
-    let _ = vfs_rmdir(DIR);
-    match outcome {
-        Ok(()) => TestResult::Pass,
-        Err(msg) => slopos_testing::fail!(msg),
-    }
-}
-
-/// A listing paged across a mount or unmount neither drops nor repeats an
-/// entry. Both halves fail against a cursor keyed on an ordinal.
-pub fn test_paged_listing_survives_a_mount_change() -> TestResult {
-    if !ready() {
-        return TestResult::Fail;
-    }
-    match (listing_drop_half(), listing_repeat_half()) {
-        (Ok(()), Ok(())) => TestResult::Pass,
-        (Err(msg), _) | (_, Err(msg)) => slopos_testing::fail!(msg),
-    }
-}
-
-/// Page one of a three-entry buffer over a freshly created directory: `.`,
-/// `..`, and the first child mount in id order.
-fn first_page(dir: &[u8], entries: &mut [UserFsEntry]) -> Result<ListCursor, &'static str> {
-    let mut cursor = ListCursor::start();
-    let n = vfs_list_from(dir, entries, &mut cursor).map_err(|_| "the first page failed")?;
-    if n != 3 || entry_name(&entries[2]) != b"m1" {
-        return Err("the first page did not end on the lowest-id child mount");
-    }
-    // Through the ABI word, because that is what userland carries between
-    // calls and the packing is part of what is under test.
-    Ok(ListCursor::from_abi(cursor.to_abi()))
-}
-
-fn listing_drop_half() -> Result<(), &'static str> {
-    const DIR: &[u8] = b"/tmp/g9_drop";
-    const M1: &[u8] = b"/tmp/g9_drop/m1";
-    const M2: &[u8] = b"/tmp/g9_drop/m2";
-    const M3: &[u8] = b"/tmp/g9_drop/m3";
-
-    if !ensure_dir(DIR) {
-        return Err("could not create the listing fixture");
-    }
-    let body = (|| -> Result<(), &'static str> {
-        mount(M1, &FIXTURE_FS[0], 0).map_err(|_| "m1 mount failed")?;
-        mount(M2, &FIXTURE_FS[1], 0).map_err(|_| "m2 mount failed")?;
-        mount(M3, &FIXTURE_FS[2], 0).map_err(|_| "m3 mount failed")?;
-
-        let mut entries = KVec::filled(UserFsEntry::new(), 3).map_err(|_| "entry buffer")?;
-        let mut cursor = first_page(DIR, &mut entries)?;
-
-        unmount(M1).map_err(|_| "m1 unmount failed")?;
-        let n =
-            vfs_list_from(DIR, &mut entries, &mut cursor).map_err(|_| "the second page failed")?;
-        if !page_contains(&entries[..n], b"m2") {
-            return Err("a mount was dropped when the set shrank between pages");
-        }
-        if page_contains(&entries[..n], b"m1") {
-            return Err("an unmounted filesystem was still listed");
-        }
-        Ok(())
-    })();
-
-    let _ = unmount(M1);
-    let _ = unmount(M2);
-    let _ = unmount(M3);
-    let _ = vfs_rmdir(DIR);
-    body
-}
-
-fn listing_repeat_half() -> Result<(), &'static str> {
-    const DIR: &[u8] = b"/tmp/g9_rep";
-    const M0: &[u8] = b"/tmp/g9_rep/m0";
-    const M1: &[u8] = b"/tmp/g9_rep/m1";
-    const M2: &[u8] = b"/tmp/g9_rep/m2";
-    const M3: &[u8] = b"/tmp/g9_rep/m3";
-
-    if !ensure_dir(DIR) {
-        return Err("could not create the listing fixture");
-    }
-    let body = (|| -> Result<(), &'static str> {
-        mount(M0, &FIXTURE_FS[0], 0).map_err(|_| "m0 mount failed")?;
-        mount(M1, &FIXTURE_FS[1], 0).map_err(|_| "m1 mount failed")?;
-        mount(M2, &FIXTURE_FS[2], 0).map_err(|_| "m2 mount failed")?;
-        // Frees the slot ahead of m1's, which the next mount takes.
-        unmount(M0).map_err(|_| "m0 unmount failed")?;
-
-        let mut entries = KVec::filled(UserFsEntry::new(), 3).map_err(|_| "entry buffer")?;
-        let mut cursor = first_page(DIR, &mut entries)?;
-
-        mount(M3, &FIXTURE_FS[3], 0).map_err(|_| "m3 mount failed")?;
-        let n =
-            vfs_list_from(DIR, &mut entries, &mut cursor).map_err(|_| "the second page failed")?;
-        if page_contains(&entries[..n], b"m1") {
-            return Err("a mount was listed twice when the set grew between pages");
-        }
-        if !page_contains(&entries[..n], b"m2") {
-            return Err("a mount was dropped when the set grew between pages");
-        }
-        Ok(())
-    })();
-
-    let _ = unmount(M1);
-    let _ = unmount(M2);
-    let _ = unmount(M3);
-    let _ = vfs_rmdir(DIR);
-    body
-}
-
-/// A real directory entry a mount covers appears exactly once across every
-/// page, as a directory.
-pub fn test_mount_shadowed_name_lists_once() -> TestResult {
-    const DIR: &[u8] = b"/tmp/g9_shadow";
-    const COVERED: &[u8] = b"/tmp/g9_shadow/covered";
-
-    if !ready() || !ensure_dir(DIR) || !ensure_dir(COVERED) {
-        return slopos_testing::fail!("could not create the shadowing fixture");
-    }
-
-    let outcome = (|| -> Result<(), &'static str> {
-        mount(COVERED, &FIXTURE_FS[0], 0).map_err(|_| "mount failed")?;
-
-        // One entry per page, so the shadowed name and the mount entry cannot
-        // land on the same page and be de-duplicated there.
-        let mut entries = KVec::filled(UserFsEntry::new(), 1).map_err(|_| "entry buffer")?;
-        let mut cursor = ListCursor::start();
-        let mut seen = 0usize;
-        let mut pages = 0usize;
-
-        while !cursor.is_end() {
-            let n = vfs_list_from(DIR, &mut entries, &mut cursor).map_err(|_| "a page failed")?;
-            for entry in entries.iter().take(n) {
-                if entry_name(entry) != b"covered" {
-                    continue;
-                }
-                seen += 1;
-                if entry.type_ != FS_TYPE_DIRECTORY {
-                    return Err("a mount point did not list as a directory");
-                }
-            }
-            cursor = ListCursor::from_abi(cursor.to_abi());
-            pages += 1;
-            if pages > 16 {
-                return Err("the paged listing did not terminate");
-            }
-        }
-
-        if seen != 1 {
-            return Err("a name shadowed by a mount was not listed exactly once");
-        }
-        Ok(())
-    })();
-
-    let _ = unmount(COVERED);
-    let _ = vfs_rmdir(COVERED);
-    let _ = vfs_rmdir(DIR);
     match outcome {
         Ok(()) => TestResult::Pass,
         Err(msg) => slopos_testing::fail!(msg),
@@ -431,7 +210,7 @@ impl FileSystem for FlakyLookup {
 }
 
 static FLAKY_FS: FlakyLookup = FlakyLookup {
-    inner: &FIXTURE_FS[3],
+    inner: &FIXTURE_FS[2],
     fail_in: AtomicU32::new(0),
     fail_stat_in: AtomicU32::new(0),
 };
@@ -653,17 +432,17 @@ pub fn write_scratch_ext2(device: &[u8]) -> bool {
     target.flush().is_ok()
 }
 
-const PAIR_MP_A: &[u8] = b"/tmp/ext2_pair_a";
-const PAIR_MP_B: &[u8] = b"/tmp/ext2_pair_b";
-const PAIR_FILE_A: &[u8] = b"/tmp/ext2_pair_a/alpha";
-const PAIR_FILE_B: &[u8] = b"/tmp/ext2_pair_b/beta";
-const PAIR_CROSS_A: &[u8] = b"/tmp/ext2_pair_a/beta";
-const PAIR_CROSS_B: &[u8] = b"/tmp/ext2_pair_b/alpha";
+const PAIR_MP_A: &[u8] = b"/tmp/ext4_pair_a";
+const PAIR_MP_B: &[u8] = b"/tmp/ext4_pair_b";
+const PAIR_FILE_A: &[u8] = b"/tmp/ext4_pair_a/alpha";
+const PAIR_FILE_B: &[u8] = b"/tmp/ext4_pair_b/beta";
+const PAIR_CROSS_A: &[u8] = b"/tmp/ext4_pair_a/beta";
+const PAIR_CROSS_B: &[u8] = b"/tmp/ext4_pair_b/alpha";
 
-/// Two ext2 filesystems mounted at once, each over its own image: the table
-/// holds them as two filesystems rather than one placed twice, and the state
-/// that used to be a handful of `static`s is genuinely per instance.
-pub fn test_two_ext2_mounts_are_independent() -> TestResult {
+/// Two ext4 mounts at once, each over its own image: the table holds them as
+/// two filesystems rather than one placed twice, and each instance's state is
+/// its own.
+pub fn test_two_ext4_mounts_are_independent() -> TestResult {
     if !ready() || !ensure_dir(PAIR_MP_A) || !ensure_dir(PAIR_MP_B) {
         return slopos_testing::fail!("the /tmp fixture directories are unavailable");
     }
@@ -673,20 +452,20 @@ pub fn test_two_ext2_mounts_are_independent() -> TestResult {
     ) else {
         return TestResult::Skipped;
     };
-    let Some(fs_a) = vfs_ext2_pool_claim() else {
-        return slopos_testing::fail!("the ext2 pool handed out no instance");
+    let Some(fs_a) = vfs_ext4_pool_claim() else {
+        return slopos_testing::fail!("the ext4 pool handed out no instance");
     };
-    let Some(fs_b) = vfs_ext2_pool_claim() else {
-        vfs_ext2_pool_release(fs_a, false);
-        return slopos_testing::fail!("the ext2 pool handed out only one instance");
+    let Some(fs_b) = vfs_ext4_pool_claim() else {
+        vfs_ext4_pool_release(fs_a, false);
+        return slopos_testing::fail!("the ext4 pool handed out only one instance");
     };
 
     let outcome = pair_body(fs_a, fs_b, dev_a, dev_b);
 
     let _ = unmount(PAIR_MP_A);
     let _ = unmount(PAIR_MP_B);
-    vfs_ext2_pool_release(fs_a, false);
-    vfs_ext2_pool_release(fs_b, false);
+    vfs_ext4_pool_release(fs_a, false);
+    vfs_ext4_pool_release(fs_b, false);
     let _ = vfs_rmdir(PAIR_MP_A);
     let _ = vfs_rmdir(PAIR_MP_B);
     match outcome {
@@ -695,17 +474,17 @@ pub fn test_two_ext2_mounts_are_independent() -> TestResult {
     }
 }
 
-/// Its own frame per phase: one `Ext2MountInfo` plus one `FsStats` plus a
+/// Its own frame per phase: one `Ext4MountInfo` plus one `FsStats` plus a
 /// mount call already fills a 2 KiB frame.
 #[inline(never)]
 fn pair_body(
-    fs_a: &'static Ext2Mount,
-    fs_b: &'static Ext2Mount,
+    fs_a: &'static Ext4Mount,
+    fs_b: &'static Ext4Mount,
     dev_a: KBox<dyn BlockDevice + Send + Sync>,
     dev_b: KBox<dyn BlockDevice + Send + Sync>,
 ) -> Result<(), &'static str> {
     if same_filesystem(fs_a, fs_b) {
-        return Err("two pooled ext2 instances share one identity");
+        return Err("two pooled ext4 instances share one identity");
     }
     pair_attach(fs_a, dev_a, PAIR_MP_A)?;
     pair_attach(fs_b, dev_b, PAIR_MP_B)?;
@@ -715,7 +494,7 @@ fn pair_body(
 
 #[inline(never)]
 fn pair_attach(
-    fs: &'static Ext2Mount,
+    fs: &'static Ext4Mount,
     device: KBox<dyn BlockDevice + Send + Sync>,
     at: &[u8],
 ) -> Result<(), &'static str> {
@@ -774,14 +553,14 @@ fn pair_geometry() -> Result<(), &'static str> {
     Ok(())
 }
 
-const REMOUNT_MP: &[u8] = b"/tmp/ext2_remount";
-const REMOUNT_FILE: &[u8] = b"/tmp/ext2_remount/persisted";
+const REMOUNT_MP: &[u8] = b"/tmp/ext4_remount";
+const REMOUNT_FILE: &[u8] = b"/tmp/ext4_remount/persisted";
 
 /// The re-mount is what proves the first mount gave the device's exclusive
 /// write claim back: a leaked claim makes every later one answer `Busy`
 /// forever. The file surviving the round trip shows the unmount reached the
 /// medium rather than merely dropping the instance.
-pub fn test_ext2_remount_of_the_same_device_succeeds() -> TestResult {
+pub fn test_ext4_remount_of_the_same_device_succeeds() -> TestResult {
     if !ready() || !ensure_dir(REMOUNT_MP) {
         return slopos_testing::fail!("the /tmp fixture directory is unavailable");
     }
@@ -790,7 +569,7 @@ pub fn test_ext2_remount_of_the_same_device_succeeds() -> TestResult {
     }
 
     let outcome = remount_body();
-    let _ = vfs_ext2_unmount_named(REMOUNT_MP);
+    let _ = vfs_ext4_unmount_named(REMOUNT_MP);
     let _ = vfs_rmdir(REMOUNT_MP);
     match outcome {
         Ok(()) => TestResult::Pass,
@@ -800,7 +579,7 @@ pub fn test_ext2_remount_of_the_same_device_succeeds() -> TestResult {
 
 #[inline(never)]
 fn remount_body() -> Result<(), &'static str> {
-    let info = vfs_ext2_mount_named(SCRATCH_DEVICE, REMOUNT_MP, false)
+    let info = vfs_ext4_mount_named(SCRATCH_DEVICE, REMOUNT_MP, false)
         .map_err(|_| "the first mount of the scratch device failed")?;
     if info.read_only {
         return Err("a writable claim came up read-only");
@@ -810,9 +589,9 @@ fn remount_body() -> Result<(), &'static str> {
     handle
         .write(0, b"persisted")
         .map_err(|_| "write through the first mount failed")?;
-    vfs_ext2_unmount_named(REMOUNT_MP).map_err(|_| "the first unmount failed")?;
+    vfs_ext4_unmount_named(REMOUNT_MP).map_err(|_| "the first unmount failed")?;
 
-    vfs_ext2_mount_named(SCRATCH_DEVICE, REMOUNT_MP, false)
+    vfs_ext4_mount_named(SCRATCH_DEVICE, REMOUNT_MP, false)
         .map_err(|_| "the re-mount failed — the first mount leaked the write claim")?;
     let again = vfs_open(REMOUNT_FILE, false).map_err(|_| "the re-mount lost the file")?;
     let mut buf = [0u8; 16];
@@ -822,24 +601,24 @@ fn remount_body() -> Result<(), &'static str> {
     if &buf[..n] != b"persisted" {
         return Err("the re-mount served different bytes");
     }
-    vfs_ext2_unmount_named(REMOUNT_MP).map_err(|_| "the second unmount failed")
+    vfs_ext4_unmount_named(REMOUNT_MP).map_err(|_| "the second unmount failed")
 }
 
-/// ext2 on 1 KiB blocks over a disk of 4 KiB logical blocks: each metadata
+/// A volume of 1 KiB blocks over a disk of 4 KiB logical blocks: each metadata
 /// write would be a read-modify-write of three neighbours, and a torn one
 /// damages blocks outside the transaction, so the mount is refused.
-pub fn test_ext2_refuses_blocks_smaller_than_the_device() -> TestResult {
+pub fn test_ext4_refuses_blocks_smaller_than_the_device() -> TestResult {
     const SCRATCH_4K: &[u8] = b"nvme1n2";
-    const MP: &[u8] = b"/tmp/ext2_4kn";
+    const MP: &[u8] = b"/tmp/ext4_4kn";
     if !ready() || !ensure_dir(MP) {
         return slopos_testing::fail!("the /tmp fixture directory is unavailable");
     }
     if !write_scratch_ext2(SCRATCH_4K) {
         return slopos_testing::fail!("could not write the ext2 fixture to nvme1n2");
     }
-    let mounted = vfs_ext2_mount_named(SCRATCH_4K, MP, false);
+    let mounted = vfs_ext4_mount_named(SCRATCH_4K, MP, false);
     if mounted.is_ok() {
-        let _ = vfs_ext2_unmount_named(MP);
+        let _ = vfs_ext4_unmount_named(MP);
     }
     let _ = vfs_rmdir(MP);
     match mounted {
@@ -882,7 +661,7 @@ impl BlockDevice for CountingDevice {
     }
 }
 
-const HEADROOM_MP: &[u8] = b"/tmp/ext2_headroom";
+const HEADROOM_MP: &[u8] = b"/tmp/ext4_headroom";
 /// Operations one burst may take to drive the log past its low-water mark: two
 /// or three suffice against the fixture's 47-slot log. The flusher is kept off
 /// the instance, since a drain from under the burst would hold the log short of
@@ -892,8 +671,8 @@ const HEADROOM_ROUNDS: usize = 64;
 /// An operation that finds the log short of headroom completes, and the pass
 /// that makes room gives the mount lock back between bounded steps. That a
 /// **read** restores the headroom is the distinguishing part: it runs no
-/// transaction, so only `Ext2Mount::with_fs`'s pre-flight can have drained it.
-pub fn test_ext2_journal_headroom_is_restored_off_the_mount_lock() -> TestResult {
+/// transaction, so only `Ext4Mount::with_fs`'s pre-flight can have drained it.
+pub fn test_ext4_journal_headroom_is_restored_off_the_mount_lock() -> TestResult {
     if !ready() || !ensure_dir(HEADROOM_MP) {
         return slopos_testing::fail!("the /tmp fixture directory is unavailable");
     }
@@ -903,8 +682,8 @@ pub fn test_ext2_journal_headroom_is_restored_off_the_mount_lock() -> TestResult
     let Some(device) = boxed_device_counting(image) else {
         return TestResult::Skipped;
     };
-    let Some(fs) = vfs_ext2_pool_claim() else {
-        return slopos_testing::fail!("the ext2 pool handed out no instance");
+    let Some(fs) = vfs_ext4_pool_claim() else {
+        return slopos_testing::fail!("the ext4 pool handed out no instance");
     };
 
     // A flusher pass left open, or a drain, would be the state under test.
@@ -913,7 +692,7 @@ pub fn test_ext2_journal_headroom_is_restored_off_the_mount_lock() -> TestResult
 
     let _ = unmount(HEADROOM_MP);
     fs.exclude_flusher_for_test(false);
-    vfs_ext2_pool_release(fs, false);
+    vfs_ext4_pool_release(fs, false);
     let _ = vfs_rmdir(HEADROOM_MP);
     match outcome {
         Ok(()) => TestResult::Pass,
@@ -928,7 +707,7 @@ fn boxed_device_counting(image: MemoryBlockDevice) -> Option<KBox<dyn BlockDevic
 
 #[inline(never)]
 fn headroom_body(
-    fs: &'static Ext2Mount,
+    fs: &'static Ext4Mount,
     device: KBox<dyn BlockDevice + Send + Sync>,
 ) -> Result<(), &'static str> {
     fs.attach(device, false)
@@ -940,7 +719,7 @@ fn headroom_body(
 
     let mut short = false;
     for round in 0..HEADROOM_ROUNDS {
-        let mut name = *b"/tmp/ext2_headroom/f000";
+        let mut name = *b"/tmp/ext4_headroom/f000";
         name[20] = b'0' + (round / 100) as u8;
         name[21] = b'0' + ((round / 10) % 10) as u8;
         name[22] = b'0' + (round % 10) as u8;
@@ -967,7 +746,7 @@ fn headroom_body(
     // A stat, not a write: no transaction runs, so the wrapper's pre-flight is
     // the only thing that can empty the log.
     let before = COUNTED_WRITES.load(Ordering::Relaxed);
-    let _ = crate::vfs::vfs_stat(b"/tmp/ext2_headroom/f000")
+    let _ = crate::vfs::vfs_stat(b"/tmp/ext4_headroom/f000")
         .map_err(|_| "the read after the burst failed")?;
     if COUNTED_WRITES.load(Ordering::Relaxed) == before {
         return Err("a read over a full log issued no writeback at all");
@@ -977,7 +756,7 @@ fn headroom_body(
     }
 
     // The pass itself: bounded, and within its per-step budget.
-    let handle = vfs_open(b"/tmp/ext2_headroom/after", true)
+    let handle = vfs_open(b"/tmp/ext4_headroom/after", true)
         .map_err(|_| "the mount stopped accepting writes")?;
     handle
         .write(0, b"still writable")
@@ -998,11 +777,11 @@ fn headroom_body(
     Ok(())
 }
 
-const SHARED_PASS_MP: &[u8] = b"/tmp/ext2_shared_pass";
+const SHARED_PASS_MP: &[u8] = b"/tmp/ext4_shared_pass";
 
 /// A sync that arrives while the mount's writeback pass is open finishes that
 /// pass instead of opening one of its own, so two callers pay for one pass.
-pub fn test_ext2_sync_finishes_the_open_pass_instead_of_opening_one() -> TestResult {
+pub fn test_ext4_sync_finishes_the_open_pass_instead_of_opening_one() -> TestResult {
     if !ready() || !ensure_dir(SHARED_PASS_MP) {
         return slopos_testing::fail!("the /tmp fixture directory is unavailable");
     }
@@ -1012,8 +791,8 @@ pub fn test_ext2_sync_finishes_the_open_pass_instead_of_opening_one() -> TestRes
     let Some(device) = boxed_device_counting(image) else {
         return TestResult::Skipped;
     };
-    let Some(fs) = vfs_ext2_pool_claim() else {
-        return slopos_testing::fail!("the ext2 pool handed out no instance");
+    let Some(fs) = vfs_ext4_pool_claim() else {
+        return slopos_testing::fail!("the ext4 pool handed out no instance");
     };
 
     // A flusher pass left open, or a drain, would be the state under test.
@@ -1022,7 +801,7 @@ pub fn test_ext2_sync_finishes_the_open_pass_instead_of_opening_one() -> TestRes
 
     let _ = unmount(SHARED_PASS_MP);
     fs.exclude_flusher_for_test(false);
-    vfs_ext2_pool_release(fs, false);
+    vfs_ext4_pool_release(fs, false);
     let _ = vfs_rmdir(SHARED_PASS_MP);
     match outcome {
         Ok(()) => TestResult::Pass,
@@ -1032,7 +811,7 @@ pub fn test_ext2_sync_finishes_the_open_pass_instead_of_opening_one() -> TestRes
 
 #[inline(never)]
 fn shared_pass_body(
-    fs: &'static Ext2Mount,
+    fs: &'static Ext4Mount,
     device: KBox<dyn BlockDevice + Send + Sync>,
 ) -> Result<(), &'static str> {
     fs.attach(device, false)
@@ -1043,7 +822,7 @@ fn shared_pass_body(
     mount(SHARED_PASS_MP, fs, 0).map_err(|_| "the mount failed")?;
     fs.sync_fs()
         .map_err(|_| "the sync after the mount failed")?;
-    vfs_open(b"/tmp/ext2_shared_pass/f", true)
+    vfs_open(b"/tmp/ext4_shared_pass/f", true)
         .map_err(|_| "the create failed")?
         .write(0, b"dirty")
         .map_err(|_| "the write failed")?;
@@ -1063,22 +842,22 @@ fn shared_pass_body(
 }
 
 /// A mount nothing writes to is still stamped clean once idle.
-pub fn test_ext2_untouched_mount_is_stamped_clean_at_idle() -> TestResult {
+pub fn test_ext4_untouched_mount_is_stamped_clean_at_idle() -> TestResult {
     let Some(image) = super::journal::journal_image() else {
         return TestResult::Skipped;
     };
     let Some(device) = boxed_device_counting(image) else {
         return TestResult::Skipped;
     };
-    let Some(fs) = vfs_ext2_pool_claim() else {
-        return slopos_testing::fail!("the ext2 pool handed out no instance");
+    let Some(fs) = vfs_ext4_pool_claim() else {
+        return slopos_testing::fail!("the ext4 pool handed out no instance");
     };
 
     fs.exclude_flusher_for_test(true);
     let outcome = untouched_body(fs, device);
 
     fs.exclude_flusher_for_test(false);
-    vfs_ext2_pool_release(fs, false);
+    vfs_ext4_pool_release(fs, false);
     match outcome {
         Ok(()) => TestResult::Pass,
         Err(msg) => slopos_testing::fail!(msg),
@@ -1087,7 +866,7 @@ pub fn test_ext2_untouched_mount_is_stamped_clean_at_idle() -> TestResult {
 
 #[inline(never)]
 fn untouched_body(
-    fs: &'static Ext2Mount,
+    fs: &'static Ext4Mount,
     device: KBox<dyn BlockDevice + Send + Sync>,
 ) -> Result<(), &'static str> {
     fs.attach(device, false)
@@ -1106,8 +885,8 @@ fn untouched_body(
     Ok(())
 }
 
-const RDONLY_MP: &[u8] = b"/tmp/ext2_rdonly";
-const RDONLY_FILE: &[u8] = b"/tmp/ext2_rdonly/denied";
+const RDONLY_MP: &[u8] = b"/tmp/ext4_rdonly";
+const RDONLY_FILE: &[u8] = b"/tmp/ext4_rdonly/denied";
 /// A device of this test's own, published through a handle that takes writes —
 /// as the root disk's own `/dev` node does — so the refusal under test is the
 /// mount's and not the medium's.
@@ -1133,7 +912,7 @@ fn register_rdonly_probe() -> bool {
 /// naming a device whose `/dev` node accepts writes must still refuse every
 /// mutation and leave the medium untouched. Inferring read-only from the
 /// device is what mounted the live root writable.
-pub fn test_ext2_readonly_mount_refuses_a_writable_device() -> TestResult {
+pub fn test_ext4_readonly_mount_refuses_a_writable_device() -> TestResult {
     if !ready() || !ensure_dir(RDONLY_MP) {
         return slopos_testing::fail!("the /tmp fixture directory is unavailable");
     }
@@ -1143,7 +922,7 @@ pub fn test_ext2_readonly_mount_refuses_a_writable_device() -> TestResult {
 
     let outcome = rdonly_mount_body();
 
-    let _ = vfs_ext2_unmount_named(RDONLY_MP);
+    let _ = vfs_ext4_unmount_named(RDONLY_MP);
     let _ = vfs_rmdir(RDONLY_MP);
     match outcome {
         Ok(()) => TestResult::Pass,
@@ -1162,7 +941,7 @@ fn rdonly_mount_body() -> Result<(), &'static str> {
     drop(node);
 
     let before = COUNTED_WRITES.load(Ordering::Relaxed);
-    let info = vfs_ext2_mount_named(RDONLY_PROBE, RDONLY_MP, true)
+    let info = vfs_ext4_mount_named(RDONLY_PROBE, RDONLY_MP, true)
         .map_err(|_| "the read-only mount of the probe device failed")?;
     if info.read_only_reason != Some(ReadOnlyReason::Requested) {
         return Err("an MS_RDONLY mount did not refuse writes on the caller's say-so");
@@ -1174,14 +953,14 @@ fn rdonly_mount_body() -> Result<(), &'static str> {
     }
     // Through the unmount, because the teardown syncs and stamps: a read-only
     // mount owes the medium nothing at either end.
-    vfs_ext2_unmount_named(RDONLY_MP).map_err(|_| "the unmount of the read-only mount failed")?;
+    vfs_ext4_unmount_named(RDONLY_MP).map_err(|_| "the unmount of the read-only mount failed")?;
     if COUNTED_WRITES.load(Ordering::Relaxed) != before {
         return Err("a read-only mount reached the device with a write");
     }
     Ok(())
 }
 
-const LABEL_MP: &[u8] = b"/tmp/ext2_label";
+const LABEL_MP: &[u8] = b"/tmp/ext4_label";
 const LABEL_PROBE: &[u8] = b"labelprobe0";
 const LABEL: &[u8] = b"stest-label";
 
@@ -1203,7 +982,7 @@ fn register_label_probe() -> bool {
 
 /// `LABEL=` names the device whose superblock carries exactly that label: a
 /// prefix of it names none.
-pub fn test_ext2_mount_by_label() -> TestResult {
+pub fn test_ext4_mount_by_label() -> TestResult {
     if !ready() || !ensure_dir(LABEL_MP) {
         return slopos_testing::fail!("the /tmp fixture directory is unavailable");
     }
@@ -1211,11 +990,11 @@ pub fn test_ext2_mount_by_label() -> TestResult {
         return TestResult::Skipped;
     }
 
-    let prefix = vfs_ext2_mount_named(b"LABEL=stest-labe", LABEL_MP, true).err();
-    let mounted = vfs_ext2_mount_named(b"LABEL=stest-label", LABEL_MP, true).is_ok()
+    let prefix = vfs_ext4_mount_named(b"LABEL=stest-labe", LABEL_MP, true).err();
+    let mounted = vfs_ext4_mount_named(b"LABEL=stest-label", LABEL_MP, true).is_ok()
         && mount_at(LABEL_MP).is_some();
 
-    let _ = vfs_ext2_unmount_named(LABEL_MP);
+    let _ = vfs_ext4_unmount_named(LABEL_MP);
     let _ = vfs_rmdir(LABEL_MP);
     if prefix != Some(VfsError::NotFound) {
         return slopos_testing::fail!("a label prefix resolved: {:?}", prefix);
@@ -1289,38 +1068,32 @@ fn kept_dirs_refuse_mounts() -> Option<&'static [u8]> {
 
 slopos_testing::stest!(name = test_mount_id_is_never_reused, suite = fs);
 slopos_testing::stest!(name = test_a_kept_directory_stays_where_it_is, suite = fs);
-slopos_testing::stest!(name = test_mount_table_child_queries, suite = fs);
+slopos_testing::stest!(name = test_two_ext4_mounts_are_independent, suite = fs);
 slopos_testing::stest!(
-    name = test_paged_listing_survives_a_mount_change,
-    suite = fs
-);
-slopos_testing::stest!(name = test_two_ext2_mounts_are_independent, suite = fs);
-slopos_testing::stest!(
-    name = test_ext2_remount_of_the_same_device_succeeds,
+    name = test_ext4_remount_of_the_same_device_succeeds,
     suite = fs
 );
 slopos_testing::stest!(
-    name = test_ext2_journal_headroom_is_restored_off_the_mount_lock,
+    name = test_ext4_journal_headroom_is_restored_off_the_mount_lock,
     suite = fs
 );
 slopos_testing::stest!(
-    name = test_ext2_sync_finishes_the_open_pass_instead_of_opening_one,
+    name = test_ext4_sync_finishes_the_open_pass_instead_of_opening_one,
     suite = fs
 );
 slopos_testing::stest!(
-    name = test_ext2_untouched_mount_is_stamped_clean_at_idle,
+    name = test_ext4_untouched_mount_is_stamped_clean_at_idle,
     suite = fs
 );
-slopos_testing::stest!(name = test_mount_shadowed_name_lists_once, suite = fs);
 slopos_testing::stest!(
     name = test_ramfs_mount_pool_exhausts_and_recovers,
     suite = fs
 );
 slopos_testing::stest!(
-    name = test_ext2_readonly_mount_refuses_a_writable_device,
+    name = test_ext4_readonly_mount_refuses_a_writable_device,
     suite = fs
 );
-slopos_testing::stest!(name = test_ext2_mount_by_label, suite = fs);
+slopos_testing::stest!(name = test_ext4_mount_by_label, suite = fs);
 slopos_testing::stest!(name = test_rename_fails_when_a_lookup_does, suite = fs);
 slopos_testing::stest!(name = test_removal_fails_when_a_lookup_does, suite = fs);
 slopos_testing::stest!(
@@ -1328,6 +1101,6 @@ slopos_testing::stest!(
     suite = fs
 );
 slopos_testing::stest!(
-    name = test_ext2_refuses_blocks_smaller_than_the_device,
+    name = test_ext4_refuses_blocks_smaller_than_the_device,
     suite = fs
 );

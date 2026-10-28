@@ -5,8 +5,8 @@
 //! isolate the exit-code path.
 
 use slopos_abi::syscall::POLLIN;
+use slopos_rt::{Ring, slopfut};
 use slopos_userland as _;
-use slopos_userland::ring::{Ring, slopfut};
 use slopos_userland::syscall::{UserPollFd, core as sys_core, fs, pidfd, process};
 
 const CHILD_EXIT_CODE: i32 = 42;

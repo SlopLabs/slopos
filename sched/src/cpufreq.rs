@@ -26,10 +26,6 @@ use slopos_abi::syscall::{
     CPU_PERF_OP_LIMITS, CPU_PERF_OP_PLACEMENT, CPU_PERF_PLACEMENT_FLAT, CPU_PERF_PLACEMENT_RANKED,
     CPU_PERF_POLICY_FIRMWARE, CPU_PERF_POLICY_HWP, UserCpuPerf, UserCpuPerfInfo,
 };
-use slopos_arch::MAX_CPUS;
-use slopos_arch::cpu::cpuid::{cpu_vendor_string, cpuid, cpuid_count, hypervisor_present};
-use slopos_arch::cpu::msr::{Msr, read_msr, write_msr};
-use slopos_arch::tsc::rdtsc;
 use slopos_cpufreq_core::cpuid::{has_eist, is_hybrid};
 use slopos_cpufreq_core::freq::MISC_ENABLE_TURBO_DISABLE;
 use slopos_cpufreq_core::hwp::autonomous_request;
@@ -38,6 +34,10 @@ use slopos_cpufreq_core::{
     Config, CoreType, CpuClass, HwpCaps, HwpRequest, Limits, Placement, Policy, PowerFeatures,
     SmtTopology,
 };
+use slopos_ostd::arch::x86_64::cpuid::{cpu_vendor_string, cpuid, cpuid_count, hypervisor_present};
+use slopos_ostd::arch::x86_64::msr::{Msr, read_msr, write_msr};
+use slopos_ostd::arch::x86_64::tsc::rdtsc;
+use slopos_ostd::cpu::x86_64::pcr::MAX_CPUS;
 use slopos_ostd::klog_info;
 
 const PM_ENABLE_HWP: u64 = 1;
@@ -432,11 +432,11 @@ pub fn control(op: u64, value: u64) -> Result<u32, Errno> {
     }
     let generation = GENERATION.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
 
-    let flags = slopos_arch::cpu::save_flags_cli();
-    let here = slopos_arch::pcr::get_current_cpu();
+    let flags = slopos_ostd::cpu::x86_64::save_flags_cli();
+    let here = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     catch_up(here);
-    slopos_arch::cpu::restore_flags(flags);
-    for cpu in 0..slopos_arch::pcr::get_cpu_count() {
+    slopos_ostd::cpu::x86_64::restore_flags(flags);
+    for cpu in 0..slopos_ostd::cpu::x86_64::pcr::get_cpu_count() {
         if cpu != here && CPUS[cpu].online.load(Ordering::Acquire) {
             crate::lifecycle::send_reschedule_ipi(cpu);
         }
@@ -459,7 +459,7 @@ pub fn placement_score(cpu: usize, busy: impl Fn(usize) -> bool) -> u32 {
     let state = &CPUS[cpu];
     let sibling_busy = state.has_sibling.load(Ordering::Relaxed) && {
         let core = state.core_id.load(Ordering::Relaxed);
-        (0..slopos_arch::pcr::get_cpu_count()).any(|other| {
+        (0..slopos_ostd::cpu::x86_64::pcr::get_cpu_count()).any(|other| {
             other != cpu
                 && CPUS[other].online.load(Ordering::Acquire)
                 && CPUS[other].core_id.load(Ordering::Relaxed) == core

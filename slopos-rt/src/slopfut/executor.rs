@@ -4,7 +4,7 @@
 //! reactor, or another task via a channel / `Notify`. [`block_on`] drives a
 //! root future to completion while running any [`spawn`]ed tasks concurrently
 //! on the same thread; the reactor's `park` (a blocking `ring_enter`) is the
-//! only sleep point (SLOPRING §7.1).
+//! only sleep point.
 
 use core::cell::RefCell;
 use core::future::Future;

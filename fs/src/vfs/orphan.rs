@@ -3,7 +3,7 @@
 //!
 //! POSIX requires an unlinked-but-open file to keep its contents until the
 //! last close. Doing that needs two halves. The on-disk half is the
-//! filesystem's — ext2 threads the inode onto `s_last_orphan`, so a crash
+//! filesystem's — ext4 threads the inode onto `s_last_orphan`, so a crash
 //! leaves a list the next `e2fsck` drains rather than leaked blocks. The
 //! in-memory half is here: a count of how many open vnodes name each inode,
 //! which is what says *when* the deferred free may run.
@@ -29,9 +29,7 @@
 //! inode and the `open` installing its reference: an `unlink` landing in
 //! between still frees underneath it. Closing that needs an inode cache keyed
 //! by `(filesystem, inode)` and a parent-directory lock held across lookup and
-//! install, neither of which exists here. It is strictly narrower than the
-//! behaviour it replaces, where every `unlink` freed regardless of who was
-//! reading.
+//! install, neither of which exists here.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -324,13 +322,13 @@ pub fn await_removal(fs: &'static dyn FileSystem, inode: InodeId) -> Result<(), 
 ///
 /// The filesystem chooses. One whose free cannot block has the drain run
 /// inline, because nothing else would ever run it. One whose free *can* block
-/// is handed to its own writeback thread — and today ext2 is the only
+/// is handed to its own writeback thread — and today ext4 is the only
 /// filesystem with one, so this asks the filesystem to say so rather than
 /// assuming it.
 ///
 /// A blocking filesystem with no writeback thread would leak: its records
 /// would stay releasable forever, and `releasable_count()` staying nonzero
-/// would also keep ext2's flusher awake every interval. That is a wiring
+/// would also keep ext4's flusher awake every interval. That is a wiring
 /// mistake rather than a runtime condition, so it is reported once and the
 /// obligation is handed back to the on-disk list, which the next mount drains.
 ///

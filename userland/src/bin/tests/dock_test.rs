@@ -6,12 +6,11 @@ use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
-use slopos_abi::window::AppId;
 use slopos_slibc::ffi::syscalls::mkfifo;
 
 use slopos_userland::app_entry::{self, AppEntry};
 use slopos_userland::apps::compositor::dock::Dock;
-use slopos_userland::syscall::UserWindowInfo;
+use slopos_userland::apps::compositor::window_info::{AppId, WindowInfo};
 
 const HOME: &str = "/var/tmp/dock_test";
 
@@ -110,9 +109,9 @@ fn every_app_is_drawn_from_its_smaller_icon() -> bool {
         held = false;
     }
 
-    let window = |task_id: u32, title: &[u8]| {
-        let mut window = UserWindowInfo::default();
-        window.task_id = task_id;
+    let window = |id: u32, title: &[u8]| {
+        let mut window = WindowInfo::default();
+        window.id = id;
         window.app_id = AppId::from_str("org.example.unlisted");
         window.title[..title.len()].copy_from_slice(title);
         window
@@ -163,8 +162,8 @@ fn a_window_without_an_app_id_is_its_own_entry() -> bool {
         eprintln!("dock_test: no entry to name a window after");
         return false;
     };
-    let mut window = UserWindowInfo::default();
-    window.task_id = 77;
+    let mut window = WindowInfo::default();
+    window.id = 77;
     window.title[..named.name.len()].copy_from_slice(named.name.as_bytes());
     for _ in 0..2 {
         dock.sync_running_apps(&[window], 1);
@@ -172,7 +171,7 @@ fn a_window_without_an_app_id_is_its_own_entry() -> bool {
             .entries()
             .iter()
             .filter(|e| e.running)
-            .map(|e| (e.pinned, e.task_id, e.name.as_str()))
+            .map(|e| (e.pinned, e.window, e.name.as_str()))
             .collect();
         if running != [(false, 77, named.name.as_str())]
             || dock.entries().len() != entries.len() + 1

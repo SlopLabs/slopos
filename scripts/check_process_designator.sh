@@ -7,30 +7,29 @@
 # is a confused-deputy surface: the kernel is the deputy, and it services the
 # call against a stranger's address space or a stranger's open files.
 #
-# The designators that replaced them carry a generation:
+# A process-keyed table is entered through a designator that carries a
+# generation:
 #
 #   slopos_ostd::process::ProcessId  — a live process, both halves consistent
 #   slopos_fs::fileio::FdTable       — Kernel, or one process's descriptors
 #
 # Both can only be built from a live process, so a stale one fails the
 # generation check instead of resolving to the slot's new occupant. That is
-# the property this gate keeps: it is cheap to reintroduce a `pid: u32`
-# parameter, and nothing else would notice until a recycled id landed on it.
+# the property this gate keeps: a `pid: u32` parameter is cheap to write, and
+# nothing else would notice until a recycled id landed on it.
 #
 # ---------------------------------------------------------------------------
 # The two checks
 # ---------------------------------------------------------------------------
 #
 #   1. No `pub fn` in the scanned modules takes a process-id-shaped `u32`
-#      parameter. Matches the parameter names that have meant "process id" in
-#      this tree — `process_id`, `pid`, `parent_id`, `src_process_id`,
+#      parameter. Matches the parameter names that mean "process id" in this
+#      tree — `process_id`, `pid`, `parent_id`, `src_process_id`,
 #      `dst_process_id`, `parent_process_id`, `child_process_id`, `caller_pid`
 #      — in binding position with type `u32`.
 #
-#   2. No lock-free scan for a matching id. The lookups these replaced walked
-#      all `MAX_PROCESSES` slots comparing `process_id`; the replacement is a
-#      slot index, so a fresh `.process_id ==` inside a loop over the tables
-#      is the old shape growing back.
+#   2. No lock-free scan for a matching id. A designator names its slot, so a
+#      `.process_id ==` inside a loop over the tables is a lookup by number.
 #
 # Scope is deliberately narrow: `mm/src/process_vm.rs` and `fs/src/fileio/`,
 # the two modules that own process-keyed tables. A `u32` pid elsewhere is
@@ -55,7 +54,7 @@ gate_parse_args check_process_designator "$@"
 # The modules that own a process-keyed table, relative to the scan root.
 SCAN_PATHS='mm/src/process_vm.rs fs/src/fileio'
 
-# Parameter names that have meant "a process id" in this tree.
+# Parameter names that mean "a process id" in this tree.
 PID_NAMES='process_id|pid|parent_id|src_process_id|dst_process_id|parent_process_id|child_process_id|caller_pid|target_pid'
 
 # ---------------------------------------------------------------------------
@@ -198,4 +197,4 @@ MSG
 fi
 
 echo "check_process_designator: OK — no process-keyed entry point takes a bare pid,"
-echo "check_process_designator: and no lock-free pid scan remains"
+echo "check_process_designator: and nothing scans the tables for a pid"

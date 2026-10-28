@@ -8,10 +8,6 @@ use slopos_ostd::sync::wait_queue::WaitQueueOps;
 use crate::driver_runtime;
 use crate::platform;
 
-/// No-op sink: `slopos-utils` depends on this crate, so no logger is reachable
-/// from here and the non-fatal RCU stall warnings are dropped.
-fn rcu_log_warn_noop(_args: core::fmt::Arguments<'_>) {}
-
 /// Ops table for `slopos_ostd::sync::wait_queue::register_wait_queue_backend`;
 /// `pub` because the boot caller registers it inline with a BSP-token witness.
 pub static WAIT_QUEUE_OPS: WaitQueueOps = WaitQueueOps {
@@ -37,5 +33,4 @@ pub static WAIT_QUEUE_OPS: WaitQueueOps = WaitQueueOps {
 /// Ops table for `slopos_ostd::sync::rcu::register_rcu_backend`.
 pub static RCU_OPS: RcuOps = RcuOps {
     clock_monotonic_ns: platform::clock_monotonic_ns,
-    log_warn: rcu_log_warn_noop,
 };

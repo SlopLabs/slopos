@@ -1,26 +1,15 @@
-//! ACPI table region handoff.
-//!
-//! Localises the `core::slice::from_raw_parts` over HHDM-mapped firmware
-//! memory; consumers get a typed, checksum-validated borrow.
+//! ACPI table region handoff: the `core::slice::from_raw_parts` over
+//! HHDM-mapped firmware memory.
 
 use slopos_abi::addr::PhysAddr;
 
-use crate::acpi::AcpiTable;
 use crate::boot::hhdm;
 
-/// Borrow `len` bytes of HHDM-mapped ACPI firmware memory and parse them as an
-/// [`AcpiTable`]. `None` unless `crate::boot::hhdm::register_hhdm_offset` has
-/// already run, `len` and `phys` are non-zero (Limine never publishes ACPI
-/// tables at physical 0), and the SDT length field and 8-bit additive checksum
-/// both validate.
-pub fn acpi_handoff(phys: PhysAddr, len: usize) -> Option<AcpiTable<'static>> {
-    let bytes = acpi_region_bytes(phys, len)?;
-    AcpiTable::from_bytes(bytes)
-}
-
-/// Raw byte primitive behind [`acpi_handoff`]: same preconditions, but no
-/// checksum or table-length validation, for consumers that probe RSDP or
-/// SDT-header prefixes at several lengths before re-borrowing the full table.
+/// `len` bytes of HHDM-mapped firmware memory at `phys`, unvalidated, for
+/// consumers that probe RSDP or SDT-header prefixes at several lengths before
+/// borrowing a whole table. `None` until `crate::boot::hhdm::register_hhdm_offset`
+/// has run, and for a zero `phys` or `len` (Limine never publishes ACPI tables
+/// at physical 0).
 pub fn acpi_region_bytes(phys: PhysAddr, len: usize) -> Option<&'static [u8]> {
     if len == 0 || phys.0 == 0 {
         return None;

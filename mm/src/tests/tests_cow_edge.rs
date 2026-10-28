@@ -9,13 +9,15 @@ use crate::cow::is_cow_fault;
 use crate::error::MmError;
 use crate::hhdm::PhysAddrHhdm;
 
-use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm::{process_vm_clone_cow, process_vm_with_vm_space};
 use crate::tests::test_fixtures::ProcessVmGuard;
-use crate::user_mappings::ostd_map_4kb_user_fresh;
+use crate::user_mappings::is_cow;
+use crate::user_mappings::map_4kb_user_fresh;
 use slopos_abi::addr::VirtAddr;
 use slopos_abi::task::INVALID_PROCESS_ID;
-use slopos_ostd::mm::frame::{AnonymousMeta, Frame, Paddr, reference_count_at};
+use slopos_ostd::mm::frame::{AnonymousMeta, Frame, reference_count_at};
+use slopos_ostd::mm::page_property::PageProperty;
 use slopos_ostd::test_support::page_io;
 
 pub fn test_cow_read_not_cow_fault() -> TestResult {
@@ -23,7 +25,7 @@ pub fn test_cow_read_not_cow_fault() -> TestResult {
         return fail!("create VM");
     };
 
-    let Some(_phys) = vm.map_test_page(0x2000, PageFlags::USER_RO.bits()) else {
+    let Some(_phys) = vm.map_test_page(0x2000, PageProperty::USER_RO) else {
         return fail!("map test page");
     };
 
@@ -76,7 +78,7 @@ pub fn test_cow_handle_not_cow_page() -> TestResult {
         return fail!("create VM");
     };
 
-    let Some(_phys) = vm.map_test_page(0x3000, PageFlags::USER_RW.bits()) else {
+    let Some(_phys) = vm.map_test_page(0x3000, PageProperty::USER_RW) else {
         return fail!("map test page");
     };
 
@@ -92,13 +94,13 @@ pub fn test_cow_single_ref_upgrade() -> TestResult {
         return fail!("create VM");
     };
 
-    let Some(phys) = vm.map_test_page(0x4000, PageFlags::USER_RO.bits()) else {
+    let Some(phys) = vm.map_test_page(0x4000, PageProperty::USER_RO) else {
         return fail!("map test page");
     };
 
     vm.mark_cow(0x4000);
 
-    let ref_before = reference_count_at(Paddr::new(phys.as_u64()));
+    let ref_before = reference_count_at(phys);
     assert_test!(ref_before == 1, "initial META_SLOTS refcount should be 1");
 
     if let Err(e) = vm.handle_cow_fault(0x4000) {
@@ -125,7 +127,7 @@ pub fn test_cow_multi_ref_copy() -> TestResult {
     };
 
     let test_addr: u64 = 0x5000;
-    let Some(phys) = vm.map_test_page(test_addr, PageFlags::USER_RO.bits()) else {
+    let Some(phys) = vm.map_test_page(test_addr, PageProperty::USER_RO) else {
         return fail!("map test page");
     };
 
@@ -137,12 +139,12 @@ pub fn test_cow_multi_ref_copy() -> TestResult {
     vm.mark_cow(test_addr);
 
     // Equivalent to two extra processes mapping the same paddr.
-    let extra1 = Frame::<AnonymousMeta>::from_in_use(Paddr::new(phys.as_u64()))
-        .expect("from_in_use 1 for COW multi-ref test");
-    let extra2 = Frame::<AnonymousMeta>::from_in_use(Paddr::new(phys.as_u64()))
-        .expect("from_in_use 2 for COW multi-ref test");
+    let extra1 =
+        Frame::<AnonymousMeta>::from_in_use(phys).expect("from_in_use 1 for COW multi-ref test");
+    let extra2 =
+        Frame::<AnonymousMeta>::from_in_use(phys).expect("from_in_use 2 for COW multi-ref test");
 
-    let ref_before = reference_count_at(Paddr::new(phys.as_u64()));
+    let ref_before = reference_count_at(phys);
     if ref_before < 3 {
         klog_info!("COW_TEST: Expected refcount >=3, got {}", ref_before);
     }
@@ -171,7 +173,7 @@ pub fn test_cow_multi_ref_copy() -> TestResult {
         }
     }
 
-    let ref_after = reference_count_at(Paddr::new(phys.as_u64()));
+    let ref_after = reference_count_at(phys);
     assert_test!(ref_after < ref_before, "old page refcount didn't decrement");
 
     drop(extra1);
@@ -186,7 +188,7 @@ pub fn test_cow_page_boundary() -> TestResult {
     };
 
     let page_start: u64 = 0x6000;
-    let Some(_phys) = vm.map_test_page(page_start, PageFlags::USER_RO.bits()) else {
+    let Some(_phys) = vm.map_test_page(page_start, PageProperty::USER_RO) else {
         return fail!("map test page");
     };
 
@@ -207,14 +209,10 @@ pub fn test_cow_clone_modify_both() -> TestResult {
         return fail!("create parent VM");
     };
 
-    let test_addr = process_vm_alloc(
-        parent.process,
-        PAGE_SIZE_4KB,
-        PageFlags::WRITABLE.bits() as u32,
-    );
+    let test_addr = process_vm_alloc(parent.process, PAGE_SIZE_4KB, true);
     assert_test!(test_addr != 0, "process_vm_alloc failed");
 
-    let Some(phys) = parent.map_test_page(test_addr, PageFlags::USER_RW.bits()) else {
+    let Some(phys) = parent.map_test_page(test_addr, PageProperty::USER_RW) else {
         return fail!("map test page");
     };
 
@@ -287,13 +285,9 @@ pub fn test_cow_clone_survives_a_sibling_unmap() -> TestResult {
     let Some(parent) = ProcessVmGuard::new() else {
         return fail!("create parent VM");
     };
-    let addr = process_vm_alloc(
-        parent.process,
-        PAGE_SIZE_4KB,
-        PageFlags::WRITABLE.bits() as u32,
-    );
+    let addr = process_vm_alloc(parent.process, PAGE_SIZE_4KB, true);
     assert_test!(addr != 0, "process_vm_alloc failed");
-    let Some(phys) = parent.map_test_page(addr, PageFlags::USER_RW.bits()) else {
+    let Some(phys) = parent.map_test_page(addr, PageProperty::USER_RW) else {
         return fail!("map test page");
     };
     if let Some(virt) = phys.to_virt_checked() {
@@ -356,7 +350,7 @@ pub fn test_fork_and_exec_walk_what_is_mapped_not_what_is_reserved() -> TestResu
     let reset = crate::process_vm::process_vm_reset_for_exec(child.process);
     let execed = walks_for_test() - before;
 
-    assert_test!(reset == 0, "resetting the child for exec failed");
+    assert_test!(reset, "resetting the child for exec failed");
     assert_test!(
         forked < BOUND,
         "forking a {} MiB reservation took {} page-table walks",
@@ -408,13 +402,13 @@ pub fn test_cow_no_collateral_damage() -> TestResult {
     let addr2: u64 = 0x8000;
 
     let map_addr1 = process_vm_with_vm_space(vm.process, |vs| {
-        ostd_map_4kb_user_fresh(vs, VirtAddr::new(addr1), PageFlags::USER_RO.bits())
+        map_4kb_user_fresh(vs, VirtAddr::new(addr1), PageProperty::USER_RO)
     });
     let Some(Ok(phys1)) = map_addr1 else {
         return fail!("map page 1");
     };
     let map_addr2 = process_vm_with_vm_space(vm.process, |vs| {
-        ostd_map_4kb_user_fresh(vs, VirtAddr::new(addr2), PageFlags::USER_RO.bits())
+        map_4kb_user_fresh(vs, VirtAddr::new(addr2), PageProperty::USER_RO)
     });
     let Some(Ok(phys2)) = map_addr2 else {
         return fail!("map page 2");
@@ -465,20 +459,16 @@ pub fn test_cow_handle_invalid_address() -> TestResult {
 }
 
 /// A sibling resolves the COW page while this CPU's fault is in flight, so
-/// the handler arrives at a leaf that already permits the write. That is what
-/// `threads_share_one_stream` used to die of after the fork before it.
+/// the handler arrives at a leaf that already permits the write, which must
+/// not be fatal: `threads_share_one_stream` reaches it after a fork.
 pub fn test_cow_write_fault_on_an_already_resolved_page_is_not_fatal() -> TestResult {
     let Some(vm) = ProcessVmGuard::new() else {
         return fail!("create VM");
     };
 
-    let addr = crate::process_vm::process_vm_alloc(
-        vm.process,
-        PAGE_SIZE_4KB,
-        PageFlags::WRITABLE.bits() as u32,
-    );
+    let addr = crate::process_vm::process_vm_alloc(vm.process, PAGE_SIZE_4KB, true);
     assert_test!(addr != 0, "process_vm_alloc failed");
-    let Some(phys) = vm.map_test_page(addr, PageFlags::USER_RO.bits()) else {
+    let Some(phys) = vm.map_test_page(addr, PageProperty::USER_RO) else {
         return fail!("map test page");
     };
     vm.mark_cow(addr);
@@ -516,7 +506,7 @@ pub fn test_write_fault_on_a_read_only_page_stays_fatal() -> TestResult {
     };
 
     let addr: u64 = 0xA000;
-    if vm.map_test_page(addr, PageFlags::USER_RO.bits()).is_none() {
+    if vm.map_test_page(addr, PageProperty::USER_RO).is_none() {
         return fail!("map test page");
     }
 
@@ -540,9 +530,9 @@ fn packed_handle(vm: &ProcessVmGuard) -> Option<u64> {
     Some(crate::process_vm::pack_process_vm_handle(handle))
 }
 
-fn leaf_flags(vm: &ProcessVmGuard, addr: u64) -> Option<PageFlags> {
+fn leaf_property(vm: &ProcessVmGuard, addr: u64) -> Option<PageProperty> {
     process_vm_with_vm_space(vm.process, |vs| {
-        crate::user_mappings::ostd_get_pte_flags_4kb(vs, VirtAddr::new(addr))
+        crate::user_mappings::leaf_property_4kb(vs, VirtAddr::new(addr))
     })
     .flatten()
 }
@@ -556,9 +546,9 @@ pub fn test_cow_write_to_a_read_only_region_is_fatal() -> TestResult {
     let Some(parent) = ProcessVmGuard::new() else {
         return fail!("create parent VM");
     };
-    let addr = process_vm_alloc(parent.process, PAGE_SIZE_4KB, 0);
+    let addr = process_vm_alloc(parent.process, PAGE_SIZE_4KB, false);
     assert_test!(addr != 0, "process_vm_alloc failed");
-    let Some(phys) = parent.map_test_page(addr, PageFlags::USER_RO.bits()) else {
+    let Some(phys) = parent.map_test_page(addr, PageProperty::USER_RO) else {
         return fail!("map test page");
     };
     let Some(child) = parent.clone_cow() else {
@@ -595,19 +585,14 @@ pub fn test_mprotect_keeps_a_forked_page_copy_on_write() -> TestResult {
         let Some(parent) = ProcessVmGuard::new() else {
             return fail!("create parent VM");
         };
-        let region_flags = if writable {
-            PageFlags::WRITABLE.bits() as u32
-        } else {
-            0
-        };
-        let addr = process_vm_alloc(parent.process, PAGE_SIZE_4KB, region_flags);
+        let addr = process_vm_alloc(parent.process, PAGE_SIZE_4KB, writable);
         assert_test!(addr != 0, "process_vm_alloc failed");
         let leaf = if writable {
-            PageFlags::USER_RW
+            PageProperty::USER_RW
         } else {
-            PageFlags::USER_RO
+            PageProperty::USER_RO
         };
-        if parent.map_test_page(addr, leaf.bits()).is_none() {
+        if parent.map_test_page(addr, leaf).is_none() {
             return fail!("map test page");
         }
         let Some(child) = parent.clone_cow() else {
@@ -621,12 +606,12 @@ pub fn test_mprotect_keeps_a_forked_page_copy_on_write() -> TestResult {
                 PAGE_SIZE_4KB,
                 (PROT_READ | PROT_WRITE) as u64,
             );
-            assert_test!(rc == 0, "mprotect failed");
-            let Some(flags) = leaf_flags(side, addr) else {
+            assert_test!(rc.is_ok(), "mprotect failed");
+            let Some(flags) = leaf_property(side, addr) else {
                 return fail!("the page vanished");
             };
             assert_test!(
-                !flags.contains(PageFlags::WRITABLE) && flags.contains(PageFlags::COW),
+                !flags.write && is_cow(&flags),
                 "mprotect made a page shared across fork writable (was writable: {})",
                 writable
             );
@@ -643,14 +628,9 @@ pub fn test_cow_copy_keeps_the_region_no_execute() -> TestResult {
     let Some(parent) = ProcessVmGuard::new() else {
         return fail!("create parent VM");
     };
-    let addr = process_vm_alloc(
-        parent.process,
-        PAGE_SIZE_4KB,
-        PageFlags::WRITABLE.bits() as u32,
-    );
+    let addr = process_vm_alloc(parent.process, PAGE_SIZE_4KB, true);
     assert_test!(addr != 0, "process_vm_alloc failed");
-    let leaf = PageFlags::USER_RW.union(PageFlags::NO_EXECUTE);
-    let Some(phys) = parent.map_test_page(addr, leaf.bits()) else {
+    let Some(phys) = parent.map_test_page(addr, PageProperty::USER_RW) else {
         return fail!("map test page");
     };
     let Some(child) = parent.clone_cow() else {
@@ -669,11 +649,11 @@ pub fn test_cow_copy_keeps_the_region_no_execute() -> TestResult {
         child.virt_to_phys(addr) != phys,
         "the child wrote to the parent's frame"
     );
-    let Some(flags) = leaf_flags(&child, addr) else {
+    let Some(flags) = leaf_property(&child, addr) else {
         return fail!("the copied page vanished");
     };
     assert_test!(
-        flags.contains(PageFlags::WRITABLE) && flags.contains(PageFlags::NO_EXECUTE),
+        flags.write && !flags.execute,
         "the COW copy lost the region's protection: {:?}",
         flags
     );

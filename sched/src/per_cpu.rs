@@ -27,7 +27,7 @@ use super::task::{TaskRef, task_put};
 use super::task_struct::Task;
 use crate::fair;
 use slopos_abi::task::TaskStatus;
-use slopos_arch::MAX_CPUS;
+use slopos_ostd::cpu::x86_64::pcr::MAX_CPUS;
 use slopos_ostd::sync::intrusive::{IntrusiveLinkedList, LinkError};
 use slopos_ostd::sync::{InitFlag, KernelSync, LOCK_LEVEL_SCHEDULER, SpinLock};
 use slopos_ostd::task::{SchedPlacement, TaskAddr, task_placement_retain, with_parked_node};
@@ -93,7 +93,6 @@ impl ReadyQueue {
         }
     }
 
-    #[allow(dead_code)]
     fn is_empty(&self) -> bool {
         self.list.is_empty()
     }
@@ -533,7 +532,7 @@ impl PriorityRunQueue {
         let cpu_id = self.cpu_id();
         // The bootstrap stub is eight bytes with no task identity to compare,
         // so that check reads the slot raw and recognises it by address range.
-        let raw_current = slopos_arch::pcr::get_current_task_for(cpu_id);
+        let raw_current = slopos_ostd::cpu::x86_64::pcr::get_current_task_for(cpu_id);
         let current = TaskAddr::current_of(cpu_id);
         let running_real = current.is_some()
             && !slopos_ostd::task::bootstrap::is_bootstrap_task_ptr(raw_current.cast_const())
@@ -904,7 +903,10 @@ pub fn init_all_percpu_schedulers() {
     let aps_parked = are_aps_paused();
     for cpu_id in 0..MAX_CPUS {
         if let Some(sched) = cpu_scheduler(cpu_id) {
-            if sched.is_enabled() && !aps_parked && cpu_id != slopos_arch::pcr::get_current_cpu() {
+            if sched.is_enabled()
+                && !aps_parked
+                && cpu_id != slopos_ostd::cpu::x86_64::pcr::current_cpu_id()
+            {
                 klog_info!(
                     "SCHED: refusing to reset the live runqueue of CPU {} —                      scheduler init ran after that CPU entered its scheduler loop",
                     cpu_id
@@ -923,8 +925,8 @@ pub fn is_percpu_scheduler_initialized(cpu_id: usize) -> bool {
 }
 
 pub fn with_local_scheduler<R>(f: impl FnOnce(&PriorityRunQueue) -> R) -> R {
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
-    let sched = cpu_scheduler(cpu_id).expect("get_current_cpu() returned an out-of-range CPU id");
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
+    let sched = cpu_scheduler(cpu_id).expect("current_cpu_id() returned an out-of-range CPU id");
     f(sched)
 }
 
@@ -978,13 +980,9 @@ pub fn try_steal_task_from_cpu(cpu_id: usize) -> Option<TaskRef> {
     .flatten()
 }
 
-pub fn get_cpu_ready_count(cpu_id: usize) -> u32 {
-    with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0)
-}
-
 pub fn get_total_ready_tasks() -> u32 {
     let mut total = 0u32;
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
         if let Some(count) = with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()) {
             total += count;
@@ -995,7 +993,7 @@ pub fn get_total_ready_tasks() -> u32 {
 
 pub fn get_total_switches() -> u64 {
     let mut total = 0u64;
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
         if let Some(count) =
             with_cpu_scheduler(cpu_id, |sched| sched.total_switches.load(Ordering::Relaxed))
@@ -1008,7 +1006,7 @@ pub fn get_total_switches() -> u64 {
 
 pub fn get_total_yields() -> u64 {
     let mut total = 0u64;
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
         if let Some(count) =
             with_cpu_scheduler(cpu_id, |sched| sched.total_yields.load(Ordering::Relaxed))
@@ -1021,7 +1019,7 @@ pub fn get_total_yields() -> u64 {
 
 pub fn get_total_schedule_calls() -> u32 {
     let mut total = 0u32;
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
         if let Some(count) =
             with_cpu_scheduler(cpu_id, |sched| sched.schedule_calls.load(Ordering::Relaxed))
@@ -1035,8 +1033,8 @@ pub fn get_total_schedule_calls() -> u32 {
 /// Genuinely idle: no queued tasks and no real (non-idle) task running.
 /// Set while a kick is on its way to a CPU, so a burst of enqueues sends it
 /// one IPI rather than one each; its scheduler loop clears it.
-static KICK_PENDING: [AtomicBool; slopos_arch::MAX_CPUS] =
-    [const { AtomicBool::new(false) }; slopos_arch::MAX_CPUS];
+static KICK_PENDING: [AtomicBool; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS];
 
 /// A task now waits behind a running one on `busy`: wake an idle CPU so its
 /// scheduler loop steals it. An idle CPU halts — tickless, it may not wake
@@ -1044,7 +1042,7 @@ static KICK_PENDING: [AtomicBool; slopos_arch::MAX_CPUS] =
 /// thief, so without this the task waits out the running one's slice while a
 /// peer sleeps. Linux kicks an idle CPU into balancing the same way.
 fn kick_idle_peer(busy: usize) {
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     let ranked = ranked_idle_cpu(0, None).filter(|&cpu| cpu != busy);
     let mut order = ranked
         .into_iter()
@@ -1058,7 +1056,8 @@ fn kick_idle_peer(busy: usize) {
 
 /// Work this CPU's idle loop would dispatch or steal if it looked now.
 pub fn has_local_work(cpu_id: usize) -> bool {
-    (cpu_id < slopos_arch::MAX_CPUS && KICK_PENDING[cpu_id].load(Ordering::Acquire))
+    (cpu_id < slopos_ostd::cpu::x86_64::pcr::MAX_CPUS
+        && KICK_PENDING[cpu_id].load(Ordering::Acquire))
         || with_cpu_scheduler(cpu_id, |sched| {
             sched.total_ready_count() > 0 || sched.has_pending_inbox()
         })
@@ -1067,7 +1066,7 @@ pub fn has_local_work(cpu_id: usize) -> bool {
 
 /// The kick has landed: this CPU's scheduler loop is looking for work.
 pub fn clear_idle_kick(cpu_id: usize) {
-    if cpu_id < slopos_arch::MAX_CPUS {
+    if cpu_id < slopos_ostd::cpu::x86_64::pcr::MAX_CPUS {
         KICK_PENDING[cpu_id].store(false, Ordering::Release);
     }
 }
@@ -1082,7 +1081,7 @@ fn ranked_idle_cpu(affinity: u32, prefer: Option<usize>) -> Option<usize> {
     if !crate::cpufreq::ranking_active() {
         return None;
     }
-    let cpu_count = slopos_arch::pcr::get_cpu_count().min(MAX_CPUS);
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count().min(MAX_CPUS);
     if cpu_count == 0 {
         return None;
     }
@@ -1107,7 +1106,7 @@ fn ranked_idle_cpu(affinity: u32, prefer: Option<usize>) -> Option<usize> {
 
 /// Select the best CPU for a waking task.
 pub fn select_target_cpu(task: &Task) -> Option<usize> {
-    let current_cpu = slopos_arch::pcr::get_current_cpu();
+    let current_cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let affinity = task.cpu_affinity();
     let last_cpu = task.last_cpu() as usize;
 
@@ -1148,12 +1147,16 @@ pub fn select_target_cpu(task: &Task) -> Option<usize> {
     // (an AP paused for a teardown, or mid-enable). Target it anyway rather
     // than stranding the wake — the remote push parks it in that CPU's inbox
     // and its next drain runs it. Only a mask with no online CPU yields `None`.
-    if slopos_arch::pcr::is_cpu_online(last_cpu) && affinity_allows_cpu(affinity, last_cpu) {
+    if slopos_ostd::cpu::x86_64::pcr::is_cpu_online(last_cpu)
+        && affinity_allows_cpu(affinity, last_cpu)
+    {
         return Some(last_cpu);
     }
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
-        if affinity_allows_cpu(affinity, cpu_id) && slopos_arch::pcr::is_cpu_online(cpu_id) {
+        if affinity_allows_cpu(affinity, cpu_id)
+            && slopos_ostd::cpu::x86_64::pcr::is_cpu_online(cpu_id)
+        {
             return Some(cpu_id);
         }
     }
@@ -1166,7 +1169,7 @@ pub fn select_target_cpu(task: &Task) -> Option<usize> {
 /// Bypasses `last_cpu` entirely — cache is cold for a new address space — and
 /// goes straight to the globally idlest CPU.
 pub fn select_target_cpu_for_new(task: &Task) -> Option<usize> {
-    let current_cpu = slopos_arch::pcr::get_current_cpu();
+    let current_cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let affinity = task.cpu_affinity();
 
     if let Some(best_cpu) = ranked_idle_cpu(affinity, None).or_else(|| find_idlest_cpu(affinity)) {
@@ -1188,17 +1191,18 @@ pub fn select_target_cpu_for_new(task: &Task) -> Option<usize> {
 /// position to break ties. The counter advances over the eligible set, not raw
 /// `cpu_count`, so tie-breaking stays fair when some CPUs are ineligible.
 fn find_idlest_cpu(affinity: u32) -> Option<usize> {
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     if cpu_count == 0 {
         return None;
     }
 
     // Heap, not stack: a `[usize; MAX_CPUS]` is 2 KiB on its own and pushes
     // this frame over the stack-sizes gate.
-    let mut eligible = match slopos_ostd::KVec::<usize>::zeroed(slopos_arch::MAX_CPUS) {
-        Ok(v) => v,
-        Err(_) => return None,
-    };
+    let mut eligible =
+        match slopos_ostd::KVec::<usize>::zeroed(slopos_ostd::cpu::x86_64::pcr::MAX_CPUS) {
+            Ok(v) => v,
+            Err(_) => return None,
+        };
     let mut n_eligible = 0usize;
     for cpu_id in 0..cpu_count {
         if is_schedulable_cpu(cpu_id, affinity) {
@@ -1260,7 +1264,7 @@ pub fn cpu_accepts_placement(cpu_id: usize) -> bool {
 }
 
 pub(crate) fn is_schedulable_cpu(cpu_id: usize, affinity: u32) -> bool {
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     if cpu_id >= cpu_count {
         return false;
     }
@@ -1273,7 +1277,7 @@ pub(crate) fn is_schedulable_cpu(cpu_id: usize, affinity: u32) -> bool {
         return false;
     }
 
-    if !slopos_arch::pcr::is_cpu_online(cpu_id) {
+    if !slopos_ostd::cpu::x86_64::pcr::is_cpu_online(cpu_id) {
         return false;
     }
 
@@ -1281,7 +1285,7 @@ pub(crate) fn is_schedulable_cpu(cpu_id: usize, affinity: u32) -> bool {
 }
 
 fn is_local_enqueue_fallback_cpu(cpu_id: usize, affinity: u32) -> bool {
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     if cpu_id >= cpu_count {
         return false;
     }
@@ -1294,7 +1298,7 @@ fn is_local_enqueue_fallback_cpu(cpu_id: usize, affinity: u32) -> bool {
 }
 
 fn find_least_loaded_cpu(affinity: u32) -> Option<usize> {
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     let mut best_cpu: Option<usize> = None;
     let mut min_load = u32::MAX;
 
@@ -1316,7 +1320,7 @@ fn find_least_loaded_cpu(affinity: u32) -> Option<usize> {
 
 /// Whether `task` is the idle task of any CPU.
 pub fn is_idle_task(task: TaskAddr) -> bool {
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     (0..cpu_count).any(|cpu_id| TaskAddr::idle_of(cpu_id) == Some(task))
 }
 
@@ -1537,7 +1541,7 @@ pub(crate) const AP_PAUSE_SPIN_BUDGET_FOR_TEST: u32 = AP_PAUSE_SPIN_BUDGET;
 /// baseline of its own.
 fn classify_pause_failure(cpu_id: usize, baseline: Option<u64>) -> ApPauseError {
     match baseline {
-        Some(before) if slopos_arch::pcr::heartbeat_for_cpu(cpu_id) == before => {
+        Some(before) if slopos_ostd::cpu::x86_64::pcr::heartbeat_for_cpu(cpu_id) == before => {
             ApPauseError::NotRunning { cpu_id }
         }
         _ => ApPauseError::NotParking { cpu_id },
@@ -1567,7 +1571,7 @@ pub fn pause_all_aps() -> Result<ApPauseToken, ApPauseError> {
     // reads back as parked and the wait ends early.
     core::sync::atomic::fence(Ordering::SeqCst);
 
-    match wait_for_aps_to_park(slopos_arch::pcr::get_cpu_count()) {
+    match wait_for_aps_to_park(slopos_ostd::cpu::x86_64::pcr::get_cpu_count()) {
         Ok(()) => {
             let skipped = SKIPPED_OFFLINE_APS.load(Ordering::Relaxed);
             if skipped != 0 && SKIPPED_OFFLINE_REPORTED.enter() {
@@ -1598,7 +1602,7 @@ fn executing_ap(cpu_count: usize) -> Option<usize> {
         let executing = with_cpu_scheduler(cpu_id, |sched| sched.is_executing_task()) == Some(true);
         // Only that AP can clear its own flag, so waiting on an offline one is a
         // wait that cannot end.
-        if executing && !slopos_arch::pcr::is_cpu_online(cpu_id) {
+        if executing && !slopos_ostd::cpu::x86_64::pcr::is_cpu_online(cpu_id) {
             SKIPPED_OFFLINE_APS.fetch_add(1, Ordering::Relaxed);
             return false;
         }
@@ -1612,7 +1616,7 @@ fn wait_for_aps_to_park(cpu_count: usize) -> Result<(), ApPauseError> {
     };
     // One `u64`, never an array: `[u64; MAX_CPUS]` is 2048 bytes, the whole of
     // `check_stack_sizes.sh`'s cap, before a single other local.
-    let blamed_beat_before = slopos_arch::pcr::heartbeat_for_cpu(blamed);
+    let blamed_beat_before = slopos_ostd::cpu::x86_64::pcr::heartbeat_for_cpu(blamed);
 
     // An AP holds `executing_task` for as long as its task runs, so waiting
     // unprovoked is a wait on that task yielding; the reschedule IPI turns it
@@ -1670,7 +1674,7 @@ fn release_ap_pause_depth() {
         return;
     }
 
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     for cpu_id in 1..cpu_count {
         // Gating only on the ready count would leave an inbox-parked wake
         // waiting for the next timer tick instead of resuming on the IPI.
@@ -1729,7 +1733,7 @@ pub fn clear_cpu_queues(cpu_id: usize) {
 }
 
 pub fn clear_all_cpu_queues() {
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
         clear_cpu_queues(cpu_id);
     }
@@ -1743,7 +1747,7 @@ pub fn hold_kernel_io_off_all_runqueues(_paused: &ApPauseToken) -> usize {
         return 0;
     }
     let mut held = 0usize;
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     for cpu_id in 0..cpu_count {
         let Some(sched) = cpu_scheduler(cpu_id) else {
             continue;

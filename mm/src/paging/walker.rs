@@ -3,9 +3,10 @@
 //! One entry is taken by value per level, so the walk never forms a
 //! reference into a page-table frame.
 
-use super::page_table_defs::{PageTableEntry, PageTableLevel, entry_at};
+use super::page_table_defs::{PageTableEntry, entry_at};
 use crate::paging_defs::PAGE_SIZE_4KB;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
+use slopos_ostd::mm::page_table::PageTableLevel;
 
 use crate::error::{MmError, MmResult};
 
@@ -15,13 +16,6 @@ pub struct WalkResult {
     pub level: PageTableLevel,
     pub phys_addr: PhysAddr,
     pub page_size: u64,
-}
-
-impl WalkResult {
-    #[inline]
-    pub fn is_huge_page(&self) -> bool {
-        self.page_size > PAGE_SIZE_4KB
-    }
 }
 
 /// Resolve `vaddr` under the PML4 frame at `pml4_phys`, stopping at the

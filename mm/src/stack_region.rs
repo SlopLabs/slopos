@@ -9,8 +9,10 @@
 //! sentinel install is visible.
 //!
 //! The hidden `_*` methods are how the generic allocator reaches a region's own
-//! statics; each region's instantiation module ([`crate::kstack_va`],
-//! [`crate::ustack_va`]) implements them, and no caller invokes them directly.
+//! statics; each region's instantiation module in [`crate::stack_va`]
+//! (`kstack`, `ustack`) implements them, and no caller invokes them directly.
+
+use slopos_ostd::mm::page_property::PageProperty;
 
 use crate::stack_va::{PcpStats, SlotEntry};
 
@@ -59,10 +61,8 @@ pub trait StackRegion: 'static + sealed::Sealed {
     /// push cannot immediately overflow again.
     const PCP_SPILL_BATCH: usize;
 
-    /// Page flags used when mapping physical frames into a slot. A raw
-    /// bitfield because `PageFlags` is not a primitive and so cannot be a
-    /// const generic.
-    const PAGE_FLAGS: u64;
+    /// How a slot's frames are mapped.
+    const PAGE_PROPERTY: PageProperty;
 
     /// Pop one slot from the current CPU's cache, refilling from the global if
     /// it is empty.
@@ -97,13 +97,13 @@ pub trait StackRegion: 'static + sealed::Sealed {
 }
 
 /// VA region for kernel-mode task stacks: `KSTACK_VA_BASE..KSTACK_VA_END` in
-/// [`crate::memory_layout_defs`], implemented in [`crate::kstack_va`].
+/// [`crate::memory_layout_defs`], implemented in [`crate::stack_va`]'s `kstack`.
 pub enum KstackRegion {}
 impl sealed::Sealed for KstackRegion {}
 
 /// VA region for SafeStack-sanitiser data stacks, disjoint from
 /// [`KstackRegion`] so a stray data-stack OOB cannot rewrite control flow on
 /// the safe (kernel) stack: `USTACK_VA_BASE..USTACK_VA_END` in
-/// [`crate::memory_layout_defs`], implemented in [`crate::ustack_va`].
+/// [`crate::memory_layout_defs`], implemented in [`crate::stack_va`]'s `ustack`.
 pub enum UstackRegion {}
 impl sealed::Sealed for UstackRegion {}

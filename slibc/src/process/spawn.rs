@@ -677,10 +677,6 @@ fn clone_fd(src: c_int, target: c_int) -> SpawnFdAction {
         src_fd: src,
         target_fd: target,
         _pad: 0,
-        open_path_ptr: 0,
-        open_path_len: 0,
-        open_flags: 0,
-        _pad2: 0,
     }
 }
 

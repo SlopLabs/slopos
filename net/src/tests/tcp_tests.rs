@@ -1667,8 +1667,8 @@ pub fn test_tcp_isn_varies_by_tuple() -> TestResult {
     pass!()
 }
 
-/// The ISN must not equal the previous ISN + 64000, the fixed delta of the old
-/// `ISN_COUNTER.fetch_add(64000)` scheme.
+/// Consecutive ISNs must not differ by a fixed delta such as 64000, which a
+/// global `fetch_add` counter would produce (RFC 6528).
 pub fn test_tcp_isn_not_monotonic_counter() -> TestResult {
     reset();
     let tuple = TcpTuple {
@@ -1686,7 +1686,7 @@ pub fn test_tcp_isn_not_monotonic_counter() -> TestResult {
     let isn_a = tcp::isn::generate_isn(&tuple);
     let isn_b = tcp::isn::generate_isn(&t2);
     let delta = isn_b.wrapping_sub(isn_a);
-    assert_test!(delta != 64_000, "ISN delta must not be the legacy 64000");
+    assert_test!(delta != 64_000, "ISN delta must not be a fixed 64000");
     pass!()
 }
 

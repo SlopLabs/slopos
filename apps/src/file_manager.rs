@@ -78,9 +78,7 @@ impl Place {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(slopos_abi::fs::SESSION_HOME))
+    std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
 const PLACES: &[Place] = &[

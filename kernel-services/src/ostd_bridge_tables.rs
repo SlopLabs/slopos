@@ -1,20 +1,14 @@
-//! Static platform tables OSTD ingests at boot: reserved IRQ vectors, legacy
-//! I/O port ranges, and MMIO ranges whose phys addresses are known that early
-//! (currently just the LAPIC).
+//! Static platform tables OSTD ingests at boot: legacy I/O port ranges, and
+//! MMIO ranges whose phys addresses are known that early (currently just the
+//! LAPIC).
 //!
 //! Runtime-discovered MMIO (HPET, IOAPIC, PCI ECAM, device BARs, framebuffer)
-//! is absent by design: `slopos_mm::mmio::MmioRegionExt::map` registers those
+//! is absent by design: `slopos_mm::mmio::map_uncached` registers those
 //! with OSTD's dynamic-range registry at the moment a driver maps them.
 
 use slopos_abi::addr::PhysAddr;
-use slopos_arch::arch::idt::{
-    LAPIC_TIMER_VECTOR, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR, SHUTDOWN_VECTOR, SYSCALL_VECTOR,
-    TLB_SHOOTDOWN_VECTOR,
-};
 use slopos_ostd::io::port::PortRange;
 use slopos_ostd::mm::io_mem::PhysRange;
-
-const SPURIOUS_VECTOR: u8 = 0xFF;
 
 pub static MMIO_RANGES: &[PhysRange] = &[PhysRange {
     base: PhysAddr(0xFEE0_0000),
@@ -63,14 +57,4 @@ pub static PORT_RANGES: &[PortRange] = &[
         start: 0xCF9,
         end: 0xCFA,
     },
-];
-
-pub static RESERVED_VECTORS: &[u8] = &[
-    SYSCALL_VECTOR,
-    RCU_QS_IPI_VECTOR,
-    RESCHEDULE_IPI_VECTOR,
-    TLB_SHOOTDOWN_VECTOR,
-    LAPIC_TIMER_VECTOR,
-    SHUTDOWN_VECTOR,
-    SPURIOUS_VECTOR,
 ];

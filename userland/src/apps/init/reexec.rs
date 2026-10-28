@@ -16,9 +16,9 @@ use crate::syscall::{OwnedFd, RawFd, SyscallError, fs, process};
 
 pub const RESUME: &str = "--resume";
 /// The state's first line after the descriptors, which an image's text holds
-/// when it reads that state: the session table's version, and the one before.
-const VERSION: &str = "slopos-init 2";
-const VERSION_1: &str = "slopos-init 1";
+/// when it reads that state, its newline included so no later version's
+/// header contains it.
+const HEADER: &str = "slopos-init-state 1\n";
 const ARGV0: &str = "/sbin/init";
 
 /// What init carries across an exec. A service's pid is `None` while it is
@@ -43,9 +43,6 @@ pub struct State {
     pub fresh: bool,
     pub default_starts: Vec<u64>,
     pub tests: Option<u32>,
-    /// A first-version image's one desktop: its compositor's pid while it
-    /// ran, which this image takes over as the first person's.
-    pub legacy: Option<Service>,
 }
 
 #[derive(Default, Debug)]
@@ -87,7 +84,7 @@ impl State {
     /// reads, so an image that cannot read the rest still closes them.
     fn encode(&self) -> String {
         let mut out = kept_line(self.descriptors());
-        out += &format!("{VERSION}\n");
+        out += HEADER;
         if !self.links.is_empty() {
             let fds: Vec<String> = self
                 .links
@@ -150,56 +147,16 @@ impl State {
         out
     }
 
-    /// The state for an image of the first version, which knows one desktop
-    /// and one consent link: what it carries of the services, and none of
-    /// the sessions, which end before it runs.
-    fn encode_first(&self) -> String {
-        let consent = self.links.first().copied();
-        let kept = consent
-            .into_iter()
-            .flat_map(|(a, b)| [a, b])
-            .chain(self.control)
-            .chain(self.reply);
-        let mut out = kept_line(kept);
-        out += &format!("{VERSION_1}\n");
-        if let Some((privd, agent)) = consent {
-            out += &format!("consent {privd} {agent}\n");
-        }
-        if let Some(control) = self.control {
-            out += &format!("control {control}\n");
-        }
-        if let Some(reply) = self.reply {
-            out += &format!("reply {reply}\n");
-        }
-        out += &service("privd", self.privd.pid, &self.privd.starts);
-        if let Some(remoted) = &self.remoted {
-            out += &service("remoted", remoted.pid, &remoted.starts);
-        }
-        out += &service("session", None, &self.default_starts);
-        if self.held {
-            out += "held\n";
-        }
-        if let Some(tests) = self.tests {
-            out += &format!("tests {tests}\n");
-        }
-        out
-    }
-
     fn decode<'a>(mut lines: impl Iterator<Item = &'a str>) -> Option<State> {
-        let first = match lines.next()? {
-            VERSION => false,
-            VERSION_1 => true,
-            _ => return None,
-        };
-        let mut state = State {
-            wanted: first,
-            ..State::default()
-        };
+        if lines.next()? != HEADER.trim_end() {
+            return None;
+        }
+        let mut state = State::default();
         for line in lines {
             let mut words = line.split(' ');
             let key = words.next()?;
             let rest: Vec<&str> = words.collect();
-            if key == "session" && !first {
+            if key == "session" {
                 state.sessions.push(carried_session(&rest)?);
                 continue;
             }
@@ -207,8 +164,7 @@ impl State {
             let numbers = numbers?;
             let fd = |i: usize| numbers.get(i).and_then(|&n| RawFd::try_from(n).ok());
             match key {
-                "consent" if first => state.links = vec![(fd(0)?, fd(1)?)],
-                "links" if !first && numbers.len() % 2 == 0 => {
+                "links" if numbers.len() % 2 == 0 => {
                     state.links = numbers
                         .chunks(2)
                         .map(|pair| {
@@ -226,11 +182,6 @@ impl State {
                 "remoted" => state.remoted = Some(Service::decode(&numbers)?),
                 "login" => state.login = Some(Service::decode(&numbers)?),
                 "default" => state.default_starts = Service::decode(&numbers)?.starts,
-                "session" => {
-                    let session = Service::decode(&numbers)?;
-                    state.default_starts = session.starts.clone();
-                    state.legacy = Some(session);
-                }
                 "front" => state.front = Some(u32::try_from(*numbers.first()?).ok()?),
                 "next" => state.next_tag = u32::try_from(*numbers.first()?).ok()?,
                 "tests" => state.tests = Some(u32::try_from(*numbers.first()?).ok()?),
@@ -351,13 +302,13 @@ fn handed_lines(text: &str) -> Result<Vec<OwnedFd>, String> {
     Ok(pipes)
 }
 
-/// What the image at `/sbin/init` reads of what a re-execution hands on.
+/// What the image at `/sbin/init` reads of what a re-execution hands on, its
+/// text holding the header each is written under.
 pub struct Reads {
-    /// The extensions' services, its text holding the header they are
-    /// written under.
+    /// The extensions' services.
     pub units: bool,
-    /// The session table, its text holding this version's header.
-    pub sessions: bool,
+    /// The rest of init's state: its services, sessions and links.
+    pub state: bool,
 }
 
 /// What the image at `/sbin/init` reads; an error when it cannot be read.
@@ -366,19 +317,15 @@ pub fn reads() -> Result<Reads, String> {
     let holds = |header: &str| image.windows(header.len()).any(|w| w == header.as_bytes());
     Ok(Reads {
         units: holds(CARRIED),
-        sessions: holds(VERSION),
+        state: holds(HEADER),
     })
 }
 
-/// Execute `/sbin/init` again carrying `state`, in the version the image
-/// reads, and, for an image that reads them, `units`. Returns only when the
-/// exec failed, with every descriptor as it was.
-pub fn reexec(state: &State, sessions: bool, units: Option<&Units>) -> String {
-    let encoded = match sessions {
-        true => state.encode(),
-        false => state.encode_first(),
-    };
-    let pipe = match handed(&encoded) {
+/// Execute `/sbin/init` again carrying `state` and, for an image that reads
+/// them, `units`. Returns only when the exec failed, with every descriptor as
+/// it was.
+pub fn reexec(state: &State, units: Option<&Units>) -> String {
+    let pipe = match handed(&state.encode()) {
         Ok(pipe) => pipe,
         Err(why) => return why,
     };
@@ -386,19 +333,8 @@ pub fn reexec(state: &State, sessions: bool, units: Option<&Units>) -> String {
         Ok(units_pipes) => units_pipes.unwrap_or_default(),
         Err(why) => return why,
     };
-    let carried: Vec<RawFd> = match sessions {
-        true => state.descriptors().collect(),
-        false => state
-            .links
-            .first()
-            .into_iter()
-            .flat_map(|&(a, b)| [a, b])
-            .chain(state.control)
-            .chain(state.reply)
-            .collect(),
-    };
-    let kept: Vec<RawFd> = carried
-        .into_iter()
+    let kept: Vec<RawFd> = state
+        .descriptors()
         .chain(units.iter().flat_map(|units| units.descriptors()))
         .chain([pipe.raw()])
         .chain(units_pipes.iter().map(OwnedFd::raw))

@@ -1,8 +1,7 @@
-use core::ffi::c_int;
-
 use crate::framebuffer::{self, FbState};
 use slopos_abi::draw::{Canvas, EncodedPixel};
 use slopos_abi::video_traits::VideoError;
+use slopos_kernel_services::syscall_services::scanout::Present;
 use slopos_ostd::boot::handoff::framebuffer::{
     fb_fill_u8_bulk, fb_ptr_add, fb_write_u8_at, fb_write_u16_at, fb_write_u32_at, fb_write_u64_at,
 };
@@ -31,10 +30,10 @@ impl GraphicsContext {
         self.fb.height()
     }
 
-    /// Flush the framebuffer to the display backend; 0 if none is registered.
-    pub fn flush(&self) -> c_int {
-        // Kernel-side draws (splash / roulette / fblog) present the whole frame.
-        framebuffer::framebuffer_flush(core::ptr::null(), 0)
+    /// Present the whole frame: kernel-side draws (splash, roulette, the
+    /// kernel log) have no damage list.
+    pub fn flush(&self) -> Present {
+        framebuffer::framebuffer_flush(&[])
     }
 }
 

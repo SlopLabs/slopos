@@ -39,10 +39,10 @@
 //
 // ONE exception. `DispatchPin` and `DispatchUnpin` are single steps here but
 // TWO writes in the tree, in different functions, with a real window between
-// them (`task_set_on_cpu` and the `PCR.current_task` publication, in opposite
+// them (`TaskInner::set_on_cpu` and the `PCR.current_task` publication, in opposite
 // orders for pin and unpin). Modelling the pair as atomic is sound only because
 // `pinned` mirrors `task_is_dispatch_pinned`, which is a DISJUNCTION —
-// `task_on_cpu_load || task_is_current_on_any_cpu || is_idle_task` — so
+// `task.on_cpu() || task_is_current_on_any_cpu || is_idle_task` — so
 // whichever write lands first another disjunct still holds and the intermediate
 // state collapses onto the pre-state. It does not depend on the write order.
 // Narrowing that predicate to a conjunction, or deleting a disjunct, makes T6
@@ -109,7 +109,7 @@ pub struct TaskOwn {
     pub exist_flag: bool,
     /// The registry holds a (weak) entry for this task.
     pub registered: bool,
-    /// `task_is_dispatch_pinned` = `task_on_cpu_load ||
+    /// `task_is_dispatch_pinned` = `task.on_cpu() ||
     /// task_is_current_on_any_cpu || per_cpu::is_idle_task`.
     pub pinned: bool,
     /// The `TaskInner` body is still initialised — the destructor has not run.
@@ -228,14 +228,14 @@ pub enum Step {
     /// existence reference can be claimed, and the dispatching CPU holds the
     /// dequeued reference as a caller handle for the whole window.
     ///
-    /// Two writes, in two functions: `task_set_on_cpu(_, true)` in the
+    /// Two writes, in two functions: `set_on_cpu(true)` in the
     /// scheduler, then the `PCR.current_task` publication inside `dispatch()`.
     /// `install_idle_task` is a third, one-way writer that fits the same guard;
     /// see the header for why that is an over-approximation rather than a hole.
     DispatchPin,
     /// The switch tail retiring the task, the same two writes in the opposite
     /// order: the successor takes `PCR.current_task`, and only then is
-    /// `task_set_on_cpu(_, false)` cleared.
+    /// `set_on_cpu(false)` cleared.
     DispatchUnpin,
     /// `task_release_strong` -> `KArc::release_deferrable`, non-final: the CAS
     /// loop observed a previous value above one. A bare atomic decrement, safe
@@ -709,7 +709,7 @@ pub open spec fn park_claim(s: TaskOwn) -> TaskOwn {
 /// retain the flag advertises a reference that has not been minted, so a
 /// concurrent `task_existence_release` wins the `true -> false` CAS and
 /// reclaims a strong reference that does not exist — one decrement too many,
-/// with no bad pointer in sight. The fixed ordering keeps both sub-states
+/// with no bad pointer in sight. The real ordering keeps both sub-states
 /// invariant and composes to the atomic `RegisterAndPark`.
 pub proof fn broken_park_ordering_violates_invariant()
     ensures
@@ -778,10 +778,10 @@ pub open spec fn reap_unhash(s: TaskOwn) -> TaskOwn {
 /// The BROKEN ordering is `reap_unhash` applied FIRST. It reaches a state where
 /// the task still holds its existence reference but no longer has a registry
 /// entry: nothing can look it up, so nothing will ever reap it, and
-/// `EXISTENCE_REFS_PARKED` permanently exceeds registry occupancy. The fixed
+/// `EXISTENCE_REFS_PARKED` permanently exceeds registry occupancy. The real
 /// order keeps both sub-states invariant and composes to the atomic
-/// `ReapAndRelease` — though `flag_agrees` is momentarily false in that fixed
-/// intermediate, which is why the biconditionals sit outside `own_inv`.
+/// `ReapAndRelease` — though `flag_agrees` is momentarily false between its
+/// two steps, which is why the biconditionals sit outside `own_inv`.
 pub proof fn broken_reap_unhash_before_release_violates_invariant()
     ensures
         exists|s: TaskOwn|

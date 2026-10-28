@@ -25,15 +25,12 @@ pub(super) use crate::tty::session::ForegroundCheck;
 pub(super) use crate::tty::session::TtySession;
 pub(super) use crate::tty::table::{TTY_OUTPUT_INFLIGHT, TTY_SLOTS};
 pub(super) use crate::tty::vconsole::{
-    Cell, CellAttributes, CellGrid, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS,
-    VConsoleState,
-};
-pub(super) use crate::tty::vtparser::{
-    Direction, EraseMode, MouseTracking, SgrAttr, VtAction, VtParser,
+    Cell, CursorAttributes, VCONSOLE_MAX_COLS, VCONSOLE_MAX_ROWS, VConsoleState,
 };
 pub(super) use crate::tty::{PacketEvents, TtyFlags};
 pub(super) use slopos_ostd::process::quota::FileBacking;
 pub(super) use slopos_ostd::task::{ProcessGroup, Session};
+pub(super) use slopos_vt::{Direction, EraseMode, MouseTracking, SgrAttr, VtAction, VtParser};
 
 pub(super) use slopos_ostd::{KArc, KWeak};
 
@@ -188,8 +185,8 @@ pub(super) fn drain_then_read_byte(stage: TtyIndex, peer: TtyIndex, byte: u8) ->
 pub(super) struct PtyPair {
     pub(super) master: TtyIndex,
     pub(super) slave: TtyIndex,
-    pub(super) master_backing: KArc<TtyBacking>,
-    pub(super) slave_backing: KArc<dyn FileBacking>,
+    _master_backing: KArc<TtyBacking>,
+    _slave_backing: KArc<dyn FileBacking>,
 }
 
 pub(super) fn open_pty_pair() -> PtyPair {
@@ -202,8 +199,8 @@ pub(super) fn open_pty_pair() -> PtyPair {
     PtyPair {
         master,
         slave,
-        master_backing,
-        slave_backing,
+        _master_backing: master_backing,
+        _slave_backing: slave_backing,
     }
 }
 

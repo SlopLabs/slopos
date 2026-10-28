@@ -1,66 +1,56 @@
-//! One-shot in-place initialiser for self-referential statics.
+//! One-shot in-place initialiser for a static too large to build on a stack.
 //!
-//! Storage sits at the final `'static` address, so `*const` fields the
-//! initialiser writes into the value stay valid for the kernel's lifetime.
-//! `OnceCell` / `OnceLock` do not fit: the value already exists at static
-//! construction with default fields, and only the pointer-mutation step is
-//! gated.
-//!
-//! Before [`InitInPlace::init_once`] runs, [`InitInPlace::as_ptr`] returns the
-//! unmodified default value, which the consumer detects via a sentinel field.
+//! The value starts as the constant it was declared with; [`InitInPlace::init_once`]
+//! writes it where it lies, and [`InitInPlace::get`] reads it once that has
+//! returned.
 
 use core::cell::SyncUnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// Self-referential one-shot in-place initialiser. `T` must be `Sync`: the
-/// cell ships a `*const T` to consumers and its storage is shared `'static`.
-/// After `init_once` returns, no further `&mut T` reborrow is obtainable.
 pub struct InitInPlace<T> {
     cell: SyncUnsafeCell<T>,
     gate: AtomicBool,
+    done: AtomicBool,
 }
 
-// SAFETY: writes to the single `T` are serialised by the gate (one CAS-once
-// writer, every later reader observes a non-mutated value), and the consumer
-// surface hands out `*const T` rather than `&T`.
-unsafe impl<T: Sync> Sync for InitInPlace<T> {}
+// SAFETY: the gate admits one writer, on whichever thread wins it, and `get`
+// hands out `&T` only once `done` says that writer's `&mut T` has ended, so no
+// `&T` overlaps a `&mut T`.
+unsafe impl<T: Send + Sync> Sync for InitInPlace<T> {}
 
 impl<T> InitInPlace<T> {
-    /// Construct a cell pre-populated with `value`, which must satisfy the
-    /// consumer's "uninitialised but C-ABI-valid" sentinel contract (e.g.
-    /// `entry_count = 0`).
     pub const fn new(value: T) -> Self {
         Self {
             cell: SyncUnsafeCell::new(value),
             gate: AtomicBool::new(false),
+            done: AtomicBool::new(false),
         }
     }
 
-    /// Run `init` exactly once with a `&mut T` reborrow. Returns `true` if
-    /// this call performed the initialisation; `false` if a prior call did.
-    ///
-    /// The cell is at its final `'static` address, so self-referential pointers
-    /// the closure writes (e.g. `T::entries = &T::entries_storage`) stay valid.
+    /// Run `init` exactly once on the value where it lies. Returns `true` if
+    /// this call ran it; `false` if another call did or is running it, so
+    /// [`Self::get`] may still answer `None`.
     pub fn init_once(&self, init: impl FnOnce(&mut T)) -> bool {
         if self.gate.swap(true, Ordering::SeqCst) {
             return false;
         }
         // SAFETY: the swap returned `false` (was uninit), so this thread holds
-        // exclusive write access; readers are ordered by the `SeqCst` swap.
+        // exclusive write access, and `get` reads nothing until `done`.
         let slot = unsafe { &mut *self.cell.get() };
         init(slot);
+        self.done.store(true, Ordering::Release);
         true
     }
 
-    /// The C-ABI consumer's view of the value; stable for the cell's `'static`
-    /// lifetime. Pair with [`Self::is_initialised`] to gate on init.
+    /// The value once [`Self::init_once`] has returned, after which nothing
+    /// can reach it mutably.
     #[inline]
-    pub fn as_ptr(&self) -> *const T {
-        self.cell.get() as *const T
-    }
-
-    #[inline]
-    pub fn is_initialised(&self) -> bool {
-        self.gate.load(Ordering::Acquire)
+    pub fn get(&self) -> Option<&T> {
+        if !self.done.load(Ordering::Acquire) {
+            return None;
+        }
+        // SAFETY: `done` is published only after the one `&mut` reborrow has
+        // ended, and the gate refuses every later one.
+        Some(unsafe { &*self.cell.get() })
     }
 }

@@ -51,7 +51,3 @@ ext4_has_feature() {
         *) return 1 ;;
     esac
 }
-
-ext4_ext2_era() {
-    ! ext4_has_feature "$1" extent && ! ext4_has_feature "$1" has_journal
-}

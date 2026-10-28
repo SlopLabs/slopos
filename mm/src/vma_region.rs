@@ -9,11 +9,13 @@
 
 use slopos_abi::quota::{CommitPagesAxis, PagesAxis, ResidentPagesAxis};
 use slopos_ostd::KBTreeMap;
+use slopos_ostd::mm::page_property::{CachePolicy, PageProperty};
 use slopos_ostd::process::AccountId;
 use slopos_ostd::process::quota::{ChargeSlot, Reservation, TryChargeError, try_charge};
 
 use crate::memfd::MemfdHandle;
-use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use crate::paging_defs::PAGE_SIZE_4KB;
+use crate::user_mappings::SOFTWARE_COW;
 
 /// A generation-checked slot in the filesystem's per-inode page set.
 ///
@@ -43,11 +45,11 @@ pub enum RegionBacking {
         first_page: u64,
         private: bool,
     },
-    /// SlopRing shared region (SLOPRING § 5.1). The kernel-side ring object
-    /// owns the frames as `Frame<RingMeta>`s and the user PTE holds an
-    /// independent `from_in_use` ref, so a mapping outliving the fd cannot
-    /// UAF; this VMA only reserves the virtual range. Not inherited across
-    /// fork (the ring fd is close-on-fork — SLOPRING § 14).
+    /// SlopRing shared region. The kernel-side ring object owns the frames as
+    /// `Frame<RingMeta>`s and the user PTE holds an independent `from_in_use`
+    /// ref, so a mapping outliving the fd cannot UAF; this VMA only reserves
+    /// the virtual range. Not inherited across fork (the ring fd is
+    /// close-on-fork).
     Ring,
 }
 
@@ -367,30 +369,26 @@ impl VmaRegion {
         out
     }
 
-    pub fn to_page_flags(&self) -> PageFlags {
-        self.page_flags(self.cow)
+    pub fn page_property(&self) -> PageProperty {
+        self.property(self.cow)
     }
 
     /// How a frame placed for this address space alone is published: `cow`
     /// describes the pages a fork handed over, never one placed since.
-    pub fn private_page_flags(&self) -> PageFlags {
-        self.page_flags(false)
+    pub fn private_page_property(&self) -> PageProperty {
+        self.property(false)
     }
 
-    fn page_flags(&self, cow: bool) -> PageFlags {
-        let mut pf = PageFlags::PRESENT;
-        if self.user {
-            pf = pf.union(PageFlags::USER);
+    fn property(&self, cow: bool) -> PageProperty {
+        PageProperty {
+            read: true,
+            write: !cow && self.protection.write,
+            execute: self.protection.exec,
+            user: self.user,
+            cache_policy: CachePolicy::WriteBack,
+            global: false,
+            software: if cow { SOFTWARE_COW } else { 0 },
         }
-        if cow {
-            pf = pf.union(PageFlags::COW);
-        } else if self.protection.write {
-            pf = pf.union(PageFlags::WRITABLE);
-        }
-        if !self.protection.exec {
-            pf = pf.union(PageFlags::NO_EXECUTE);
-        }
-        pf
     }
 }
 
@@ -526,12 +524,6 @@ impl VmaMap {
     #[inline]
     pub fn peak_resident_pages(&self) -> u32 {
         self.peak_resident
-    }
-
-    /// Pages the charge token currently holds.
-    #[inline]
-    pub fn charged_pages(&self) -> u32 {
-        self.charge.amount()
     }
 
     /// Pages promised against the commit ceiling.
@@ -778,19 +770,6 @@ impl VmaMap {
         let region = &entry.1.1;
         if addr < end {
             Some((start, end, region))
-        } else {
-            None
-        }
-    }
-
-    /// Find a region that fully covers [start, end).
-    pub fn find_covering(&self, start: u64, end: u64) -> Option<(u64, u64, &VmaRegion)> {
-        let entry = self.map.range(..=start).next_back()?;
-        let vma_start = *entry.0;
-        let vma_end = entry.1.0;
-        let region = &entry.1.1;
-        if vma_start <= start && vma_end >= end {
-            Some((vma_start, vma_end, region))
         } else {
             None
         }

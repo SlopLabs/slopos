@@ -10,10 +10,7 @@ pub mod mutex;
 pub mod once;
 pub mod rwlock;
 pub mod semaphore;
-#[allow(dead_code)]
-pub(crate) mod shim;
 pub mod tcb;
-pub mod tests;
 pub mod tls;
 
 use core::ffi::{c_char, c_int, c_void};

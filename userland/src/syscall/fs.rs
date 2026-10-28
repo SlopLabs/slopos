@@ -6,16 +6,12 @@ use super::RawFd;
 use super::error::{SyscallError, SyscallResult, demux};
 use super::numbers::*;
 use super::raw::{syscall2, syscall3};
-use slopos_abi::fs::{
-    AT_FDCWD, DT_BLK, DT_CHR, DT_DIR, DT_LNK, DT_REG, FS_LIST_CURSOR_END, FS_TYPE_BLOCKDEV,
-    FS_TYPE_CHARDEV, FS_TYPE_DIRECTORY, FS_TYPE_FILE, FS_TYPE_SYMLINK, FS_TYPE_UNKNOWN,
-    O_DIRECTORY, O_NOFOLLOW, O_RDONLY, USER_NAME_MAX, UserFsEntry,
-};
+use slopos_abi::fs::{O_DIRECTORY, O_NOFOLLOW, O_RDONLY};
 use slopos_abi::syscall::{
-    SEEK_SET, TIOCGPTPEER, TIOCGSID, TIOCGWINSZ, TIOCSCTTY, TIOCSWINSZ, UserPollFd, UserTermios,
-    UserTimeval, UserWinsize,
+    TIOCGPTPEER, TIOCGSID, TIOCGWINSZ, TIOCSCTTY, TIOCSWINSZ, UserPollFd, UserTermios, UserTimeval,
+    UserWinsize,
 };
-use slopos_abi::{UserFsList, UserFsStat, UserStatfs};
+use slopos_abi::{UserFsStat, UserStatfs};
 use slopos_slibc::io::dirent::DirentIter;
 use slopos_slibc::pal::{Pal, Sys};
 
@@ -215,73 +211,6 @@ pub fn rename(old_path: *const c_char, new_path: *const c_char) -> SyscallResult
     Sys::rename(old_path as *const u8, new_path as *const u8).map_err(Into::into)
 }
 
-/// List directory contents into `list.entries`, resuming from `list.cursor`
-/// and updating it: zero it for the first call, carry it back verbatim, and
-/// stop once it reads [`FS_LIST_CURSOR_END`].
-///
-/// A directory larger than `max_entries` therefore takes several calls rather
-/// than being cut off. Names are raw bytes, NUL-terminated inside the entry.
-///
-/// This runs over `getdents64` on a descriptor, which reports what the mount
-/// under it holds: a child mount point with no backing entry — `/dev` and
-/// `/tmp` on the shipped image — does not appear, where the retired
-/// path-addressed listing synthesised one.
-///
-/// # Errors
-/// * `ENOENT` - Directory not found
-/// * `ENOTDIR` - Path is not a directory
-pub fn list_dir(path: *const c_char, list: &mut UserFsList) -> SyscallResult<()> {
-    let fd = Sys::openat(
-        AT_FDCWD,
-        path as *const u8,
-        (O_RDONLY | O_DIRECTORY) as i32,
-        0,
-    )?;
-    let result = read_entries(fd, list);
-    let _ = Sys::close(fd);
-    result
-}
-
-/// Drains one `list.max_entries`-sized batch from an open directory fd. The
-/// cursor is a `getdents64` `d_off`, which is what `lseek` resumes a directory
-/// at, so a truncated batch loses nothing.
-fn read_entries(fd: RawFd, list: &mut UserFsList) -> SyscallResult<()> {
-    list.count = 0;
-    if list.cursor == FS_LIST_CURSOR_END || list.entries.is_null() || list.max_entries == 0 {
-        return Ok(());
-    }
-    if list.cursor != 0 {
-        Sys::lseek(fd, list.cursor as i64, SEEK_SET as i32)?;
-    }
-
-    let mut batch = [0u8; 4096];
-    while list.count < list.max_entries {
-        let filled = Sys::getdents64(fd, batch.as_mut_ptr(), batch.len())?;
-        if filled == 0 {
-            list.cursor = FS_LIST_CURSOR_END;
-            return Ok(());
-        }
-        for record in DirentIter::new(&batch[..filled]) {
-            if record.name.is_empty() || record.name.len() > USER_NAME_MAX {
-                continue;
-            }
-            // SAFETY: `count < max_entries` bounds the index, and the caller
-            // owns `max_entries` entries at `entries`.
-            let entry = unsafe { &mut *list.entries.add(list.count as usize) };
-            *entry = UserFsEntry::new();
-            entry.name[..record.name.len()].copy_from_slice(record.name);
-            entry.type_ = fs_type_of(record.d_type);
-            entry.size = entry_size(fd, entry.name.as_ptr());
-            list.count += 1;
-            list.cursor = record.d_off as u64;
-            if list.count == list.max_entries {
-                return Ok(());
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Every name the directory `fd` lists but `.` and `..`.
 pub fn names(fd: RawFd) -> SyscallResult<Vec<Vec<u8>>> {
     let mut names = Vec::new();
@@ -296,27 +225,6 @@ pub fn names(fd: RawFd) -> SyscallResult<Vec<Vec<u8>>> {
                 .map(|record| record.name.to_vec())
                 .filter(|name| !matches!(name.as_slice(), b"." | b"..")),
         );
-    }
-}
-
-fn fs_type_of(d_type: u8) -> u8 {
-    match d_type {
-        DT_REG => FS_TYPE_FILE,
-        DT_DIR => FS_TYPE_DIRECTORY,
-        DT_CHR => FS_TYPE_CHARDEV,
-        DT_BLK => FS_TYPE_BLOCKDEV,
-        DT_LNK => FS_TYPE_SYMLINK,
-        _ => FS_TYPE_UNKNOWN,
-    }
-}
-
-/// 0 for an entry that cannot be stat'ed — a listing is not the place to fail
-/// over one unreadable name.
-fn entry_size(dirfd: RawFd, name: *const u8) -> u64 {
-    let mut st = UserFsStat::default();
-    match Sys::fstatat(dirfd, name, &mut st, 0) {
-        Ok(()) => st.st_size.max(0) as u64,
-        Err(_) => 0,
     }
 }
 
@@ -667,12 +575,12 @@ fn copy_mount_field(dst: &mut [u8], src: &[u8]) -> bool {
 }
 
 /// `mount(2)`. `source` is meaningful only for a filesystem with a device to
-/// name: `ramfs` and `devfs` ignore it, and `ext2` refuses a non-empty one
-/// because the kernel holds exactly one instance, bound at boot to `root=`.
+/// name: `ramfs` and `devfs` ignore it, and for `ext2`, `ext3` or `ext4` an
+/// empty one places the instance boot attached to `root=` at a second path.
 ///
 /// # Errors
 /// * `EPERM` - The caller does not hold the mount capability
-/// * `ENODEV` - Unsupported `fstype`, or no ext2 attached
+/// * `ENODEV` - Unsupported `fstype`, or an empty `source` with no ext4 attached
 /// * `ENOTDIR` - `target` is not a directory
 /// * `EBUSY` - `target` is `/` or already a mount point
 /// * `ENOSPC` - The mount table or the ramfs pool is full

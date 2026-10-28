@@ -4,8 +4,8 @@
 //! re-read, so it is what `CLOCK_REALTIME` is anchored to at boot.
 
 use slopos_acpi::tables::AcpiTables;
-use slopos_arch::cpu::interrupts::IrqDisabled;
 use slopos_kernel_services::platform;
+use slopos_ostd::cpu::x86_64::interrupts::IrqDisabled;
 use slopos_ostd::io::CmosRegs;
 use slopos_ostd::io::port::IoPortRegistry;
 use slopos_ostd::klog_warn;

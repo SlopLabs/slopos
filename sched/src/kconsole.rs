@@ -192,12 +192,8 @@ fn dump_one(kc: &mut KConsole<'_>, t: &Task) {
         frame_pointer: 0,
         return_address: 0,
     }; PARK_FRAMES];
-    let captured = slopos_ostd::stacktrace::stacktrace_capture_from(
-        rbp,
-        entries.as_mut_ptr(),
-        entries.len() as core::ffi::c_int,
-    );
-    for entry in entries.iter().take(captured.max(0) as usize) {
+    let captured = slopos_ostd::stacktrace::stacktrace_capture_from(rbp, &mut entries);
+    for entry in &entries[..captured] {
         ksymline!(kc, entry.return_address, "      ");
     }
 }

@@ -70,7 +70,7 @@ pub(super) fn release_process_id(id: u32) {
     if id == INVALID_PROCESS_ID || id == 0 || id > MAX_PROCESS_ID {
         return;
     }
-    PROCESS_IDS.free((id - 1) as usize);
+    PROCESS_IDS.clear((id - 1) as usize);
 }
 
 /// The registry's own handle type; every caller outside this module holds a

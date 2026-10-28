@@ -18,8 +18,8 @@ pub mod vm_space;
 pub mod vmcursor;
 
 pub use dma::{
-    DmaCoherent, DmaCoherentMeta, DmaDirection, DmaError, DmaStream, DmaStreamMeta, IommuMapper,
-    register_identity_dma_mapper, register_iommu_mapper,
+    DmaCoherent, DmaCoherentMeta, DmaError, IommuMapper, register_identity_dma_mapper,
+    register_iommu_mapper,
 };
 pub use frame::{FrameAlloc, FrameAllocOptions};
 pub use heap::{

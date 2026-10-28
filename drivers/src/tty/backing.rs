@@ -253,8 +253,8 @@ fn console_last_close(idx: TtyIndex) {
 /// Open the TTY at `idx`: share the live owner, or mint a fresh one for a
 /// console slot whose previous backing has fully closed. PTY pairs cannot
 /// be resurrected — a dead backing means the pair is (mid-)gone. Slave
-/// indices resolve to the shared [`TtySlaveOpen`] (no `TIOCSPTLCK` check,
-/// matching historical by-index open semantics).
+/// indices resolve to the shared [`TtySlaveOpen`] without a `TIOCSPTLCK`
+/// check.
 pub fn open_tty(idx: TtyIndex) -> Result<KArc<dyn FileBacking>, TtyError> {
     let slot = idx.0 as usize;
     if slot >= MAX_TTYS {

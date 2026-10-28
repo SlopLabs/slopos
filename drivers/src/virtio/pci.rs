@@ -4,8 +4,9 @@ use crate::driver_core::msi::{self as core_msi, IrqMechanism};
 use crate::msix;
 use crate::pci::BoundDevice;
 use slopos_abi::addr::PhysAddr;
-use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
+use slopos_mm::mmio;
 use slopos_ostd::klog_info;
+use slopos_ostd::mm::IoMem;
 
 use crate::pci::{PciDeviceInfo, pci_config_read8, pci_config_read16, pci_config_read32};
 
@@ -23,9 +24,9 @@ pub use crate::pci_defs::PCI_VENDOR_ID_VIRTIO;
 
 pub use crate::pci::enable_bus_master;
 
-fn map_cap_region(info: &PciDeviceInfo, bar: u8, offset: u32, length: u32) -> MmioRegion {
+fn map_cap_region(info: &PciDeviceInfo, bar: u8, offset: u32, length: u32) -> IoMem {
     if bar as usize >= info.bars.len() {
-        return MmioRegion::empty();
+        return IoMem::empty();
     }
     let bar_info = &info.bars[bar as usize];
     // The device supplies both offset and length; a function that declares a
@@ -39,9 +40,9 @@ fn map_cap_region(info: &PciDeviceInfo, bar: u8, offset: u32, length: u32) -> Mm
             offset as u64 + length as u64,
             bar_info.size,
         );
-        return MmioRegion::empty();
+        return IoMem::empty();
     };
-    MmioRegion::map(PhysAddr::new(base), length as usize).unwrap_or_else(MmioRegion::empty)
+    mmio::map_uncached(PhysAddr::new(base), length as usize).unwrap_or_else(IoMem::empty)
 }
 
 pub fn parse_capabilities(info: &PciDeviceInfo) -> VirtioMmioCaps {

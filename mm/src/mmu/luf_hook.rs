@@ -1,6 +1,6 @@
-//! `CursorUnmapHook` adapter bridging OSTD `VmSpace` cursor unmaps and
-//! activations into slopos-mm's Lazy-Unmap-Flush ring, so TLB policy stays out
-//! of the OSTD core. Wiring is one-shot at boot, from
+//! `CursorUnmapHook` adapter bridging OSTD `VmSpace` cursor unmaps and CR3
+//! loads into slopos-mm's Lazy-Unmap-Flush ring and PCID pool, so TLB policy
+//! stays out of the OSTD core. Wiring is one-shot at boot, from
 //! `boot::boot_memory::boot_step_register_luf_hook_fn`.
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
@@ -20,10 +20,6 @@ impl CursorUnmapHook for LufHook {
 
     fn flush_local(&self) {
         super::asid::flush_pcid(super::read_cr3_value().pcid().raw());
-    }
-
-    fn on_activate(&self, mm_ctx_handle: u64) {
-        luf::current_cpu_set_active_mm_ctx(mm_ctx_handle);
     }
 
     fn select_cr3(&self, mm_ctx_handle: u64, tlb_gen: u64) -> Option<(u16, bool)> {

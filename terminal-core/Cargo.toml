@@ -15,4 +15,5 @@ doctest = false
 
 [dependencies]
 slopos-abi = { workspace = true }
+slopos-keymap-core = { workspace = true }
 slopos-vt = { workspace = true }

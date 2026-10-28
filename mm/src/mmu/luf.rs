@@ -8,8 +8,6 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use slopos_arch::pcr::MAX_CPUS;
-
 /// Record that peers have *not* been told `mm_ctx_handle` lost a translation.
 ///
 /// Runs once per page a range teardown clears, so a stamp already this new is
@@ -43,34 +41,4 @@ fn ctx_slot(mm_ctx_handle: u64) -> usize {
 pub fn may_hold_stale(mm_ctx_handle: u64) -> bool {
     let deferred = CTX_DEFERRED[ctx_slot(mm_ctx_handle)].load(Ordering::Acquire);
     deferred != 0 && !super::quiesce::all_acked_after(deferred)
-}
-
-/// Per-CPU `mm_ctx_handle` of the address space currently installed in CR3.
-/// `0` is the "no context bound" sentinel, matching `MmContextId::INVALID`.
-/// Each CPU writes its own slot; cross-CPU reads are diagnostics only.
-static ACTIVE_MM_CTX_HANDLE: [AtomicU64; MAX_CPUS] = {
-    const INIT: AtomicU64 = AtomicU64::new(0);
-    [INIT; MAX_CPUS]
-};
-
-/// Record the address space the current CPU is installing; called from
-/// `LufHook::on_activate`, before `VmSpace::activate` writes CR3.
-#[inline]
-pub fn current_cpu_set_active_mm_ctx(handle: u64) {
-    let cpu = slopos_arch::pcr::get_current_cpu();
-    if cpu < MAX_CPUS {
-        ACTIVE_MM_CTX_HANDLE[cpu].store(handle, Ordering::Release);
-    }
-}
-
-/// Read the address space handle this CPU last activated, or `0` if no
-/// VmSpace has been activated on this CPU yet.
-#[inline]
-pub fn current_cpu_active_mm_ctx() -> u64 {
-    let cpu = slopos_arch::pcr::get_current_cpu();
-    if cpu < MAX_CPUS {
-        ACTIVE_MM_CTX_HANDLE[cpu].load(Ordering::Acquire)
-    } else {
-        0
-    }
 }

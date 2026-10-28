@@ -6,8 +6,8 @@ use slopos_ostd::KVec;
 use slopos_ostd::test_support::page_io;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
-use slopos_arch::cpu;
-use slopos_arch::cpu::msr::Msr;
+use slopos_ostd::arch::x86_64::msr::{Msr, read_msr};
+use slopos_ostd::cpu::x86_64 as cpu;
 use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_not_null, assert_test, fail, pass};
@@ -20,7 +20,8 @@ use crate::page_alloc::{
 use crate::paging::virt_to_phys;
 use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm::get_process_vm_stats;
-use crate::slab::{get_heap_stats_owned, kfree, kmalloc, kzalloc};
+use crate::slab::stats::snapshot as heap_stats;
+use crate::slab::{kfree, kmalloc};
 
 use slopos_ostd::process::ProcessId;
 
@@ -284,14 +285,14 @@ pub fn test_heap_large_alloc() -> TestResult {
     pass!()
 }
 
-pub fn test_heap_kzalloc_zeroed() -> TestResult {
-    let ptr = kzalloc(128);
-    assert_not_null!(ptr, "kzalloc 128 bytes");
+pub fn test_heap_kmalloc_zeroed() -> TestResult {
+    let ptr = kmalloc(128);
+    assert_not_null!(ptr, "kmalloc 128 bytes");
 
     let bytes = ptr as *const u8;
     if let Some(i) = page_io::verify_pattern(bytes, 0, 128) {
         kfree(ptr);
-        return fail!("kzalloc memory not zeroed at offset {}", i);
+        return fail!("kmalloc memory not zeroed at offset {}", i);
     }
 
     kfree(ptr);
@@ -313,14 +314,14 @@ pub fn test_heap_alloc_zero() -> TestResult {
 }
 
 pub fn test_heap_stats() -> TestResult {
-    let before = get_heap_stats_owned();
+    let before = heap_stats();
 
     let ptr = kmalloc(256);
     assert_not_null!(ptr, "alloc for stats test");
-    let allocated = get_heap_stats_owned();
+    let allocated = heap_stats();
 
     kfree(ptr);
-    let freed = get_heap_stats_owned();
+    let freed = heap_stats();
 
     // Byte totals move under a peer's `kfree`; the two counts only ever climb.
     if allocated.allocation_count <= before.allocation_count {
@@ -530,9 +531,7 @@ pub fn test_process_vm_slot_reuse() -> TestResult {
         let Some(p) = procs[idx] else {
             return fail!("process {} designator", idx);
         };
-        if destroy_process_vm(p) != 0 {
-            return fail!("destroy process at index {}", idx);
-        }
+        destroy_process_vm(p);
     }
 
     for &idx in &[1usize, 2, 3] {
@@ -580,8 +579,8 @@ pub fn test_process_vm_slot_reuse() -> TestResult {
         "original process 4 still alive"
     );
 
-    assert_test!(destroy_process_vm(p0) == 0, "destroy original 0");
-    assert_test!(destroy_process_vm(p4) == 0, "destroy original 4");
+    destroy_process_vm(p0);
+    destroy_process_vm(p4);
     for p in reused.into_iter().flatten() {
         destroy_process_vm(p);
     }
@@ -626,9 +625,7 @@ pub fn test_process_vm_counter_reset() -> TestResult {
     }
 
     for pid in pids.iter().rev() {
-        if destroy_process_vm(resolve_pid(*pid)) != 0 {
-            return fail!("destroy process {}", pid);
-        }
+        destroy_process_vm(resolve_pid(*pid));
     }
 
     let final_active = get_process_vm_stats().active_processes;
@@ -975,7 +972,7 @@ pub fn test_irqmutex_try_lock() -> TestResult {
 use crate::memfd;
 
 pub fn test_memfd_create_and_release() -> TestResult {
-    let result = memfd::memfd_create(0, slopos_ostd::process::quota::root());
+    let result = memfd::memfd_create(slopos_ostd::process::quota::root());
     assert_test!(result.is_some(), "memfd_create should succeed");
     if let Some((_handle, _ops, backing)) = result {
         drop(backing);
@@ -984,10 +981,9 @@ pub fn test_memfd_create_and_release() -> TestResult {
 }
 
 pub fn test_memfd_ftruncate_valid() -> TestResult {
-    let (handle, _ops, backing) =
-        memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
+    let (handle, _ops, backing) = memfd::memfd_create(slopos_ostd::process::quota::root()).unwrap();
     let rc = memfd::memfd_ftruncate(handle, 4096, slopos_ostd::process::AccountId::NONE);
-    assert_test!(rc == 0, "ftruncate(4096) should succeed");
+    assert_test!(rc.is_ok(), "ftruncate(4096) should succeed");
     let (phys, size) = memfd::memfd_get_phys(handle);
     assert_test!(!phys.is_null(), "phys should be non-null after ftruncate");
     assert_test!(size >= 4096, "size should be >= 4096");
@@ -996,45 +992,41 @@ pub fn test_memfd_ftruncate_valid() -> TestResult {
 }
 
 pub fn test_memfd_ftruncate_zero() -> TestResult {
-    let (handle, _ops, backing) =
-        memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
+    let (handle, _ops, backing) = memfd::memfd_create(slopos_ostd::process::quota::root()).unwrap();
     let rc = memfd::memfd_ftruncate(handle, 0, slopos_ostd::process::AccountId::NONE);
-    assert_test!(rc < 0, "ftruncate(0) should fail");
+    assert_test!(rc.is_err(), "ftruncate(0) should fail");
     drop(backing);
     pass!()
 }
 
 pub fn test_memfd_ftruncate_excessive() -> TestResult {
-    let (handle, _ops, backing) =
-        memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
+    let (handle, _ops, backing) = memfd::memfd_create(slopos_ostd::process::quota::root()).unwrap();
     let rc = memfd::memfd_ftruncate(
         handle,
         128 * 1024 * 1024,
         slopos_ostd::process::AccountId::NONE,
     );
-    assert_test!(rc < 0, "ftruncate(128MB) should fail");
+    assert_test!(rc.is_err(), "ftruncate(128MB) should fail");
     drop(backing);
     pass!()
 }
 
 pub fn test_memfd_ftruncate_twice() -> TestResult {
-    let (handle, _ops, backing) =
-        memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
+    let (handle, _ops, backing) = memfd::memfd_create(slopos_ostd::process::quota::root()).unwrap();
     let rc1 = memfd::memfd_ftruncate(handle, 4096, slopos_ostd::process::AccountId::NONE);
-    assert_test!(rc1 == 0, "first ftruncate should succeed");
+    assert_test!(rc1.is_ok(), "first ftruncate should succeed");
     let rc2 = memfd::memfd_ftruncate(handle, 8192, slopos_ostd::process::AccountId::NONE);
-    assert_test!(rc2 < 0, "second ftruncate should fail (one-shot)");
+    assert_test!(rc2.is_err(), "second ftruncate should fail (one-shot)");
     drop(backing);
     pass!()
 }
 
 pub fn test_memfd_refcount() -> TestResult {
-    let (handle, _ops, backing) =
-        memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
+    let (handle, _ops, backing) = memfd::memfd_create(slopos_ostd::process::quota::root()).unwrap();
     let alias = backing.clone();
     drop(backing);
     assert_test!(
-        memfd::memfd_ftruncate(handle, 4096, slopos_ostd::process::AccountId::NONE) == 0,
+        memfd::memfd_ftruncate(handle, 4096, slopos_ostd::process::AccountId::NONE).is_ok(),
         "memfd must stay alive while an alias holds it"
     );
     drop(alias);
@@ -1055,10 +1047,9 @@ pub fn test_memfd_invalid_handle() -> TestResult {
 }
 
 pub fn test_memfd_mapcount() -> TestResult {
-    let (handle, _ops, backing) =
-        memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
+    let (handle, _ops, backing) = memfd::memfd_create(slopos_ostd::process::quota::root()).unwrap();
     let h = memfd::handle_from_raw(handle);
-    memfd::memfd_ftruncate(handle, 4096, slopos_ostd::process::AccountId::NONE);
+    let _ = memfd::memfd_ftruncate(handle, 4096, slopos_ostd::process::AccountId::NONE);
     memfd::memfd_inc_mapcount_by(h, 1);
     memfd::memfd_inc_mapcount_by(h, 1);
     // Closing the fd side must not free pages while map_count > 0; the pages go
@@ -1070,14 +1061,13 @@ pub fn test_memfd_mapcount() -> TestResult {
 }
 
 pub fn test_memfd_get_info() -> TestResult {
-    let (handle, _ops, backing) =
-        memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
+    let (handle, _ops, backing) = memfd::memfd_create(slopos_ostd::process::quota::root()).unwrap();
     let h = memfd::handle_from_raw(handle);
     assert_test!(
         memfd::memfd_get_info(h).is_none(),
         "unsized memfd should return None"
     );
-    memfd::memfd_ftruncate(handle, 8192, slopos_ostd::process::AccountId::NONE);
+    let _ = memfd::memfd_ftruncate(handle, 8192, slopos_ostd::process::AccountId::NONE);
     let info = memfd::memfd_get_info(h);
     assert_test!(info.is_some(), "sized memfd should return Some");
     if let Some((phys, size, pages)) = info {
@@ -1090,10 +1080,9 @@ pub fn test_memfd_get_info() -> TestResult {
 }
 
 pub fn test_memfd_size_query() -> TestResult {
-    let (handle, _ops, backing) =
-        memfd::memfd_create(0, slopos_ostd::process::quota::root()).unwrap();
+    let (handle, _ops, backing) = memfd::memfd_create(slopos_ostd::process::quota::root()).unwrap();
     assert_test!(memfd::memfd_size(handle) == 0, "size before ftruncate");
-    memfd::memfd_ftruncate(handle, 16384, slopos_ostd::process::AccountId::NONE);
+    let _ = memfd::memfd_ftruncate(handle, 16384, slopos_ostd::process::AccountId::NONE);
     assert_test!(memfd::memfd_size(handle) >= 16384, "size after ftruncate");
     drop(backing);
     pass!()
@@ -1408,10 +1397,10 @@ fn scrub_chunk(ptr: *mut core::ffi::c_void, len: usize) {
 }
 
 use crate::cow::is_cow_fault;
-use crate::paging_defs::PageFlags;
 use crate::process_vm::process_vm_with_vm_space;
 use crate::tests::test_fixtures::ProcessVmGuard;
-use crate::user_mappings::ostd_map_4kb_user_fresh;
+use crate::user_mappings::map_4kb_user_fresh;
+use slopos_ostd::mm::page_property::PageProperty;
 
 pub fn test_process_vm_create_destroy_memory() -> TestResult {
     let Some(vm) = ProcessVmGuard::new() else {
@@ -1432,7 +1421,7 @@ pub fn test_process_vm_alloc_and_access() -> TestResult {
     };
 
     use crate::process_vm::process_vm_alloc;
-    let user_addr = process_vm_alloc(vm.process, 4096, PageFlags::WRITABLE.bits() as u32);
+    let user_addr = process_vm_alloc(vm.process, 4096, true);
     assert_test!(user_addr != 0, "process_vm_alloc returned 0");
 
     // The allocation is lazy: pages are not mapped until accessed.
@@ -1551,15 +1540,11 @@ pub fn test_cow_page_isolation() -> TestResult {
 
     // COW clone iterates VMAs, not raw mappings, so the page needs a real VMA.
     use crate::process_vm::process_vm_alloc;
-    let test_addr = process_vm_alloc(
-        parent.process,
-        PAGE_SIZE_4KB,
-        PageFlags::WRITABLE.bits() as u32,
-    );
+    let test_addr = process_vm_alloc(parent.process, PAGE_SIZE_4KB, true);
     assert_test!(test_addr != 0, "process_vm_alloc failed");
 
     let map_result = process_vm_with_vm_space(parent.process, |vs| {
-        ostd_map_4kb_user_fresh(vs, VirtAddr::new(test_addr), PageFlags::USER_RW.bits())
+        map_4kb_user_fresh(vs, VirtAddr::new(test_addr), PageProperty::USER_RW)
     });
     let Some(Ok(phys)) = map_result else {
         return fail!("map page in parent");
@@ -1607,7 +1592,7 @@ pub fn test_cow_fault_handling() -> TestResult {
 
     let test_addr = 0x2000u64;
     let map_result = process_vm_with_vm_space(vm.process, |vs| {
-        ostd_map_4kb_user_fresh(vs, VirtAddr::new(test_addr), PageFlags::USER_RO.bits())
+        map_4kb_user_fresh(vs, VirtAddr::new(test_addr), PageProperty::USER_RO)
     });
     let Some(Ok(_phys)) = map_result else {
         return fail!("map page as RO");
@@ -1693,7 +1678,7 @@ pub fn test_vma_region_retrieval() -> TestResult {
     use crate::process_vm::{process_vm_alloc, process_vm_get_region};
     use crate::vma_region::RegionPurpose;
 
-    let user_addr = process_vm_alloc(vm.process, 8192, PageFlags::WRITABLE.bits() as u32);
+    let user_addr = process_vm_alloc(vm.process, 8192, true);
     assert_test!(user_addr != 0, "process_vm_alloc returned 0");
 
     let region = process_vm_get_region(vm.process, user_addr);
@@ -1718,7 +1703,7 @@ pub fn test_vma_region_retrieval() -> TestResult {
 pub fn test_pat_wc_enabled() -> TestResult {
     const MEM_TYPE_WC: u8 = 0x01;
 
-    let pat_msr = cpu::read_msr(Msr::PAT);
+    let pat_msr = read_msr(Msr::PAT);
     let pat1 = ((pat_msr >> 8) & 0xFF) as u8;
 
     if pat1 != MEM_TYPE_WC {
@@ -1764,7 +1749,7 @@ stest!(name = test_heap_warmup_pages_minimum, suite = heap_ext);
 stest!(name = test_heap_small_alloc, suite = heap_ext);
 stest!(name = test_heap_medium_alloc, suite = heap_ext);
 stest!(name = test_heap_large_alloc, suite = heap_ext);
-stest!(name = test_heap_kzalloc_zeroed, suite = heap_ext);
+stest!(name = test_heap_kmalloc_zeroed, suite = heap_ext);
 stest!(name = test_heap_kfree_null, suite = heap_ext);
 stest!(name = test_heap_alloc_zero, suite = heap_ext);
 stest!(name = test_heap_stats, suite = heap_ext);

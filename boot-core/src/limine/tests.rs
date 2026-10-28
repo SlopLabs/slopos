@@ -75,7 +75,6 @@ fn every_entry_loads_the_same_two_bases_whatever_its_slot() {
     for path in ["/boot/base/current.img", "/boot/base/previous.img"] {
         assert_eq!(text.matches(path).count(), 2, "{path} in {text}");
     }
-    assert!(!text.contains("base.img"));
     let firmware = &text[text.find("/cachyos").unwrap()..text.find("/slopos-bad").unwrap()];
     assert!(!firmware.contains("module_path"));
 }

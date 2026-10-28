@@ -126,21 +126,6 @@ pub fn read_volatile_canonical_kernel_u64(addr: u64) -> Option<u64> {
     if ok != 0 { Some(out) } else { None }
 }
 
-/// Read an unaligned `u64` from a raw pointer.
-///
-/// # Safety
-///
-/// `ptr` must point to 8 readable bytes inside the kernel address
-/// space. The lone callers (`handle_corrupt_iret_frame` and the panic
-/// vicinity dump) bound the read region either via the current task's
-/// kernel-stack extents or via a ±128-byte window around a probed
-/// pointer.
-#[inline]
-pub unsafe fn read_unaligned_u64(ptr: *const u64) -> u64 {
-    // SAFETY: contract delegated to caller (see fn-level docs).
-    unsafe { core::ptr::read_unaligned(ptr) }
-}
-
 /// Read the five-word IRETQ frame `[RIP, CS, RFLAGS, RSP, SS]` from a
 /// kernel-space pointer published by an ISR asm stub.
 ///
@@ -210,40 +195,4 @@ pub mod fn_ptr {
             Some(unsafe { core::mem::transmute_copy::<*mut (), F>(&raw) })
         }
     }
-}
-
-/// Sanity-check probe: read one byte from a linker-published kernel
-/// symbol pointer.
-///
-/// # Safety
-/// `addr` must point to a readable byte inside the kernel image (or
-/// the call sites the kernel pretends so) — callers obtain it from
-/// the linker via `slopos_ostd::extern_block!`. A misaddressed probe
-/// faults rather than silently returning garbage; this is the desired
-/// boot-time diagnostic.
-#[inline]
-pub unsafe fn probe_kernel_byte(addr: *const u8) -> u8 {
-    // SAFETY: contract delegated to caller (see fn-level docs).
-    unsafe { core::ptr::read_volatile(addr) }
-}
-
-/// Kernel entry symbol `_start`; kept private so only
-/// [`verify_kernel_entry_alive`] can dereference it.
-mod kernel_entry_sym {
-    crate::extern_block! {
-        pub(super) mod externs {
-            static _start: u8;
-        }
-    }
-}
-
-/// Best-effort sanity check that the linker placed the kernel image
-/// where the bootloader handoff promised: a fault on the one-byte
-/// `_start` probe triple-faults during boot, which is the diagnostic.
-#[inline]
-pub fn verify_kernel_entry_alive() {
-    let addr = kernel_entry_sym::externs::_start_addr();
-    // SAFETY: `_start` is a linker-published byte inside the kernel
-    // image; an unmapped image faults, which is the intended outcome.
-    let _ = unsafe { core::ptr::read_volatile(addr) };
 }

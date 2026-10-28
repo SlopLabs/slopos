@@ -7,8 +7,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use slopos_boot_core::disk_id::DiskId;
 use slopos_fs::blockdev::BlockDevice;
-use slopos_mm::mmio::MmioRegion;
 use slopos_ostd::mm::AllocError;
+use slopos_ostd::mm::IoMem;
 use slopos_ostd::mm::init::{Init, Initialised, SlotPtr, init_struct_with};
 use slopos_ostd::{KArc, KBox, klog_debug, klog_info, write_field};
 
@@ -82,7 +82,7 @@ struct VirtioBlkReqHeader {
 #[derive(slopos_ostd::SlotFields)]
 struct VirtioBlkQueue {
     vq: Virtqueue,
-    notify_cfg: MmioRegion,
+    notify_cfg: IoMem,
     notify_off_multiplier: u32,
     /// Each submitted descriptor's successor in its chain, kept in kernel
     /// memory: a retired chain is freed without trusting the device-visible
@@ -98,7 +98,7 @@ impl VirtioBlkQueue {
         init_struct_with(
             |slot: SlotPtr<Self>| -> Result<Initialised<Self>, AllocError> {
                 write_field!(slot, vq, Virtqueue::new());
-                write_field!(slot, notify_cfg, MmioRegion::empty());
+                write_field!(slot, notify_cfg, IoMem::empty());
                 write_field!(slot, notify_off_multiplier, 0);
                 write_field!(slot, chain_next, [UNUSED_DESC; MAX_QUEUE_SIZE as usize]);
                 write_field!(slot, msix_state, None);

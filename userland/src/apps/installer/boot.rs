@@ -54,10 +54,6 @@ fn write_verified(volume: &mut Volume<BlockFile>, path: &str, bytes: &[u8]) -> R
     Ok(())
 }
 
-/// Where a disk laid out before the base moved beside the slots kept each
-/// slot's base.
-const SLOT_BASE: &str = "base.img";
-
 /// The medium's kernel into every slot, its base as both the current and the
 /// previous base, which every entry loads, and its notices beside them.
 pub fn write_boot(boot_node: &str, medium: &Medium, events: &mut dyn Events) -> Result<(), String> {
@@ -80,35 +76,12 @@ pub fn write_boot(boot_node: &str, medium: &Medium, events: &mut dyn Events) -> 
         )?;
         events.log(format!("slot {slot}: kernel {} bytes", kernel.len()));
     }
-    if medium.has(layout::MEDIUM_NOTICE) {
-        let notice = medium.read(layout::MEDIUM_NOTICE)?;
-        write_verified(
-            &mut volume,
-            &format!("{}/NOTICE.md", layout::SLOTS_DIR),
-            &notice,
-        )?;
-    }
-    Ok(())
-}
-
-/// The bases a boot partition kept per slot, which only the configuration
-/// written before this install loads.
-pub fn forget_slot_bases(boot_node: &str, events: &mut dyn Events) -> Result<(), String> {
-    let mut volume = open_fat(boot_node)?;
-    let kept: Vec<String> = volume
-        .list(layout::SLOTS_DIR)
-        .map_err(|e| format!("{}: {e:?}", layout::SLOTS_DIR))?
-        .into_iter()
-        .filter(|entry| entry.is_dir && layout::valid_slot(&entry.name))
-        .map(|entry| format!("{}/{}/{SLOT_BASE}", layout::SLOTS_DIR, entry.name))
-        .collect();
-    for path in kept {
-        match volume.remove(&path) {
-            Ok(()) => events.log(format!("removed {path}, a base the disk kept per slot")),
-            Err(FatError::NotFound) => {}
-            Err(e) => return Err(format!("{path}: {e:?}")),
-        }
-    }
+    let notice = medium.read(layout::MEDIUM_NOTICE)?;
+    write_verified(
+        &mut volume,
+        &format!("{}/NOTICE.md", layout::SLOTS_DIR),
+        &notice,
+    )?;
     Ok(())
 }
 

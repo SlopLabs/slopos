@@ -8,7 +8,7 @@
 
 #![no_std]
 
-use core::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
+use core::ffi::{CStr, c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use core::ptr::NonNull;
 
 use slopos_abi::errno::Errno;
@@ -38,6 +38,7 @@ mod c {
         pub fn write(fd: c_int, buf: *const c_void, len: usize) -> isize;
         pub fn pipe2(fds: *mut c_int, flags: c_int) -> c_int;
         pub safe fn geteuid() -> c_uint;
+        pub fn getenv(name: *const c_char) -> *mut c_char;
         pub fn clock_gettime(clock: c_int, ts: *mut Timespec) -> c_int;
         pub fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> c_int;
         pub fn memfd_create(name: *const c_char, flags: c_uint) -> c_int;
@@ -168,6 +169,19 @@ pub fn pipe2(flags: i32) -> Result<(i32, i32), Errno> {
 
 pub fn geteuid() -> u32 {
     c::geteuid()
+}
+
+/// The environment's value for `name`, handed to `f`.
+pub fn getenv<R>(name: &CStr, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+    // SAFETY: `name` is NUL-terminated and the call only reads it.
+    let value = unsafe { c::getenv(name.as_ptr()) };
+    if value.is_null() {
+        return None;
+    }
+    // SAFETY: what `getenv` answers is NUL-terminated and valid until the
+    // environment changes, which `std::env::set_var`'s contract forbids while
+    // another thread reads it.
+    Some(f(unsafe { CStr::from_ptr(value) }.to_bytes()))
 }
 
 /// Milliseconds on the monotonic clock, 0 if it cannot be read.

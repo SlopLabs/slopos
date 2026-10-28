@@ -32,41 +32,6 @@ impl Default for FdSet {
     }
 }
 
-const FD_SETSIZE: usize = 1024;
-const BITS_PER_WORD: usize = 64;
-
-#[inline]
-pub unsafe fn fd_zero(set: *mut FdSet) {
-    if !set.is_null() {
-        core::ptr::write_bytes(set, 0, 1);
-    }
-}
-
-#[inline]
-pub unsafe fn fd_set(fd: i32, set: *mut FdSet) {
-    let fd = fd as usize;
-    if !set.is_null() && fd < FD_SETSIZE {
-        (*set).fds_bits[fd / BITS_PER_WORD] |= 1u64 << (fd % BITS_PER_WORD);
-    }
-}
-
-#[inline]
-pub unsafe fn fd_clr(fd: i32, set: *mut FdSet) {
-    let fd = fd as usize;
-    if !set.is_null() && fd < FD_SETSIZE {
-        (*set).fds_bits[fd / BITS_PER_WORD] &= !(1u64 << (fd % BITS_PER_WORD));
-    }
-}
-
-#[inline]
-pub unsafe fn fd_isset(fd: i32, set: *const FdSet) -> bool {
-    let fd = fd as usize;
-    if set.is_null() || fd >= FD_SETSIZE {
-        return false;
-    }
-    ((*set).fds_bits[fd / BITS_PER_WORD] & (1u64 << (fd % BITS_PER_WORD))) != 0
-}
-
 /// `nfds` is `nfds_t`, an `unsigned long`. The kernel's `poll` takes a 32-bit
 /// count and caps it at its own `SELECT_MAX_FDS`, so a count that cannot be
 /// narrowed without loss is `EINVAL` here rather than a silently truncated

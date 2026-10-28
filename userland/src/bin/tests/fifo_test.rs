@@ -1,4 +1,4 @@
-//! Named pipes through slibc's `mkfifo`/`mknodat` and std, on the ext2 root
+//! Named pipes through slibc's `mkfifo`/`mknodat` and std, on the ext4 root
 //! (`/var`) and the RAM filesystem behind `/tmp`.
 
 use std::ffi::CString;
@@ -20,7 +20,7 @@ use slopos_slibc::types::{sigaction as SigAction, sigset_t as SigSet};
 use slopos_userland as _;
 use slopos_userland::syscall::{core as sys_core, process};
 
-const EXT2_DIR: &str = "/var/fifo_test";
+const EXT4_DIR: &str = "/var/fifo_test";
 const TMP_DIR: &str = "/tmp/fifo_test";
 const AT_FDCWD: i32 = slopos_abi::fs::AT_FDCWD;
 
@@ -117,8 +117,8 @@ fn made_node_is_a_fifo(dir: &str) -> bool {
     true
 }
 
-fn fifo_on_ext2_root() -> bool {
-    made_node_is_a_fifo(EXT2_DIR)
+fn fifo_on_ext4_root() -> bool {
+    made_node_is_a_fifo(EXT4_DIR)
 }
 
 fn fifo_on_tmp() -> bool {
@@ -145,7 +145,7 @@ fn mknod_refuses_other_node_kinds() -> bool {
 }
 
 fn nonblocking_writer_without_reader_is_enxio() -> bool {
-    let path = fresh(EXT2_DIR, "enxio");
+    let path = fresh(EXT4_DIR, "enxio");
     if make_fifo(&path, 0o600).is_err() {
         return fail("mkfifo failed");
     }
@@ -155,7 +155,7 @@ fn nonblocking_writer_without_reader_is_enxio() -> bool {
 }
 
 fn nonblocking_reader_opens_at_once() -> bool {
-    let path = fresh(EXT2_DIR, "nbread");
+    let path = fresh(EXT4_DIR, "nbread");
     if make_fifo(&path, 0o600).is_err() {
         return fail("mkfifo failed");
     }
@@ -186,7 +186,7 @@ fn read_write_open_does_not_block() -> bool {
 }
 
 fn openers_share_one_pipe_until_eof() -> bool {
-    let path = fresh(EXT2_DIR, "share");
+    let path = fresh(EXT4_DIR, "share");
     if make_fifo(&path, 0o600).is_err() {
         return fail("mkfifo failed");
     }
@@ -294,7 +294,7 @@ fn blocking_open_is_released_by_partner(waiter: Access, partner: Access, dir: &s
 }
 
 fn blocking_reader_is_released_by_writer() -> bool {
-    blocking_open_is_released_by_partner(Access::Read, Access::Write, EXT2_DIR)
+    blocking_open_is_released_by_partner(Access::Read, Access::Write, EXT4_DIR)
 }
 
 fn blocking_writer_is_released_by_reader() -> bool {
@@ -349,7 +349,7 @@ fn blocked_open_is_interrupted_by_a_signal() -> bool {
 }
 
 fn blocked_open_yields_to_a_kill() -> bool {
-    let path = fresh(EXT2_DIR, "kill");
+    let path = fresh(EXT4_DIR, "kill");
     if make_fifo(&path, 0o600).is_err() {
         return fail("mkfifo failed");
     }
@@ -367,7 +367,7 @@ fn blocked_open_yields_to_a_kill() -> bool {
 }
 
 fn contents_are_discarded_after_the_last_close() -> bool {
-    let path = fresh(EXT2_DIR, "discard");
+    let path = fresh(EXT4_DIR, "discard");
     if make_fifo(&path, 0o600).is_err() {
         return fail("mkfifo failed");
     }
@@ -392,8 +392,8 @@ fn contents_are_discarded_after_the_last_close() -> bool {
 }
 
 fn unlink_and_rename_keep_open_pipes() -> bool {
-    let path = fresh(EXT2_DIR, "unlinked");
-    let moved = fresh(EXT2_DIR, "renamed");
+    let path = fresh(EXT4_DIR, "unlinked");
+    let moved = fresh(EXT4_DIR, "renamed");
     if make_fifo(&path, 0o600).is_err() {
         return fail("mkfifo failed");
     }
@@ -460,7 +460,7 @@ fn existing_fifo_opens_as_a_pipe() -> bool {
 }
 
 const CASES: &[(&str, fn() -> bool)] = &[
-    ("fifo_on_ext2_root", fifo_on_ext2_root),
+    ("fifo_on_ext4_root", fifo_on_ext4_root),
     ("fifo_on_tmp", fifo_on_tmp),
     (
         "mknod_refuses_other_node_kinds",

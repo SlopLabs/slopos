@@ -75,7 +75,7 @@ mod tests {
         assert_eq!(ratio(grey, grey), 1.0);
     }
 
-    /// The old disabled text on the old window surface.
+    /// A pair WCAG's formula puts at 2.86:1.
     #[test]
     fn ratio_reproduces_a_known_pair() {
         let r = ratio(

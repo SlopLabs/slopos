@@ -26,7 +26,7 @@ use slopos_kernel_services::syscall_services::tty;
 use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
 };
-use slopos_mm::user_ptr::{UserBytes as MmUserBytes, UserPtr as MmUserPtr};
+use slopos_ostd::user::ptr::{UserBytes as OstdUserBytes, UserPtr as OstdUserPtr};
 
 use crate::syscall::args::{Fd, UserPtr};
 use crate::syscall::context::SyscallContext;
@@ -42,7 +42,7 @@ fn ioctl_termios(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64) -> 
     if arg == 0 {
         return Err(());
     }
-    let ptr = MmUserPtr::<UserTermios>::try_new(arg).map_err(|_| ())?;
+    let ptr = OstdUserPtr::<UserTermios>::try_new(arg).map_err(|_| ())?;
     match cmd {
         TCGETS => {
             let t = tty::get_termios(tty_idx).map_err(|_| ())?;
@@ -74,7 +74,7 @@ fn ioctl_winsize(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64) -> 
     if arg == 0 {
         return Err(());
     }
-    let ptr = MmUserPtr::<UserWinsize>::try_new(arg).map_err(|_| ())?;
+    let ptr = OstdUserPtr::<UserWinsize>::try_new(arg).map_err(|_| ())?;
     match cmd {
         TIOCGWINSZ => {
             let ws = tty::get_winsize(tty_idx).map_err(|_| ())?;
@@ -101,7 +101,7 @@ fn ioctl_pty(
             if arg == 0 {
                 return Err(());
             }
-            let ptr = MmUserPtr::<u32>::try_new(arg).map_err(|_| ())?;
+            let ptr = OstdUserPtr::<u32>::try_new(arg).map_err(|_| ())?;
             let pty_number = tty::get_pty_number(tty_idx).map_err(|_| ())?;
             copy_to_user(ptr, &pty_number).map_err(|_| ())?;
             Ok(0)
@@ -119,7 +119,7 @@ fn ioctl_pty(
             if arg == 0 {
                 return Err(());
             }
-            let ptr = MmUserPtr::<i32>::try_new(arg).map_err(|_| ())?;
+            let ptr = OstdUserPtr::<i32>::try_new(arg).map_err(|_| ())?;
             let val = copy_from_user(ptr).map_err(|_| ())?;
             tty::set_pty_lock(tty_idx, val != 0)
                 .map(|_| 0)
@@ -129,7 +129,7 @@ fn ioctl_pty(
             if arg == 0 {
                 return Err(());
             }
-            let ptr = MmUserPtr::<i32>::try_new(arg).map_err(|_| ())?;
+            let ptr = OstdUserPtr::<i32>::try_new(arg).map_err(|_| ())?;
             let state = tty::get_pty_lock(tty_idx).map_err(|_| ())?;
             let state_i = i32::from(state);
             copy_to_user(ptr, &state_i).map_err(|_| ())?;
@@ -139,7 +139,7 @@ fn ioctl_pty(
             if arg == 0 {
                 return Err(());
             }
-            let ptr = MmUserPtr::<i32>::try_new(arg).map_err(|_| ())?;
+            let ptr = OstdUserPtr::<i32>::try_new(arg).map_err(|_| ())?;
             let val = copy_from_user(ptr).map_err(|_| ())?;
             tty::set_packet_mode(tty_idx, val != 0)
                 .map(|_| 0)
@@ -156,7 +156,7 @@ fn ioctl_misc(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64) -> Ioc
             if arg == 0 {
                 return Err(());
             }
-            let ptr = MmUserPtr::<u32>::try_new(arg).map_err(|_| ())?;
+            let ptr = OstdUserPtr::<u32>::try_new(arg).map_err(|_| ())?;
             let ldisc_id = tty::get_ldisc(tty_idx).unwrap_or(slopos_abi::syscall::N_TTY);
             copy_to_user(ptr, &ldisc_id).map_err(|_| ())?;
             Ok(0)
@@ -165,7 +165,7 @@ fn ioctl_misc(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64) -> Ioc
             if arg == 0 {
                 return Err(());
             }
-            let ptr = MmUserPtr::<u32>::try_new(arg).map_err(|_| ())?;
+            let ptr = OstdUserPtr::<u32>::try_new(arg).map_err(|_| ())?;
             let ldisc_id = copy_from_user(ptr).map_err(|_| ())?;
             tty::set_ldisc(tty_idx, ldisc_id).map(|_| 0).map_err(|_| ())
         }
@@ -173,7 +173,7 @@ fn ioctl_misc(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64) -> Ioc
             if arg == 0 {
                 return Err(());
             }
-            let ptr = MmUserPtr::<i32>::try_new(arg).map_err(|_| ())?;
+            let ptr = OstdUserPtr::<i32>::try_new(arg).map_err(|_| ())?;
             let count = tty::bytes_available(tty_idx).map_err(|_| ())? as i32;
             copy_to_user(ptr, &count).map_err(|_| ())?;
             Ok(0)
@@ -182,7 +182,7 @@ fn ioctl_misc(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64) -> Ioc
             if arg == 0 {
                 return Err(());
             }
-            let ptr = MmUserPtr::<i32>::try_new(arg).map_err(|_| ())?;
+            let ptr = OstdUserPtr::<i32>::try_new(arg).map_err(|_| ())?;
             let count = tty::output_queued_bytes(tty_idx).map_err(|_| ())? as i32;
             copy_to_user(ptr, &count).map_err(|_| ())?;
             Ok(0)
@@ -198,7 +198,7 @@ fn ioctl_misc(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64) -> Ioc
             if arg == 0 {
                 return Err(());
             }
-            let ptr = MmUserPtr::<i32>::try_new(arg).map_err(|_| ())?;
+            let ptr = OstdUserPtr::<i32>::try_new(arg).map_err(|_| ())?;
             let state = tty::get_exclusive(tty_idx).map_err(|_| ())?;
             let state_i = i32::from(state);
             copy_to_user(ptr, &state_i).map_err(|_| ())?;
@@ -417,7 +417,7 @@ fn wait_sigmask(ptr: u64, size: u64) -> Result<Option<SigSet>, Errno> {
     if size != core::mem::size_of::<SigSet>() as u64 {
         return Err(Errno::EINVAL);
     }
-    let user = MmUserPtr::<SigSet>::try_new(ptr).map_err(|_| Errno::EFAULT)?;
+    let user = OstdUserPtr::<SigSet>::try_new(ptr).map_err(|_| Errno::EFAULT)?;
     copy_from_user(user).map(Some).map_err(|_| Errno::EFAULT)
 }
 
@@ -451,7 +451,7 @@ fn poll_fds(pid: FdTable, base_ptr: u64, nfds: usize, timeout_ms: i64) -> Result
 
     loop {
         for idx in 0..nfds {
-            let user_ptr = MmUserPtr::<UserPollFd>::try_new(
+            let user_ptr = OstdUserPtr::<UserPollFd>::try_new(
                 base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64,
             )
             .map_err(|_| Errno::EFAULT)?;
@@ -489,7 +489,7 @@ fn poll_fds(pid: FdTable, base_ptr: u64, nfds: usize, timeout_ms: i64) -> Result
                 let revents_addr =
                     base_ptr + (idx * core::mem::size_of::<UserPollFd>()) as u64 + REVENTS_OFFSET;
                 let revents_ptr =
-                    MmUserBytes::try_new(revents_addr, 2).map_err(|_| Errno::EFAULT)?;
+                    OstdUserBytes::try_new(revents_addr, 2).map_err(|_| Errno::EFAULT)?;
                 copy_bytes_to_user(revents_ptr, &cached[idx].to_ne_bytes())
                     .map_err(|_| Errno::EFAULT)?;
             }
@@ -568,7 +568,7 @@ define_syscall!(syscall_pselect6
     let mask = match sig {
         0 => None,
         addr => {
-            let pair = MmUserPtr::<[u64; 2]>::try_new(addr).map_err(|_| Errno::EFAULT)?;
+            let pair = OstdUserPtr::<[u64; 2]>::try_new(addr).map_err(|_| Errno::EFAULT)?;
             let [ptr, size] = copy_from_user(pair).map_err(|_| Errno::EFAULT)?;
             wait_sigmask(ptr, size)?
         }
@@ -627,7 +627,7 @@ fn select_fds(
     let scratch: &mut SelectScratch = &mut *scratch_box;
 
     if rd_ptr != 0 {
-        let in_bytes = MmUserBytes::try_new(rd_ptr, bytes_len).map_err(|_| Errno::EFAULT)?;
+        let in_bytes = OstdUserBytes::try_new(rd_ptr, bytes_len).map_err(|_| Errno::EFAULT)?;
         let copied = copy_bytes_from_user(in_bytes, &mut scratch.read_in[..bytes_len])
             .map_err(|_| Errno::EFAULT)?;
         if copied != bytes_len {
@@ -635,7 +635,7 @@ fn select_fds(
         }
     }
     if wr_ptr != 0 {
-        let in_bytes = MmUserBytes::try_new(wr_ptr, bytes_len).map_err(|_| Errno::EFAULT)?;
+        let in_bytes = OstdUserBytes::try_new(wr_ptr, bytes_len).map_err(|_| Errno::EFAULT)?;
         let copied = copy_bytes_from_user(in_bytes, &mut scratch.write_in[..bytes_len])
             .map_err(|_| Errno::EFAULT)?;
         if copied != bytes_len {
@@ -643,7 +643,7 @@ fn select_fds(
         }
     }
     if ex_ptr != 0 {
-        let in_bytes = MmUserBytes::try_new(ex_ptr, bytes_len).map_err(|_| Errno::EFAULT)?;
+        let in_bytes = OstdUserBytes::try_new(ex_ptr, bytes_len).map_err(|_| Errno::EFAULT)?;
         let copied = copy_bytes_from_user(in_bytes, &mut scratch.except_in[..bytes_len])
             .map_err(|_| Errno::EFAULT)?;
         if copied != bytes_len {
@@ -686,7 +686,7 @@ fn select_fds(
             (out.ex_ptr, except_out),
         ] {
             if ptr != 0 {
-                let dst = MmUserBytes::try_new(ptr, len).map_err(|_| Errno::EFAULT)?;
+                let dst = OstdUserBytes::try_new(ptr, len).map_err(|_| Errno::EFAULT)?;
                 copy_bytes_to_user(dst, &bits[..len]).map_err(|_| Errno::EFAULT)?;
             }
         }
@@ -809,7 +809,7 @@ fn fd_layer_ioctl(table: FdTable, fd: c_int, cmd: u64, arg: u64) -> Option<Resul
         FIOCLEX => Some(from_fcntl(file_fcntl_fd(table, fd, F_SETFD, FD_CLOEXEC))),
         FIONCLEX => Some(from_fcntl(file_fcntl_fd(table, fd, F_SETFD, 0))),
         FIONBIO => {
-            let ptr = match MmUserPtr::<c_int>::try_new(arg) {
+            let ptr = match OstdUserPtr::<c_int>::try_new(arg) {
                 Ok(p) => p,
                 Err(_) => return Some(Err(Errno::EFAULT)),
             };
@@ -847,7 +847,7 @@ fn block_ioctl(table: FdTable, fd: c_int, cmd: u64, arg: u64) -> Option<Result<u
         Err(e) => return Some(Err(e)),
     };
     fn store<T: Copy>(arg: u64, value: T) -> Result<u64, Errno> {
-        let ptr = MmUserPtr::<T>::try_new(arg).map_err(|_| Errno::EFAULT)?;
+        let ptr = OstdUserPtr::<T>::try_new(arg).map_err(|_| Errno::EFAULT)?;
         copy_to_user(ptr, &value).map_err(|_| Errno::EFAULT)?;
         Ok(0)
     }
@@ -871,7 +871,7 @@ fn inode_flags_ioctl(
 ) -> Option<Result<u64, Errno>> {
     use slopos_abi::fs::inode_flags_ioctl::{FS_IOC_GETFLAGS, FS_IOC_SETFLAGS};
 
-    let flags = || MmUserPtr::<u32>::try_new(arg).map_err(|_| Errno::EFAULT);
+    let flags = || OstdUserPtr::<u32>::try_new(arg).map_err(|_| Errno::EFAULT);
     Some(match cmd as u32 {
         FS_IOC_GETFLAGS => file_inode_flags_fd(table, fd).and_then(|value| {
             copy_to_user(flags()?, &value).map_err(|_| Errno::EFAULT)?;
@@ -936,7 +936,7 @@ define_syscall!(syscall_ioctl
             if arg == 0 {
                 return Err(Errno::EINVAL);
             }
-            let ptr = MmUserPtr::<u32>::try_new(arg).map_err(|_| Errno::EFAULT)?;
+            let ptr = OstdUserPtr::<u32>::try_new(arg).map_err(|_| Errno::EFAULT)?;
             let fg_pgrp = tty::get_foreground_pgrp(tty_idx).unwrap_or(0);
             copy_to_user(ptr, &fg_pgrp).map_err(|_| Errno::EFAULT)?;
             Ok(0)
@@ -950,7 +950,7 @@ define_syscall!(syscall_ioctl
                 _ => return Err(Errno::EINVAL),
             }
 
-            let ptr = MmUserPtr::<u32>::try_new(arg).map_err(|_| Errno::EFAULT)?;
+            let ptr = OstdUserPtr::<u32>::try_new(arg).map_err(|_| Errno::EFAULT)?;
             let pgrp = copy_from_user(ptr).map_err(|_| Errno::EFAULT)?;
             let caller_pgid = current_task_pgid();
             let caller_sid = slopos_sched::scheduler::current_task_sid();
@@ -1015,7 +1015,7 @@ define_syscall!(syscall_ioctl
                 Some(ctty) if ctty == tty_idx => {}
                 _ => return Err(Errno::EINVAL),
             }
-            let ptr = MmUserPtr::<u32>::try_new(arg).map_err(|_| Errno::EFAULT)?;
+            let ptr = OstdUserPtr::<u32>::try_new(arg).map_err(|_| Errno::EFAULT)?;
             let sid = tty::get_session_id(tty_idx).unwrap_or(0);
             copy_to_user(ptr, &sid).map_err(|_| Errno::EFAULT)?;
             Ok(0)

@@ -1,30 +1,31 @@
 //! The machine's one keyboard state, which every keyboard feeds with
 //! `(source, usage, pressed)` steps: the modifiers, merged by counting, the
 //! locks and the layout with its dead key, the diagnostic console's trigger,
-//! the boot log's Esc, the scroll keys, and the TTY a key reaches when no task
-//! has keyboard focus.
+//! the boot log's Esc, the scroll keys, and the console TTY a key reaches while
+//! nothing holds the input sink, which gets the bytes a VT sends.
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use slopos_abi::Errno;
-use slopos_abi::input::{KEY_FLAG_FROM_KEYPAD, KEY_FLAG_HAS_CANONICAL, KEY_FLAG_IS_REPEAT};
+use slopos_abi::input::{KEY_FLAG_FROM_KEYPAD, KEY_FLAG_IS_REPEAT};
 use slopos_hid_core::keyboard::KeySet;
 use slopos_kernel_services::driver_runtime::request_reschedule_from_interrupt;
 use slopos_keymap_core::keycode::{self, NamedKey};
 use slopos_keymap_core::keymap::KeyOutcome;
-use slopos_keymap_core::scancode_set1::make_code;
 use slopos_keymap_core::sysrq::{SysrqFsm, Verdict};
+use slopos_keymap_core::vt;
 use slopos_keymap_core::{
-    DeadKeyState, LayoutTable, ModSnapshot, ModTracker, Resolved, SERIALIZED_LEN, US_QWERTY,
+    DeadKeyState, LayoutTable, ModSnapshot, ModTracker, Mods, Resolved, SERIALIZED_LEN, US_QWERTY,
     deserialize, resolve,
 };
 use slopos_mm::user_io_buf::memdup_user;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KBox, lock_class};
 
-use crate::input_event::{input_route_key_full, keys_reach_console};
+use crate::input_event::{input_route_key, keys_reach_console};
+use crate::tty::driver::InputEvent as TtyInput;
 use crate::tty::vconsole;
-use crate::tty::{active_tty, push_input};
+use crate::tty::{active_tty, push_input_batch};
 
 /// Keyboards that feed the state at once, the i8042 among them.
 pub const MAX_KEYBOARDS: usize = 8;
@@ -217,7 +218,7 @@ pub fn key(source: KeyboardSource, usage: u16, pressed: bool, timestamp_ms: u64)
         leds_changed();
     }
 
-    deliver(usage, pressed, repeat, resolved, snap, timestamp_ms);
+    deliver(usage, pressed, repeat, resolved, mods, snap, timestamp_ms);
 }
 
 /// The i8042's LED exchange starts here; the USB thread brings every USB
@@ -232,98 +233,87 @@ fn deliver(
     pressed: bool,
     repeat: bool,
     resolved: Resolved,
+    mods: Mods,
     snap: ModSnapshot,
     timestamp_ms: u64,
 ) {
+    // The accent a dead key leaves when nothing composes with it: a press of
+    // no key.
     if resolved.flush != 0 {
-        route_text(resolved.flush, snap.mods, timestamp_ms);
+        input_route_key(0, resolved.flush, snap.mods, 0, true, timestamp_ms);
     }
-    let (ascii, codepoint) = legacy_and_canonical(resolved.outcome, pressed);
-    let mut flags = KEY_FLAG_HAS_CANONICAL;
+    let codepoint = match resolved.outcome {
+        KeyOutcome::Text(cp) => cp,
+        KeyOutcome::Named(_) | KeyOutcome::None => 0,
+    };
+    let mut flags = 0;
     if keycode::is_keypad(usage) {
         flags |= KEY_FLAG_FROM_KEYPAD;
     }
     if repeat {
         flags |= KEY_FLAG_IS_REPEAT;
     }
-    input_route_key_full(
-        make_code(usage).unwrap_or(0),
-        ascii,
-        usage,
-        codepoint,
-        snap.mods,
-        flags,
-        pressed,
-        timestamp_ms,
-    );
+    input_route_key(usage, codepoint, snap.mods, flags, pressed, timestamp_ms);
 
     if pressed && keys_reach_console() {
-        let flush_byte = if resolved.flush != 0 && resolved.flush <= 0x7F {
-            resolved.flush as u8
-        } else {
-            0
-        };
-        if flush_byte != 0 {
-            push_input(active_tty(), flush_byte);
+        let mut typed = ConsoleBytes::new();
+        typed.text(resolved.flush);
+        match resolved.outcome {
+            KeyOutcome::Text(cp) => typed.text(cp),
+            KeyOutcome::Named(key) => typed.named(key, mods),
+            KeyOutcome::None => {}
         }
-        if ascii != 0 {
-            push_input(active_tty(), ascii);
-        }
-        if flush_byte != 0 || ascii != 0 {
+        if !typed.is_empty() {
+            push_input_batch(active_tty(), typed.as_slice());
             request_reschedule_from_interrupt();
         }
     }
 }
 
-/// A bare text codepoint as a key press with no canonical keycode: the
-/// accent a dead key leaves when nothing composes with it.
-fn route_text(codepoint: u32, modifiers: u8, ts: u64) {
-    let ascii = if codepoint <= 0x7F {
-        codepoint as u8
-    } else {
-        0
-    };
-    input_route_key_full(
-        0,
-        ascii,
-        0,
-        codepoint,
-        modifiers,
-        KEY_FLAG_HAS_CANONICAL,
-        true,
-        ts,
-    );
+/// An accent's UTF-8, then the key's own: its text's UTF-8 or its escape
+/// sequence.
+const CONSOLE_BYTES_MAX: usize = 4 + vt::SEQUENCE_MAX;
+
+/// What one press types on the console: text as UTF-8, a named key as the
+/// escape sequence a VT sends for it.
+struct ConsoleBytes {
+    bytes: [TtyInput; CONSOLE_BYTES_MAX],
+    len: usize,
 }
 
-/// The legacy byte is ASCII only: a Latin-1 byte on the TTY stream would be
-/// mojibake to UTF-8 readers, and 0x80..=0x88 are the navigation codes.
-fn legacy_and_canonical(outcome: KeyOutcome, pressed: bool) -> (u8, u32) {
-    if !pressed {
-        return (0, 0);
-    }
-    match outcome {
-        KeyOutcome::Text(cp) => {
-            let ascii = if cp <= 0x7F { cp as u8 } else { 0 };
-            (ascii, cp)
+impl ConsoleBytes {
+    const fn new() -> Self {
+        Self {
+            bytes: [TtyInput::normal(0); CONSOLE_BYTES_MAX],
+            len: 0,
         }
-        KeyOutcome::Named(nk) => (named_to_legacy_ascii(nk), 0),
-        KeyOutcome::None => (0, 0),
     }
-}
 
-/// The codes the terminal and the shell turn into ANSI escape sequences.
-fn named_to_legacy_ascii(nk: NamedKey) -> u8 {
-    match nk {
-        NamedKey::PageUp => 0x80,
-        NamedKey::PageDown => 0x81,
-        NamedKey::Up => 0x82,
-        NamedKey::Down => 0x83,
-        NamedKey::Left => 0x84,
-        NamedKey::Right => 0x85,
-        NamedKey::Home => 0x86,
-        NamedKey::End => 0x87,
-        NamedKey::Delete => 0x88,
-        _ => 0,
+    fn push(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.bytes[self.len] = TtyInput::normal(byte);
+            self.len += 1;
+        }
+    }
+
+    fn text(&mut self, codepoint: u32) {
+        if let Some(ch) = char::from_u32(codepoint).filter(|&ch| ch != '\0') {
+            self.push(ch.encode_utf8(&mut [0; 4]).as_bytes());
+        }
+    }
+
+    fn named(&mut self, key: NamedKey, mods: Mods) {
+        if let Some(seq) = vt::sequence(key, mods, false) {
+            self.push(seq.as_bytes());
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn as_slice(&self) -> &[TtyInput] {
+        &self.bytes[..self.len]
     }
 }
 
@@ -361,6 +351,7 @@ pub fn layout_name(out: &mut [u8]) -> usize {
 }
 
 /// The `MODIFIER_*` bits.
+#[cfg(feature = "test-hooks")]
 pub fn get_modifier_state() -> u8 {
     STATE.lock().mods.snapshot().mods
 }

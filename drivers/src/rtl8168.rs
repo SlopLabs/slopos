@@ -4,13 +4,13 @@
 
 use core::sync::atomic::{AtomicBool, Ordering, fence};
 
-use slopos_mm::mmio::MmioRegion;
 use slopos_mm::page_alloc::OwnedPageFrame;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB_USIZE;
 use slopos_net::netdev::{NetDevice, NetDeviceFeatures, NetDeviceStats};
 use slopos_net::packetbuf::PacketBuf;
 use slopos_net::pool::PacketPool;
 use slopos_net::types::{MacAddr, NetError};
+use slopos_ostd::mm::IoMem;
 use slopos_ostd::sync::{
     InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, Mutex, MutexGuard, SpinLock,
 };
@@ -42,7 +42,7 @@ const BUFFER_LEN: usize = 2048;
 const BUFFERS_PER_PAGE: usize = 4096 / BUFFER_LEN;
 const MTU: u16 = 1500;
 
-struct Regs<'a>(&'a MmioRegion);
+struct Regs<'a>(&'a IoMem);
 
 impl RegisterBus for Regs<'_> {
     fn read8(&mut self, offset: usize) -> u8 {
@@ -141,7 +141,7 @@ impl Buffers {
 
 struct Nic {
     info: PciDeviceInfo,
-    regs: MmioRegion,
+    regs: IoMem,
     probed: Probed,
     rx: RxRing<DescriptorPage>,
     rx_buffers: Buffers,
@@ -492,7 +492,7 @@ fn probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError> {
 #[inline(never)]
 fn install(
     bound: &mut BoundDevice<'_>,
-    regs: MmioRegion,
+    regs: IoMem,
     probed: Probed,
     name: &str,
 ) -> Result<&'static str, PciProbeError> {

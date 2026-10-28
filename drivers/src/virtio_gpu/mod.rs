@@ -8,7 +8,6 @@
 
 mod protocol;
 
-use core::ffi::c_int;
 use core::mem::size_of;
 use slopos_ostd::lock_class;
 
@@ -27,7 +26,7 @@ use slopos_ostd::util::ptr_buf;
 use slopos_ostd::{klog_info, klog_warn, write_field, write_init_field};
 
 use slopos_kernel_services::syscall_services::scanout::{
-    self, ClaimOutcome, GpuControlFns, InstallCtx, ScanoutId, ScanoutProvider,
+    self, ClaimOutcome, GpuControlFns, InstallCtx, Present, ScanoutId, ScanoutProvider,
 };
 
 use crate::pci::BoundDevice;
@@ -880,23 +879,21 @@ impl VirtioGpuInner {
     /// allocates, so it is callable from the `fblog` timer tick as well as the
     /// compositor; a present still in flight drops this frame rather than
     /// waiting.
-    fn present(&self, damage: *const DamageRect, count: u32) -> c_int {
+    fn present(&self, damage: &[DamageRect]) -> Present {
         let mut st = self.state.lock();
         let geom = st.geom;
         if !geom.ready || geom.resource_id == 0 {
-            return -1;
+            return Present::Failed;
         }
         st.control.harvest();
         if st.control.present_busy {
-            // 1 = suppressed: the compositor keeps the damage pending and
-            // retries next frame.
-            return 1;
+            return Present::Suppressed;
         }
         if st.control.present_page.is_none() {
-            return -1;
+            return Present::Failed;
         }
 
-        let rect = if damage.is_null() || count == 0 {
+        let rect = if damage.is_empty() {
             VirtioGpuRect {
                 x: 0,
                 y: 0,
@@ -904,13 +901,10 @@ impl VirtioGpuInner {
                 height: geom.height,
             }
         } else {
-            let n = (count as usize).min(MAX_DAMAGE_REGIONS);
-            let coalesced = ptr_buf::with_buf(damage, n, |regions| {
-                coalesce_damage(regions, geom.width, geom.height)
-            });
-            match coalesced {
+            let regions = &damage[..damage.len().min(MAX_DAMAGE_REGIONS)];
+            match coalesce_damage(regions, geom.width, geom.height) {
                 Some(r) => r,
-                None => return 0,
+                None => return Present::Shown,
             }
         };
         let offset = (rect.y as u64) * (geom.pitch as u64) + (rect.x as u64) * 4;
@@ -932,7 +926,7 @@ impl VirtioGpuInner {
             let page = st.control.present_page.as_ref().unwrap();
             if !page.write_at(PRESENT_XFER_CMD, &xfer) || !page.write_at(PRESENT_FLUSH_CMD, &flush)
             {
-                return -1;
+                return Present::Failed;
             }
         }
 
@@ -945,10 +939,9 @@ impl VirtioGpuInner {
                 &st.control.q,
                 st.control.index,
             );
-            0
+            Present::Shown
         } else {
-            // -1 = not submitted; the compositor keeps the damage pending.
-            -1
+            Present::Failed
         }
     }
 
@@ -1272,10 +1265,10 @@ pub fn is_present() -> bool {
 }
 
 /// Flush callback registered with the video framebuffer layer.
-pub fn virtio_gpu_flush(damage: *const DamageRect, count: u32) -> c_int {
+pub fn virtio_gpu_flush(damage: &[DamageRect]) -> Present {
     match current_device() {
-        Some(dev) => dev.present(damage, count),
-        None => -1,
+        Some(dev) => dev.present(damage),
+        None => Present::Failed,
     }
 }
 

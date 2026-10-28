@@ -99,13 +99,13 @@ struct TimerWheelInner {
 ///
 /// ```ignore
 /// // Schedule a timer 30 ms from now:
-/// let token = NET_TIMER_WHEEL.schedule(30, TimerKind::ArpExpire, entry_id);
+/// let token = wheel().schedule(30, TimerKind::ArpExpire, entry_id);
 ///
 /// // Cancel it before it fires:
-/// NET_TIMER_WHEEL.cancel(token);
+/// wheel().cancel(token);
 ///
 /// // Fire everything due as of the current clock (NAPI poll / idle callback):
-/// let fired = NET_TIMER_WHEEL.process_due();
+/// let fired = wheel().process_due();
 /// for timer in &fired {
 ///     match timer.kind {
 ///         TimerKind::ArpExpire => { /* handle */ },
@@ -121,12 +121,12 @@ pub struct NetTimerWheel {
 }
 
 /// Shared by `new` and `init_with`, which build the same logical lock.
-const NET_TIMER_WHEEL_CLASS: &slopos_ostd::sync::lock_tracking::LockClassKey =
+const NET_TIMER_WHEEL_CLASS: &slopos_ostd::sync::LockClassKey =
     slopos_ostd::lock_class!("NET_TIMER_WHEEL", LOCK_LEVEL_REGISTRY);
 
 /// Distinct class: same-class nesting is a lockdep finding.
 #[cfg(feature = "test-hooks")]
-const TEST_TIMER_WHEEL_CLASS: &slopos_ostd::sync::lock_tracking::LockClassKey =
+const TEST_TIMER_WHEEL_CLASS: &slopos_ostd::sync::LockClassKey =
     slopos_ostd::lock_class!("NET_TEST_TIMER_WHEEL", LOCK_LEVEL_REGISTRY);
 
 impl NetTimerWheel {
@@ -134,7 +134,7 @@ impl NetTimerWheel {
         Self::with_class(NET_TIMER_WHEEL_CLASS)
     }
 
-    const fn with_class(class: &'static slopos_ostd::sync::lock_tracking::LockClassKey) -> Self {
+    const fn with_class(class: &'static slopos_ostd::sync::LockClassKey) -> Self {
         Self {
             inner: SpinLock::new(
                 TimerWheelInner {
@@ -287,6 +287,8 @@ pub static TEST_TIMER_WHEEL: NetTimerWheel = NetTimerWheel::with_class(TEST_TIME
 #[cfg(feature = "test-hooks")]
 static TEST_WHEEL_SELECTED: AtomicBool = AtomicBool::new(false);
 
+/// The wheel every networking subsystem schedules through: the test wheel
+/// while [`select_test_wheel`] has selected it.
 #[cfg(feature = "test-hooks")]
 #[inline]
 pub fn wheel() -> &'static NetTimerWheel {
@@ -297,6 +299,7 @@ pub fn wheel() -> &'static NetTimerWheel {
     }
 }
 
+/// The wheel every networking subsystem schedules through.
 #[cfg(not(feature = "test-hooks"))]
 #[inline]
 pub fn wheel() -> &'static NetTimerWheel {
@@ -308,26 +311,6 @@ pub fn wheel() -> &'static NetTimerWheel {
 pub fn select_test_wheel(on: bool) -> bool {
     TEST_WHEEL_SELECTED.swap(on, Ordering::AcqRel)
 }
-
-#[cfg(feature = "test-hooks")]
-pub fn test_wheel_selected() -> bool {
-    TEST_WHEEL_SELECTED.load(Ordering::Acquire)
-}
-
-/// Zero-sized stand-in so existing `NET_TIMER_WHEEL.…` sites follow [`wheel`]'s selection.
-pub struct SelectedWheel;
-
-impl core::ops::Deref for SelectedWheel {
-    type Target = NetTimerWheel;
-
-    #[inline]
-    fn deref(&self) -> &NetTimerWheel {
-        wheel()
-    }
-}
-
-/// The one wheel every networking subsystem schedules through.
-pub static NET_TIMER_WHEEL: SelectedWheel = SelectedWheel;
 
 /// Process pending network timers up to the current clock and dispatch them.
 /// Called from both the NAPI poll loop and the idle wakeup callback, so timers

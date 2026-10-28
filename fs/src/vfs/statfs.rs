@@ -8,7 +8,7 @@ use crate::vfs::traits::{FsStats, VfsResult};
 /// flags of the mount the walk ended in.
 ///
 /// The flags describe how the mount was *made*; a filesystem that latched
-/// itself read-only afterwards — ext2's `errors=remount-ro` — appears only in
+/// itself read-only afterwards — ext4's `errors=remount-ro` — appears only in
 /// [`FsStats::read_only`], which is why the syscall layer folds both into
 /// `ST_RDONLY`.
 pub fn vfs_statfs(path: &[u8]) -> VfsResult<(FsStats, u32)> {

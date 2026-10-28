@@ -2,8 +2,8 @@ use slopos_abi::net::{AF_INET, SOCK_STREAM};
 use slopos_abi::syscall::{ERRNO_EAGAIN, ERRNO_EINPROGRESS, POLLOUT};
 use slopos_ostd::KBox;
 use slopos_ostd::lock_class;
+use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::sync::WaitQueue;
-use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
 
@@ -12,7 +12,6 @@ use crate::socket;
 use crate::tcp;
 use crate::tests::env_wait::errno_i64;
 use crate::tests::net_scope::NetTestScope;
-use crate::tests::socket_tests;
 use crate::tests::tcp_common::PEER_ISS;
 
 /// The sink answers nothing, so the SYN+ACK completing the handshake is
@@ -204,13 +203,6 @@ pub fn test_send_backpressure() -> TestResult {
     pass!()
 }
 
-pub fn test_regression_existing() -> TestResult {
-    match socket_tests::test_socket_create_tcp() {
-        TestResult::Pass => pass!(),
-        _ => TestResult::Fail,
-    }
-}
-
 slopos_testing::stest!(name = test_napi_budget_limiting, suite = napi);
 slopos_testing::stest!(name = test_napi_waker_rearm_short_circuits, suite = napi);
 slopos_testing::stest!(name = test_waitqueue_basic, suite = napi);
@@ -220,4 +212,3 @@ slopos_testing::stest!(name = test_socket_poll_flags, suite = napi);
 slopos_testing::stest!(name = test_nonblocking_preserved, suite = napi);
 slopos_testing::stest!(name = test_recv_timeout, suite = napi);
 slopos_testing::stest!(name = test_send_backpressure, suite = napi);
-slopos_testing::stest!(name = test_regression_existing, suite = napi);

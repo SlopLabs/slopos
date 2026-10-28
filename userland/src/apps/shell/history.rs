@@ -2,8 +2,8 @@ use std::sync::Mutex;
 
 const MAX_HISTORY: usize = 64;
 
-/// Variable-length: a fixed per-entry width would reintroduce a line ceiling
-/// the editor no longer has.
+/// Variable-length: the editor puts no ceiling on a line, and a fixed
+/// per-entry width would.
 struct HistoryInner {
     entries: Vec<Vec<u8>>,
     count: usize,

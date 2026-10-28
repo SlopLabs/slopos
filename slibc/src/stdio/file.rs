@@ -54,7 +54,7 @@ unsafe fn new_stream(fd: i32, fflags: u32) -> *mut FILE {
 
     // C11 §7.21.3: only a stream on an interactive device is line-buffered by
     // default.
-    let buf_mode = if crate::io::shim::isatty(fd) != 0 {
+    let buf_mode = if crate::io::misc::is_terminal(fd) {
         BufferMode::Line
     } else {
         BufferMode::Full
@@ -213,7 +213,7 @@ pub unsafe extern "C" fn freopen(path: *const u8, mode: *const u8, stream: *mut 
         // A standard stream owns what it reopens, as `fopen`'s would.
         owned = FILE_FLAG_OWNED_FD;
         if f.mode != BufferMode::None {
-            f.mode = if crate::io::shim::isatty(f.fd) != 0 {
+            f.mode = if crate::io::misc::is_terminal(f.fd) {
                 BufferMode::Line
             } else {
                 BufferMode::Full

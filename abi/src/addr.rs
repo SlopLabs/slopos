@@ -188,17 +188,6 @@ impl VirtAddr {
         self.0 & (PAGE_SIZE - 1)
     }
 
-    /// Kernel space is the higher half — on x86-64 those addresses have bit 47 set.
-    #[inline]
-    pub const fn is_kernel_space(self) -> bool {
-        self.0 >= 0xFFFF_8000_0000_0000
-    }
-
-    #[inline]
-    pub const fn is_user_space(self) -> bool {
-        self.0 < 0x0000_8000_0000_0000
-    }
-
     #[inline]
     pub const fn is_canonical(addr: u64) -> bool {
         let sign = (addr >> 47) & 1;

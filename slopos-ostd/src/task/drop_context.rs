@@ -2,7 +2,7 @@
 //! kernel allocator.
 
 use crate::cpu::x86_64::interrupts;
-use crate::sync::lock_tracking::{held_lock_count, held_lock_snapshot};
+use crate::sync::lock_graph::{held_lock_count, held_lock_snapshot};
 
 /// Whether preemption is disabled on this CPU.
 ///

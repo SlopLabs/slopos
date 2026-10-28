@@ -1,16 +1,16 @@
 use slopos_abi::Errno;
 use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
-use slopos_abi::fate::FateResult;
 use slopos_abi::syscall::{GRND_NONBLOCK, GRND_RANDOM};
 use slopos_abi::{DisplayInfo, InputEvent};
 
 use slopos_kernel_services::platform;
+use slopos_kernel_services::syscall_services::scanout::Present;
 use slopos_kernel_services::syscall_services::{input, video};
 use slopos_sched::fate_api::{fate_apply_outcome, fate_set_pending, fate_spin, fate_take_pending};
 
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_bytes_to_user, copy_to_user};
-use slopos_mm::user_ptr::{UserBytes as MmUserBytes, UserPtr as MmUserPtr};
 use slopos_ostd::KVec;
+use slopos_ostd::user::ptr::UserBytes as OstdUserBytes;
 
 use slopos_ostd::seat::{SeatId, SeatKind};
 
@@ -29,9 +29,6 @@ define_syscall!(syscall_screen_acquire
     if fd < 0 {
         return Err(Errno::from_raw(fd).unwrap_or(Errno::EINVAL));
     }
-    // What `fb_flip` used to stamp on every frame. Announced by the arbiter at
-    // the acquire, so the owner is decided once by asking rather than
-    // repeatedly by acting.
     video::set_compositor_task_id(task_id);
     Ok(fd as u64)
 });
@@ -47,13 +44,7 @@ define_syscall!(syscall_input_sink_acquire
     if fd < 0 {
         return Err(Errno::from_raw(fd).unwrap_or(Errno::EINVAL));
     }
-    // What `input_poll_batch` used to re-arm on every call. The pointer
-    // re-seed is deliberately *not* repeated here: its loss happens at task
-    // cleanup, and that is where the repair now lives.
     input::register_compositor(task_id);
-    if input::get_pointer_focus() == 0 {
-        input::set_pointer_focus(task_id, 0);
-    }
     Ok(fd as u64)
 });
 
@@ -115,7 +106,7 @@ define_syscall!(syscall_getrandom
     let total = len as usize;
     // The whole span is validated once, so an unusable pointer is one
     // `EFAULT` rather than a zero-length success.
-    MmUserBytes::try_new(buf, total).map_err(|_| Errno::EFAULT)?;
+    OstdUserBytes::try_new(buf, total).map_err(|_| Errno::EFAULT)?;
     let mut scratch = [0u8; GETRANDOM_SLICE];
     let mut filled = 0usize;
 
@@ -131,7 +122,7 @@ define_syscall!(syscall_getrandom
         let Some(addr) = buf.checked_add(filled as u64) else {
             break;
         };
-        let Ok(user_out) = MmUserBytes::try_new(addr, slice_len) else {
+        let Ok(user_out) = OstdUserBytes::try_new(addr, slice_len) else {
             break;
         };
         if copy_bytes_to_user(user_out, &scratch[..slice_len]).is_err() {
@@ -195,7 +186,7 @@ define_syscall!(syscall_input_poll_batch
             .as_u64()
             .checked_add(byte_offset)
             .ok_or(Errno::EFAULT)?;
-        let user_out = MmUserBytes::try_new(
+        let user_out = OstdUserBytes::try_new(
             dst,
             src_bytes.len(),
         )
@@ -224,7 +215,7 @@ define_syscall!(syscall_clipboard_copy
     }
 
     let copy_len = src.len().min(slopos_abi::CLIPBOARD_MAX_SIZE);
-    let user_bytes = MmUserBytes::try_new(src.base_u64(), copy_len).map_err(|_| Errno::EFAULT)?;
+    let user_bytes = OstdUserBytes::try_new(src.base_u64(), copy_len).map_err(|_| Errno::EFAULT)?;
     let mut buf = slopos_ostd::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE)
         .map_err(|_| Errno::ENOMEM)?;
     copy_bytes_from_user(user_bytes, &mut buf[..copy_len]).map_err(|_| Errno::EFAULT)?;
@@ -249,7 +240,7 @@ define_syscall!(syscall_clipboard_paste
     }
 
     let write_len = pasted.min(dst.len());
-    let user_ptr = MmUserBytes::try_new(dst.base_u64(), write_len).map_err(|_| Errno::EFAULT)?;
+    let user_ptr = OstdUserBytes::try_new(dst.base_u64(), write_len).map_err(|_| Errno::EFAULT)?;
     copy_bytes_to_user(user_ptr, &buf[..write_len]).map_err(|_| Errno::EFAULT)?;
     Ok(write_len as u64)
 });
@@ -280,31 +271,25 @@ define_syscall!(syscall_fb_flip
     }
 
     let mut damage_regions = [DamageRect::invalid(); MAX_DAMAGE_REGIONS];
-    let mut damage_region_count = 0u32;
+    let mut damage_region_count = 0usize;
     if damage_ptr != 0 && damage_count > 0 {
         let clamped = damage_count.min(MAX_DAMAGE_REGIONS);
         let byte_len = core::mem::size_of::<DamageRect>() * clamped;
-        let user_bytes = MmUserBytes::try_new(damage_ptr, byte_len).map_err(|_| Errno::EFAULT)?;
+        let user_bytes = OstdUserBytes::try_new(damage_ptr, byte_len).map_err(|_| Errno::EFAULT)?;
         let dst = &mut damage_regions[..clamped];
         let dst_bytes = slopos_ostd::util::byte_view::pod_slice_as_bytes_mut(dst);
         debug_assert_eq!(dst_bytes.len(), byte_len);
         copy_bytes_from_user(user_bytes, dst_bytes).map_err(|_| Errno::EFAULT)?;
-        damage_region_count = clamped as u32;
+        damage_region_count = clamped;
     }
 
     video::get_display_info().ok_or(Errno::EINVAL)?;
-    let damage_ptr_ffi = if damage_region_count > 0 {
-        damage_regions.as_ptr()
-    } else {
-        core::ptr::null()
-    };
-    let rc = video::fb_flip_from_shm(phys_addr, size, damage_ptr_ffi, damage_region_count);
-    if rc < 0 {
-        return Err(Errno::EINVAL);
+    // The compositor keeps a frame's damage pending on any nonzero answer.
+    match video::fb_flip_from_shm(phys_addr, size, &damage_regions[..damage_region_count]) {
+        Present::Shown => Ok(0),
+        Present::Suppressed => Ok(1),
+        Present::Failed => Err(Errno::EINVAL),
     }
-    // 0 = shown, 1 = suppressed (kernel log owns the screen, or a prior present
-    // is still in flight); the compositor keeps damage pending on nonzero.
-    Ok(rc as u64)
 });
 
 define_syscall!(syscall_cursor_set_image
@@ -323,7 +308,7 @@ define_syscall!(syscall_cursor_set_image
     }
     // Heap-staged: 16 KiB exceeds the kernel stack frame budget.
     let mut buf = KVec::<u8>::zeroed(len).map_err(|_| Errno::ENOMEM)?;
-    let user = MmUserBytes::try_new(image_ptr, len).map_err(|_| Errno::EFAULT)?;
+    let user = OstdUserBytes::try_new(image_ptr, len).map_err(|_| Errno::EFAULT)?;
     copy_bytes_from_user(user, &mut buf[..]).map_err(|_| Errno::EFAULT)?;
     let hot_x = ((hotspot >> 16) & 0xFFFF) as u32;
     let hot_y = (hotspot & 0xFFFF) as u32;
@@ -389,7 +374,7 @@ define_syscall!(syscall_roulette_spin (ctx)
     -> Result<u64, Errno>
 {
     let res = fate_spin();
-    if fate_set_pending(res, task_id) != 0 {
+    if !fate_set_pending(res, task_id) {
         return Err(Errno::EINVAL);
     }
     let packed = ((res.token as u64) << 32) | res.value as u64;
@@ -414,10 +399,10 @@ define_syscall!(syscall_roulette_result
     let is_win = (stored.value & 1) == 1;
 
     if is_win {
-        fate_apply_outcome(&stored as *const FateResult, 0, true);
+        fate_apply_outcome(true);
         SyscallResult::Ok(0)
     } else {
-        fate_apply_outcome(&stored as *const FateResult, 0, false);
+        fate_apply_outcome(false);
         // Second key: `Fate` admits the caller, the flag says this image is
         // one where losing costs a reboot. A test image loses without
         // rebooting. Reachability here is what the gate script exists for.
@@ -425,7 +410,7 @@ define_syscall!(syscall_roulette_result
             return SyscallResult::Ok(1);
         }
         let cap = slopos_ostd::platform::power::kernel_authority();
-        slopos_ostd::platform::power::reboot(&cap, b"Roulette loss - spinning again\0".as_ptr() as *const i8);
+        slopos_ostd::platform::power::reboot(&cap, "Roulette loss - spinning again");
         #[allow(unreachable_code)]
         SyscallResult::NoReturn
     }
@@ -439,6 +424,3 @@ define_syscall!(syscall_fb_info
     copy_to_user(info_out.inner(), &info).map_err(|_| Errno::EFAULT)?;
     Ok(())
 });
-
-#[allow(dead_code)]
-type _Unused = MmUserPtr<u8>;

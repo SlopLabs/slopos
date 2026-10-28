@@ -21,7 +21,7 @@
 
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::cpu::x86_64::pcr::{MAX_CPUS, get_current_cpu};
+use crate::cpu::x86_64::pcr::{MAX_CPUS, current_cpu_id};
 use crate::task::kernel_task::TaskInner;
 
 /// Sentinel for [`TaskInner::fpu_last_cpu`]: no CPU's register file holds this
@@ -197,7 +197,7 @@ pub fn fpu_owner_forget<K, U>(task: &TaskInner<K, U>) {
 /// Off-PCR (host tests, pre-`GS_BASE` boot) this reports CPU 0.
 #[inline]
 pub fn fpu_current_cpu() -> usize {
-    get_current_cpu()
+    current_cpu_id()
 }
 
 // These drive the tag state machine directly rather than through

@@ -186,10 +186,6 @@ impl MemoryBlockDevice {
         let mut guard = self.buffer.lock();
         f(guard.as_mut_slice())
     }
-
-    pub fn capacity_inner(&self) -> usize {
-        self.buffer.lock().len()
-    }
 }
 
 impl BlockDevice for MemoryBlockDevice {

@@ -4,10 +4,10 @@
 use slopos_ext4_core::extent;
 use slopos_testing::TestResult;
 
-use super::{FIX_ROOT_DIR_BLOCK, ext4_image_laid_out, phase3_image, with_mounted};
+use super::{FIX_ROOT_DIR_BLOCK, ext4_image_laid_out, with_mounted, writable_file_image};
 use crate::blockdev::MemoryBlockDevice;
-use crate::ext2::ondisk::{EXT2_IMMUTABLE_FL, EXT2_INDEX_FL, EXT4_EXTENTS_FL, InodeTime};
-use crate::ext2::{Ext2Error, Ext2Fs};
+use crate::ext4::ondisk::{EXT4_EXTENTS_FL, EXT4_IMMUTABLE_FL, EXT4_INDEX_FL, InodeTime};
+use crate::ext4::{Ext4Error, Ext4Fs};
 
 const BLOCKS: u32 = 512;
 const BS: u64 = 1024;
@@ -16,7 +16,7 @@ const FIRST_FILE: u32 = 12;
 
 fn run(
     device: &MemoryBlockDevice,
-    body: fn(&mut Ext2Fs<'_>) -> Result<(), &'static str>,
+    body: fn(&mut Ext4Fs<'_>) -> Result<(), &'static str>,
 ) -> TestResult {
     match with_mounted(device, body) {
         Ok(()) => TestResult::Pass,
@@ -38,7 +38,7 @@ pub fn test_ext4_extent_tree_grows_and_shrinks() -> TestResult {
 }
 
 #[inline(never)]
-fn extent_tree_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn extent_tree_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let free_before = fs.superblock().free_blocks_count;
     let ino = fs.create_file(2, b"sparse").map_err(|_| "create")?;
     for i in 0..12u8 {
@@ -71,7 +71,7 @@ fn extent_tree_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 }
 
 #[inline(never)]
-fn depth_of(fs: &mut Ext2Fs<'_>, ino: u32) -> Result<u16, &'static str> {
+fn depth_of(fs: &mut Ext4Fs<'_>, ino: u32) -> Result<u16, &'static str> {
     let inode = fs.read_inode(ino).map_err(|_| "read inode")?;
     if inode.flags & EXT4_EXTENTS_FL == 0 {
         return Err("a new file on an extents volume is block-mapped");
@@ -82,7 +82,7 @@ fn depth_of(fs: &mut Ext2Fs<'_>, ino: u32) -> Result<u16, &'static str> {
 }
 
 #[inline(never)]
-fn byte_at(fs: &mut Ext2Fs<'_>, ino: u32, offset: u64) -> Result<u8, &'static str> {
+fn byte_at(fs: &mut Ext4Fs<'_>, ino: u32, offset: u64) -> Result<u8, &'static str> {
     let mut byte = [0u8; 1];
     fs.read_file(ino, offset, &mut byte).map_err(|_| "read")?;
     Ok(byte[0])
@@ -100,7 +100,7 @@ pub fn test_ext4_inode_checksum_is_verified() -> TestResult {
     let record = u64::from(layout.inode_table) * BS + u64::from(FIRST_FILE - 1) * 256;
     flip(&device, record + 0xF0);
     run(&device, |fs| match fs.read_inode(FIRST_FILE) {
-        Err(Ext2Error::BadChecksum) => Ok(()),
+        Err(Ext4Error::BadChecksum) => Ok(()),
         _ => Err("a corrupted record was read"),
     })
 }
@@ -113,13 +113,13 @@ pub fn test_ext4_directory_checksum_is_verified() -> TestResult {
     // The free space past `lost+found`'s entry, which only the tail covers.
     flip(&device, u64::from(layout.root_dir) * BS + 600);
     run(&device, |fs| match fs.lookup_child(2, b"lost+found") {
-        Err(Ext2Error::BadChecksum) => Ok(()),
+        Err(Ext4Error::BadChecksum) => Ok(()),
         _ => Err("a corrupted directory block was read"),
     })
 }
 
 #[inline(never)]
-fn create_and_sync(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn create_and_sync(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let ino = fs.create_file(2, b"c").map_err(|_| "create")?;
     if ino != FIRST_FILE {
         return Err("the first create took another inode");
@@ -140,7 +140,7 @@ pub fn test_ext4_times_carry_nanoseconds() -> TestResult {
 }
 
 #[inline(never)]
-fn times_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn times_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let ino = fs.create_file(2, b"t").map_err(|_| "create")?;
     let late = 1i64 << 33;
     fs.set_times(
@@ -172,7 +172,7 @@ pub fn test_ext4_inode_flags_honour_the_seal() -> TestResult {
 }
 
 #[inline(never)]
-fn flags_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn flags_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     use slopos_abi::fs::inode_flags::{FS_APPEND_FL, FS_NODUMP_FL};
 
     let ino = fs.create_file(2, b"f").map_err(|_| "create")?;
@@ -182,19 +182,19 @@ fn flags_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     }
     fs.set_inode_flags(ino, flags | FS_NODUMP_FL, false)
         .map_err(|_| "nodump refused")?;
-    if fs.set_inode_flags(ino, flags | FS_APPEND_FL, false) != Err(Ext2Error::UnsupportedFeature) {
+    if fs.set_inode_flags(ino, flags | FS_APPEND_FL, false) != Err(Ext4Error::UnsupportedFeature) {
         return Err("an unhonoured flag was not refused");
     }
-    let sealed = flags | FS_NODUMP_FL | EXT2_IMMUTABLE_FL;
-    if fs.set_inode_flags(ino, sealed, false) != Err(Ext2Error::Immutable) {
+    let sealed = flags | FS_NODUMP_FL | EXT4_IMMUTABLE_FL;
+    if fs.set_inode_flags(ino, sealed, false) != Err(Ext4Error::Immutable) {
         return Err("the seal moved without the authority to move it");
     }
     fs.set_inode_flags(ino, sealed, true)
         .map_err(|_| "sealing refused")?;
-    if fs.write_file(ino, 0, b"x") != Err(Ext2Error::Immutable) {
+    if fs.write_file(ino, 0, b"x") != Err(Ext4Error::Immutable) {
         return Err("a sealed file took a write");
     }
-    if fs.set_inode_flags(ino, sealed & !FS_NODUMP_FL, true) != Err(Ext2Error::Immutable) {
+    if fs.set_inode_flags(ino, sealed & !FS_NODUMP_FL, true) != Err(Ext4Error::Immutable) {
         return Err("a sealed inode changed another flag");
     }
     fs.set_inode_flags(ino, flags, true)
@@ -214,7 +214,7 @@ pub fn test_ext4_append_only_is_sealed() -> TestResult {
 }
 
 #[inline(never)]
-fn append_only_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn append_only_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     use slopos_abi::fs::inode_flags::FS_APPEND_FL;
 
     let ino = fs.create_file(2, b"log").map_err(|_| "create")?;
@@ -222,16 +222,16 @@ fn append_only_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     let mut inode = fs.read_inode(ino).map_err(|_| "read")?;
     inode.flags |= FS_APPEND_FL;
     fs.write_inode_for_test(ino, &inode).map_err(|_| "mark")?;
-    if fs.write_file(ino, 3, b"two") != Err(Ext2Error::Immutable) {
+    if fs.write_file(ino, 3, b"two") != Err(Ext4Error::Immutable) {
         return Err("an append-only file took a write");
     }
-    if fs.truncate_file(ino, 0) != Err(Ext2Error::Immutable) {
+    if fs.truncate_file(ino, 0) != Err(Ext4Error::Immutable) {
         return Err("an append-only file was truncated");
     }
-    if fs.unlink_entry(2, b"log") != Err(Ext2Error::Immutable) {
+    if fs.unlink_entry(2, b"log") != Err(Ext4Error::Immutable) {
         return Err("an append-only file lost its name");
     }
-    if fs.rename_entry(2, b"log", 2, b"moved") != Err(Ext2Error::Immutable) {
+    if fs.rename_entry(2, b"log", 2, b"moved") != Err(Ext4Error::Immutable) {
         return Err("an append-only file was renamed");
     }
     if fs.is_sealed(ino) != Ok(true) {
@@ -243,7 +243,7 @@ fn append_only_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 /// A volume converted to extents keeps its block-mapped files: they read
 /// and grow through their block map, and new files beside them get trees.
 pub fn test_ext4_block_mapped_files_live_beside_extent_files() -> TestResult {
-    let Some(device) = phase3_image(b"old.txt", b"from before extents") else {
+    let Some(device) = writable_file_image(b"old.txt", b"from before extents") else {
         return TestResult::Skipped;
     };
     device.with_buffer_mut(|buf| {
@@ -257,7 +257,7 @@ pub fn test_ext4_block_mapped_files_live_beside_extent_files() -> TestResult {
 }
 
 #[inline(never)]
-fn mixed_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn mixed_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let old = fs
         .resolve_path(b"/old.txt")
         .map_err(|_| "the old file is gone")?;
@@ -285,14 +285,14 @@ fn mixed_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 /// A name that reaches a reserved inode — the journal's, the resize
 /// inode's — is damage, not a file to open.
 pub fn test_ext4_a_name_never_reaches_a_reserved_inode() -> TestResult {
-    let Some(device) = phase3_image(b"r.txt", b"x") else {
+    let Some(device) = writable_file_image(b"r.txt", b"x") else {
         return TestResult::Skipped;
     };
     // The fixture's file entry follows `.` and `..`.
     let entry = FIX_ROOT_DIR_BLOCK as usize * BS as usize + 24;
     device.with_buffer_mut(|buf| buf[entry..entry + 4].copy_from_slice(&8u32.to_le_bytes()));
     run(&device, |fs| match fs.lookup_child(2, b"r.txt") {
-        Err(Ext2Error::DirectoryFormat) => Ok(()),
+        Err(Ext4Error::DirectoryFormat) => Ok(()),
         _ => Err("a name reached inode 8"),
     })
 }
@@ -377,7 +377,7 @@ pub fn test_ext4_a_mapping_that_cannot_grow_leaks_nothing() -> TestResult {
 }
 
 #[inline(never)]
-fn unmappable_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn unmappable_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let ino = fs.create_file(2, b"four").map_err(|_| "create")?;
     for i in 0..u64::from(extent::ROOT_MAX) {
         fs.write_file(ino, 2 * i * BS, b"x").map_err(|_| "write")?;
@@ -393,7 +393,7 @@ fn unmappable_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     if fs.superblock().free_blocks_count != 1 {
         return Err("the fixture did not leave exactly one block free");
     }
-    if fs.write_file(ino, 8 * BS, b"y") != Err(Ext2Error::NoSpace) {
+    if fs.write_file(ino, 8 * BS, b"y") != Err(Ext4Error::NoSpace) {
         return Err("a write whose tree had no room to grow did not fail");
     }
     if fs.superblock().free_blocks_count != 1 {
@@ -415,19 +415,19 @@ pub fn test_ext4_an_uncounted_directory_stays_uncounted() -> TestResult {
 }
 
 #[inline(never)]
-fn uncounted_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn uncounted_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let dir = fs.create_directory(2, b"wide").map_err(|_| "mkdir")?;
     fs.create_directory(dir, b"a").map_err(|_| "mkdir inside")?;
     stop_counting(fs, dir, 0)?;
-    if fs.create_directory(dir, b"b") != Err(Ext2Error::TooManyLinks) {
+    if fs.create_directory(dir, b"b") != Err(Ext4Error::TooManyLinks) {
         return Err("a subdirectory was added to an uncounted directory");
     }
     fs.remove_directory(dir, b"a").map_err(|_| "rmdir inside")?;
     if links_of(fs, dir)? != 1 {
         return Err("an rmdir dropped an uncounted directory's count");
     }
-    stop_counting(fs, dir, EXT2_INDEX_FL)?;
-    if fs.create_file(dir, b"f") != Err(Ext2Error::TooManyLinks) {
+    stop_counting(fs, dir, EXT4_INDEX_FL)?;
+    if fs.create_file(dir, b"f") != Err(Ext4Error::TooManyLinks) {
         return Err("an uncounted indexed directory took an entry");
     }
     if !fs.read_inode(dir).map_err(|_| "read")?.is_indexed() {
@@ -437,7 +437,7 @@ fn uncounted_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 }
 
 #[inline(never)]
-fn stop_counting(fs: &mut Ext2Fs<'_>, dir: u32, flags: u32) -> Result<(), &'static str> {
+fn stop_counting(fs: &mut Ext4Fs<'_>, dir: u32, flags: u32) -> Result<(), &'static str> {
     let mut inode = fs.read_inode(dir).map_err(|_| "read")?;
     inode.links_count = 1;
     inode.flags |= flags;
@@ -445,7 +445,7 @@ fn stop_counting(fs: &mut Ext2Fs<'_>, dir: u32, flags: u32) -> Result<(), &'stat
 }
 
 #[inline(never)]
-fn links_of(fs: &mut Ext2Fs<'_>, ino: u32) -> Result<u16, &'static str> {
+fn links_of(fs: &mut Ext4Fs<'_>, ino: u32) -> Result<u16, &'static str> {
     Ok(fs.read_inode(ino).map_err(|_| "read")?.links_count)
 }
 
@@ -494,7 +494,7 @@ pub fn test_ext4_a_record_spanning_the_tail_is_refused() -> TestResult {
         dir::seal(inode::seed(fs_seed, 2, 0), block);
     });
     run(&device, |fs| match fs.lookup_child(2, b"lost+found") {
-        Err(Ext2Error::DirectoryFormat) => Ok(()),
+        Err(Ext4Error::DirectoryFormat) => Ok(()),
         _ => Err("a block whose records run over its tail was read"),
     })
 }
@@ -509,7 +509,7 @@ pub fn test_ext4_an_extent_never_reaches_the_superblock() -> TestResult {
 }
 
 #[inline(never)]
-fn superblock_extent_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn superblock_extent_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let ino = fs.create_file(2, b"aimed").map_err(|_| "create")?;
     fs.write_file(ino, 0, b"x").map_err(|_| "write")?;
     let mut inode = fs.read_inode(ino).map_err(|_| "read")?;
@@ -528,7 +528,7 @@ fn superblock_extent_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
         .map_err(|_| "write inode")?;
     let mut byte = [0u8; 1];
     match fs.read_file(ino, 0, &mut byte) {
-        Err(Ext2Error::InvalidBlock) => Ok(()),
+        Err(Ext4Error::InvalidBlock) => Ok(()),
         _ => Err("a read went through an extent naming the superblock"),
     }
 }

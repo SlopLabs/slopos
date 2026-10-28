@@ -1,48 +1,51 @@
-//! Keyboard adapter integration tests: synthetic scancodes → focused task's
-//! input queue, asserting the canonical `(keycode, codepoint, modifiers)`
-//! payload alongside the legacy `(scancode, ascii)` bytes.
+//! Keyboard integration tests: synthetic set-1 scancodes into the sink
+//! holder's queue as `(keycode, codepoint, modifiers)`, and into the console
+//! TTY as the bytes a VT sends while nothing holds the sink.
 
 use slopos_abi::input::{InputEventType, KEY_FLAG_FROM_KEYPAD, MODIFIER_SHIFT};
 use slopos_keymap_core::keycode;
 use slopos_testing::{TestResult, fail, pass};
 
-use crate::input_event::{input_cleanup_task, input_poll, input_set_keyboard_focus};
+use crate::input_event::{
+    input_cleanup_task, input_compositor_task_id, input_poll, input_register_compositor,
+};
 use crate::ps2::keyboard::{handle_scancode, reset_state_for_test};
 
 const DUMMY_TASK: u32 = 9001;
 
-fn setup() {
+/// Makes [`DUMMY_TASK`] the sink's holder; what held it before, for
+/// [`teardown`].
+fn setup() -> u32 {
     reset_state_for_test();
+    let restore = input_compositor_task_id();
     input_cleanup_task(DUMMY_TASK);
-    input_set_keyboard_focus(DUMMY_TASK);
+    input_register_compositor(DUMMY_TASK);
     while input_poll(DUMMY_TASK).is_some() {}
+    restore
 }
 
-fn teardown() {
-    input_set_keyboard_focus(0);
+fn teardown(restore: u32) {
     input_cleanup_task(DUMMY_TASK);
+    input_register_compositor(restore);
     reset_state_for_test();
 }
 
 /// KP7 with Num Lock on (the default) produces the digit '7'.
 pub fn test_keypad_numlock_digit() -> TestResult {
-    setup();
+    let restore = setup();
     handle_scancode(0x47); // KP7 make code
     let ev = input_poll(DUMMY_TASK);
-    teardown();
+    teardown(restore);
 
     let ev = match ev {
         Some(e) => e,
-        None => return fail!("keypad 7 produced no event (the original bug)"),
+        None => return fail!("keypad 7 produced no event"),
     };
     if ev.key_keycode() != keycode::KEY_KP_7 {
-        return fail!("keypad 7 decoded to the wrong canonical keycode");
+        return fail!("keypad 7 decoded to the wrong keycode");
     }
     if ev.key_codepoint() != b'7' as u32 {
         return fail!("keypad 7 did not produce digit '7' with Num Lock on");
-    }
-    if ev.key_ascii() != b'7' {
-        return fail!("keypad 7 legacy ascii is not '7'");
     }
     if ev.key_flags() & KEY_FLAG_FROM_KEYPAD == 0 {
         return fail!("keypad 7 missing FROM_KEYPAD flag");
@@ -51,31 +54,34 @@ pub fn test_keypad_numlock_digit() -> TestResult {
 }
 
 pub fn test_letter_canonical_payload() -> TestResult {
-    setup();
+    let restore = setup();
     handle_scancode(0x1E); // 'a' make code
     let ev = input_poll(DUMMY_TASK);
-    teardown();
+    teardown(restore);
 
     let ev = match ev {
         Some(e) => e,
         None => return fail!("letter 'a' produced no event"),
     };
     if ev.key_keycode() != keycode::KEY_A {
-        return fail!("letter 'a' wrong canonical keycode");
+        return fail!("letter 'a' wrong keycode");
     }
-    if ev.key_codepoint() != b'a' as u32 || ev.key_ascii() != b'a' {
-        return fail!("letter 'a' wrong codepoint/ascii");
+    if ev.key_codepoint() != b'a' as u32 {
+        return fail!("letter 'a' wrong codepoint");
+    }
+    if ev.key_flags() != 0 {
+        return fail!("letter 'a' carries flags {:#x}", ev.key_flags());
     }
     pass!()
 }
 
 pub fn test_shift_letter_uppercase_and_modifier() -> TestResult {
-    setup();
+    let restore = setup();
     handle_scancode(0x2A); // Left Shift press
     handle_scancode(0x1E); // 'a' -> 'A'
     let _shift_ev = input_poll(DUMMY_TASK);
     let ev = input_poll(DUMMY_TASK);
-    teardown();
+    teardown(restore);
 
     let ev = match ev {
         Some(e) => e,
@@ -84,7 +90,7 @@ pub fn test_shift_letter_uppercase_and_modifier() -> TestResult {
     if ev.key_keycode() != keycode::KEY_A {
         return fail!("shift+'a' wrong keycode");
     }
-    if ev.key_codepoint() != b'A' as u32 || ev.key_ascii() != b'A' {
+    if ev.key_codepoint() != b'A' as u32 {
         return fail!("shift+'a' did not produce uppercase 'A'");
     }
     if ev.key_modifiers() & MODIFIER_SHIFT == 0 {
@@ -93,35 +99,34 @@ pub fn test_shift_letter_uppercase_and_modifier() -> TestResult {
     pass!()
 }
 
-/// Extended arrows still carry the legacy 0x82 pseudo-code the terminal/shell
-/// expect.
-pub fn test_extended_arrow_legacy_and_canonical() -> TestResult {
-    setup();
+/// An extended arrow is its keycode and no text.
+pub fn test_extended_arrow_canonical_payload() -> TestResult {
+    let restore = setup();
     handle_scancode(0xE0); // extended prefix
     handle_scancode(0x48); // Up arrow
     let ev = input_poll(DUMMY_TASK);
-    teardown();
+    teardown(restore);
 
     let ev = match ev {
         Some(e) => e,
         None => return fail!("Up arrow produced no event"),
     };
     if ev.key_keycode() != keycode::KEY_UP {
-        return fail!("Up arrow wrong canonical keycode");
+        return fail!("Up arrow wrong keycode");
     }
-    if ev.key_ascii() != 0x82 {
-        return fail!("Up arrow legacy pseudo-code is not 0x82");
+    if ev.key_codepoint() != 0 {
+        return fail!("Up arrow carries text {:#x}", ev.key_codepoint());
     }
     pass!()
 }
 
 pub fn test_press_then_release_events() -> TestResult {
-    setup();
+    let restore = setup();
     handle_scancode(0x1E); // 'a' press
     handle_scancode(0x9E); // 'a' release
     let press = input_poll(DUMMY_TASK);
     let release = input_poll(DUMMY_TASK);
-    teardown();
+    teardown(restore);
 
     let press = match press {
         Some(e) => e,
@@ -138,10 +143,70 @@ pub fn test_press_then_release_events() -> TestResult {
         return fail!("expected KeyRelease");
     }
     if release.key_keycode() != keycode::KEY_A {
-        return fail!("release missing canonical keycode");
+        return fail!("release missing keycode");
     }
-    if release.key_ascii() != 0 {
-        return fail!("release should carry no text byte");
+    if release.key_codepoint() != 0 {
+        return fail!("release should carry no text");
+    }
+    pass!()
+}
+
+/// While nothing holds the sink, a named key reaches the console as the
+/// escape sequence a VT sends, its modifiers in the second parameter.
+pub fn test_named_keys_reach_the_console_as_vt_sequences() -> TestResult {
+    use crate::tty::{self, TtyIndex};
+    use slopos_abi::syscall::LocalFlags;
+
+    const CONSOLE: TtyIndex = TtyIndex(0);
+    const PRESSES: &[&[u8]] = &[
+        &[0xE0, 0x48, 0xE0, 0xC8],             // Up
+        &[0xE0, 0x53, 0xE0, 0xD3],             // Delete
+        &[0xE0, 0x51, 0xE0, 0xD1],             // Page Down
+        &[0x1D, 0xE0, 0x4B, 0xE0, 0xCB, 0x9D], // Ctrl+Left
+        &[0x3F, 0xBF],                         // F5
+        &[0x1E, 0x9E],                         // 'a'
+    ];
+    const SENT: &[u8] = b"\x1b[A\x1b[3~\x1b[6~\x1b[1;5D\x1b[15~a";
+
+    reset_state_for_test();
+    tty::table::tty_table_init();
+    let restore = input_compositor_task_id();
+    input_register_compositor(0);
+    let active = tty::active_tty();
+    tty::set_active_tty(CONSOLE);
+    let Ok(saved) = tty::get_termios(CONSOLE) else {
+        tty::set_active_tty(active);
+        input_register_compositor(restore);
+        return fail!("the console has no termios");
+    };
+    let mut raw = saved;
+    raw.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
+    let _ = tty::set_termios(CONSOLE, &raw);
+    let mut scratch = [0u8; 64];
+    while matches!(tty::read(CONSOLE, &mut scratch, true), Ok(n) if n > 0) {}
+
+    for press in PRESSES {
+        for &byte in *press {
+            handle_scancode(byte);
+        }
+    }
+    let mut got = [0u8; 64];
+    let mut len = 0;
+    while let Ok(n) = tty::read(CONSOLE, &mut got[len..], true) {
+        if n == 0 || len + n == got.len() {
+            len += n;
+            break;
+        }
+        len += n;
+    }
+
+    let _ = tty::set_termios(CONSOLE, &saved);
+    tty::set_active_tty(active);
+    input_register_compositor(restore);
+    reset_state_for_test();
+
+    if &got[..len] != SENT {
+        return fail!("the console read {:x?}, want {:x?}", &got[..len], SENT);
     }
     pass!()
 }
@@ -155,17 +220,17 @@ pub fn test_runtime_layout_swap() -> TestResult {
 
     const DE_CH: &str = include_str!("../../../assets/keymaps/de_CH.layout");
 
-    setup();
+    let restore = setup();
 
     let mut table = match KBox::<LayoutTable>::zeroed() {
         Ok(t) => t,
         Err(_) => {
-            teardown();
+            teardown(restore);
             return fail!("layout alloc failed");
         }
     };
     if parse(DE_CH.as_bytes(), &mut table).is_err() {
-        teardown();
+        teardown(restore);
         return fail!("de_CH layout failed to parse");
     }
     set_layout(table);
@@ -183,7 +248,7 @@ pub fn test_runtime_layout_swap() -> TestResult {
     handle_scancode(0xE0);
     handle_scancode(0xB8); // right Alt release
 
-    teardown();
+    teardown(restore);
 
     let z = match z_ev {
         Some(e) => e,
@@ -210,7 +275,11 @@ slopos_testing::stest!(
     suite = keyboard
 );
 slopos_testing::stest!(
-    name = test_extended_arrow_legacy_and_canonical,
+    name = test_extended_arrow_canonical_payload,
     suite = keyboard
 );
 slopos_testing::stest!(name = test_press_then_release_events, suite = keyboard);
+slopos_testing::stest!(
+    name = test_named_keys_reach_the_console_as_vt_sequences,
+    suite = keyboard
+);

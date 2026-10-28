@@ -1,6 +1,6 @@
 use crate::TestResult;
-use slopos_arch::arch::exception::{exception_is_critical, get_exception_name};
-use slopos_arch::InterruptFrame;
+use slopos_ostd::arch::x86_64::exception::get_exception_name;
+use slopos_ostd::irq::interrupt_frame::InterruptFrame;
 use slopos_ostd::klog_info;
 
 fn create_test_frame(vector: u8, from_user: bool) -> InterruptFrame {
@@ -52,45 +52,6 @@ pub fn test_exception_names_valid() -> TestResult {
             return TestResult::Fail;
         }
     }
-    TestResult::Pass
-}
-
-pub fn test_critical_exception_classification() -> TestResult {
-    if !exception_is_critical(8) {
-        klog_info!("EXCEPTION_TEST: BUG - Double fault not marked critical");
-        return TestResult::Fail;
-    }
-    if !exception_is_critical(2) {
-        klog_info!("EXCEPTION_TEST: BUG - NMI not marked critical");
-        return TestResult::Fail;
-    }
-    if !exception_is_critical(18) {
-        klog_info!("EXCEPTION_TEST: BUG - Machine check not marked critical");
-        return TestResult::Fail;
-    }
-
-    if exception_is_critical(0) {
-        klog_info!("EXCEPTION_TEST: BUG - Divide error marked critical");
-        return TestResult::Fail;
-    }
-    if exception_is_critical(13) {
-        klog_info!("EXCEPTION_TEST: BUG - GPF marked critical");
-        return TestResult::Fail;
-    }
-    if exception_is_critical(14) {
-        klog_info!("EXCEPTION_TEST: BUG - Page fault marked critical");
-        return TestResult::Fail;
-    }
-
-    if exception_is_critical(32) {
-        klog_info!("EXCEPTION_TEST: BUG - Vector 32 marked critical");
-        return TestResult::Fail;
-    }
-    if exception_is_critical(255) {
-        klog_info!("EXCEPTION_TEST: BUG - Vector 255 marked critical");
-        return TestResult::Fail;
-    }
-
     TestResult::Pass
 }
 
@@ -261,10 +222,6 @@ pub fn test_known_exception_names() -> TestResult {
 }
 
 crate::stest!(name = test_exception_names_valid, suite = exception);
-crate::stest!(
-    name = test_critical_exception_classification,
-    suite = exception
-);
 crate::stest!(name = test_page_fault_error_codes, suite = exception);
 crate::stest!(name = test_frame_mode_detection, suite = exception);
 crate::stest!(name = test_frame_invalid_cs, suite = exception);

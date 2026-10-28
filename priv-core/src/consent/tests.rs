@@ -105,13 +105,16 @@ fn every_field_a_question_names_round_trips_and_ready_names_a_version() {
         ..ask()
     };
     assert_eq!(Ask::decode(&payload(&full.frame()).1), Ok(full));
-    assert_eq!(decode_ready(&[]), Ok(0));
-    for version in ["x", ""] {
+    assert_eq!(decode_ready(&[]), Err(Malformed));
+    for version in ["x", "", "01"] {
         let body = Fields::new().with("version", version).encode();
         assert_eq!(decode_ready(&body), Err(Malformed), "{version:?}");
     }
-    let older = Fields::new().with("version", "2").encode();
-    assert_eq!(decode_ready(&older), Ok(2));
+    let later = Fields::new()
+        .with("version", (VERSION + 1).to_string())
+        .with("features", "more")
+        .encode();
+    assert_eq!(decode_ready(&later), Ok(VERSION + 1));
 }
 
 #[test]
@@ -130,7 +133,7 @@ fn what_a_question_may_carry_is_its_version_s() {
     let digest = shape.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3)
     });
-    assert_eq!((VERSION, digest), (3, 0x7d19_33f5_4750_6d7c));
+    assert_eq!((VERSION, digest), (1, 0x7d19_33f5_4750_6d7c));
 }
 
 #[test]

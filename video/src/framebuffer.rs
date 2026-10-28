@@ -1,9 +1,9 @@
-use core::ffi::c_int;
 use slopos_ostd::lock_class;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::damage::DamageRect;
 use slopos_abi::{DisplayInfo, PixelFormat};
+use slopos_kernel_services::syscall_services::scanout::{FlushFn, Present};
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{klog_debug, klog_warn};
@@ -77,26 +77,22 @@ static FRAMEBUFFER: SpinLock<FramebufferState> = SpinLock::new(
     FramebufferState::new(),
     lock_class!("FRAMEBUFFER", LOCK_LEVEL_RESOURCE),
 );
-/// Backend present hook. Receives the damaged region (or `(null, 0)` for a
-/// full-frame present) so a GPU backend can scope its transfer/flush.
-type FlushCallback = fn(*const DamageRect, u32) -> c_int;
-
-static FRAMEBUFFER_FLUSH: SpinLock<Option<FlushCallback>> =
+static FRAMEBUFFER_FLUSH: SpinLock<Option<FlushFn>> =
     SpinLock::new(None, lock_class!("FRAMEBUFFER_FLUSH", LOCK_LEVEL_RESOURCE));
 
-fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) -> i32 {
+fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) -> bool {
     if addr == 0 || width < MIN_FRAMEBUFFER_WIDTH || width > DisplayInfo::MAX_DIMENSION {
-        return -1;
+        return false;
     }
     if height < MIN_FRAMEBUFFER_HEIGHT || height > DisplayInfo::MAX_DIMENSION {
-        return -1;
+        return false;
     }
     if bpp != 16 && bpp != 24 && bpp != 32 {
-        return -1;
+        return false;
     }
     let _buffer_size = match pitch.checked_mul(height) {
         Some(sz) if sz > 0 && sz <= MAX_BUFFER_SIZE => sz,
-        _ => return -1,
+        _ => return false,
     };
 
     let mapped_base = if let Some(hhdm_base) = slopos_mm::hhdm::try_offset() {
@@ -114,7 +110,7 @@ fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) 
     };
 
     if mapped_base.is_null() {
-        return -1;
+        return false;
     }
 
     let display_info = DisplayInfo::new(width, height, pitch, PixelFormat::from_bpp(bpp));
@@ -126,11 +122,11 @@ fn init_state_from_raw(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) 
 
     let mut guard = FRAMEBUFFER.lock();
     guard.fb = Some(fb_state);
-    0
+    true
 }
 
-pub fn init_with_display_info(address: *mut u8, info: &DisplayInfo) -> i32 {
-    let rc = init_state_from_raw(
+pub fn init_with_display_info(address: *mut u8, info: &DisplayInfo) -> bool {
+    let adopted = init_state_from_raw(
         address as u64,
         info.width,
         info.height,
@@ -138,7 +134,7 @@ pub fn init_with_display_info(address: *mut u8, info: &DisplayInfo) -> i32 {
         info.bytes_per_pixel() * 8,
     );
 
-    if rc == 0 {
+    if adopted {
         if let Some(fb) = FRAMEBUFFER.lock().fb {
             klog_debug!(
                 "Framebuffer init: phys=0x{:x} virt=0x{:x} {}x{} pitch={} bpp={}",
@@ -163,7 +159,7 @@ pub fn init_with_display_info(address: *mut u8, info: &DisplayInfo) -> i32 {
         );
     }
 
-    rc
+    adopted
 }
 pub fn get_display_info() -> Option<DisplayInfo> {
     FRAMEBUFFER.lock().fb.map(|fb| fb.info)
@@ -183,22 +179,22 @@ pub(crate) fn try_snapshot() -> Option<FbState> {
     FRAMEBUFFER.try_lock()?.fb
 }
 
-pub fn register_flush_callback(callback: FlushCallback) {
+pub fn register_flush_callback(callback: FlushFn) {
     let mut guard = FRAMEBUFFER_FLUSH.lock();
     *guard = Some(callback);
 }
 
-/// Present the (optionally damage-scoped) frame through the registered backend.
+/// Present `damage` — the whole frame when it is empty — through the
+/// registered backend; [`Present::Shown`] for a direct-write backing.
 ///
 /// The callback pointer is copied out and the lock released before the callback
 /// runs: the backend may take device locks or submit GPU commands, which must
-/// not happen under this IRQ-disabling `SpinLock`. Returns the backend's
-/// [`PRESENT_SHOWN`] / [`PRESENT_SUPPRESSED`] code.
-pub fn framebuffer_flush(damage: *const DamageRect, damage_count: u32) -> c_int {
+/// not happen under this IRQ-disabling `SpinLock`.
+pub fn framebuffer_flush(damage: &[DamageRect]) -> Present {
     let cb = *FRAMEBUFFER_FLUSH.lock();
     match cb {
-        Some(cb) => cb(damage, damage_count),
-        None => 0,
+        Some(cb) => cb(damage),
+        None => Present::Shown,
     }
 }
 
@@ -206,7 +202,7 @@ pub fn framebuffer_flush(damage: *const DamageRect, damage_count: u32) -> c_int 
 /// backend's hook is held.
 pub(crate) fn try_flush() {
     if let Some(Some(cb)) = FRAMEBUFFER_FLUSH.try_lock().map(|hook| *hook) {
-        cb(core::ptr::null(), 0);
+        cb(&[]);
     }
 }
 
@@ -274,27 +270,13 @@ pub fn release_compositor_fb() {
 static COMPOSITOR_FB_ACQUIRED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize) -> c_int {
-    fb_flip_from_shm_damage(shm_phys, size, core::ptr::null(), 0)
-}
-
-/// Present-result codes returned to the compositor via the fb_flip syscall:
-/// `0` reached the scanout, positive was deliberately not shown, negative is a
-/// hard failure. The compositor keeps a frame's damage pending on any nonzero
-/// result, so it is retried rather than cleared as if shown.
-pub const PRESENT_SHOWN: c_int = 0;
-pub const PRESENT_SUPPRESSED: c_int = 1;
-
-pub fn fb_flip_from_shm_damage(
-    shm_phys: PhysAddr,
-    size: usize,
-    damage: *const slopos_abi::damage::DamageRect,
-    damage_count: u32,
-) -> c_int {
-    // Drop the frame while the kernel log owns the screen; suppressed rather
-    // than failed so the compositor keeps the damage pending and retries.
+/// Copy the compositor's frame at `shm_phys` to the framebuffer — `damage`
+/// alone, or all of it when `damage` is empty — and present it.
+pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize, damage: &[DamageRect]) -> Present {
+    // Suppressed rather than failed: the compositor keeps the damage pending
+    // and retries once the kernel log gives the screen back.
     if slopos_ostd::fblog::is_active() {
-        return PRESENT_SUPPRESSED;
+        return Present::Suppressed;
     }
 
     if !COMPOSITOR_FB_ACQUIRED.swap(true, core::sync::atomic::Ordering::Relaxed) {
@@ -309,52 +291,47 @@ pub fn fb_flip_from_shm_damage(
 
     let fb = match FRAMEBUFFER.lock().fb {
         Some(fb) => fb,
-        None => return -1,
+        None => return Present::Failed,
     };
 
     let fb_size = fb.info.buffer_size();
     let copy_size = size.min(fb_size);
     if copy_size == 0 {
-        return -1;
+        return Present::Failed;
     }
 
     let shm_virt = match shm_phys.to_virt_checked() {
         Some(v) => v.as_u64(),
-        None => return -1,
+        None => return Present::Failed,
     };
 
     let shm_ptr = shm_virt as *const u8;
 
-    if force_full || damage.is_null() || damage_count == 0 {
+    if force_full || damage.is_empty() {
         let Some(dst_ptr) = fb.checked_ptr(0, copy_size) else {
-            return -1;
+            return Present::Failed;
         };
-        let t0 = slopos_arch::tsc::rdtsc();
+        let t0 = slopos_ostd::arch::x86_64::tsc::rdtsc();
         slopos_ostd::util::ptr_buf::copy_bytes(dst_ptr, shm_ptr, copy_size);
-        crate::blit_census::record(t0, slopos_arch::tsc::rdtsc(), copy_size);
-        return framebuffer_flush(core::ptr::null(), 0);
+        crate::blit_census::record(t0, slopos_ostd::arch::x86_64::tsc::rdtsc(), copy_size);
+        return framebuffer_flush(&[]);
     }
 
-    let max_regions = slopos_abi::damage::MAX_DAMAGE_REGIONS as u32;
-    let region_count = damage_count.min(max_regions) as usize;
-    // Kernel syscall path validates this pointer and length before calling us.
-    let any_failed = slopos_ostd::util::ptr_buf::with_buf(damage, region_count, |regions| {
-        let mut any_failed = false;
-        let mut blit_bytes = 0usize;
-        let t0 = slopos_arch::tsc::rdtsc();
-        for rect in regions {
-            if !rect.is_valid() {
-                continue;
-            }
-            blit_bytes += rect.area().max(0) as usize * fb.info.bytes_per_pixel() as usize;
-            if !copy_rect_from_shm(&fb, shm_ptr, copy_size, rect.x0, rect.y0, rect.x1, rect.y1) {
-                any_failed = true;
-                // Partial presentation beats none, so keep going.
-            }
+    let damage = &damage[..damage.len().min(slopos_abi::damage::MAX_DAMAGE_REGIONS)];
+    let mut any_failed = false;
+    let mut blit_bytes = 0usize;
+    let t0 = slopos_ostd::arch::x86_64::tsc::rdtsc();
+    for rect in damage {
+        if !rect.is_valid() {
+            continue;
         }
-        crate::blit_census::record(t0, slopos_arch::tsc::rdtsc(), blit_bytes);
-        any_failed
-    });
-    let flush = framebuffer_flush(damage, region_count as u32);
-    if any_failed { -1 } else { flush }
+        blit_bytes += rect.area().max(0) as usize * fb.info.bytes_per_pixel() as usize;
+        // Partial presentation beats none, so a failed rect does not stop the rest.
+        if !copy_rect_from_shm(&fb, shm_ptr, copy_size, rect.x0, rect.y0, rect.x1, rect.y1) {
+            any_failed = true;
+        }
+    }
+    crate::blit_census::record(t0, slopos_ostd::arch::x86_64::tsc::rdtsc(), blit_bytes);
+    let flush = framebuffer_flush(damage);
+    if any_failed { Present::Failed } else { flush }
 }

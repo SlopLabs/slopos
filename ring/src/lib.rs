@@ -4,7 +4,7 @@
 //! SlopRing — io_uring-style submission/completion ring (kernel side).
 //!
 //! Sync only: there is no `async fn` here — `scripts/check_no_kernel_async.sh`
-//! enforces it (AD-8/AD-9/R13). Async lives in the userland runtime that drives
+//! enforces it (AD-8/AD-9). Async lives in the userland runtime that drives
 //! this ring.
 
 pub mod buffers;

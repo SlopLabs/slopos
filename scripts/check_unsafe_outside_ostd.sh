@@ -298,9 +298,9 @@ if [ -n "$source_offenders" ]; then
     exit 1
 fi
 
-# Fails closed. This used to warn and skip, so a runner without jq passed a
-# crate carrying no lint attribute at all; cargo and jq are already hard
-# requirements of tcb_ratio.sh, which runs beside this gate.
+# Fails closed: a skip would pass a crate carrying no lint attribute at all.
+# cargo and jq are already hard requirements of tcb_ratio.sh, which runs beside
+# this gate.
 if ! crate_dirs="$("$SCRIPT_DIR/kernel_crates.sh")"; then
     echo "check_unsafe_outside_ostd: could not resolve the kernel crate set" >&2
     echo "  (scripts/kernel_crates.sh needs cargo + jq). The lint-attribute scan is" >&2

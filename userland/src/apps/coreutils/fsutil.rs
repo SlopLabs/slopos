@@ -1,61 +1,21 @@
-//! Filesystem operations the utilities share: the calls `std` does not expose
-//! on this target, and one directory walk instead of a recursion per tool.
+//! Filesystem operations the utilities share: links by their target's bytes,
+//! the access check `std` does not expose, and one directory walk instead of
+//! a recursion per tool.
 
-use std::ffi::CString;
+use std::ffi::{CString, OsStr};
 use std::fs::{self, Metadata};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 use slopos_slibc::pal::{Pal, Sys};
 
-fn bad_path() -> std::io::Error {
-    std::io::Error::from(std::io::ErrorKind::InvalidInput)
-}
-
-fn os_error(errno: slopos_slibc::errno::Errno) -> std::io::Error {
-    std::io::Error::from_raw_os_error(errno.raw())
-}
-
-/// `chmod(2)`. `std::fs::set_permissions` needs `PermissionsExt` to carry a
-/// mode, and that extension trait is not wired into the patched std.
-pub fn chmod(path: &str, mode: u32) -> Result<(), std::io::Error> {
-    let c_path = CString::new(path).map_err(|_| bad_path())?;
-    Sys::chmod(c_path.as_ptr() as *const u8, mode).map_err(os_error)
-}
-
-/// `stat(2)`'s `st_mode`. The patched std's `Metadata` carries no mode, so a
-/// tool that has to preserve one — copying a file, or replacing it through a
-/// temporary — has to ask the kernel directly.
-pub fn mode_of(path: &str) -> Result<u32, std::io::Error> {
-    let c_path = CString::new(path).map_err(|_| bad_path())?;
-    let mut buf = [0u8; core::mem::size_of::<slopos_abi::fs::UserFsStat>()];
-    Sys::stat(c_path.as_ptr() as *const u8, buf.as_mut_ptr()).map_err(os_error)?;
-    // `st_mode` sits at a fixed offset in the Linux x86-64 layout the struct
-    // reproduces; reading it by offset avoids a transmute of a byte buffer.
-    const ST_MODE_OFFSET: usize = 24;
-    let mut mode = [0u8; 4];
-    mode.copy_from_slice(&buf[ST_MODE_OFFSET..ST_MODE_OFFSET + 4]);
-    Ok(u32::from_ne_bytes(mode))
-}
-
-/// `symlink(2)`.
+/// `symlink(2)`, storing `target`'s bytes as they are.
 pub fn symlink(target: &[u8], link: &str) -> Result<(), std::io::Error> {
-    let c_target = CString::new(target).map_err(|_| bad_path())?;
-    let c_link = CString::new(link).map_err(|_| bad_path())?;
-    Sys::symlink(c_target.as_ptr() as *const u8, c_link.as_ptr() as *const u8).map_err(os_error)
-}
-
-/// `link(2)`.
-pub fn hard_link(existing: &str, new: &str) -> Result<(), std::io::Error> {
-    fs::hard_link(existing, new)
+    std::os::unix::fs::symlink(OsStr::from_bytes(target), link)
 }
 
 /// `readlink(2)`, answering the target bytes.
 pub fn read_link(path: &str) -> Result<Vec<u8>, std::io::Error> {
-    let c_path = CString::new(path).map_err(|_| bad_path())?;
-    let mut buf = vec![0u8; slopos_abi::fs::USER_PATH_MAX];
-    let len = Sys::readlink(c_path.as_ptr() as *const u8, buf.as_mut_ptr(), buf.len())
-        .map_err(os_error)?;
-    buf.truncate(len.min(buf.len()));
-    Ok(buf)
+    fs::read_link(path).map(|target| target.into_os_string().into_vec())
 }
 
 /// `PATH`, or the system's default search path when the environment names none.

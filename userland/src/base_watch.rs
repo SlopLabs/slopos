@@ -29,8 +29,7 @@ impl Switch {
 }
 
 impl BaseWatch {
-    /// `None` on a kernel with no monitor to give, or a base whose manifest
-    /// cannot be read.
+    /// `None` when the monitor or the base's manifest cannot be had.
     pub fn open() -> Option<BaseWatch> {
         let monitor = base_monitor().ok()?;
         let manifest = settled(&monitor)?;

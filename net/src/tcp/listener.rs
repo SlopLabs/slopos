@@ -11,7 +11,7 @@ use crate::tcp::{
     self, DEFAULT_MSS, DEFAULT_WINDOW_SIZE, TCP_FLAG_ACK, TCP_FLAG_SYN, TcpOutSegment, TcpTuple,
     our_window_scale,
 };
-use crate::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
+use crate::timer::{self, TimerKind, TimerToken};
 use crate::types::{Ipv4Addr, Port, SockAddr};
 
 /// Maximum half-open connections per listening socket, separate from the
@@ -56,15 +56,6 @@ pub struct TcpFourTuple {
 }
 
 impl TcpFourTuple {
-    pub fn from_tcp_tuple(t: &TcpTuple) -> Self {
-        Self {
-            local_ip: Ipv4Addr(t.local_ip),
-            local_port: Port(t.local_port),
-            remote_ip: Ipv4Addr(t.remote_ip),
-            remote_port: Port(t.remote_port),
-        }
-    }
-
     pub fn to_tcp_tuple(&self) -> TcpTuple {
         TcpTuple {
             local_ip: self.local_ip.0,
@@ -202,8 +193,7 @@ impl SynQueue {
         let child_tuple = four_tuple.to_tcp_tuple();
         let iss = tcp::isn::generate_isn(&child_tuple);
         let key = alloc_syn_entry_key();
-        let timer_token =
-            NET_TIMER_WHEEL.schedule(SYN_ACK_BASE_DELAY_MS, TimerKind::TcpSynAck, key);
+        let timer_token = timer::wheel().schedule(SYN_ACK_BASE_DELAY_MS, TimerKind::TcpSynAck, key);
         let effective_mss = if peer_mss == 0 { DEFAULT_MSS } else { peer_mss };
 
         let entry = SynRecvEntry {
@@ -223,7 +213,7 @@ impl SynQueue {
 
         let syn_ack = build_syn_ack_from(&entry, &four_tuple);
         if self.entries.push((four_tuple, entry)).is_err() {
-            NET_TIMER_WHEEL.cancel(timer_token);
+            timer::wheel().cancel(timer_token);
             return None;
         }
 
@@ -255,7 +245,7 @@ impl SynQueue {
             .position(|(ft, entry)| *ft == four_tuple && ack_num == entry.iss.wrapping_add(1))?;
 
         let (_, entry) = self.entries.swap_remove(idx);
-        NET_TIMER_WHEEL.cancel(entry.timer_token);
+        timer::wheel().cancel(entry.timer_token);
 
         klog_debug!(
             "tcp_listen: 3WHS complete for {}:{} (iss={}, irs={})",
@@ -300,7 +290,7 @@ impl SynQueue {
 
         let syn_ack = build_syn_ack_from(entry, four_tuple);
         let delay = SYN_ACK_BASE_DELAY_MS * (1u64 << (entry.retries as u64 - 1));
-        entry.timer_token = NET_TIMER_WHEEL.schedule(delay, TimerKind::TcpSynAck, key);
+        entry.timer_token = timer::wheel().schedule(delay, TimerKind::TcpSynAck, key);
 
         klog_debug!(
             "tcp_listen: SYN-ACK retransmit #{} for {}:{} (key={}, next_delay={})",
@@ -321,7 +311,7 @@ impl SynQueue {
             return false;
         };
         let (_, entry) = self.entries.swap_remove(idx);
-        NET_TIMER_WHEEL.cancel(entry.timer_token);
+        timer::wheel().cancel(entry.timer_token);
         true
     }
 
@@ -340,7 +330,7 @@ impl SynQueue {
     /// Drop every entry, cancelling its retransmit timer.
     pub fn clear(&mut self) {
         for (_, entry) in self.entries.drain(..) {
-            NET_TIMER_WHEEL.cancel(entry.timer_token);
+            timer::wheel().cancel(entry.timer_token);
         }
     }
 }

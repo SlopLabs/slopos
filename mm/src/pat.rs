@@ -4,9 +4,9 @@
 //! flag with the PAT bit clear, so framebuffer writes combine instead of
 //! going Write-Back.
 
-use slopos_arch::cpu;
-use slopos_arch::cpu::cpuid::{CPUID_FEAT_EDX_PAT, CPUID_LEAF_FEATURES};
-use slopos_arch::cpu::msr::Msr;
+use slopos_ostd::arch::x86_64::cpuid::{CPUID_FEAT_EDX_PAT, CPUID_LEAF_FEATURES, cpuid};
+use slopos_ostd::arch::x86_64::msr::{Msr, read_msr, write_msr};
+use slopos_ostd::cpu::x86_64 as cpu;
 use slopos_ostd::sync::InitFlag;
 use slopos_ostd::{klog_debug, klog_info};
 
@@ -53,7 +53,7 @@ pub fn is_supported() -> bool {
 }
 
 pub fn pat_supported() -> bool {
-    let (_, _, _, edx) = cpu::cpuid(CPUID_LEAF_FEATURES);
+    let (_, _, _, edx) = cpuid(CPUID_LEAF_FEATURES);
     (edx & CPUID_FEAT_EDX_PAT) != 0
 }
 
@@ -69,7 +69,7 @@ fn write_pat_msr_sdm_sequence() {
     cpu::write_cr0((cr0 | cpu::CR0_CD) & !cpu::CR0_NW);
 
     cpu::wbinvd();
-    cpu::write_msr(Msr::PAT, PAT_VALUE);
+    write_msr(Msr::PAT, PAT_VALUE);
     cpu::wbinvd();
 
     cpu::write_cr0(cr0 & !cpu::CR0_CD & !cpu::CR0_NW);
@@ -77,7 +77,7 @@ fn write_pat_msr_sdm_sequence() {
 
     cpu::restore_flags(flags);
 
-    let new_pat = cpu::read_msr(Msr::PAT);
+    let new_pat = read_msr(Msr::PAT);
     if new_pat != PAT_VALUE {
         panic!(
             "PAT: Write verification failed! Expected {:#018x}, got {:#018x}",

@@ -10,10 +10,10 @@
 
 use core::marker::PhantomData;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use crate::KBox;
-use crate::sync::BspToken;
+use crate::atomic_bitmap::AtomicBitmap;
 
 /// First allocatable vector. Vectors 0..=31 are CPU exceptions.
 pub const ALLOC_VECTOR_BASE: u8 = 32;
@@ -23,133 +23,15 @@ pub const ALLOC_VECTOR_BASE: u8 = 32;
 pub const ALLOC_VECTOR_END: u8 = 224;
 
 const ALLOC_RANGE: usize = (ALLOC_VECTOR_END - ALLOC_VECTOR_BASE) as usize;
-const BITMAP_WORDS: usize = ALLOC_RANGE.div_ceil(64);
-
-/// Lock-free bitmap; each bit is guarded by a CAS loop on its 64-bit word.
-struct AtomicBitmap {
-    words: [AtomicU64; BITMAP_WORDS],
-}
-
-impl AtomicBitmap {
-    const fn new() -> Self {
-        Self {
-            words: [const { AtomicU64::new(0) }; BITMAP_WORDS],
-        }
-    }
-
-    #[inline]
-    fn test(&self, bit: usize) -> bool {
-        if bit >= ALLOC_RANGE {
-            return false;
-        }
-        let w = bit >> 6;
-        let mask = 1u64 << (bit & 63);
-        self.words[w].load(Ordering::Acquire) & mask != 0
-    }
-
-    #[inline]
-    fn set(&self, bit: usize) {
-        if bit >= ALLOC_RANGE {
-            return;
-        }
-        let w = bit >> 6;
-        let mask = 1u64 << (bit & 63);
-        self.words[w].fetch_or(mask, Ordering::AcqRel);
-    }
-
-    #[inline]
-    fn clear(&self, bit: usize) {
-        if bit >= ALLOC_RANGE {
-            return;
-        }
-        let w = bit >> 6;
-        let mask = 1u64 << (bit & 63);
-        self.words[w].fetch_and(!mask, Ordering::AcqRel);
-    }
-
-    /// Atomically claim a bit; `false` if it was already set.
-    fn try_set(&self, bit: usize) -> bool {
-        if bit >= ALLOC_RANGE {
-            return false;
-        }
-        let w = bit >> 6;
-        let mask = 1u64 << (bit & 63);
-        loop {
-            let cur = self.words[w].load(Ordering::Acquire);
-            if cur & mask != 0 {
-                return false;
-            }
-            if self.words[w]
-                .compare_exchange(cur, cur | mask, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                return true;
-            }
-        }
-    }
-
-    /// Atomically claim the first clear bit at or after `start_bit`.
-    ///
-    /// `start_bit` lets `IrqAllocator::alloc()` skip the legacy IOAPIC-pinned
-    /// vectors (32..48) so dynamic allocations only land in the MSI range;
-    /// lower vectors stay claimable through `IrqAllocator::reserve_specific`.
-    fn alloc_from(&self, start_bit: usize) -> Option<usize> {
-        for (w_idx, word) in self.words.iter().enumerate() {
-            let word_start = w_idx * 64;
-            let local_skip = if start_bit > word_start {
-                start_bit - word_start
-            } else {
-                0
-            };
-            if local_skip >= 64 {
-                continue;
-            }
-            let skip_mask: u64 = if local_skip == 0 {
-                0
-            } else {
-                (1u64 << local_skip) - 1
-            };
-            loop {
-                let cur = word.load(Ordering::Acquire);
-                let inv = !(cur | skip_mask);
-                if inv == 0 {
-                    break;
-                }
-                let bit_in_word = inv.trailing_zeros() as usize;
-                let bit = word_start + bit_in_word;
-                if bit >= ALLOC_RANGE {
-                    break;
-                }
-                let mask = 1u64 << bit_in_word;
-                if word
-                    .compare_exchange(cur, cur | mask, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    return Some(bit);
-                }
-            }
-        }
-        None
-    }
-}
+const BITMAP_WORDS: usize = ALLOC_RANGE.div_ceil(usize::BITS as usize);
 
 /// Bit index of vector 48 (MSI_VECTOR_BASE) — the lowest vector
 /// `IrqAllocator::alloc()` may hand out; 32..48 are IOAPIC-pinned legacy IRQs,
 /// claimable only through `reserve_specific`.
 const MSI_RANGE_FIRST_BIT: usize = 16;
 
-struct AllocState {
-    /// Bit set = vector held by some `IrqLine` *or* marked platform-reserved.
-    allocated: AtomicBitmap,
-    /// Bit set = platform-reserved; consulted on `IrqLine` drop so a reserved
-    /// bit is never cleared.
-    reserved: AtomicBitmap,
-}
-
-static ALLOC_STATE: AllocState = AllocState {
-    allocated: AtomicBitmap::new(),
-    reserved: AtomicBitmap::new(),
-};
+/// Bit set = vector held by some `IrqLine`.
+static ALLOCATED: AtomicBitmap<BITMAP_WORDS> = AtomicBitmap::new();
 
 #[inline]
 fn vector_to_idx(vector: u8) -> Option<usize> {
@@ -159,28 +41,10 @@ fn vector_to_idx(vector: u8) -> Option<usize> {
     Some((vector - ALLOC_VECTOR_BASE) as usize)
 }
 
-/// Mark vectors as platform-reserved: [`IrqAllocator::alloc`] will not hand
-/// them out, and an `IrqLine` drop will not release them back to the pool.
-///
-/// Additive and idempotent; vectors outside 32..224 are ignored. The
-/// `BspToken` witnesses BSP-only init. Caller invariant (Inv. 3): every listed
-/// vector is reserved by the platform's vector layout.
-pub fn register_irq_reserved<'brand>(_token: &BspToken<'brand>, reserved: &[u8]) {
-    for &v in reserved {
-        if let Some(idx) = vector_to_idx(v) {
-            ALLOC_STATE.reserved.set(idx);
-            ALLOC_STATE.allocated.set(idx);
-        }
-    }
-}
-
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_for_test() {
-    for word in ALLOC_STATE.allocated.words.iter() {
-        word.store(0, Ordering::Release);
-    }
-    for word in ALLOC_STATE.reserved.words.iter() {
-        word.store(0, Ordering::Release);
+    for bit in 0..ALLOC_RANGE {
+        ALLOCATED.clear(bit);
     }
     for slot in DISPATCH.iter() {
         let raw = slot.ptr.swap(ptr::null_mut(), Ordering::AcqRel);
@@ -196,7 +60,7 @@ pub fn reset_for_test() {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrqError {
-    /// Allocator pool exhausted (or fully reserved).
+    /// Allocator pool exhausted.
     Exhausted,
     /// `register_callback` called twice on the same vector.
     AlreadyRegistered,
@@ -306,14 +170,12 @@ fn clear_dispatch(vector: u8) {
 pub struct IrqAllocator;
 
 impl IrqAllocator {
-    /// Allocate a free vector from the MSI pool (48..224, minus
-    /// platform-reserved vectors). Vectors 32..48 stay bound to fixed hardware
-    /// lines (PIT timer, PS/2 keyboard/mouse, COM1, …) and are claimable only
-    /// via [`IrqAllocator::reserve_specific`].
+    /// Allocate a free vector from the MSI pool (48..224). Vectors 32..48 stay
+    /// bound to fixed hardware lines (PIT timer, PS/2 keyboard/mouse, COM1, …)
+    /// and are claimable only via [`IrqAllocator::reserve_specific`].
     pub fn alloc() -> Result<IrqLine, IrqError> {
-        let idx = ALLOC_STATE
-            .allocated
-            .alloc_from(MSI_RANGE_FIRST_BIT)
+        let idx = ALLOCATED
+            .alloc_from(MSI_RANGE_FIRST_BIT, ALLOC_RANGE)
             .ok_or(IrqError::Exhausted)?;
         Ok(IrqLine {
             vector: ALLOC_VECTOR_BASE + idx as u8,
@@ -326,12 +188,11 @@ impl IrqAllocator {
     ///
     /// [`IrqError::Exhausted`] if `vector` is outside
     /// `ALLOC_VECTOR_BASE..ALLOC_VECTOR_END`;
-    /// [`IrqError::AlreadyRegistered`] if the bit is already claimed, including
-    /// by [`register_irq_reserved`]. The line's `Drop` releases the bit unless
-    /// the vector was platform-reserved.
+    /// [`IrqError::AlreadyRegistered`] if the bit is already claimed. The
+    /// line's `Drop` releases the bit.
     pub fn reserve_specific(vector: u8) -> Result<IrqLine, IrqError> {
         let idx = vector_to_idx(vector).ok_or(IrqError::Exhausted)?;
-        if ALLOC_STATE.allocated.try_set(idx) {
+        if ALLOCATED.test_and_set(idx) {
             Ok(IrqLine { vector })
         } else {
             Err(IrqError::AlreadyRegistered)
@@ -423,9 +284,7 @@ impl Drop for IrqLine {
     fn drop(&mut self) {
         clear_dispatch(self.vector);
         if let Some(idx) = vector_to_idx(self.vector) {
-            if !ALLOC_STATE.reserved.test(idx) {
-                ALLOC_STATE.allocated.clear(idx);
-            }
+            ALLOCATED.clear(idx);
         }
     }
 }
@@ -505,19 +364,6 @@ mod tests {
                     Err(IrqError::Exhausted) => panic!("never saw freed vector"),
                     Err(other) => panic!("unexpected {:?}", other),
                 }
-            }
-        });
-    }
-
-    #[test]
-    fn reserved_vector_is_skipped() {
-        isolate(|| {
-            crate::sync::run_bsp_init_for_test(|t| {
-                register_irq_reserved(t, &[ALLOC_VECTOR_BASE]);
-            });
-            for _ in 0..3 {
-                let l = IrqAllocator::alloc().expect("alloc");
-                assert_ne!(l.vector(), ALLOC_VECTOR_BASE);
             }
         });
     }
@@ -665,20 +511,6 @@ mod tests {
             }
             let line = IrqAllocator::reserve_specific(36).expect("after drop");
             assert_eq!(line.vector(), 36);
-        });
-    }
-
-    #[test]
-    fn reserve_specific_refuses_platform_reserved_vector() {
-        isolate(|| {
-            // 0x80 (SYSCALL_VECTOR) is the only platform-reserved vector inside
-            // the 32..224 pool; the IPI/timer/spurious vectors at 0xEC..0xFF
-            // sit outside it, so reserving those is a no-op in the bitmap.
-            crate::sync::run_bsp_init_for_test(|t| {
-                register_irq_reserved(t, &[0x80]);
-            });
-            let r = IrqAllocator::reserve_specific(0x80);
-            assert_eq!(r.err(), Some(IrqError::AlreadyRegistered));
         });
     }
 }

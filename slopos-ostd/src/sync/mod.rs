@@ -18,7 +18,6 @@ pub mod intrusive_dlist;
 pub mod kernel_io_task;
 pub mod kernel_sync;
 pub mod lock_graph;
-pub mod lock_tracking;
 pub mod mutex;
 pub mod once_lock;
 pub mod panic_recovery;
@@ -48,7 +47,7 @@ pub use kernel_sync::{
     reset_ap_token_for_tests, reset_bsp_token_for_tests, run_ap_init_for_test,
     run_bsp_init_for_test,
 };
-pub use lock_tracking::{
+pub use lock_graph::{
     DeclareOrderError, LOCK_LEVEL_ALLOCATOR, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE,
     LOCK_LEVEL_SCHEDULER, LOCK_LEVEL_UNORDERED, LockClassKey, LockdepMode, chain_count, chain_hits,
     chain_misses, class_collisions, class_count, class_info, class_slots_leaked, declare_order,

@@ -22,8 +22,8 @@ use slopos_slibc::pal::{Pal, Sys};
 use slopos_theme_core::{Icon, TextRole, Tone, space};
 
 use super::overlay::Overlay;
-use crate::apps::privd::CONSENT_FD;
 use crate::gfx::{DamageRect, DrawBuffer};
+use crate::init_control::fds::COMPOSITOR_CONSENT;
 use crate::syscall::{OwnedFd, RawFd, SyscallError, core as sys_core, fs, net};
 
 /// How long after its last key a password question that went unanswered
@@ -159,16 +159,18 @@ fn load_icon(path: &str) -> Option<ImageData> {
 }
 
 impl Consent {
-    /// The end init handed over at [`CONSENT_FD`]: either end of a socket
-    /// pair names its maker, so no other process can hand over one that
-    /// passes.
+    /// The end init handed over at [`COMPOSITOR_CONSENT`]: either end of a
+    /// socket pair names its maker, so no other process can hand over one
+    /// that passes.
     pub fn acquire() -> Consent {
-        let fd = Sys::fcntl(CONSENT_FD, F_GETFD as i32, 0).ok().map(|_| {
-            let _ = fs::set_fd_cloexec(CONSENT_FD);
-            // SAFETY: init handed this descriptor over and nothing else here
-            // owns it.
-            unsafe { OwnedFd::from_raw(CONSENT_FD) }
-        });
+        let fd = Sys::fcntl(COMPOSITOR_CONSENT, F_GETFD as i32, 0)
+            .ok()
+            .map(|_| {
+                let _ = fs::set_fd_cloexec(COMPOSITOR_CONSENT);
+                // SAFETY: init handed this descriptor over and nothing else here
+                // owns it.
+                unsafe { OwnedFd::from_raw(COMPOSITOR_CONSENT) }
+            });
         let fd = fd.filter(|fd| {
             net::peer_cred(fd.raw()).is_ok_and(|cred| cred.uid == 0)
                 && net::peer_program(fd.raw()).ok().flatten().as_deref() == Some(INIT.as_bytes())

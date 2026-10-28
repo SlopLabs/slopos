@@ -225,8 +225,8 @@ func TestUserAbortStillOutranksKernelAbort(t *testing.T) {
 	}
 }
 
-// The recorded case ended with QEMU killed by the wall guard, so the abort has
-// to survive the unexpected-status path with its diagnostic intact.
+// An abort can end with QEMU killed by the wall guard, so the abort has to
+// survive the unexpected-status path with its diagnostic intact.
 func TestKernelAbortDiagnosticSurvivesUnexpectedQemuStatus(t *testing.T) {
 	s := summaryOf(phase(1, "kernel", 1, 1))
 	s.KernelAbort = true

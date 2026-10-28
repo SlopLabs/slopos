@@ -6,108 +6,51 @@
 # filesystem-over-raw write-rate ratio is the only quantity here that is
 # invariant under a change of accelerator, so it is the only rate graded.
 # Floors exist so a measurement that stopped happening cannot read as free.
+# The write window flushes to quiescence at both ends, so a count is the whole
+# cost of getting 2 MiB onto the medium.
 #
 # A cap matching nothing is a dead entry and fails the gate — except the
-# capacity rows, which a run without `CAPACITY_IMG` attached legitimately does
-# not report. `--require-capacity` (what `just test-capacity` passes) turns
-# that skip back into a failure.
-#
-# Provenance: the FSPERF rows are from a full `builddir/run_tests --raw`
-# capture; the FSCAP rows are from a `just test-capacity` boot with the 16 GiB
-# volume attached, since no other run has one. Both were measured on the same
-# tree.
-#
-# Measured 2026-09-14, the change that made storage hold a tree:
-#   2 MiB through the real write(2) path costs 10 transactions, 10 commit
-#   records, 44 block-layer write requests carrying 4624 sectors, and 10
-#   barriers. Before the batching and the coalescing the same 2 MiB was 512
-#   transactions and 578 requests; `max-txns-per-mib 8` is what stops a
-#   per-4-KiB transaction coming back, since that shape reports 256.
-#   The write rate is 8–16% of the same run's raw device rate over six runs of
-#   one pinned ISO. That gap is request count and barriers, not bytes: 4624
-#   sectors for 4096 of data is 1.13x amplification, and the reference write
-#   issues no barriers at all.
-#   max-devblocks-per-mib grades that amplification, because the request cap
-#   cannot: batching a payload into the log instead of writing it home costs
-#   about one extra request per transaction — 27 per MiB against a cap of 29 —
-#   while the sectors roughly double.
-#
-#   The 16 GiB volume mounts in **26–27 device reads** — a mount's cost is
-#   geometry plus the journal's block map, not a sweep of the volume — and a
-#   lookup of the last of 4000 names in one directory costs 0 block reads once
-#   the directory index is warm.
-#
-#   It also *holds* something: a checked-out copy of this repository plus the
-#   pinned toolchain sysroot, which the guest walks back off the volume as
-#   **5445 regular files totalling 1105385677 bytes** in 1207 directories.
-#   min-files and min-treebytes are that observation padded a quarter down,
-#   because a volume that stopped being populated looks exactly like a tree
-#   that got cheap to walk. Both halves are always staged for anyone who can
-#   build the kernel at all: the sysroot is the toolchain rust-toolchain.toml
-#   pins, and `_fs-image-capacity` fails naming it rather than staging the
-#   repository alone, so this floor describes the only tree it builds.
-#
-# max-lookup-reads is 8 rather than the 1 the observation pads to, and it
-# grades the *second* lookup of the name. A hit in the name index is a
-# *candidate*: the record at that position is read and its name compared
-# before it is trusted, so a lookup legitimately costs a block read whenever
-# that block is not already cached — 0 is what a warm cache measures, not what
-# the algorithm guarantees, and 8 is the same budget the directory-index test
-# asserts against a 533-block scan. The first lookup is not graded because an
-# allocation scope that rolls back retracts the directory's index, which a fill
-# into nearly-full groups hits on a volume that also holds a tree; the lookup
-# after that rebuilds the index by scanning, which for 4000 names is one pass
-# over its 32 data blocks. That is the rebuild's cost, not an indexed lookup's.
+# capacity rows (FSCAP), which a run without `CAPACITY_IMG` attached
+# legitimately does not report. `--require-capacity` (what `just
+# test-capacity` passes) turns that skip back into a failure. The FSPERF rows
+# come from a full `builddir/run_tests --raw` capture, the FSCAP rows from a
+# `just test-capacity` boot of the same tree.
 
-# min-fs-over-raw-pct is 6, a quarter below the lowest of six observations,
-# and it is worth being exact about what that buys. Both halves of the
-# quotient are single timings on a shared machine: the 2 MiB write measured
-# 63–87 ms and the raw reference 7.5–10.9 ms, so the ratio itself ranges 8–16%
-# and a floor that admits every honest run cannot be tight. It catches a
-# collapse — a return to a transaction per 4 KiB is roughly an order of
-# magnitude, i.e. ~1.5% — and it does not catch a 2x regression. The rows that
-# do catch a 2x are the per-MiB counts above, which is why they carry the
-# narrow caps and this one does not.
-
-# 2026-09-17, the editor. No cap moved; the *measurement* did.
-#
-# The window used to be opened with `stats::reset()` on whatever the boot had
-# left dirty and closed on whatever had landed by then, so what it reported was
-# the write plus however much unrelated writeback the flusher's idle timer
-# happened to overlap with it. That was invisible while the image was small and
-# the phase was stable: three runs of the parent commit measure 44 requests /
-# 4624 sectors / 10 barriers every time. Adding the editor's binaries and two
-# font files to the tests image shifted the phase, and the same code then
-# measured 44-65 requests and 4624-4786 sectors over four runs — a row the
-# header calls a property of the code behaving like a property of the host.
-#
-# `perf_body` now flushes to quiescence at both ends of the window, so the
-# number is the whole cost of getting 2 MiB onto the medium rather than the
-# part of it that had landed when the counters were read. Three of four runs
-# then measure 48 / 4650 / 13, against 44 / 4624 / 10 before: the +4 requests
-# are the metadata pass that used to fall outside the window as often as in.
-# 24 requests per MiB, inside the 29 below, so no cap moves.
-#
-# The residual is one run in four measuring 78 / 4890 / 15 (39 per MiB, over
-# the cap). That is the *eager* flusher: a 2 MiB write passes
-# `FLUSH_EAGER_THRESHOLD` many times over, so the flusher wakes inside the
-# window and splits what one pass would have coalesced. Isolating it needs the
-# flusher held off for the duration, which is a change to `Ext2Mount` and not
-# one to make from here. Until then this row can fail on a loaded host, and the
-# answer is to re-run rather than to raise the cap: `txns` and `commits` are
-# 10/10 in every run of both trees, which is the write path's actual shape.
-
+# 2 MiB through write(2) is 10 transactions and 10 commit records; a
+# transaction per 4 KiB reports 256 per MiB, which this cap stops.
 max-txns-per-mib	post-kernel-tests	8
 max-commits-per-mib	post-kernel-tests	8
+# Block-layer write requests: about one per transaction beyond the data, 24
+# per MiB measured. The eager flusher can wake inside the window and split
+# what one pass coalesces, so a loaded host can exceed it: re-run, do not
+# raise it, while txns and commits keep their shape.
 max-devwrites-per-mib	post-kernel-tests	29
+# Sectors written: what logging a payload instead of writing it home costs,
+# which the request cap cannot see (4650 sectors for 2 MiB, 1.13x).
 max-devblocks-per-mib	post-kernel-tests	2891
 max-barriers-per-mib	post-kernel-tests	8
+# The filesystem's write rate over the same run's raw device rate, 8–16%
+# measured: two single timings on a shared machine, so the floor (a quarter
+# under the lowest) catches a collapse to a transaction per 4 KiB (~1.5%),
+# not a 2x regression, which the per-MiB caps catch.
 min-fs-over-raw-pct	post-kernel-tests	6
+# The window wrote what it claims to have measured.
 min-bytes	post-kernel-tests	1572864
 
+# The 16 GiB capacity volume (`just test-capacity`) mounts in 26–27 device
+# reads: geometry plus the journal's block map, not a sweep of the volume.
 max-mount-reads-per-gib	post-kernel-tests	3
+# The second lookup of the last of 4000 names. A name-index hit is a candidate
+# whose record is read and compared, so a cold block costs a read; 0 is a warm
+# cache, and 8 the budget the directory-index test asserts. The first lookup
+# is not graded: a rolled-back allocation retracts the index, and the next
+# lookup rebuilds it by scanning.
 max-lookup-reads	post-kernel-tests	8
 min-volume-gib	post-kernel-tests	16
 min-dirents	post-kernel-tests	3000
+# The volume holds a checkout of this repository and the pinned toolchain
+# sysroot, which the guest walks back as 5445 files of 1105385677 bytes;
+# these floors are that padded a quarter down, because a volume that stopped
+# being populated looks like a tree that got cheap to walk.
 min-files	post-kernel-tests	4083
 min-treebytes	post-kernel-tests	829039257

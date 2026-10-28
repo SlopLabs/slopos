@@ -379,9 +379,8 @@ fn which_reports_the_installed_path() -> bool {
     setup() && expect("which", &["ls"], "/bin/ls\n")
 }
 
-/// The shell reaches a utility through `PATH` now that none of them is a
-/// builtin, so a pipeline of two of them plus a redirect is the integration
-/// the builtin table used to hide.
+/// The shell reaches each utility through `PATH`, so a pipeline of two of
+/// them plus a redirect exercises spawn, pipes and redirection together.
 fn the_shell_pipes_one_utility_into_another() -> bool {
     if !setup() {
         return false;

@@ -11,9 +11,6 @@
 //! untouched.
 
 pub mod pty;
-#[allow(dead_code)]
-pub(crate) mod shim;
-pub mod tests;
 
 use crate::errno::errno_set;
 use crate::pal::{Pal, Sys};

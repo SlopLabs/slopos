@@ -1,5 +1,5 @@
 //! The kernel-side ring object: SQ/CQ index state, the in-flight
-//! table, and the per-ring serialization lock (SLOPRING § 6, § 9).
+//! table, and the per-ring serialization lock.
 //!
 //! The cached kernel-owned indices (`sq_head` / `cq_tail`) are the source of
 //! truth for control decisions, and are mirrored into the shared page on each
@@ -11,9 +11,9 @@ use slopos_fs::fileio::FileRef;
 
 use crate::region::{RegionError, RingRegion};
 
-/// One armed-but-incomplete SQE — plain data, never a suspended future
-/// (SLOPRING § 9). Holds everything needed to re-run the non-blocking probe at
-/// harvest time, and nothing that references ring memory.
+/// One armed-but-incomplete SQE — plain data, never a suspended future. Holds
+/// everything needed to re-run the non-blocking probe at harvest time, and
+/// nothing that references ring memory.
 pub struct InFlight {
     /// Correlation cookie, echoed into the eventual CQE.
     pub user_data: u64,
@@ -75,7 +75,7 @@ impl InFlight {
 }
 
 /// One ring object — created by `ring_setup`, dropped when its last fd
-/// closes. Stored in the per-process ring registry (SLOPRING § 9).
+/// closes. Stored in the ring registry.
 pub struct Ring {
     /// The shared SQ/CQ region (owns the `RingMeta` frames).
     pub region: RingRegion,
@@ -87,9 +87,6 @@ pub struct Ring {
     pub cq_tail: u32,
     /// In-flight rows. Bounded by `cq_entries`.
     pub inflight: heapless_vec::InFlightVec,
-    /// User VA the region was mapped at (for teardown bookkeeping).
-    #[allow(dead_code)]
-    pub user_addr: u64,
     /// The owning process — the only one allowed to enter this ring.
     ///
     /// An [`FdTable`] rather than a raw pid because this is a *permission*
@@ -102,7 +99,7 @@ pub struct Ring {
     pub allowed_ops: crate::opcode::OpcodeSet,
     /// Count of CQEs dropped on overflow (mirrors shared `cq_overflow`).
     pub cq_overflow: u32,
-    /// Registered / provided buffer registry (ABI v2 zero-copy path). Shares
+    /// Registered / provided buffer registry (the zero-copy path). Shares
     /// the per-ring lock. Heap-boxed so `Ring` stays constructible within the
     /// 2 KiB stack ceiling (Inv. 5').
     pub buffers: slopos_ostd::KBox<crate::buffers::BufferRegistry>,
@@ -113,12 +110,12 @@ pub struct Ring {
 }
 
 impl Ring {
-    /// Number of unharvested CQEs (`cq_tail - cq_head`, SLOPRING § 8.3).
+    /// Number of unharvested CQEs (`cq_tail - cq_head`).
     pub fn available_cqes(&self, cq_head: u32) -> u32 {
         self.cq_tail.wrapping_sub(cq_head)
     }
 
-    /// `true` iff the CQ has no free slot (SLOPRING § 11).
+    /// `true` iff the CQ has no free slot.
     pub fn cq_full(&self, cq_head: u32) -> bool {
         self.cq_tail.wrapping_sub(cq_head) >= self.layout.cq_entries
     }
@@ -149,8 +146,7 @@ impl Ring {
 
     /// Post a completion with explicit CQE `flags`. Returns `false` when the
     /// CQ is full — the overflow counter is bumped instead, and the caller
-    /// decides whether that is acceptable (ownership ops reserve a slot
-    /// first, SLOPRING § 11).
+    /// decides whether that is acceptable (ownership ops reserve a slot first).
     pub fn post_cqe(
         &mut self,
         user_data: u64,
@@ -190,7 +186,7 @@ pub mod heapless_vec {
     use slopos_ostd::KVec;
 
     /// Capacity-bounded in-flight table; never grows past `cap`, and excess
-    /// submissions complete `-EAGAIN` (SLOPRING § 9).
+    /// submissions complete `-EAGAIN`.
     pub struct InFlightVec {
         rows: KVec<InFlight>,
         cap: usize,
@@ -208,14 +204,9 @@ pub mod heapless_vec {
             self.rows.len() >= self.cap
         }
 
-        #[allow(dead_code)]
+        #[cfg(feature = "test-hooks")]
         pub fn len(&self) -> usize {
             self.rows.len()
-        }
-
-        #[allow(dead_code)]
-        pub fn is_empty(&self) -> bool {
-            self.rows.is_empty()
         }
 
         /// Push a row; returns `false` if at capacity (caller completes

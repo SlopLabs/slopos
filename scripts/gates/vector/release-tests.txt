@@ -13,8 +13,7 @@
 # kernel's dev-profile list names by symbol are inlined into the test bodies
 # that call them, so the conformance tests are named one by one here.
 
-# Liveness floors, half the measured 2026-09-25 decode of 9668 returns /
-# 13274 symbols.
+# Liveness floors, half the returns and symbols the ELF decodes to.
 min-returns 4834
 min-symbols 6637
 

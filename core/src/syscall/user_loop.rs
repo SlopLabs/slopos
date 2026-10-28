@@ -1,30 +1,12 @@
 //! Kernel-side wrapper that drives the OSTD `UserMode::execute()` round-trip on
 //! every user task.
 
-use slopos_ostd::KArc;
 use slopos_ostd::klog_info;
-use slopos_ostd::mm::vm_space::VmSpace;
 use slopos_ostd::panic_recovery;
-use slopos_ostd::sync::once_lock::OnceLock;
-use slopos_ostd::user::mode::{ReturnReason, UserMode};
+use slopos_ostd::user::mode::UserMode;
 
-use slopos_sched::scheduler::scheduler_task_exit_impl;
+use slopos_sched::scheduler::scheduler_task_exit;
 use slopos_sched::task_struct::Current;
-
-/// Shared by every user task: the trusted-side `UserModeBackend` activates the
-/// supplied `&VmSpace` as a no-op, CR3 staying under legacy-kernel control.
-static GLOBAL_VM_SPACE: OnceLock<KArc<VmSpace>> = OnceLock::new();
-
-fn placeholder_vm_space() -> &'static KArc<VmSpace> {
-    GLOBAL_VM_SPACE.call_once(|| {
-        let space = VmSpace::new()
-            .expect("placeholder_vm_space: VmSpace::new failed at first user task entry");
-        KArc::try_new(space).expect("placeholder_vm_space: KArc allocation failed")
-    });
-    GLOBAL_VM_SPACE
-        .get()
-        .expect("placeholder_vm_space: OnceLock not populated after call_once")
-}
 
 /// Entry point used by the scheduler for new user tasks; the kernel stack is
 /// seeded so `switch_registers` rets here on first dispatch. `extern "sysv64"`
@@ -44,7 +26,6 @@ pub fn install_user_task_entry<'b>(token: &slopos_ostd::sync::BspToken<'b>) {
 }
 
 fn user_task_loop() -> ! {
-    let space = placeholder_vm_space();
     // The outermost frame, so one guard names the task for the whole loop: it is
     // the witness authorising the register snapshot handed to `UserMode`.
     let current = Current::get().expect("user_task_loop: dispatched with no current task");
@@ -59,52 +40,31 @@ fn user_task_loop() -> ! {
         // comes from the pending signal's disposition.
         if current.task().is_killed() {
             crate::syscall::signal::deliver_pending_signal(&current, user_ctx);
-            scheduler_task_exit_impl();
+            scheduler_task_exit();
         }
 
-        let reason = {
-            let user_mode = UserMode::new(user_ctx, space);
-            user_mode.execute()
-        };
+        UserMode::new(user_ctx).execute();
 
-        match reason {
-            ReturnReason::Syscall(_n) => {
-                if panic_recovery::production_recovery_enabled() {
-                    match panic_recovery::run_recoverable(|| {
-                        crate::syscall::dispatch::syscall_handle(user_ctx);
-                    }) {
-                        Ok(()) => {}
-                        Err(oops) => {
-                            klog_info!(
-                                "panic recovery: syscall task={} {}:{}:{}: {} (oops total={})",
-                                oops.task_id,
-                                oops.file.as_str(),
-                                oops.line,
-                                oops.column,
-                                oops.reason.as_str(),
-                                panic_recovery::oops_count(),
-                            );
-                            scheduler_task_exit_impl();
-                        }
-                    }
-                } else {
-                    crate::syscall::dispatch::syscall_handle(user_ctx);
+        if panic_recovery::production_recovery_enabled() {
+            match panic_recovery::run_recoverable(|| {
+                crate::syscall::dispatch::syscall_handle(user_ctx);
+            }) {
+                Ok(()) => {}
+                Err(oops) => {
+                    klog_info!(
+                        "panic recovery: syscall task={} {}:{}:{}: {} (oops total={})",
+                        oops.task_id,
+                        oops.file.as_str(),
+                        oops.line,
+                        oops.column,
+                        oops.reason.as_str(),
+                        panic_recovery::oops_count(),
+                    );
+                    scheduler_task_exit();
                 }
             }
-            ReturnReason::Exception(info) => {
-                panic!(
-                    "user_task_loop: unexpected ReturnReason::Exception(vector={}, error={:#x}, fault={:#x}); \
-                     only SYSCALL is wired through the OSTD round-trip",
-                    info.vector, info.error_code, info.fault_addr,
-                );
-            }
-            ReturnReason::Interrupt(vec) => {
-                panic!(
-                    "user_task_loop: unexpected ReturnReason::Interrupt(vec={:#x}); \
-                     only SYSCALL is wired through the OSTD round-trip",
-                    vec
-                );
-            }
+        } else {
+            crate::syscall::dispatch::syscall_handle(user_ctx);
         }
     }
 }

@@ -22,10 +22,6 @@ pub enum SpawnFdActionKind {
     TransferFd = 2,
     /// Close the child's `target_fd`.
     Close = 3,
-    // Discriminant `4` is the retired `Open` and must not be reused. It minted
-    // a descriptor from a path string, so a spawner could endow a child with
-    // one it could not open itself — every surviving action can only move or
-    // drop authority the spawner already holds.
 }
 
 impl SpawnFdActionKind {
@@ -35,14 +31,14 @@ impl SpawnFdActionKind {
             1 => Some(Self::CloneFd),
             2 => Some(Self::TransferFd),
             3 => Some(Self::Close),
-            // 4 is the retired `Open`: rejected as malformed, not silently
-            // ignored, so a caller still constructing one learns it is gone.
             _ => None,
         }
     }
 }
 
-/// A single spawn file action. Unused fields for a given `kind` are ignored.
+/// A single spawn file action. Every kind moves or drops a descriptor the
+/// spawner already holds; none mints one. Unused fields for a given `kind`
+/// are ignored.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct SpawnFdAction {
@@ -53,12 +49,6 @@ pub struct SpawnFdAction {
     /// Destination fd in the child — every kind.
     pub target_fd: i32,
     pub _pad: u32,
-    /// Retired with `Open`. Kept so the struct layout stays ABI-stable; every
-    /// remaining action ignores them, and a non-zero value is not an error.
-    pub open_path_ptr: u64,
-    pub open_path_len: u64,
-    pub open_flags: u32,
-    pub _pad2: u32,
 }
 
 /// Spawn attributes, passed by pointer in the spawn syscall's `attrs` register.
@@ -99,27 +89,19 @@ pub struct SpawnAttrs {
     /// Which ids the child takes from the fields above; it keeps the
     /// spawner's others, so a zeroed field asks for nothing.
     pub set: u32,
+    /// The login tag the child's process carries, under [`SPAWN_SET_LOGIN`].
+    /// Fork, spawn and exec pass a process's tag on, and nothing changes it
+    /// after.
+    pub login: u32,
+    pub _pad3: u32,
 }
 
 pub const SPAWN_SET_UID: u32 = 1 << 0;
 pub const SPAWN_SET_GID: u32 = 1 << 1;
 pub const SPAWN_SET_GROUPS: u32 = 1 << 2;
-/// The child takes [`SpawnLoginAttrs::login`], which takes `SetId`.
+/// The child takes [`SpawnAttrs::login`], which takes `SetId`.
 pub const SPAWN_SET_LOGIN: u32 = 1 << 3;
 pub const SPAWN_SET_ALL: u32 = SPAWN_SET_UID | SPAWN_SET_GID | SPAWN_SET_GROUPS | SPAWN_SET_LOGIN;
-
-/// [`SpawnAttrs`] and the login tag a spawn reads after them under
-/// [`SPAWN_SET_LOGIN`]. Interface 1's attributes end where `login` begins, so a
-/// spawn that sets no tag passes [`SpawnAttrs`] alone.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct SpawnLoginAttrs {
-    pub attrs: SpawnAttrs,
-    /// The login tag the child's process carries. Fork, spawn and exec pass a
-    /// process's tag on, and nothing changes it after.
-    pub login: u32,
-    pub _pad: u32,
-}
 
 impl SpawnAttrs {
     /// A spawn at `priority` with `flags` and nothing else: no fd actions, no
@@ -144,6 +126,8 @@ impl SpawnAttrs {
             groups_ptr: 0,
             ngroups: 0,
             set: 0,
+            login: 0,
+            _pad3: 0,
         }
     }
 }
@@ -151,16 +135,13 @@ impl SpawnAttrs {
 /// Upper bound on the action-array length the kernel will read.
 pub const SPAWN_MAX_FD_ACTIONS: usize = 64;
 
-const _: () = assert!(core::mem::size_of::<SpawnFdAction>() == 40);
-const _: () = assert!(core::mem::align_of::<SpawnFdAction>() == 8);
+const _: () = assert!(core::mem::size_of::<SpawnFdAction>() == 16);
+const _: () = assert!(core::mem::align_of::<SpawnFdAction>() == 4);
 const _: () = assert!(core::mem::offset_of!(SpawnFdAction, kind) == 0);
 const _: () = assert!(core::mem::offset_of!(SpawnFdAction, src_fd) == 4);
 const _: () = assert!(core::mem::offset_of!(SpawnFdAction, target_fd) == 8);
-const _: () = assert!(core::mem::offset_of!(SpawnFdAction, open_path_ptr) == 16);
-const _: () = assert!(core::mem::offset_of!(SpawnFdAction, open_path_len) == 24);
-const _: () = assert!(core::mem::offset_of!(SpawnFdAction, open_flags) == 32);
 
-const _: () = assert!(core::mem::size_of::<SpawnAttrs>() == 96);
+const _: () = assert!(core::mem::size_of::<SpawnAttrs>() == 104);
 const _: () = assert!(core::mem::align_of::<SpawnAttrs>() == 8);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, priority) == 0);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, flags) == 4);
@@ -177,27 +158,14 @@ const _: () = assert!(core::mem::offset_of!(SpawnAttrs, gid) == 76);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, groups_ptr) == 80);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, ngroups) == 88);
 const _: () = assert!(core::mem::offset_of!(SpawnAttrs, set) == 92);
-
-const _: () = assert!(core::mem::size_of::<SpawnLoginAttrs>() == 104);
-const _: () = assert!(core::mem::offset_of!(SpawnLoginAttrs, login) == 96);
+const _: () = assert!(core::mem::offset_of!(SpawnAttrs, login) == 96);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Discriminant 4 is retired, and must be *rejected* rather than silently
-    /// ignored: a caller still constructing an `Open` action learns it is gone
-    /// instead of getting a child that quietly lacks the descriptor.
     #[test]
-    fn the_retired_open_discriminant_is_refused() {
-        assert_eq!(SpawnFdActionKind::from_u32(4), None);
-    }
-
-    /// The surviving actions all move or drop authority the spawner already
-    /// holds. That is the property `Open` broke by minting a descriptor from a
-    /// path string, and the reason it was removed rather than fixed.
-    #[test]
-    fn the_surviving_actions_are_the_attenuating_ones() {
+    fn only_the_three_actions_decode() {
         for (raw, want) in [
             (1u32, SpawnFdActionKind::CloneFd),
             (2, SpawnFdActionKind::TransferFd),
@@ -205,8 +173,7 @@ mod tests {
         ] {
             assert_eq!(SpawnFdActionKind::from_u32(raw), Some(want));
         }
-        // Nothing above the retired value decodes either.
-        for raw in [0u32, 5, 6, u32::MAX] {
+        for raw in [0u32, 4, 5, u32::MAX] {
             assert_eq!(SpawnFdActionKind::from_u32(raw), None);
         }
     }

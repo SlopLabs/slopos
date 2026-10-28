@@ -4,14 +4,14 @@ use crate::cow::handle_cow_fault;
 use crate::demand::handle_demand_fault;
 use crate::error::MmError;
 
-use crate::paging_defs::PageFlags;
 use crate::process_vm::{
     create_process_vm, destroy_process_vm, init_process_vm, process_vm_clone_cow,
     process_vm_user_va_to_paddr, process_vm_with_vm_space,
 };
-use crate::user_mappings::{ostd_get_pte_flags_4kb, ostd_map_4kb_user_fresh, ostd_mark_cow_4kb};
+use crate::user_mappings::{is_cow, leaf_property_4kb, map_4kb_user_fresh, mark_cow_4kb};
 use slopos_abi::task::INVALID_PROCESS_ID;
 use slopos_ostd::handle::HandleError;
+use slopos_ostd::mm::page_property::PageProperty;
 use slopos_ostd::process::ProcessId;
 
 /// Owns a process VM; the helpers drive the OSTD cursor under the per-process
@@ -48,7 +48,7 @@ impl ProcessVmGuard {
 
     pub fn handle_cow_fault(&self, fault_addr: u64) -> Result<(), MmError> {
         process_vm_with_vm_space(self.process, |vs| {
-            handle_cow_fault(vs, fault_addr, PageFlags::USER_RW)
+            handle_cow_fault(vs, fault_addr, PageProperty::USER_RW)
         })
         .unwrap_or(Err(MmError::NoAddressSpace))
     }
@@ -95,9 +95,9 @@ impl ProcessVmGuard {
     }
 
     /// Returns the physical address backing the new mapping.
-    pub fn map_test_page(&self, vaddr: u64, flags: u64) -> Option<PhysAddr> {
+    pub fn map_test_page(&self, vaddr: u64, prop: PageProperty) -> Option<PhysAddr> {
         process_vm_with_vm_space(self.process, |vs| {
-            ostd_map_4kb_user_fresh(vs, VirtAddr::new(vaddr), flags).ok()
+            map_4kb_user_fresh(vs, VirtAddr::new(vaddr), prop).ok()
         })
         .flatten()
     }
@@ -107,18 +107,17 @@ impl ProcessVmGuard {
         PhysAddr::new(process_vm_user_va_to_paddr(self.process, vaddr))
     }
 
-    /// Clears `WRITABLE` and sets the COW software bit; no-op if no leaf is
-    /// present at `vaddr`.
+    /// Makes the leaf read-only and copy-on-write; no-op if no leaf is present
+    /// at `vaddr`.
     pub fn mark_cow(&self, vaddr: u64) {
         let _ = process_vm_with_vm_space(self.process, |vs| {
-            let _ = ostd_mark_cow_4kb(vs, VirtAddr::new(vaddr));
+            let _ = mark_cow_4kb(vs, VirtAddr::new(vaddr));
         });
     }
 
     pub fn is_cow(&self, vaddr: u64) -> bool {
         process_vm_with_vm_space(self.process, |vs| {
-            ostd_get_pte_flags_4kb(vs, VirtAddr::new(vaddr))
-                .map_or(false, |f| f.contains(PageFlags::COW))
+            leaf_property_4kb(vs, VirtAddr::new(vaddr)).is_some_and(|leaf| is_cow(&leaf))
         })
         .unwrap_or(false)
     }

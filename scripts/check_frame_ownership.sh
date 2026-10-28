@@ -3,24 +3,24 @@
 #
 # A `PhysAddr` is a number. It says nothing about who owns the page, so a
 # function that takes one, mints the owning `UFrame` internally, and can then
-# fail has performed a transfer it cannot reverse: the refusal drops the frame
-# — which frees the page — while the caller, holding only the number, frees it
-# again. That was `ostd_map_4kb_user`, reachable from an unprivileged demand
-# fault whenever the buddy was empty.
+# fail performs a transfer it cannot reverse: the refusal drops the frame —
+# which frees the page — while the caller, holding only the number, frees it
+# again. On a map path that is reachable from an unprivileged demand fault
+# whenever the buddy is empty.
 #
-# Neither free was observable. `BuddyAllocator::free_phys` returns 0 both for a
+# Neither free is observable. `BuddyAllocator::free_phys` returns 0 both for a
 # real release and for a page whose descriptor is already PCP/FREE/QUIESCE,
-# which is exactly what a second free finds, so the bug was silent in every
-# variant. What kept it from corrupting memory was three coincidences — the
-# page landing on the freeing CPU's private PCP magazine, every caller holding
-# a cli-spinlock, and that state check — not ownership. An allocator policy
-# change (`no_pcp`, `dma`) detonates it.
+# which is exactly what a second free finds, so a double free is silent in
+# every variant. Only coincidences — the page landing on the freeing CPU's
+# private PCP magazine, every caller holding a cli-spinlock, and that state
+# check — would keep it from corrupting memory, and an allocator policy change
+# (`no_pcp`, `dma`) removes them.
 #
-# The shape that replaced it:
+# So each map entry point says who owns the page:
 #
-#   ostd_map_4kb_user        takes UFrame, returns it in the error
-#   ostd_map_4kb_user_fresh  allocates, maps, frees iff refused
-#   ostd_map_4kb_user_shared takes a paddr and *aliases* it
+#   map_4kb_user        takes UFrame, returns it in the error
+#   map_4kb_user_fresh  allocates, maps, frees iff refused
+#   map_4kb_user_shared takes a paddr and *aliases* it
 #
 # ---------------------------------------------------------------------------
 # The two checks
@@ -32,7 +32,7 @@
 #      `return Err` in between drops it and frees the page under the caller.
 #      This is stated over *distance from the claim* rather than over the
 #      parameter type, because a `PhysAddr` parameter is correct for the
-#      alias-class entry points (`_shared`, `ostd_map_ring_4kb_user`) whose
+#      alias-class entry points (`_shared`, `map_ring_4kb_user`) whose
 #      caller genuinely has no handle to give.
 #
 #   2. No `free_page_frame` in the fault and map paths. Those release through
@@ -43,12 +43,12 @@
 #      both correctly free a just-allocated page when the claim itself fails —
 #      no MetaSlot ref exists yet at that point.
 #
-#   3. No constructor that decides claim-vs-alias at run time. The original
-#      `wrap_user_paddr` tried `from_unused` and fell through to `from_in_use`
-#      on `StateMismatch`, so one call site meant "claim a fresh page" or
-#      "alias a live one" depending on the slot — and the two differ in who
-#      frees the page. Without this check the first two are evadable by simply
-#      not naming `claim_user_paddr`, which is what the pre-fix tree did.
+#   3. No constructor that decides claim-vs-alias at run time. One that tries
+#      `from_unused` and falls through to `from_in_use` on `StateMismatch`
+#      makes one call site mean "claim a fresh page" or "alias a live one"
+#      depending on the slot — and the two differ in who frees the page.
+#      Without this check the first two are evadable by simply not naming
+#      `claim_user_paddr`.
 #
 # Deliberately accepted, and asserted in the self-test:
 #   - `_shared` / ring entry points taking a `PhysAddr` and aliasing it.
@@ -98,8 +98,8 @@ scan_claim_window() {
                 }
                 # The consuming call closes the window.
                 if ($0 ~ /(cursor|cur)\.(map|map_each|replace)(::|[[:space:]]*\()/ ||
-                    $0 ~ /ostd_map(_each)?_4kb_user[[:space:]]*\(/ ||
-                    $0 ~ /ostd_replace_4kb_user[[:space:]]*\(/) { inwin = 0; next }
+                    $0 ~ /(^|[^a-z_])map(_each)?_4kb_user[[:space:]]*\(/ ||
+                    $0 ~ /(^|[^a-z_])replace_4kb_user[[:space:]]*\(/) { inwin = 0; next }
                 if ($0 ~ /\?;[[:space:]]*$/ || $0 ~ /\?[[:space:]]*$/ ||
                     $0 ~ /^[[:space:]]*return Err/) {
                     printf "claimwin\t%s:%d: %s\n", file, NR, substr($0, 1, 90)
@@ -179,17 +179,17 @@ run_scan() {
 if [ "$GATE_SELF_TEST" -eq 1 ]; then
     gate_selftest_begin check_frame_ownership
 
-    # A planted fallible step between the claim and the map — the original
-    # defect, in both of its reachable spellings.
+    # A planted fallible step between the claim and the map, in both of its
+    # reachable spellings.
     cat > "$(gate_fixture mm/src/user_mappings.rs)" <<'RS'
 pub fn bad_map_question(vm: &mut KArc<VmSpace>, va: VirtAddr, pa: PhysAddr) -> Result<(), MapError> {
-    let frame = UFrame::<AnonymousMeta>::claim_user_paddr(Paddr::new(pa.as_u64()))?;
+    let frame = UFrame::<AnonymousMeta>::claim_user_paddr(pa)?;
     let mut cursor = vs.cursor_mut(range)?;
     cursor.map::<Size4Kb, AnonymousMeta>(frame, prop)
 }
 
 pub fn good_shared(vm: &mut KArc<VmSpace>, va: VirtAddr, pa: PhysAddr) -> Result<(), MapError> {
-    let frame = UFrame::<AnonymousMeta>::alias_user_paddr(Paddr::new(pa.as_u64()))?;
+    let frame = UFrame::<AnonymousMeta>::alias_user_paddr(pa)?;
     let mut cursor = vs.cursor_mut(range)?;
     cursor.map::<Size4Kb, AnonymousMeta>(frame, prop)
 }
@@ -206,13 +206,13 @@ fn bad_map_return(vm: &mut KArc<VmSpace>) -> Result<(), MmError> {
     if !region.is_ok() {
         return Err(MmError::PermissionDenied);
     }
-    ostd_map_4kb_user(vm, va, frame, flags)
+    map_4kb_user(vm, va, frame, flags)
 }
 RS
     # A planted raw free on a map path.
     cat > "$(gate_fixture mm/src/process_vm.rs)" <<'RS'
 fn map_user_range(vm: &mut KArc<VmSpace>) -> Result<u32, c_int> {
-    if let Err(err) = ostd_map_4kb_user_fresh(vm, VirtAddr::new(current), map_flags) {
+    if let Err(err) = map_4kb_user_fresh(vm, VirtAddr::new(current), map_flags) {
         free_page_frame(phys);
         return Err(-1);
     }
@@ -221,20 +221,20 @@ fn map_user_range(vm: &mut KArc<VmSpace>) -> Result<u32, c_int> {
 RS
     cat > "$(gate_fixture mm/src/cow.rs)" <<'RS'
 fn ok_claim_failure_free(vm: &mut KArc<VmSpace>) -> Result<(), MmError> {
-    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(Paddr::new(new_phys.as_u64())) {
+    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(new_phys) {
         Ok(f) => f,
         Err(e) => {
             free_page_frame(new_phys);
             return Err(MmError::MappingFailed);
         }
     };
-    ostd_replace_4kb_user(vm, va, frame, flags)
+    replace_4kb_user(vm, va, frame, flags)
 }
 RS
 
-    # A planted claim/alias fall-through: the constructor this replaced.
+    # A planted claim/alias fall-through constructor.
     cat > "$(gate_fixture slopos-ostd/src/mm/uframe.rs)" <<'RS'
-    pub fn wrap_user_paddr(paddr: Paddr) -> Result<Self, FrameError> {
+    pub fn claim_or_alias_user_paddr(paddr: PhysAddr) -> Result<Self, FrameError> {
         match Frame::<AnonymousMeta>::from_unused(paddr, AnonymousMeta::default()) {
             Ok(frame) => Ok(Self(frame)),
             Err(FrameError::StateMismatch) => Ok(Self(Frame::<AnonymousMeta>::from_in_use(paddr)?)),
@@ -242,11 +242,11 @@ RS
         }
     }
 
-    pub fn claim_user_paddr(paddr: Paddr) -> Result<Self, FrameError> {
+    pub fn claim_user_paddr(paddr: PhysAddr) -> Result<Self, FrameError> {
         Ok(Self(Frame::<AnonymousMeta>::from_unused(paddr, AnonymousMeta::default())?))
     }
 
-    pub fn alias_user_paddr(paddr: Paddr) -> Result<Self, FrameError> {
+    pub fn alias_user_paddr(paddr: PhysAddr) -> Result<Self, FrameError> {
         Ok(Self(Frame::<AnonymousMeta>::from_in_use(paddr)?))
     }
 RS

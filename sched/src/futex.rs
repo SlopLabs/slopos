@@ -19,9 +19,9 @@ use slopos_ostd::lock_class;
 
 use slopos_abi::syscall::FUTEX_BITSET_MATCH_ANY;
 use slopos_abi::task::BlockReason;
-use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::sync::{IntrusiveDList, KernelSync, LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::task::{FutexRole, placement};
+use slopos_ostd::user::ptr::UserPtr;
 
 use super::scheduler::{
     abort_raced_block, mark_current_blocked, set_current_runnable, unblock_task,

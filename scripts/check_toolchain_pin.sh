@@ -1,22 +1,10 @@
 #!/usr/bin/env bash
 # Verify the pinned std, libc and compiler forks against what is on disk.
 #
-# This gate replaces the retired std-patching script's `cfg_select!` arm-order
-# check, which existed because an arm placed after the `_` wildcard is dead
-# code that still compiles — it once shipped as a `ud2` in
-# `std::process::exit`.
-# One slopos arm outlives that check: the std patch adds a
-# `target_os = "slopos"` arm to the `cfg_select!` in
-# `std/src/sys/random/mod.rs`. It needs no gate because that select's wildcard
-# is `_ => {}`, empty — an arm placed after it leaves `fill_bytes` undefined
-# and the build fails loudly. The retired check was needed for the opposite
-# shape, where the fallback supplied a working symbol and the dead arm could
-# ship unnoticed.
-# The failure mode moves instead: a fork can drift from the compiler it was
-# cut against, a patch can change without its pin changing, and a materialised
-# tree can go stale or lose its registration. All of them are silent — a stale
-# tree compiles, it just compiles last week's fork — so they are gated rather
-# than reviewed.
+# A fork can drift from the compiler it was cut against, a patch can change
+# without its pin changing, and a materialised tree can go stale or lose its
+# registration. All of them are silent — a stale tree compiles, it just
+# compiles last week's fork — so they are gated rather than reviewed.
 #
 # The four failures:
 #   1. `toolchain/PIN`'s channel disagrees with `rust-toolchain.toml`.

@@ -1,15 +1,16 @@
 //! Shared syscall infrastructure: dispatch-table entry type, user-string
 //! copy helpers, fixed I/O cap.
 
-use core::ffi::{c_char, c_int};
+use core::ffi::c_char;
 
 use slopos_abi::Errno;
 use slopos_ostd::authority::Capability;
 use slopos_ostd::sync::KernelSync;
 
 use slopos_mm::paging_defs::PAGE_SIZE_4KB_USIZE;
+use slopos_mm::user_copy::UserPtrError;
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_bytes_to_user};
-use slopos_mm::user_ptr::{UserBytes, UserPtrError};
+use slopos_ostd::user::ptr::UserBytes;
 
 use crate::syscall::context::SyscallContext;
 use crate::syscall::result::SyscallResult;
@@ -84,14 +85,6 @@ pub fn syscall_copy_user_str(dst: &mut [u8], user_src: u64) -> Result<(), UserPt
         copied += chunk;
     }
     Ok(())
-}
-
-pub fn syscall_copy_user_str_to_cstr(dst: &mut [i8], user_src: u64) -> c_int {
-    let dst_u8 = slopos_ostd::util::byte_view::pod_slice_as_bytes_mut(dst);
-    match syscall_copy_user_str(dst_u8, user_src) {
-        Ok(()) => 0,
-        Err(_) => -1,
-    }
 }
 
 pub fn syscall_bounded_from_user(

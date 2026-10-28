@@ -1,4 +1,4 @@
-//! Socket-opcode glue (SLOPRING § 12, cross-cutting reality 2).
+//! Socket-opcode glue.
 //!
 //! Socket-typed opcodes route through the socket send/recv/accept paths, not
 //! the generic `file_read_fd`/`file_write_fd`, per family via
@@ -20,7 +20,7 @@ use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
 };
 use slopos_mm::user_msghdr::{msg_iovec_buf, msghdr_write_out};
-use slopos_mm::user_ptr::{UserBytes, UserPtr};
+use slopos_ostd::user::ptr::{UserBytes, UserPtr};
 
 use slopos_fs::fileio::FileRef;
 use slopos_net::socket::ZcSendOutcome;
@@ -41,8 +41,8 @@ const STAGING_CAP: usize = 4096;
 const EAGAIN: i32 = Errno::EAGAIN.raw();
 
 /// Run `f` with the AF_UNIX socket forced nonblocking, restoring its original
-/// stored flag afterward (SLOPRING § 12 reality 1: there is no per-call
-/// nonblock argument). A concurrent close between the set and the restore is
+/// stored flag afterward, since the socket primitives take no per-call
+/// nonblock argument. A concurrent close between the set and the restore is
 /// bounded by the socket-handle validation each primitive does internally.
 fn with_unix_forced_nonblock<T>(h: SocketHandle, f: impl FnOnce() -> T) -> T {
     let was = unix_socket::unix_is_nonblocking(h).unwrap_or(false);
@@ -65,7 +65,7 @@ fn with_inet_forced_nonblock<T>(idx: u32, f: impl FnOnce() -> T) -> T {
 /// Non-blocking accept for process `table`. `Ok(None)` means would block;
 /// `Err(errno)` is a real error.
 ///
-/// Reserve-before-side-effect (SLOPRING § 11) is the *caller's*
+/// Reserving the CQE slot before the side effect is the *caller's*
 /// responsibility — by the time we install the fd here the CQE slot is
 /// already reserved, so the accepted fd can always be reported.
 pub fn accept_nonblock(table: FdTable, file: &FileRef) -> Result<Option<i32>, Errno> {
@@ -215,8 +215,8 @@ pub(crate) fn outcome_from_rc(rc: i32) -> Outcome {
     }
 }
 
-/// `OP_SEND`: socket-only send (SLOPRING § 12). Both families stage the user
-/// bytes into a kernel scratch and pass the *scratch* to the send primitive,
+/// `OP_SEND`: socket-only send. Both families stage the user bytes into a
+/// kernel scratch and pass the *scratch* to the send primitive,
 /// never a raw user VA: `socket_send` reads without fault recovery, so a
 /// concurrent munmap between validation and the read would fault the kernel.
 /// Neither primitive takes per-call send flags, so `sqe.op_flags` is accepted
@@ -265,13 +265,13 @@ pub fn send_nonblock(file: &FileRef, addr: u64, len: u32, _op_flags: u32) -> Out
     }
 }
 
-/// `OP_RECVMSG`: socket-only recvmsg (SLOPRING § 12). Parses the user `MsgHdr`
-/// at `sqe.addr`, recvs into a staging buffer, scatters the data across the
+/// `OP_RECVMSG`: socket-only recvmsg. Parses the user `MsgHdr` at `sqe.addr`,
+/// recvs into a staging buffer, scatters the data across the
 /// caller's `msg_iov` segments, and — for AF_UNIX with SCM_RIGHTS fds —
 /// installs the received fds into the caller's fd table and writes one
 /// `SCM_RIGHTS` item back into `msg_control`. AF_INET fills data only (no
 /// SCM_RIGHTS), which is correct, not an error. An ownership op (it installs
-/// fds), so the caller reserves a CQE slot before dispatch (SLOPRING § 11).
+/// fds), so the caller reserves a CQE slot before dispatch.
 pub fn recvmsg_nonblock(table: FdTable, file: &FileRef, addr: u64, _op_flags: u32) -> Outcome {
     let (handle, ops) = match socket_handle_from_ref(file) {
         Ok(v) => v,
@@ -356,15 +356,15 @@ pub fn recvmsg_nonblock(table: FdTable, file: &FileRef, addr: u64, _op_flags: u3
     }
 }
 
-/// `OP_RECVFROM`: AF_INET datagram recv that also returns the source address
-/// (SLOPRING § 12). Recvs into a kernel scratch, copies the data out to the
-/// user buffer at `addr`, and writes the source `SockAddrIn` to the validated
-/// user out-pointer at `addr2`. `-EAGAIN` defers; every other result completes
-/// inline. A *consuming* op — the caller reserves a CQE slot before dispatch
-/// (SLOPRING § 11), so a successful recv never drops its CQE and loses the
-/// datagram. Null `addr` (with non-zero `len`) or null `addr2` is `-EFAULT`
-/// before any recv: the source addr is mandatory, like `recvfrom(2)`'s
-/// `src_addr` when requested.
+/// `OP_RECVFROM`: AF_INET datagram recv that also returns the source address.
+/// Recvs into a kernel scratch, copies the data out to the user buffer at
+/// `addr`, and writes the source `SockAddrIn` to the validated user
+/// out-pointer at `addr2`. `-EAGAIN` defers; every other result completes
+/// inline. A *consuming* op — the caller reserves a CQE slot before dispatch,
+/// so a successful recv never drops its CQE and loses the datagram. Null
+/// `addr` (with non-zero `len`) or null `addr2` is `-EFAULT` before any recv:
+/// the source addr is mandatory, like `recvfrom(2)`'s `src_addr` when
+/// requested.
 pub fn recvfrom_nonblock(file: &FileRef, addr: u64, len: u32, addr2: u64) -> Outcome {
     if addr2 == 0 {
         return Outcome::Inline(Errno::EFAULT.raw());

@@ -1,7 +1,6 @@
 //! The i8042 PS/2 controller as a platform (ACPI) device driver: binds the ACPI
 //! `PNP0303` node through [`crate::platform_bus`], claiming its 0x60/0x64 ports
-//! and legacy IRQ under devres. Declines when the `i8042.legacy` escape hatch is
-//! selected, so the controller is never double-initialised.
+//! and legacy IRQ under devres.
 
 use slopos_kernel_services::driver_runtime::{LEGACY_IRQ_KEYBOARD, LEGACY_IRQ_MOUSE};
 use slopos_ostd::klog_info;
@@ -32,11 +31,6 @@ struct I8042Quirks {
 }
 
 fn i8042_probe(bound: &mut BoundPlatformDevice<'_>) -> Result<ProbeOutcome, PlatformProbeError> {
-    // `irq::init` already ran the hardcoded bring-up; binding would repeat it.
-    if ps2::legacy_mode() {
-        return Ok(ProbeOutcome::Declined);
-    }
-
     let info = *bound.info();
 
     // An EC-gated `_STA` the narrow interpreter cannot evaluate yields `None`,

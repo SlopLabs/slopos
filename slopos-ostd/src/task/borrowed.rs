@@ -811,76 +811,15 @@ impl<K, U> TaskInner<K, U> {
         self.running_cleanup.store(running, Ordering::Relaxed);
     }
 
-    // `TaskContext` is `#[repr(C, packed)]`, so its `u64` fields carry no
-    // alignment guarantee — hence `read_unaligned`. `as_ptr_racy` forms no
-    // reference, so a concurrent write by the owning CPU tears rather than
-    // being UB, and torn is acceptable: every consumer range-checks what it
-    // reads. Reading a task this CPU is *not* running is the point, so a
-    // witnessed accessor would be wrong here.
-
-    /// The task's saved `CR3` — the address-space identity tag the user-fault
-    /// dispatcher compares against live `CR3`.
+    /// The root of the address space this task runs in; see the field.
     #[inline]
-    pub fn context_cr3(&self) -> u64 {
-        self.read_context_field(core::mem::offset_of!(
-            crate::task::kernel_task::TaskContext,
-            cr3
-        ))
+    pub fn cr3(&self) -> u64 {
+        self.cr3.load(Ordering::Relaxed)
     }
 
     #[inline]
-    pub fn context_rip(&self) -> u64 {
-        self.read_context_field(core::mem::offset_of!(
-            crate::task::kernel_task::TaskContext,
-            rip
-        ))
-    }
-
-    #[inline]
-    pub fn context_rsp(&self) -> u64 {
-        self.read_context_field(core::mem::offset_of!(
-            crate::task::kernel_task::TaskContext,
-            rsp
-        ))
-    }
-
-    #[inline]
-    pub fn context_cs(&self) -> u64 {
-        self.read_context_field(core::mem::offset_of!(
-            crate::task::kernel_task::TaskContext,
-            cs
-        ))
-    }
-
-    #[inline]
-    pub fn context_ss(&self) -> u64 {
-        self.read_context_field(core::mem::offset_of!(
-            crate::task::kernel_task::TaskContext,
-            ss
-        ))
-    }
-
-    #[inline]
-    pub fn context_rflags(&self) -> u64 {
-        self.read_context_field(core::mem::offset_of!(
-            crate::task::kernel_task::TaskContext,
-            rflags
-        ))
-    }
-
-    /// One racy, unaligned `u64` read out of the saved `context`.
-    ///
-    /// Two distinct types share the name `TaskContext`: `context` is
-    /// `kernel_task::TaskContext`, the packed interrupt-frame snapshot, while
-    /// `switch_ctx` is `task::task::TaskContext`, the callee-saved frame the
-    /// switch asm uses. Different layouts, so the two readers cannot be one.
-    #[inline]
-    fn read_context_field(&self, offset: usize) -> u64 {
-        let base = self.context.as_ptr_racy().cast::<u8>();
-        // SAFETY: `offset` is an `offset_of!` into the very `TaskContext` this
-        // pointer addresses, so the read is in bounds; `read_unaligned` because
-        // the struct is packed, and no reference is formed.
-        unsafe { base.add(offset).cast::<u64>().read_unaligned() }
+    pub fn set_cr3(&mut self, cr3: u64) {
+        *self.cr3.get_mut() = cr3;
     }
 
     /// The saved callee-saved frame's `(rip, rsp)` — the seed for walking a
@@ -888,27 +827,30 @@ impl<K, U> TaskInner<K, U> {
     #[inline]
     pub fn switch_ctx_rip_rsp(&self) -> (u64, u64) {
         (
-            self.read_switch_ctx_field(core::mem::offset_of!(crate::task::TaskContext, rip)),
-            self.read_switch_ctx_field(core::mem::offset_of!(crate::task::TaskContext, rsp)),
+            self.read_switch_ctx_field(core::mem::offset_of!(crate::task::SwitchContext, rip)),
+            self.read_switch_ctx_field(core::mem::offset_of!(crate::task::SwitchContext, rsp)),
         )
     }
 
     #[inline]
     pub fn switch_ctx_rbp(&self) -> u64 {
-        self.read_switch_ctx_field(core::mem::offset_of!(crate::task::TaskContext, rbp))
+        self.read_switch_ctx_field(core::mem::offset_of!(crate::task::SwitchContext, rbp))
     }
 
     #[inline]
     pub fn switch_ctx_rflags(&self) -> u64 {
-        self.read_switch_ctx_field(core::mem::offset_of!(crate::task::TaskContext, rflags))
+        self.read_switch_ctx_field(core::mem::offset_of!(crate::task::SwitchContext, rflags))
     }
 
-    /// See [`read_context_field`](Self::read_context_field); same contract,
-    /// other cell.
+    /// One racy `u64` read out of the saved switch frame, for a task this CPU
+    /// is not running, so no witness. `as_ptr_racy` forms no reference: a
+    /// concurrent write by the owning CPU tears the value rather than being UB,
+    /// and every consumer range-checks what it reads.
     #[inline]
     fn read_switch_ctx_field(&self, offset: usize) -> u64 {
         let base = self.switch_ctx.as_ptr_racy().cast::<u8>();
-        // SAFETY: as `read_context_field`.
+        // SAFETY: `offset` is an `offset_of!` into the `SwitchContext` this
+        // pointer addresses, so the read is in bounds; no reference is formed.
         unsafe { base.add(offset).cast::<u64>().read_unaligned() }
     }
 }

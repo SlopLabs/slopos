@@ -94,13 +94,6 @@ impl KernelTestScope {
         self.kernel_io_freeze.as_ref().map(KernelIoFreeze::outcome)
     }
 
-    /// Threads a container still owned when the hold's settle loop gave up.
-    pub fn kernel_io_unsettled(&self) -> usize {
-        self.kernel_io_hold
-            .as_ref()
-            .map_or(0, super::task::KernelIoHold::unsettled)
-    }
-
     /// Enter the scope: freeze the kernel-I/O threads, snapshot kernel-wide
     /// state via the hermetic registry, pause APs, and reset the task
     /// population + scheduler so the test starts from a clean slate.
@@ -162,7 +155,7 @@ impl KernelTestScope {
         let kernel_io_hold = hold_kernel_io_all(&kernel_io_freeze, &aps_paused);
 
         // Drop wake-IPIs issued before the pause flag became visible to APs.
-        let cpu_count = slopos_arch::pcr::get_cpu_count();
+        let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
         for cpu in 0..cpu_count {
             let _ = with_cpu_scheduler(cpu, |s| s.force_clear_inbox_count());
         }
@@ -200,7 +193,7 @@ impl KernelTestScope {
 
         // The reset runs after the snapshot, so the captured values are the
         // pre-reset ones and Drop's restore walk puts those back.
-        slopos_arch::pcr::park_bootstrap_task(
+        slopos_ostd::cpu::x86_64::pcr::park_bootstrap_task(
             slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut (),
         );
 
@@ -208,9 +201,9 @@ impl KernelTestScope {
         scheduler_shutdown();
 
         let mut reset_failure: Option<&'static str> = None;
-        if task_registry_reset(&kernel_io_freeze) != 0 {
+        if !task_registry_reset(&kernel_io_freeze) {
             reset_failure = Some("task_registry_reset");
-        } else if init_scheduler() != 0 {
+        } else if !init_scheduler() {
             reset_failure = Some("init_scheduler");
         }
 
@@ -252,12 +245,6 @@ impl KernelTestScope {
             boot_ctx: Some(boot_ctx),
             _not_send: PhantomData,
         }
-    }
-
-    /// Alias for `enter()`, so `MyFixture::new()` keeps working where
-    /// `MyFixture` is a type alias for `KernelTestScope`.
-    pub fn new() -> Self {
-        Self::enter()
     }
 
     /// Borrow the `BootCtx` so a test can call boot-only mutators

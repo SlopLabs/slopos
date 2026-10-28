@@ -49,15 +49,15 @@ impl AmlHost for HhdmHost {
         // can name BIOS-NVS or a reserved aperture.
         let mut page = virt & !0xfff;
         while page < end {
-            if slopos_mm::paging::is_mapped(VirtAddr::new(page)) == 0 {
+            if !slopos_mm::paging::is_mapped(VirtAddr::new(page)) {
                 // Firmware memory the buddy has never owned, hence an IO
                 // mapping rather than an allocation.
                 let _ = slopos_mm::kernel_mappings::kernel_map_io_4kb(
                     VirtAddr::new(page),
                     PhysAddr::new(page.wrapping_sub(off)),
-                    slopos_mm::paging_defs::PageFlags::KERNEL_RO.bits(),
+                    slopos_ostd::mm::page_property::PageProperty::KERNEL_RO,
                 );
-                if slopos_mm::paging::is_mapped(VirtAddr::new(page)) == 0 {
+                if !slopos_mm::paging::is_mapped(VirtAddr::new(page)) {
                     return;
                 }
             }

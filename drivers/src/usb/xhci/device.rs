@@ -4,8 +4,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use slopos_mm::mmio::MmioRegion;
 use slopos_ostd::mm::AllocError;
+use slopos_ostd::mm::IoMem;
 use slopos_ostd::mm::init::{Initialised, SlotPtr, init_struct_with};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, Mutex, MutexGuard, SpinLock, WaitAbort};
 use slopos_ostd::{KArc, KBox, KVec, klog_info, lock_class, write_field};
@@ -231,7 +231,7 @@ pub struct Device {
     pub slot: u8,
     /// A slot number is reused, a serial never.
     pub serial: u64,
-    regs: MmioRegion,
+    regs: IoMem,
     doorbell: usize,
     contexts: ContextLayout,
     memory: SpinLock<KBox<Memory>>,
@@ -296,7 +296,7 @@ impl Device {
         controller: u8,
         slot: u8,
         serial: u64,
-        regs: MmioRegion,
+        regs: IoMem,
         doorbell: usize,
         contexts: ContextLayout,
     ) -> Result<KArc<Self>, AllocError> {

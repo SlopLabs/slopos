@@ -53,10 +53,6 @@ static C_LOCALE: SyncUnsafeCell<__locale_struct> =
 /// `((locale_t)-1)`, POSIX's designator for whatever `setlocale` selected.
 const GLOBAL: locale_t = ptr::without_provenance_mut(usize::MAX);
 
-pub fn c_locale() -> locale_t {
-    C_LOCALE.get()
-}
-
 /// Before TLS is up there is one thread, so a static is its [`uselocale`]
 /// slot. Null in either slot means the global locale.
 static mut PRE_TLS_LOCALE: locale_t = ptr::null_mut();

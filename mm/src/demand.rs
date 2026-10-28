@@ -5,18 +5,19 @@ use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::mm::KArc;
 use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 
-use slopos_ostd::mm::frame::{AnonymousMeta, Paddr};
+use slopos_ostd::mm::frame::AnonymousMeta;
+use slopos_ostd::mm::page_property::PageProperty;
 use slopos_ostd::mm::uframe::UFrame;
 
 use crate::error::MmError;
 use crate::hhdm::PhysAddrHhdm;
 use crate::page_alloc::{alloc_kernel_page, alloc_page_frames_pcp_batch, free_page_frame};
-use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::process_vm;
 use crate::tlb;
 use crate::user_mappings::{
-    ostd_map_4kb_user, ostd_map_4kb_user_shared, ostd_map_each_4kb_user, ostd_present_mask_4kb,
-    ostd_virt_to_phys_4kb, wait_vm_space_exclusive,
+    cow_marked, map_4kb_user, map_4kb_user_shared, map_each_4kb_user, present_mask_4kb,
+    virt_to_phys_4kb, wait_vm_space_exclusive,
 };
 use crate::vma_region::{Commit, FileMapRef, RegionPurpose, VmaMap, VmaRegion};
 
@@ -60,13 +61,9 @@ pub fn can_satisfy_fault(error_code: u64, region: &VmaRegion) -> bool {
         return false;
     }
 
-    // A region with no protection at all is `PROT_NONE` — a guard page. The
-    // arms above each test only the access the error code names, and a read
-    // names none of them, so a read fault used to walk straight through. x86
-    // has no read-disable bit: a frame installed here is published
-    // `PRESENT | USER` and the guard reads back. Mirrors Linux's
-    // `vma_is_accessible`; write-only stays readable, as it is on this
-    // hardware.
+    // `PROT_NONE` is a guard page, and a read names none of the arms above;
+    // x86 cannot map a present user page unreadable (Linux's
+    // `vma_is_accessible`).
     if !(region.protection.read || region.protection.write || region.protection.exec) {
         return false;
     }
@@ -91,7 +88,7 @@ pub fn handle_demand_fault(
         return Err(MmError::PermissionDenied);
     }
 
-    let existing_phys = ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(aligned_addr));
+    let existing_phys = virt_to_phys_4kb(vm_space, VirtAddr::new(aligned_addr));
     if !existing_phys.is_null() {
         return Ok(());
     }
@@ -170,7 +167,7 @@ pub fn fault_around_anon(
     let start = (aligned_addr & !(window - 1)).max(vma_start);
     let end = ((aligned_addr & !(window - 1)) + window).min(vma_end);
     let (first, last) = (VirtAddr::new(start), VirtAddr::new(end));
-    let Ok(present) = ostd_present_mask_4kb(vm_space, first, last) else {
+    let Ok(present) = present_mask_4kb(vm_space, first, last) else {
         return;
     };
     let mut absent = [0u64; ANON_FAULT_AROUND_PAGES as usize];
@@ -189,14 +186,14 @@ pub fn fault_around_anon(
 
     // A frame the claim or the map never reached is still the allocator's.
     let mut taken = 0usize;
-    let pte_flags = region.private_page_flags().bits();
+    let prop = region.private_page_property();
     let pages = absent[..got]
         .iter()
         .zip(&phys[..got])
         .map_while(|(&va, &pa)| {
             taken += 1;
-            match UFrame::<AnonymousMeta>::claim_user_paddr(Paddr::new(pa.as_u64())) {
-                Ok(frame) => Some((VirtAddr::new(va), frame, pte_flags)),
+            match UFrame::<AnonymousMeta>::claim_user_paddr(pa) {
+                Ok(frame) => Some((VirtAddr::new(va), frame, prop)),
                 Err(e) => {
                     free_page_frame(pa);
                     slopos_ostd::klog_info!("demand::fault_around_anon: claim failed: {:?}", e);
@@ -204,7 +201,7 @@ pub fn fault_around_anon(
                 }
             }
         });
-    let mapped = match ostd_map_each_4kb_user(vm_space, first, last, pages) {
+    let mapped = match map_each_4kb_user(vm_space, first, last, pages) {
         Ok(n) => n,
         Err((_, refused)) => absent[..got]
             .iter()
@@ -255,7 +252,7 @@ fn place_page(
         }
     }
 
-    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(Paddr::new(phys.as_u64())) {
+    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(phys) {
         Ok(f) => f,
         Err(e) => {
             free_page_frame(phys);
@@ -264,11 +261,9 @@ fn place_page(
         }
     };
 
-    let pte_flags = region.private_page_flags().bits();
+    let prop = region.private_page_property();
     // Sole ref, so dropping the refused frame is the free.
-    if let Err((_, err)) =
-        ostd_map_4kb_user(vm_space, VirtAddr::new(aligned_addr), frame, pte_flags)
-    {
+    if let Err((_, err)) = map_4kb_user(vm_space, VirtAddr::new(aligned_addr), frame, prop) {
         if err == MapError::WouldBlock {
             return Err(MmError::Retry);
         }
@@ -309,7 +304,7 @@ pub fn plan_file_fault(
     if !can_satisfy_fault(error_code, region) {
         return Err(MmError::PermissionDenied);
     }
-    if !ostd_virt_to_phys_4kb(vm_space, VirtAddr::new(aligned_addr)).is_null() {
+    if !virt_to_phys_4kb(vm_space, VirtAddr::new(aligned_addr)).is_null() {
         return Ok(None);
     }
 
@@ -341,16 +336,9 @@ pub fn fault_around_first(page_index: u64) -> u64 {
 /// How a page set's frame is published into `region`. A private mapping takes
 /// it read-only and COW-marked: its first store copies it, which is the only
 /// point at which a private mapping needs a page of its own.
-fn set_frame_flags(region: &VmaRegion, private: bool) -> u64 {
-    let flags = region.to_page_flags();
-    if private {
-        flags
-            .difference(PageFlags::WRITABLE)
-            .union(PageFlags::COW)
-            .bits()
-    } else {
-        flags.bits()
-    }
+fn set_frame_property(region: &VmaRegion, private: bool) -> PageProperty {
+    let prop = region.page_property();
+    if private { cow_marked(prop) } else { prop }
 }
 
 /// Install a page the filesystem just read, revalidated against the region
@@ -381,7 +369,7 @@ pub fn install_file_page(
     }
 
     let va = VirtAddr::new(plan.aligned_addr);
-    if !ostd_virt_to_phys_4kb(vm_space, va).is_null() {
+    if !virt_to_phys_4kb(vm_space, va).is_null() {
         return Ok(());
     }
     if !wait_vm_space_exclusive(vm_space) {
@@ -390,8 +378,8 @@ pub fn install_file_page(
 
     let is_write = plan.error_code & 0x02 != 0;
     if !plan.private || !is_write {
-        let pte_flags = set_frame_flags(region, plan.private);
-        return match ostd_map_4kb_user_shared(vm_space, va, cached, pte_flags) {
+        let prop = set_frame_property(region, plan.private);
+        return match map_4kb_user_shared(vm_space, va, cached, prop) {
             Ok(()) => {
                 flush_fresh_mapping(vm_space, va);
                 Ok(())
@@ -426,7 +414,7 @@ fn install_private_copy(
     if phys.is_null() {
         return Err(MmError::NoMemory);
     }
-    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(Paddr::new(phys.as_u64())) {
+    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(phys) {
         Ok(f) => f,
         Err(e) => {
             free_page_frame(phys);
@@ -436,7 +424,7 @@ fn install_private_copy(
     };
     let _ = slopos_ostd::mm::hhdm_bytes::copy_page(cached.to_virt(), phys.to_virt());
 
-    match ostd_map_4kb_user(vm_space, va, frame, region.private_page_flags().bits()) {
+    match map_4kb_user(vm_space, va, frame, region.private_page_property()) {
         Ok(()) => {
             flush_fresh_mapping(vm_space, va);
             Ok(())
@@ -463,7 +451,7 @@ pub fn map_resident_around(
     frames: &[PhysAddr],
     region: &VmaRegion,
 ) {
-    let pte_flags = set_frame_flags(region, plan.private);
+    let prop = set_frame_property(region, plan.private);
     let mut candidates = [(0u64, PhysAddr::NULL); FAULT_AROUND_PAGES];
     let mut count = 0usize;
     for (page, &frame) in (first_page..).zip(frames).take(FAULT_AROUND_PAGES) {
@@ -498,7 +486,7 @@ pub fn map_resident_around(
         return;
     };
     let (first, last) = (VirtAddr::new(low), VirtAddr::new(high + PAGE_SIZE_4KB));
-    let Ok(present) = ostd_present_mask_4kb(vm_space, first, last) else {
+    let Ok(present) = present_mask_4kb(vm_space, first, last) else {
         return;
     };
     let absent = candidates
@@ -506,11 +494,11 @@ pub fn map_resident_around(
         .filter(|&&(va, _)| present & (1 << ((va - low) / PAGE_SIZE_4KB)) == 0);
     let mut mapped = (u64::MAX, 0u64);
     let pages = absent.map_while(|&(va, pa)| {
-        let frame = UFrame::<AnonymousMeta>::alias_user_paddr(Paddr::new(pa.as_u64())).ok()?;
+        let frame = UFrame::<AnonymousMeta>::alias_user_paddr(pa).ok()?;
         mapped = (mapped.0.min(va), va + PAGE_SIZE_4KB);
-        Some((VirtAddr::new(va), frame, pte_flags))
+        Some((VirtAddr::new(va), frame, prop))
     });
-    if let Err((_, refused)) = ostd_map_each_4kb_user(vm_space, first, last, pages) {
+    if let Err((_, refused)) = map_each_4kb_user(vm_space, first, last, pages) {
         mapped.1 = refused.as_u64();
     }
     if mapped.0 < mapped.1 {

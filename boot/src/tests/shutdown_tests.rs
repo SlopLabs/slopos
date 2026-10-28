@@ -12,7 +12,7 @@ use slopos_sched::task::{
 use slopos_sched::test_fixture::KernelTestScope;
 use slopos_testing::{TestResult, assert_eq_test, assert_test};
 
-use core::ffi::{c_char, c_void};
+use core::ffi::c_void;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -30,7 +30,7 @@ impl ShutdownFixture {
 
 extern "C" fn dummy_task_fn(_arg: *mut c_void) {}
 
-fn reset_registry() -> i32 {
+fn reset_registry() -> bool {
     let freeze = freeze_kernel_io_all();
     task_registry_reset(&freeze)
 }
@@ -39,7 +39,7 @@ fn create_n_tasks(n: usize) -> usize {
     let mut created = 0;
     for _ in 0..n {
         let id = task_create(
-            b"TestTask\0".as_ptr() as *const c_char,
+            b"TestTask",
             dummy_task_fn,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -126,12 +126,11 @@ pub fn test_stateflag_relaxed_access() -> TestResult {
 pub fn test_scheduler_shutdown_disables() -> TestResult {
     let _fixture = ShutdownFixture::new();
 
-    assert_eq_test!(scheduler_is_enabled(), 0, "should start disabled");
+    assert_test!(!scheduler_is_enabled(), "should start disabled");
 
     scheduler_shutdown();
-    assert_eq_test!(
-        scheduler_is_enabled(),
-        0,
+    assert_test!(
+        !scheduler_is_enabled(),
         "should stay disabled after shutdown"
     );
 
@@ -144,7 +143,7 @@ pub fn test_scheduler_shutdown_idempotent() -> TestResult {
     scheduler_shutdown();
     scheduler_shutdown();
     scheduler_shutdown();
-    assert_eq_test!(scheduler_is_enabled(), 0);
+    assert_test!(!scheduler_is_enabled());
 
     TestResult::Pass
 }
@@ -153,7 +152,7 @@ pub fn test_scheduler_shutdown_clears_state() -> TestResult {
     let _fixture = ShutdownFixture::new();
 
     let task_id = task_create(
-        b"ShutdownTest\0".as_ptr() as *const c_char,
+        b"ShutdownTest",
         dummy_task_fn,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -189,7 +188,7 @@ pub fn test_task_shutdown_all_idempotent() -> TestResult {
     let _fixture = ShutdownFixture::new();
 
     let task_id = task_create(
-        b"IdempotentTest\0".as_ptr() as *const c_char,
+        b"IdempotentTest",
         dummy_task_fn,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -209,7 +208,7 @@ pub fn test_shutdown_sequence_ordering() -> TestResult {
     let _fixture = ShutdownFixture::new();
 
     let task_id = task_create(
-        b"SeqTest\0".as_ptr() as *const c_char,
+        b"SeqTest",
         dummy_task_fn,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -248,7 +247,7 @@ pub fn test_rapid_shutdown_cycles() -> TestResult {
         let _fixture = ShutdownFixture::new();
 
         let task_id = task_create(
-            b"CycleTask\0".as_ptr() as *const c_char,
+            b"CycleTask",
             dummy_task_fn,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -262,16 +261,8 @@ pub fn test_rapid_shutdown_cycles() -> TestResult {
 
         task_shutdown_population();
         scheduler_shutdown();
-        assert_test!(
-            reset_registry() == 0,
-            "cycle {} registry reset failed",
-            cycle
-        );
-        assert_test!(
-            init_scheduler() == 0,
-            "cycle {} scheduler reinit failed",
-            cycle
-        );
+        assert_test!(reset_registry(), "cycle {} registry reset failed", cycle);
+        assert_test!(init_scheduler(), "cycle {} scheduler reinit failed", cycle);
     }
 
     TestResult::Pass
@@ -299,7 +290,7 @@ pub fn test_shutdown_mixed_priorities() -> TestResult {
 
     for &priority in &priorities {
         let task_id = task_create(
-            b"PriTask\0".as_ptr() as *const c_char,
+            b"PriTask",
             dummy_task_fn,
             ptr::null_mut(),
             priority,
@@ -317,7 +308,7 @@ pub fn test_task_shutdown_skips_current() -> TestResult {
 
     for _ in 0..5 {
         let _ = task_create(
-            b"SkipTest\0".as_ptr() as *const c_char,
+            b"SkipTest",
             dummy_task_fn,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -335,11 +326,11 @@ pub fn test_scheduler_reinit_after_shutdown() -> TestResult {
     scheduler_shutdown();
     task_shutdown_population();
 
-    assert_eq_test!(reset_registry(), 0, "registry reset failed");
-    assert_eq_test!(init_scheduler(), 0, "reinit scheduler failed");
+    assert_test!(reset_registry(), "registry reset failed");
+    assert_test!(init_scheduler(), "reinit scheduler failed");
 
     let task_id = task_create(
-        b"ReinitTest\0".as_ptr() as *const c_char,
+        b"ReinitTest",
         dummy_task_fn,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -380,7 +371,7 @@ pub fn test_serial_flush_terminates() -> TestResult {
         if (lsr & 0x40) != 0 {
             break;
         }
-        slopos_arch::cpu::pause();
+        slopos_ostd::cpu::x86_64::pause();
     }
     klog_info!(
         "SHUTDOWN_TEST: Serial flush completed in {} iterations",
@@ -405,14 +396,14 @@ pub fn test_shutdown_e2e_stress_with_allocation() -> TestResult {
 
     for cycle in 0..CYCLES {
         assert_test!(
-            reset_registry() == 0 && init_scheduler() == 0,
+            reset_registry() && init_scheduler(),
             "cycle {} init failed",
             cycle
         );
 
         for _ in 0..TASKS_PER_CYCLE {
             let _ = task_create(
-                b"StressTask\0".as_ptr() as *const c_char,
+                b"StressTask",
                 dummy_task_fn,
                 ptr::null_mut(),
                 TaskPriority::Normal.as_u8(),
@@ -455,13 +446,13 @@ pub fn test_shutdown_e2e_stress_with_allocation() -> TestResult {
     TestResult::Pass
 }
 
-/// `task_terminate` on an already-terminated task returns 0 without re-running
+/// `task_terminate` on an already-terminated task succeeds without re-running
 /// teardown side-effects.
 pub fn test_task_terminate_idempotent() -> TestResult {
     let _fixture = ShutdownFixture::new();
 
     let task_id = task_create(
-        b"TermIdem\0".as_ptr() as *const c_char,
+        b"TermIdem",
         dummy_task_fn,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -469,7 +460,7 @@ pub fn test_task_terminate_idempotent() -> TestResult {
     );
     assert_test!(task_id != INVALID_TASK_ID, "task creation failed");
 
-    assert_eq_test!(task_terminate(task_id), 0, "first terminate should succeed");
+    assert_test!(task_terminate(task_id), "first terminate should succeed");
 
     if let Some(task) = task_find_by_id(task_id) {
         let status = task.status();
@@ -480,15 +471,13 @@ pub fn test_task_terminate_idempotent() -> TestResult {
         );
     }
 
-    assert_eq_test!(
+    assert_test!(
         task_terminate(task_id),
-        0,
         "second terminate should be idempotent"
     );
 
-    assert_eq_test!(
+    assert_test!(
         task_terminate(task_id),
-        0,
         "third terminate should be idempotent"
     );
 
@@ -508,12 +497,12 @@ pub fn test_shutdown_scheduler_alive_during_task_teardown() -> TestResult {
 
     let _result = task_shutdown_population();
     assert_test!(
-        scheduler_is_enabled() != 0,
+        scheduler_is_enabled(),
         "scheduler must remain enabled after task_shutdown_all"
     );
 
     scheduler_shutdown();
-    assert_eq_test!(scheduler_is_enabled(), 0, "scheduler should be disabled");
+    assert_test!(!scheduler_is_enabled(), "scheduler should be disabled");
 
     TestResult::Pass
 }

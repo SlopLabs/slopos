@@ -87,9 +87,9 @@ define_syscall!(syscall_run_userland_tests (ctx) cap(TestHarness)
     cfg.shutdown = false;
 
     let mut utest_summary = TestRunSummary::default();
-    let utest_rc = tests_run_userland(&cfg, &mut utest_summary);
+    let _ = tests_run_userland(&cfg, &mut utest_summary);
 
-    let (kernel_summary, kernel_rc) = kernel_phase_summary::load_kernel_phase();
+    let kernel_summary = kernel_phase_summary::load_kernel_phase();
     let total_failed = kernel_summary.failed.saturating_add(utest_summary.failed);
     let total_passed = kernel_summary.passed.saturating_add(utest_summary.passed);
     let total = kernel_summary.total.saturating_add(utest_summary.total);
@@ -116,12 +116,9 @@ define_syscall!(syscall_run_userland_tests (ctx) cap(TestHarness)
     }
     report_reclaim();
 
-    let _ = utest_rc;
-    let _ = kernel_rc;
-
     fn report_reclaim() {
         // Not a kernel `stest!`: the kernel phase runs at drivers/90, before
-        // ext2 is mounted, so the block cache does not exist yet and the
+        // ext4 is mounted, so the block cache does not exist yet and the
         // measurement would pass vacuously against an empty tier.
         let available = slopos_ostd::mm::reclaim::reclaimable_pages();
         let freed = slopos_ostd::mm::reclaim::run(available.min(32));
@@ -141,7 +138,7 @@ define_syscall!(syscall_run_userland_tests (ctx) cap(TestHarness)
         klog_info!("TESTS: Auto shutdown enabled after harness");
         // Not in `qemu_signal_exit`: its port write kills the VM before the
         // `power::shutdown` tail that would flush. Last point with IRQs live.
-        slopos_fs::ext2_vfs_shutdown_sync();
+        slopos_fs::ext4_vfs_shutdown_sync();
         tests_request_shutdown(total_failed as i32);
     }
 

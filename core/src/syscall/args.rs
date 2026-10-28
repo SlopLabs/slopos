@@ -9,8 +9,8 @@ use slopos_abi::Errno;
 use slopos_abi::fs::USER_PATH_MAX;
 use slopos_abi::signal::NSIG;
 use slopos_abi::task::{INVALID_PROCESS_ID, INVALID_TASK_ID};
-use slopos_mm::user_ptr::{UserPtr as MmUserPtr, UserSlice as MmUserSlice};
 use slopos_ostd::mm::heap::KVec;
+use slopos_ostd::user::ptr::{UserPtr as OstdUserPtr, UserSlice as OstdUserSlice};
 
 use crate::syscall::common::syscall_copy_user_str;
 use crate::syscall::context::SyscallContext;
@@ -217,15 +217,15 @@ impl SyscallArg for Signum {
 }
 
 /// Typed user-space pointer argument, one register. [`UserPtr::inner`] yields
-/// the [`slopos_mm::user_ptr::UserPtr<T>`] the user-copy primitives take.
+/// the [`slopos_ostd::user::ptr::UserPtr<T>`] the user-copy primitives take.
 #[derive(Clone, Copy)]
 pub struct UserPtr<T> {
-    inner: MmUserPtr<T>,
+    inner: OstdUserPtr<T>,
 }
 
 impl<T> UserPtr<T> {
     #[inline]
-    pub const fn inner(self) -> MmUserPtr<T> {
+    pub const fn inner(self) -> OstdUserPtr<T> {
         self.inner
     }
     #[inline]
@@ -238,7 +238,7 @@ impl<T> SyscallArg for UserPtr<T> {
     const ARITY: usize = 1;
     #[inline]
     fn from_raw(regs: &[u64], _ctx: &SyscallContext) -> Result<Self, Errno> {
-        match MmUserPtr::<T>::try_new(regs[0]) {
+        match OstdUserPtr::<T>::try_new(regs[0]) {
             Ok(p) => Ok(UserPtr { inner: p }),
             Err(_) => Err(Errno::EFAULT),
         }
@@ -252,7 +252,7 @@ impl<T> SyscallArg for Option<UserPtr<T>> {
         if regs[0] == 0 {
             Ok(None)
         } else {
-            match MmUserPtr::<T>::try_new(regs[0]) {
+            match OstdUserPtr::<T>::try_new(regs[0]) {
                 Ok(p) => Ok(Some(UserPtr { inner: p })),
                 Err(_) => Err(Errno::EFAULT),
             }
@@ -265,12 +265,12 @@ impl<T> SyscallArg for Option<UserPtr<T>> {
 /// base to `None`.
 #[derive(Clone, Copy)]
 pub struct UserSlice<T> {
-    inner: MmUserSlice<T>,
+    inner: OstdUserSlice<T>,
 }
 
 impl<T> UserSlice<T> {
     #[inline]
-    pub const fn inner(&self) -> &MmUserSlice<T> {
+    pub const fn inner(&self) -> &OstdUserSlice<T> {
         &self.inner
     }
     #[inline]
@@ -296,7 +296,7 @@ impl<T> SyscallArg for UserSlice<T> {
     #[inline]
     fn from_raw(regs: &[u64], _ctx: &SyscallContext) -> Result<Self, Errno> {
         let count = regs[1] as usize;
-        MmUserSlice::<T>::try_new(regs[0], count)
+        OstdUserSlice::<T>::try_new(regs[0], count)
             .map(|inner| UserSlice { inner })
             .map_err(|_| Errno::EFAULT)
     }
@@ -330,12 +330,6 @@ impl<const N: usize> UserCStr<N> {
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         &self.buf[..self.len]
-    }
-
-    /// Full buffer, NUL-terminated.
-    #[inline]
-    pub fn as_nul_terminated(&self) -> &[u8] {
-        &self.buf[..]
     }
 
     /// Length of the payload (excluding the trailing NUL).

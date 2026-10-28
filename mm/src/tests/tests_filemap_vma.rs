@@ -20,7 +20,8 @@ use crate::tests::test_fixtures::ProcessVmGuard;
 use crate::vma_region::FileMapRef;
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 
-use crate::paging_defs::PageFlags;
+use crate::user_mappings::is_cow;
+use slopos_ostd::mm::page_property::PageProperty;
 
 const PAGES: u32 = 2;
 const LENGTH: u64 = PAGES as u64 * 4096;
@@ -199,7 +200,7 @@ pub fn test_file_vma_faults_in_and_unmap_releases_without_freeing() -> TestResul
         "a mapped page should hold the set's ref and the PTE's, holds {}",
         refs_mapped
     );
-    assert_test!(rc == 0, "munmap of the file mapping failed: {}", rc);
+    assert_test!(rc.is_ok(), "munmap of the file mapping failed: {:?}", rc);
     assert_test!(
         released == PAGES + 1,
         "munmap released {} page refs, expected {}",
@@ -292,8 +293,8 @@ pub fn test_file_vma_readonly_is_not_armed_and_munmap_drains() -> TestResult {
     drop_pages(pages);
 
     assert_test!(
-        rc == 0,
-        "munmap of the read-only file mapping failed: {}",
+        rc.is_ok(),
+        "munmap of the read-only file mapping failed: {:?}",
         rc
     );
     assert_test!(
@@ -320,9 +321,9 @@ fn packed_handle(vm: &ProcessVmGuard) -> Option<u64> {
     Some(crate::process_vm::pack_process_vm_handle(handle))
 }
 
-fn leaf_flags(vm: &ProcessVmGuard, va: u64) -> Option<PageFlags> {
+fn leaf_property(vm: &ProcessVmGuard, va: u64) -> Option<PageProperty> {
     crate::process_vm::process_vm_with_vm_space(vm.process, |vs| {
-        crate::user_mappings::ostd_get_pte_flags_4kb(vs, VirtAddr::new(va))
+        crate::user_mappings::leaf_property_4kb(vs, VirtAddr::new(va))
     })
     .flatten()
 }
@@ -362,7 +363,7 @@ pub fn test_private_file_vma_reads_share_and_stores_copy() -> TestResult {
     // 0x04: a user read of an absent page.
     let read = vm.handle_file_fault(va, 0x04);
     let read_mapped = vm.virt_to_phys(va);
-    let read_flags = leaf_flags(&vm, va);
+    let read_flags = leaf_property(&vm, va);
     let read_refs = reference_count_at(pages.0);
 
     // 0x07: the store that follows, against the present read-only page.
@@ -388,7 +389,7 @@ pub fn test_private_file_vma_reads_share_and_stores_copy() -> TestResult {
         pages.0.as_u64()
     );
     assert_test!(
-        read_flags.is_some_and(|f| !f.contains(PageFlags::WRITABLE) && f.contains(PageFlags::COW)),
+        read_flags.is_some_and(|f| !f.write && is_cow(&f)),
         "the set's frame is mapped {:?} into a private mapping",
         read_flags
     );
@@ -432,7 +433,11 @@ pub fn test_private_file_vma_reads_share_and_stores_copy() -> TestResult {
         "a private mapping armed the writeback for {} page(s)",
         armed
     );
-    assert_test!(rc == 0, "munmap of the private file mapping failed: {}", rc);
+    assert_test!(
+        rc.is_ok(),
+        "munmap of the private file mapping failed: {:?}",
+        rc
+    );
     pass!()
 }
 
@@ -466,7 +471,7 @@ pub fn test_file_fault_maps_the_resident_pages_around_it() -> TestResult {
         other => other,
     };
     let neighbour = vm.virt_to_phys(va + 4096);
-    let neighbour_flags = leaf_flags(&vm, va + 4096);
+    let neighbour_flags = leaf_property(&vm, va + 4096);
     let neighbour_refs = reference_count_at(pages.1);
     let released = RELEASED.load(Ordering::Relaxed);
     let faulted = FAULTED.load(Ordering::Relaxed);
@@ -486,8 +491,7 @@ pub fn test_file_fault_maps_the_resident_pages_around_it() -> TestResult {
         pages.1.as_u64()
     );
     assert_test!(
-        neighbour_flags
-            .is_some_and(|f| !f.contains(PageFlags::WRITABLE) && f.contains(PageFlags::NO_EXECUTE)),
+        neighbour_flags.is_some_and(|f| !f.write && !f.execute),
         "the neighbour of a read-only mapping is mapped {:?}",
         neighbour_flags
     );
@@ -501,7 +505,7 @@ pub fn test_file_fault_maps_the_resident_pages_around_it() -> TestResult {
         "the fault released {} set references, expected the read's 1",
         released
     );
-    assert_test!(rc == 0, "munmap of the file mapping failed: {}", rc);
+    assert_test!(rc.is_ok(), "munmap of the file mapping failed: {:?}", rc);
     pass!()
 }
 

@@ -1,7 +1,7 @@
-//! Per-inode page sets for file-backed `mmap` (G14).
+//! Per-inode page sets for file-backed `mmap`.
 //!
 //! **A per-inode page set is the authority for the pages it holds populated
-//! while a shared mapping is live.** Nothing here maps an ext2 `BlockCache`
+//! while a shared mapping is live.** Nothing here maps an ext4 `BlockCache`
 //! frame, so the block cache stays the single device-facing cache, at the cost
 //! of one 4 KiB copy per mapped page: a fault reads through
 //! [`FileSystem::read_pages`] straight into the frames it publishes. `read(2)`
@@ -37,7 +37,7 @@
 //! writeback is skipped.
 //!
 //! When an inode's name is removed the VFS flushes its set and unkeys it
-//! ([`detach_inode`]) *before* the removal: ext2 inode numbers carry no
+//! ([`detach_inode`]) *before* the removal: ext4 inode numbers carry no
 //! generation, so unkeying at the one moment the number can be reused is what
 //! stops a reallocated inode resolving to the previous file's pages. A live
 //! mapping keeps the frames it has, its stores stop being written back, and a
@@ -46,10 +46,10 @@
 //! Lock order: a [`FILEMAP_IO`] stripe (sleeping, held across the filesystem
 //! calls for one inode; never two at once) →
 //! [`FILEMAP`] (spinning; a bounded scan, one index rebuild or one page copy) →
-//! `CACHED_EXT2`. Exactly one page is populated per [`FILEMAP`] acquisition and
-//! the read that fills it runs with [`FILEMAP`] dropped. [`release`] is reached
-//! from process teardown under a preempt guard, so it queues and
-//! [`drain_pending`] completes the work.
+//! the mount's `EXT4_POOL_<n>` lock. Exactly one page is populated per
+//! [`FILEMAP`] acquisition and the read that fills it runs with [`FILEMAP`]
+//! dropped. [`release`] is reached from process teardown under a preempt
+//! guard, so it queues and [`drain_pending`] completes the work.
 //!
 //! The inode cap bounds the registry; the page ceiling is derived from usable
 //! physical memory, because a page under a live user PTE is unreclaimable by
@@ -98,8 +98,7 @@ const MAPPED_PAGE_SHARE: u32 = 4;
 /// maps every rlib of the kernel and its own output at once.
 const PRINCIPAL_PAGE_SHARE: u32 = 2;
 
-/// Floor for a machine whose usable memory is not known yet — the 4 MiB this
-/// registry was fixed at before the ceiling was derived.
+/// Floor for a machine whose usable memory is not known yet: 4 MiB.
 const MIN_MAPPED_PAGES: u32 = 1024;
 
 /// Pages one set's index may describe. The index is a single `KVec<PhysAddr>`
@@ -108,7 +107,7 @@ const MIN_MAPPED_PAGES: u32 = 1024;
 const MAX_SET_PAGES: u32 = 65536;
 
 /// Slots one principal may hold. Kernel work (`AccountId::NONE`) is outside
-/// the share, as it is outside ext2's block reserve: it is not a principal.
+/// the share, as it is outside ext4's block reserve: it is not a principal.
 pub(crate) const MAX_INODES_PER_ACCOUNT: usize = MAX_MAPPED_INODES / 4;
 
 /// Derived once from the page allocator, then cached. Zero is "not derived
@@ -513,7 +512,7 @@ pub fn reserve_range(
         return Err(FileMapError::TooManyPages);
     }
     // A set queued by a process that exited has nobody else to complete it on
-    // a boot that runs no ext2 flusher, and the slot it holds would refuse
+    // a boot that runs no ext4 flusher, and the slot it holds would refuse
     // every later mapping.
     drain_pending();
     let io = io_lock(inode)?;

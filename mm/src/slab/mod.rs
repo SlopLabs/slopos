@@ -13,11 +13,12 @@
 //! fast path.
 
 pub mod allocator;
-pub mod compat;
 pub mod large;
 pub mod magazine;
 pub mod page;
 pub mod poison;
+#[cfg(feature = "test-hooks")]
+pub mod raw;
 pub mod stats;
 
 use core::ptr::NonNull;
@@ -27,10 +28,9 @@ use slopos_ostd::lock_class;
 use slopos_ostd::mm::KernelHeapBackend;
 use slopos_ostd::sync::{BspToken, LOCK_LEVEL_ALLOCATOR};
 
-pub use compat::{
-    HeapStats, get_heap_stats_owned, kernel_heap_enable_diagnostics, kfree, kmalloc, kzalloc,
-    print_heap_stats,
-};
+#[cfg(feature = "test-hooks")]
+pub use raw::{kfree, kmalloc};
+pub use stats::HeapStats;
 
 /// Lifecycle of [`KERNEL_SLAB`].
 #[repr(u8)]
@@ -247,20 +247,4 @@ pub fn warmup_for_soft_reboot() {
 /// the SMP per-CPU areas online.
 pub fn enable_heap_caches() {
     HEAP_CACHES_ENABLED.store(true, Ordering::Release);
-}
-
-/// Drain every per-CPU magazine, so a heap reinit cannot hand out stale
-/// per-CPU pointers.
-pub fn drain_all_heap_caches() {
-    if !HEAP_CACHES_ENABLED.load(Ordering::Relaxed) {
-        return;
-    }
-    KERNEL_SLAB.slab16.drain_magazines();
-    KERNEL_SLAB.slab32.drain_magazines();
-    KERNEL_SLAB.slab64.drain_magazines();
-    KERNEL_SLAB.slab128.drain_magazines();
-    KERNEL_SLAB.slab256.drain_magazines();
-    KERNEL_SLAB.slab512.drain_magazines();
-    KERNEL_SLAB.slab1024.drain_magazines();
-    KERNEL_SLAB.slab2048.drain_magazines();
 }

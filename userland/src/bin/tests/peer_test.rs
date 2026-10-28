@@ -528,7 +528,7 @@ fn foreign_code_forfeits_the_program() -> bool {
 /// A ring's `OP_CONNECT` attests the process that submitted it, as the
 /// syscall does, not the kernel that ran it.
 fn ring_connect_attests_its_submitter() -> bool {
-    use slopos_userland::ring::{Ring, slopfut};
+    use slopos_rt::{Ring, slopfut};
     const NAME: &str = "/tmp/peer-e2e-ring";
     let Some(listener) = listen(NAME) else {
         eprintln!("peer_test: could not listen");
@@ -561,7 +561,7 @@ fn ring_connect_attests_its_submitter() -> bool {
 /// A ring's connect that waits for room in a full backlog attests who connects
 /// when it does: the ids change while it waits, within one `ring_enter`.
 fn a_waiting_ring_connect_attests_as_of_its_connect() -> bool {
-    use slopos_userland::ring::{Ring, slopfut};
+    use slopos_rt::{Ring, slopfut};
     const NAME: &str = "/tmp/peer-e2e-ring-wait";
     const BACKLOG: usize = 32;
     let pid = process::fork();

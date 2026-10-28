@@ -3,13 +3,6 @@
 //! Stack layout after exec:
 //!   [argc] [argv0..argvN] [NULL] [env0..envN] [NULL] [auxv entries] [AT_NULL,0]
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct AuxEntry {
-    pub a_type: u64,
-    pub a_val: u64,
-}
-
 // Type numbering follows the ELF spec and the Linux x86-64 ABI.
 
 pub const AT_NULL: u64 = 0;

@@ -1,11 +1,12 @@
 //! User-mode entry / exit primitive.
 //!
 //! [`UserMode::execute`] is the only OSTD-sanctioned way to enter user mode:
-//! it IRETQs to the RIP/RSP encoded in the `UserContext` and returns once user
-//! mode hands control back, with [`ReturnReason`] naming what brought it back.
-//! `__ostd_user_return`, defined here via `global_asm!`, is the trampoline the
-//! IDT routes user→kernel transitions through; it captures the user register
-//! file back into the `UserContext` named by the per-CPU stash.
+//! it IRETQs to the RIP/RSP encoded in the `UserContext` and returns once the
+//! user thread makes a SYSCALL. `__ostd_user_return`, defined here via
+//! `global_asm!`, is the SYSCALL entry point LSTAR holds; it captures the user
+//! register file back into the `UserContext` named by the per-CPU stash.
+//! Exceptions and interrupts taken from user mode go through the IDT and
+//! resume user mode from their own handlers, never through this round trip.
 //!
 //! That stash is supplied by the trusted side via
 //! [`register_user_mode_backend`]; until a backend is registered,
@@ -15,31 +16,12 @@ use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::mm::vm_space::VmSpace;
 use crate::sync::BspToken;
 use crate::user::context::UserContext;
 #[cfg(all(target_arch = "x86_64", not(test)))]
 use crate::user::context::UserRegs;
 
-/// Why the kernel re-took control from a user-mode thread.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReturnReason {
-    /// SYSCALL; the argument is the syscall number loaded into `rax`.
-    Syscall(u64),
-    /// A CPU exception; `fault_addr` is CR2 for `#PF` and 0 otherwise.
-    Exception(ExceptionInfo),
-    /// An external interrupt took control while the user thread was running.
-    Interrupt(u8),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ExceptionInfo {
-    pub vector: u8,
-    pub error_code: u64,
-    pub fault_addr: u64,
-}
-
-/// Borrowed handle paired against a `UserContext` and a `VmSpace`.
+/// Borrowed handle on the `UserContext` a user-mode round trip runs.
 ///
 /// `execute` consumes the wrapper, but `&'a UserContext` is `Copy`, so that
 /// confers no once-only property on the context itself: entry is serialised by
@@ -47,29 +29,28 @@ pub struct ExceptionInfo {
 /// trampoline → return), not by this type.
 pub struct UserMode<'a> {
     ctx: &'a UserContext,
-    space: &'a VmSpace,
 }
 
 impl<'a> UserMode<'a> {
-    pub fn new(ctx: &'a UserContext, space: &'a VmSpace) -> Self {
-        Self { ctx, space }
+    pub fn new(ctx: &'a UserContext) -> Self {
+        Self { ctx }
     }
 
     /// Switch the current CPU into user mode and resume execution at
-    /// `ctx.rip()` with `ctx.rsp()`. Returns once a syscall,
-    /// exception, or external interrupt rejoins the kernel.
+    /// `ctx.rip()` with `ctx.rsp()`. Returns once the user thread makes a
+    /// SYSCALL, with its registers, the number in `rax` among them, in `ctx`.
     ///
     /// SAFETY: Inv. 2 (kernel-mode CPU state) is preserved because
     /// `set_rflags` masked every dangerous flag before the frame was built.
     /// Inv. 5 (user pointers cannot reach kernel memory) is preserved because
     /// the context's `rip` / `rsp` are loaded via IRETQ, which itself enforces
     /// canonicality on 64-bit.
-    pub fn execute(self) -> ReturnReason {
+    pub fn execute(self) {
         let backend = current_user_mode_backend();
         // SAFETY: `self` borrows `ctx` for `'a`, which outlives the
         // round trip; the backend publishes it to the trampoline
         // through its per-CPU slot.
-        unsafe { backend.execute_round_trip(self.ctx, self.space) }
+        unsafe { backend.execute_round_trip(self.ctx) }
     }
 
     pub fn ctx(&self) -> &UserContext {
@@ -77,24 +58,24 @@ impl<'a> UserMode<'a> {
     }
 }
 
-/// Trusted-side hook that drives a single user-mode round trip.
+/// Trusted-side hook that drives a single user-mode round trip in the
+/// address space the CPU already runs.
 ///
 /// An implementation publishes `ctx` in the current CPU's PCR slot for the
-/// `__ostd_user_return` trampoline, activates `space`, saves the kernel
-/// callee-saves, restores the user GPRs from `ctx.regs_ptr()`, and
-/// `swapgs; iretq`s. The publish must be `gs`-relative with interrupts off
-/// until the iretq, so it lands on the CPU that enters user mode. It must
-/// derive the [`ReturnReason`] from the per-task
-/// `UserContext` the trampoline wrote, never from a per-CPU slot, which a
+/// `__ostd_user_return` trampoline, saves the kernel callee-saves, restores
+/// the user GPRs from `ctx.regs_ptr()`, and `swapgs; iretq`s. The publish must
+/// be `gs`-relative with interrupts off until the iretq, so it lands on the
+/// CPU that enters user mode. The user state comes back in the per-task
+/// `UserContext` the trampoline wrote, never in a per-CPU slot, which a
 /// preemption in the trampoline-return tail could misdirect to another CPU.
 ///
 /// # Safety
 ///
-/// `space` must outlive the round trip. The trampoline writes the
-/// final user register state back into `ctx` before this function
-/// returns, through the cell that holds its register file.
+/// The trampoline writes the final user register state back into `ctx`
+/// before this function returns, through the cell that holds its register
+/// file.
 pub unsafe trait UserModeBackend: Send + Sync + 'static {
-    unsafe fn execute_round_trip(&self, ctx: &UserContext, space: &VmSpace) -> ReturnReason;
+    unsafe fn execute_round_trip(&self, ctx: &UserContext);
 }
 
 /// Default backend used until [`register_user_mode_backend`] is
@@ -103,7 +84,7 @@ struct PanicBackend;
 
 // SAFETY: holds no per-CPU state; trivially Send + Sync.
 unsafe impl UserModeBackend for PanicBackend {
-    unsafe fn execute_round_trip(&self, _ctx: &UserContext, _space: &VmSpace) -> ReturnReason {
+    unsafe fn execute_round_trip(&self, _ctx: &UserContext) {
         panic!(
             "slopos_ostd::user::mode::UserMode::execute called before \
              register_user_mode_backend installed a production backend"
@@ -148,10 +129,6 @@ pub fn reset_user_mode_backend_for_test() {
 
 /// Production [`UserModeBackend`] that drives the kernel→user→kernel
 /// round trip via the per-CPU PCR slots.
-///
-/// `_space` is intentionally ignored at this layer: CR3 is owned by
-/// the kernel paging code outside OSTD, so address-space activation
-/// happens before the round trip is dispatched.
 pub struct PcrUserModeBackend;
 
 /// Production backend installed by boot via [`register_user_mode_backend`].
@@ -159,13 +136,13 @@ pub static DEFAULT_USER_MODE_BACKEND: PcrUserModeBackend = PcrUserModeBackend;
 
 // SAFETY: `PcrUserModeBackend` carries no per-instance state. The outbound leg
 // publishes the context and the return snapshot `gs`-relative with interrupts
-// off, so both land in the PCR of the CPU that executes the iretq. The return
-// reason is read from the per-task `UserContext`, which travels with the task,
+// off, so both land in the PCR of the CPU that executes the iretq. The user
+// state comes back in the per-task `UserContext`, which travels with the task,
 // so a preempt-and-migrate in the trampoline's post-`sti` tail cannot
 // misattribute it.
 #[cfg(all(target_arch = "x86_64", not(test)))]
 unsafe impl UserModeBackend for PcrUserModeBackend {
-    unsafe fn execute_round_trip(&self, ctx: &UserContext, _space: &VmSpace) -> ReturnReason {
+    unsafe fn execute_round_trip(&self, ctx: &UserContext) {
         // SAFETY: `ctx` is borrowed for the duration of the round trip, and its
         // register file sits at offset zero, so the pointer the helper
         // publishes is the context the trampoline writes the next user state
@@ -180,13 +157,6 @@ unsafe impl UserModeBackend for PcrUserModeBackend {
             core::ptr::eq(crate::cpu::x86_64::pcr::published_user_ctx(), ctx),
             "user round trip returned with another context published"
         );
-
-        // The only path back here is the SYSCALL trampoline, which saves the
-        // user GPRs into the per-task `UserContext` before returning:
-        // exceptions and interrupts from user mode take the legacy IDT path
-        // and never return through this round trip, so the reason is always a
-        // syscall.
-        ReturnReason::Syscall(ctx.rax())
     }
 }
 
@@ -196,7 +166,7 @@ unsafe impl UserModeBackend for PcrUserModeBackend {
 #[cfg(not(all(target_arch = "x86_64", not(test))))]
 // SAFETY: carries no state; the only operation performed is `unreachable!`.
 unsafe impl UserModeBackend for PcrUserModeBackend {
-    unsafe fn execute_round_trip(&self, _ctx: &UserContext, _space: &VmSpace) -> ReturnReason {
+    unsafe fn execute_round_trip(&self, _ctx: &UserContext) {
         unreachable!(
             "PcrUserModeBackend::execute_round_trip is only callable on \
              x86_64 production builds"
@@ -279,13 +249,12 @@ core::arch::global_asm!(
 
 #[cfg(target_arch = "x86_64")]
 unsafe extern "C" {
-    /// The IDT's user-mode entry target: captures the current user state and
-    /// rejoins [`UserMode::execute`].
+    /// The SYSCALL entry point: captures the current user state and rejoins
+    /// [`UserMode::execute`].
     pub fn __ostd_user_return();
 }
 
-/// Address of the user-return trampoline, read when programming the
-/// user-mode IDT vectors.
+/// Address of the user-return trampoline, which LSTAR holds.
 #[cfg(target_arch = "x86_64")]
 pub fn user_return_trampoline_addr() -> u64 {
     __ostd_user_return as *const () as u64
@@ -412,26 +381,11 @@ mod tests {
     use crate::user::context::{FpuStateRef, UserRegs};
 
     #[test]
-    fn return_reason_variants_distinct() {
-        let s = ReturnReason::Syscall(42);
-        let i = ReturnReason::Interrupt(0xEC);
-        let e = ReturnReason::Exception(ExceptionInfo {
-            vector: 14,
-            error_code: 0x4,
-            fault_addr: 0xdead_beef,
-        });
-        assert_ne!(s, i);
-        assert_ne!(s, e);
-        assert_ne!(i, e);
-    }
-
-    #[test]
     fn user_mode_borrow_shape() {
         let regs = UserRegs::default();
         let ctx = UserContext::new(regs, FpuStateRef::empty());
-        // No `VmSpace` here: constructing one needs the allocator fixture, and
-        // this only asserts `ctx` is usable through a shared borrow.
         ctx.set_rip(0x1000);
-        assert_eq!(ctx.rip(), 0x1000);
+        let mode = UserMode::new(&ctx);
+        assert_eq!(mode.ctx().rip(), 0x1000);
     }
 }

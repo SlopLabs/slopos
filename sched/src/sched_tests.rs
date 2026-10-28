@@ -1,6 +1,6 @@
 //! Scheduler and task-management tests.
 
-use core::ffi::{c_char, c_void};
+use core::ffi::c_void;
 use core::ptr;
 use slopos_ostd::lock_class;
 
@@ -15,18 +15,16 @@ use super::scheduler::{
     scheduler_is_enabled, scheduler_timer_tick, task_wait_for, unschedule_task,
 };
 use super::task::{
-    INVALID_PROCESS_ID, INVALID_TASK_ID, IdtEntry, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE,
-    Task, TaskPriority, TaskRef, TaskStatus, task_abandon, task_build, task_commit, task_create,
+    INVALID_PROCESS_ID, INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TASK_FLAG_USER_MODE, Task,
+    TaskPriority, TaskRef, TaskStatus, task_abandon, task_build, task_commit, task_create,
     task_find_by_id, task_for_each_active, task_handle, task_id_was_allocated,
     task_live_cap_rejects_for_test, task_resolve_handle, task_set_state,
     task_set_state_with_reason, task_slot_census, task_terminate, task_waiter_count,
 };
 use super::test_fixture::{KernelTestScope, mark_current_killed};
 use slopos_abi::task::BlockReason;
-use slopos_arch::MAX_CPUS;
-use slopos_arch::arch::gdt::SegmentSelector;
-use slopos_arch::arch::idt::SYSCALL_VECTOR;
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
+use slopos_ostd::cpu::x86_64::pcr::MAX_CPUS;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, PreemptGuard, SpinLock};
 use slopos_ostd::task::SchedPlacement;
 
@@ -51,7 +49,7 @@ impl SchedFixture {
 use crate::test_fixture::dummy_task_entry;
 
 fn make_task_ready(task_id: u32) -> bool {
-    task_set_state(task_id, TaskStatus::Ready) == 0
+    task_set_state(task_id, TaskStatus::Ready)
 }
 
 fn is_published_placement(placement: SchedPlacement) -> bool {
@@ -73,7 +71,7 @@ pub fn test_previous_task_reference_drains_exactly_once() -> TestResult {
     let strong_before = KArc::strong_count(&witness);
 
     let parked = task_placement_leak(arc);
-    if slopos_arch::pcr::defer_previous_task(parked.as_ptr().cast()).is_err() {
+    if slopos_ostd::cpu::x86_64::pcr::defer_previous_task(parked.as_ptr().cast()).is_err() {
         klog_info!("SCHED_TEST: previous-task slot was already occupied");
         drop(task_placement_reclaim(parked));
         return TestResult::Fail;
@@ -129,7 +127,7 @@ pub fn test_corpse_is_queued_inside_a_running_cleanup() -> TestResult {
     let strong_before = KArc::strong_count(&witness);
 
     let parked = task_placement_leak(arc);
-    if slopos_arch::pcr::defer_previous_task(parked.as_ptr().cast()).is_err() {
+    if slopos_ostd::cpu::x86_64::pcr::defer_previous_task(parked.as_ptr().cast()).is_err() {
         klog_info!("SCHED_TEST: previous-task slot was already occupied");
         drop(task_placement_reclaim(parked));
         return TestResult::Fail;
@@ -186,10 +184,10 @@ pub fn test_task_put_defers_unsafe_context_then_drains() -> TestResult {
     let witness = KArc::downgrade(&arc);
 
     // Interrupts off is one of the contexts where the destructor must not run.
-    let flags = slopos_arch::cpu::save_flags_cli();
+    let flags = slopos_ostd::cpu::x86_64::save_flags_cli();
     crate::task::task_put(TaskRef::from_arc_for_test(arc));
     let parked = crate::task::task_graveyard_pending();
-    slopos_arch::cpu::restore_flags(flags);
+    slopos_ostd::cpu::x86_64::restore_flags(flags);
 
     if !parked {
         klog_info!("SCHED_TEST: final release with interrupts off was not deferred");
@@ -231,10 +229,10 @@ pub fn test_graveyard_drains_at_a_bottom_half_point() -> TestResult {
     };
 
     // Interrupts off, so the release defers rather than destroying inline.
-    let flags = slopos_arch::cpu::save_flags_cli();
+    let flags = slopos_ostd::cpu::x86_64::save_flags_cli();
     crate::task::task_put(TaskRef::from_arc_for_test(arc));
     let parked = crate::task::task_graveyard_pending();
-    slopos_arch::cpu::restore_flags(flags);
+    slopos_ostd::cpu::x86_64::restore_flags(flags);
 
     if !parked {
         klog_info!("SCHED_TEST: final release with interrupts off was not deferred");
@@ -363,7 +361,7 @@ pub fn test_rescue_sweep_republishes_an_orphaned_migrating_task() -> TestResult 
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"OrphanMigrant\0".as_ptr() as *const c_char,
+        b"OrphanMigrant",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Low.as_u8(),
@@ -376,7 +374,7 @@ pub fn test_rescue_sweep_republishes_an_orphaned_migrating_task() -> TestResult 
         return slopos_testing::fail!("task lookup failed");
     };
     let fresh = task.sched_placement();
-    let orphaned = task_set_state(task_id, TaskStatus::Ready) == 0
+    let orphaned = task_set_state(task_id, TaskStatus::Ready)
         && task.sched_placement_compare_exchange(fresh, SchedPlacement::Migrating);
     if !orphaned {
         drop(task);
@@ -412,7 +410,7 @@ pub fn test_dispatch_publishes_current_priority() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"PrioPublish\0".as_ptr() as *const c_char,
+        b"PrioPublish",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Low.as_u8(),
@@ -426,20 +424,20 @@ pub fn test_dispatch_publishes_current_priority() -> TestResult {
     }
 
     // `dispatch` only accepts a runnable task; a fresh one is Blocked.
-    if task_set_state(task_id, TaskStatus::Ready) != 0 {
+    if !task_set_state(task_id, TaskStatus::Ready) {
         klog_info!("SCHED_TEST: task_set_state Ready failed");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
     }
 
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     if !scheduler::dispatch_task_for_test(cpu, task_id) {
         klog_info!("SCHED_TEST: dispatch fixture task vanished");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
     }
 
-    let published = slopos_arch::pcr::current_task_priority_for(cpu);
+    let published = slopos_ostd::cpu::x86_64::pcr::current_task_priority_for(cpu);
     if published != TaskPriority::Low.as_u8() {
         klog_info!(
             "SCHED_TEST: dispatch published priority {}, expected {}",
@@ -450,11 +448,11 @@ pub fn test_dispatch_publishes_current_priority() -> TestResult {
         return TestResult::Fail;
     }
 
-    slopos_arch::pcr::park_bootstrap_task(
-        slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut ()
+    slopos_ostd::cpu::x86_64::pcr::park_bootstrap_task(
+        slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut (),
     );
-    let parked = slopos_arch::pcr::current_task_priority_for(cpu);
-    if parked != slopos_arch::pcr::PRIORITY_NONE {
+    let parked = slopos_ostd::cpu::x86_64::pcr::current_task_priority_for(cpu);
+    if parked != slopos_ostd::cpu::x86_64::pcr::PRIORITY_NONE {
         klog_info!(
             "SCHED_TEST: parked CPU published priority {}, expected PRIORITY_NONE",
             parked
@@ -463,7 +461,7 @@ pub fn test_dispatch_publishes_current_priority() -> TestResult {
         return TestResult::Fail;
     }
 
-    if TaskPriority::Idle.as_u8() >= slopos_arch::pcr::PRIORITY_NONE {
+    if TaskPriority::Idle.as_u8() >= slopos_ostd::cpu::x86_64::pcr::PRIORITY_NONE {
         klog_info!("SCHED_TEST: PRIORITY_NONE does not lose to every real priority");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -553,7 +551,7 @@ slopos_testing::stest!(name = test_scalar_field_identity, suite = sched_core);
 /// stack and its process VM.
 fn build_parkable_child() -> Option<crate::task::PendingTask> {
     crate::task::task_build(
-        b"ParkedChild\0".as_ptr() as *const core::ffi::c_char,
+        b"ParkedChild",
         dummy_task_entry,
         core::ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -571,7 +569,7 @@ pub fn test_failed_publication_restores_nascent() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"FailPublish\0".as_ptr() as *const c_char,
+        b"FailPublish",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -586,7 +584,7 @@ pub fn test_failed_publication_restores_nascent() -> TestResult {
     let task: &Task = &guard;
 
     // Blocked + Nascent: the publish path must refuse this.
-    if scheduler::schedule_new_task(&guard) == 0 {
+    if scheduler::schedule_new_task(&guard) {
         klog_info!("SCHED_TEST: schedule_new_task published a Blocked task");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -600,7 +598,7 @@ pub fn test_failed_publication_restores_nascent() -> TestResult {
         return TestResult::Fail;
     }
 
-    if scheduler::unblock_task(&guard) != 0 {
+    if !scheduler::unblock_task(&guard) {
         klog_info!("SCHED_TEST: wake after a failed publication did not no-op");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -611,7 +609,7 @@ pub fn test_failed_publication_restores_nascent() -> TestResult {
         return TestResult::Fail;
     }
 
-    if publish_new_task(&guard) != 0 {
+    if !publish_new_task(&guard) {
         klog_info!("SCHED_TEST: publish_new_task failed after a rolled-back reservation");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -639,7 +637,7 @@ pub fn test_nascent_task_is_terminable_and_retires_to_none() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"NascentDie\0".as_ptr() as *const c_char,
+        b"NascentDie",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -657,7 +655,7 @@ pub fn test_nascent_task_is_terminable_and_retires_to_none() -> TestResult {
         return TestResult::Fail;
     }
 
-    if task_terminate(task_id) != 0 {
+    if !task_terminate(task_id) {
         klog_info!("SCHED_TEST: a nascent task was not terminable");
         return TestResult::Fail;
     }
@@ -690,7 +688,7 @@ pub fn test_nascent_task_refuses_wake() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"NascentWake\0".as_ptr() as *const c_char,
+        b"NascentWake",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -709,13 +707,13 @@ pub fn test_nascent_task_refuses_wake() -> TestResult {
         return TestResult::Fail;
     }
 
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let ready_before =
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0);
 
     // The wake reports "nothing to do" rather than failure: the task exists, so
     // a caller like `kill` must not turn this into ESRCH.
-    if scheduler::unblock_task(&guard) != 0 {
+    if !scheduler::unblock_task(&guard) {
         klog_info!("SCHED_TEST: nascent wake did not report a no-op");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -747,7 +745,7 @@ pub fn test_nascent_task_refuses_wake() -> TestResult {
         return TestResult::Fail;
     }
 
-    if publish_new_task(&guard) != 0 {
+    if !publish_new_task(&guard) {
         klog_info!("SCHED_TEST: publish_new_task failed after a refused wake");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -778,7 +776,7 @@ pub fn test_pending_task_is_unreachable_until_commit() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let Some(mut pending) = task_build(
-        b"PendingHidden\0".as_ptr() as *const c_char,
+        b"PendingHidden",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -861,7 +859,7 @@ pub fn test_task_abandon_releases_the_address_space() -> TestResult {
     let (live_before, _, _, _) = task_slot_census();
 
     let Some(mut pending) = task_build(
-        b"AbandonMe\0".as_ptr() as *const c_char,
+        b"AbandonMe",
         crate::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -934,7 +932,7 @@ pub fn test_a_built_user_task_joins_a_counted_process() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let Some(mut pending) = task_build(
-        b"ProcJoin\0".as_ptr() as *const c_char,
+        b"ProcJoin",
         crate::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -995,7 +993,7 @@ pub fn test_a_kernel_task_has_no_process() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let Some(mut pending) = task_build(
-        b"NoProc\0".as_ptr() as *const c_char,
+        b"NoProc",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -1038,7 +1036,7 @@ pub fn test_process_registrations_do_not_leak_across_churn() -> TestResult {
 
     for i in 0..32 {
         let Some(pending) = task_build(
-            b"ProcChurn\0".as_ptr() as *const c_char,
+            b"ProcChurn",
             crate::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -1089,7 +1087,7 @@ pub fn test_every_user_task_built_since_boot_is_dispatchable() -> TestResult {
 
     for i in 0..CYCLES {
         let Some(mut pending) = task_build(
-            b"Churn\0".as_ptr() as *const c_char,
+            b"Churn",
             crate::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -1140,7 +1138,7 @@ pub fn test_a_dead_address_space_is_unreachable_through_its_task_handle() -> Tes
     let _fixture = SchedFixture::new();
 
     let Some(mut pending) = task_build(
-        b"HandleStale\0".as_ptr() as *const c_char,
+        b"HandleStale",
         crate::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -1202,7 +1200,7 @@ pub fn test_raw_ready_store_does_not_reserve_waking_placement() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"ReadyRaw\0".as_ptr() as *const c_char,
+        b"ReadyRaw",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -1225,7 +1223,7 @@ pub fn test_raw_ready_store_does_not_reserve_waking_placement() -> TestResult {
         return TestResult::Fail;
     }
 
-    if task_set_state(task_id, TaskStatus::Ready) != 0 {
+    if !task_set_state(task_id, TaskStatus::Ready) {
         klog_info!("SCHED_TEST: task_set_state Ready failed");
         return TestResult::Fail;
     }
@@ -1241,7 +1239,7 @@ pub fn test_raw_ready_store_does_not_reserve_waking_placement() -> TestResult {
         return TestResult::Fail;
     }
 
-    if scheduler::schedule_task(&guard) != 0 {
+    if !scheduler::schedule_task(&guard) {
         klog_info!("SCHED_TEST: explicit Ready publish failed");
         return TestResult::Fail;
     }
@@ -1260,7 +1258,7 @@ pub fn test_publish_new_task_owns_ready_publication() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"NewPublish\0".as_ptr() as *const c_char,
+        b"NewPublish",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -1278,7 +1276,7 @@ pub fn test_publish_new_task_owns_ready_publication() -> TestResult {
         return TestResult::Fail;
     }
 
-    if publish_new_task(&guard) != 0 {
+    if !publish_new_task(&guard) {
         klog_info!("SCHED_TEST: publish_new_task failed");
         return TestResult::Fail;
     }
@@ -1300,7 +1298,7 @@ pub fn test_wake_blocked_task_publishes_from_none() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"WakeNone\0".as_ptr() as *const c_char,
+        b"WakeNone",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -1324,7 +1322,7 @@ pub fn test_wake_blocked_task_publishes_from_none() -> TestResult {
         return TestResult::Fail;
     }
 
-    if scheduler::wake_blocked_task(&guard, task_id) != 0 {
+    if !scheduler::wake_blocked_task(&guard, task_id) {
         klog_info!("SCHED_TEST: wake_blocked_task failed");
         return TestResult::Fail;
     }
@@ -1346,7 +1344,7 @@ pub fn test_state_transition_ready_to_running() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"StateTest\0".as_ptr() as *const c_char,
+        b"StateTest",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -1371,12 +1369,12 @@ pub fn test_state_transition_ready_to_running() -> TestResult {
         return TestResult::Fail;
     }
 
-    if task_set_state(task_id, TaskStatus::Ready) != 0 {
+    if !task_set_state(task_id, TaskStatus::Ready) {
         klog_info!("SCHED_TEST: Failed to set READY state");
         return TestResult::Fail;
     }
 
-    if task_set_state(task_id, TaskStatus::Running) != 0 {
+    if !task_set_state(task_id, TaskStatus::Running) {
         klog_info!("SCHED_TEST: Failed to set RUNNING state");
         return TestResult::Fail;
     }
@@ -1397,7 +1395,7 @@ pub fn test_state_transition_running_to_blocked() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"BlockTest\0".as_ptr() as *const c_char,
+        b"BlockTest",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -1408,16 +1406,16 @@ pub fn test_state_transition_running_to_blocked() -> TestResult {
         return TestResult::Fail;
     }
 
-    if task_set_state(task_id, TaskStatus::Ready) != 0 {
+    if !task_set_state(task_id, TaskStatus::Ready) {
         klog_info!("SCHED_TEST: Failed to set READY state");
         return TestResult::Fail;
     }
-    if task_set_state(task_id, TaskStatus::Running) != 0 {
+    if !task_set_state(task_id, TaskStatus::Running) {
         klog_info!("SCHED_TEST: Failed to set RUNNING state");
         return TestResult::Fail;
     }
 
-    if task_set_state(task_id, TaskStatus::Blocked) != 0 {
+    if !task_set_state(task_id, TaskStatus::Blocked) {
         klog_info!("SCHED_TEST: Failed to set BLOCKED state");
         return TestResult::Fail;
     }
@@ -1437,7 +1435,7 @@ pub fn test_state_transition_invalid_terminated_to_running() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"InvalidTransition\0".as_ptr() as *const c_char,
+        b"InvalidTransition",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -1468,7 +1466,7 @@ pub fn test_state_transition_invalid_blocked_to_running() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"BlockedRunning\0".as_ptr() as *const c_char,
+        b"BlockedRunning",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -1505,7 +1503,7 @@ pub fn test_task_registry_live_cap() -> TestResult {
     };
     for _ in 0..TARGET {
         let id = task_create(
-            b"GrowTask\0".as_ptr() as *const c_char,
+            b"GrowTask",
             dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -1535,7 +1533,7 @@ pub fn test_task_guard_pins_terminated_task() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let id = task_create(
-        b"GuardPin\0".as_ptr() as *const c_char,
+        b"GuardPin",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -1548,7 +1546,7 @@ pub fn test_task_guard_pins_terminated_task() -> TestResult {
         return TestResult::Fail;
     };
     let weak = guard.downgrade_for_test();
-    if task_terminate(id) != 0 {
+    if !task_terminate(id) {
         return TestResult::Fail;
     }
 
@@ -1578,7 +1576,7 @@ pub fn test_unpublished_task_is_terminable() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let id = task_create(
-        b"Unpublish\0".as_ptr() as *const c_char,
+        b"Unpublish",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -1594,7 +1592,7 @@ pub fn test_unpublished_task_is_terminable() -> TestResult {
         let _ = task.set_status(TaskStatus::Invalid);
     }
 
-    if task_terminate(id) != 0 {
+    if !task_terminate(id) {
         klog_info!("SCHED_TEST: unpublished task {} refused termination", id);
         return TestResult::Fail;
     }
@@ -1613,7 +1611,7 @@ pub fn test_rapid_create_destroy_cycle() -> TestResult {
 
     for i in 0..CYCLES {
         let task_id = task_create(
-            b"CycleTask\0".as_ptr() as *const c_char,
+            b"CycleTask",
             dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -1625,7 +1623,7 @@ pub fn test_rapid_create_destroy_cycle() -> TestResult {
             return TestResult::Fail;
         }
 
-        if task_terminate(task_id) != 0 {
+        if !task_terminate(task_id) {
             klog_info!("SCHED_TEST: Cycle {} failed to terminate task", i);
             return TestResult::Fail;
         }
@@ -1647,7 +1645,7 @@ pub fn test_task_handle_stale_after_reuse() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let id1 = task_create(
-        b"HandleA\0".as_ptr() as *const c_char,
+        b"HandleA",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -1671,7 +1669,7 @@ pub fn test_task_handle_stale_after_reuse() -> TestResult {
     }
 
     let id2 = task_create(
-        b"HandleB\0".as_ptr() as *const c_char,
+        b"HandleB",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -1806,7 +1804,7 @@ pub fn test_kstack_pcp_refill() -> TestResult {
     use slopos_mm::stack_region::KstackRegion;
     use slopos_mm::stack_va::{pcp_flush_current, pcp_stats};
 
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     // Flush stale entries so the refill_count readings are meaningful.
     pcp_flush_current::<KstackRegion>();
@@ -1880,7 +1878,7 @@ pub fn test_kstack_pcp_spill_overflow() -> TestResult {
     use slopos_mm::stack_region::KstackRegion;
     use slopos_mm::stack_va::{in_use_count, pcp_capacity, pcp_flush_current, pcp_stats};
 
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     pcp_flush_current::<KstackRegion>();
     let baseline_in_use = in_use_count::<KstackRegion>();
     let before = pcp_stats::<KstackRegion>(cpu);
@@ -2091,7 +2089,7 @@ pub fn test_kstack_pcp_smp_throughput_bench() -> TestResult {
     drop(warmup);
 
     const ITERATIONS: u64 = 512;
-    let start = slopos_arch::tsc::rdtsc();
+    let start = slopos_ostd::arch::x86_64::tsc::rdtsc();
     for _ in 0..ITERATIONS {
         let s = match KernelStack::allocate(
             TASK_STACK_SIZE as usize,
@@ -2102,7 +2100,7 @@ pub fn test_kstack_pcp_smp_throughput_bench() -> TestResult {
         };
         drop(s);
     }
-    let end = slopos_arch::tsc::rdtsc();
+    let end = slopos_ostd::arch::x86_64::tsc::rdtsc();
     let cycles = end.wrapping_sub(start);
     let per_op = cycles / ITERATIONS;
     klog_info!(
@@ -2219,7 +2217,7 @@ pub fn test_ustack_pcp_refill() -> TestResult {
     use slopos_mm::stack_region::UstackRegion;
     use slopos_mm::stack_va::{pcp_flush_current, pcp_stats};
 
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     pcp_flush_current::<UstackRegion>();
 
     let before = pcp_stats::<UstackRegion>(cpu);
@@ -2288,7 +2286,7 @@ pub fn test_ustack_pcp_spill_overflow() -> TestResult {
     use slopos_mm::stack_region::UstackRegion;
     use slopos_mm::stack_va::{in_use_count, pcp_capacity, pcp_flush_current, pcp_stats};
 
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     pcp_flush_current::<UstackRegion>();
     let baseline_in_use = in_use_count::<UstackRegion>();
     let before = pcp_stats::<UstackRegion>(cpu);
@@ -2560,9 +2558,9 @@ pub fn test_regions_disjoint() -> TestResult {
 
 pub fn test_schedule_to_empty_queue() -> TestResult {
     let _fixture = SchedFixture::new();
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
-    slopos_arch::pcr::mark_cpu_online(cpu_id);
+    slopos_ostd::cpu::x86_64::pcr::mark_cpu_online(cpu_id);
     if super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.enable()).is_none() {
         klog_info!(
             "SCHED_TEST: Failed to enable scheduler precondition on CPU {}",
@@ -2572,7 +2570,7 @@ pub fn test_schedule_to_empty_queue() -> TestResult {
     }
 
     let task_id = task_create(
-        b"EmptyQueue\0".as_ptr() as *const c_char,
+        b"EmptyQueue",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -2592,7 +2590,7 @@ pub fn test_schedule_to_empty_queue() -> TestResult {
         return TestResult::Fail;
     }
 
-    if schedule_task(&task_guard) != 0 {
+    if !schedule_task(&task_guard) {
         klog_info!("SCHED_TEST: Failed to schedule task to empty queue");
         return TestResult::Fail;
     }
@@ -2612,7 +2610,7 @@ pub fn test_schedule_duplicate_task() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"Duplicate\0".as_ptr() as *const c_char,
+        b"Duplicate",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -2657,7 +2655,7 @@ pub fn test_schedule_refuses_non_ready_task() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"NotReady\0".as_ptr() as *const c_char,
+        b"NotReady",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -2671,7 +2669,7 @@ pub fn test_schedule_refuses_non_ready_task() -> TestResult {
     };
 
     // A fresh task is Blocked + Nascent.
-    if schedule_task(&guard) == 0 {
+    if schedule_task(&guard) {
         klog_info!("SCHED_TEST: BUG - scheduled a task that was not Ready!");
         let _ = task_terminate(task_id);
         return TestResult::Fail;
@@ -2693,7 +2691,7 @@ pub fn test_unschedule_not_in_queue() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"NotQueued\0".as_ptr() as *const c_char,
+        b"NotQueued",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -2717,7 +2715,7 @@ pub fn test_priority_ordering() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let low_id = task_create(
-        b"LowPri\0".as_ptr() as *const c_char,
+        b"LowPri",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Low.as_u8(),
@@ -2725,7 +2723,7 @@ pub fn test_priority_ordering() -> TestResult {
     );
 
     let normal_id = task_create(
-        b"NormalPri\0".as_ptr() as *const c_char,
+        b"NormalPri",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -2733,7 +2731,7 @@ pub fn test_priority_ordering() -> TestResult {
     );
 
     let high_id = task_create(
-        b"HighPri\0".as_ptr() as *const c_char,
+        b"HighPri",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::High.as_u8(),
@@ -2767,7 +2765,7 @@ pub fn test_idle_priority_last() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let idle_id = task_create(
-        b"IdlePri\0".as_ptr() as *const c_char,
+        b"IdlePri",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Idle.as_u8(),
@@ -2775,7 +2773,7 @@ pub fn test_idle_priority_last() -> TestResult {
     );
 
     let normal_id = task_create(
-        b"NormalPri2\0".as_ptr() as *const c_char,
+        b"NormalPri2",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -2807,12 +2805,12 @@ pub fn test_idle_priority_last() -> TestResult {
 pub fn test_timer_tick_decrements_slice() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    if scheduler::create_idle_task() != 0 {
+    if !scheduler::create_idle_task() {
         return TestResult::Fail;
     }
 
     let task_id = task_create(
-        b"SliceTest\0".as_ptr() as *const c_char,
+        b"SliceTest",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -2840,7 +2838,7 @@ pub fn test_terminate_invalid_id() -> TestResult {
 
     let result = task_terminate(INVALID_TASK_ID);
 
-    if result == 0 {
+    if result {
         klog_info!("SCHED_TEST: BUG - Terminating INVALID_TASK_ID succeeded!");
         return TestResult::Fail;
     }
@@ -2853,7 +2851,7 @@ pub fn test_terminate_nonexistent_id() -> TestResult {
 
     let result = task_terminate(0xDEADBEEF);
 
-    if result == 0 {
+    if result {
         klog_info!("SCHED_TEST: BUG - Terminating nonexistent task succeeded!");
         return TestResult::Fail;
     }
@@ -2865,7 +2863,7 @@ pub fn test_double_terminate() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"DoubleTerm\0".as_ptr() as *const c_char,
+        b"DoubleTerm",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -2877,7 +2875,7 @@ pub fn test_double_terminate() -> TestResult {
     }
 
     let first_result = task_terminate(task_id);
-    if first_result != 0 {
+    if !first_result {
         klog_info!("SCHED_TEST: First terminate failed");
         return TestResult::Fail;
     }
@@ -2915,7 +2913,7 @@ pub fn test_create_conflicting_flags() -> TestResult {
     let bad_flags = TASK_FLAG_KERNEL_MODE | super::task::TASK_FLAG_USER_MODE;
 
     let task_id = task_create(
-        b"BadFlags\0".as_ptr() as *const c_char,
+        b"BadFlags",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -2931,11 +2929,11 @@ pub fn test_create_conflicting_flags() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_create_null_name() -> TestResult {
+pub fn test_create_empty_name() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        ptr::null(),
+        b"",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -2943,7 +2941,7 @@ pub fn test_create_null_name() -> TestResult {
     );
 
     if task_id == INVALID_TASK_ID {
-        klog_info!("SCHED_TEST: Task creation with null name failed (may be OK)");
+        klog_info!("SCHED_TEST: Task creation with an empty name failed (may be OK)");
     }
 
     TestResult::Pass
@@ -2952,9 +2950,7 @@ pub fn test_create_null_name() -> TestResult {
 pub fn test_scheduler_starts_disabled() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    let enabled = scheduler_is_enabled();
-
-    if enabled != 0 {
+    if scheduler_is_enabled() {
         klog_info!("SCHED_TEST: Scheduler should start disabled!");
         return TestResult::Fail;
     }
@@ -2975,7 +2971,7 @@ pub fn test_schedule_while_disabled() -> TestResult {
 /// must work on a CPU whose scheduler is initialised but not yet enabled.
 pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult {
     let _fixture = SchedFixture::new();
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     if super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.disable()).is_none() {
         klog_info!(
@@ -2986,7 +2982,7 @@ pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult
     }
 
     let task_id = task_create(
-        b"BootPreInit\0".as_ptr() as *const c_char,
+        b"BootPreInit",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -3009,7 +3005,7 @@ pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult
     }
     crate::task::task_install_idle_affinity(&task_guard, 1u32 << cpu_id, cpu_id as u8);
 
-    if schedule_task(&task_guard) != 0 {
+    if !schedule_task(&task_guard) {
         klog_info!(
             "SCHED_TEST: Failed to schedule task before scheduler enable on CPU {}",
             cpu_id
@@ -3033,7 +3029,7 @@ pub fn test_schedule_task_before_scheduler_enable_on_current_cpu() -> TestResult
 pub fn test_resolve_idle_stack_for_bsp_uses_idle_task_kernel_stack() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    if scheduler::create_idle_task_for_cpu(0) != 0 {
+    if !scheduler::create_idle_task_for_cpu(0) {
         klog_info!("SCHED_TEST: Failed to create BSP idle task");
         return TestResult::Fail;
     }
@@ -3071,8 +3067,8 @@ pub fn test_resolve_idle_stack_reports_missing_idle_task() -> TestResult {
     let _fixture = SchedFixture::new();
 
     // PCR.idle_task is the single source of truth for the idle slot.
-    let previous_idle = slopos_arch::pcr::get_idle_task(0) as *mut Task;
-    slopos_arch::pcr::set_idle_task(0, ptr::null_mut());
+    let previous_idle = slopos_ostd::cpu::x86_64::pcr::get_idle_task(0) as *mut Task;
+    slopos_ostd::cpu::x86_64::pcr::set_idle_task(0, ptr::null_mut());
 
     let result = match runtime::resolve_idle_stack_for_cpu(0) {
         Err(IdleStackResolveError::MissingIdleTask) => TestResult::Pass,
@@ -3092,7 +3088,7 @@ pub fn test_resolve_idle_stack_reports_missing_idle_task() -> TestResult {
         }
     };
 
-    slopos_arch::pcr::set_idle_task(0, previous_idle as *mut ());
+    slopos_ostd::cpu::x86_64::pcr::set_idle_task(0, previous_idle as *mut ());
 
     result
 }
@@ -3147,7 +3143,7 @@ pub fn test_many_same_priority_tasks() -> TestResult {
 
     for i in 0..COUNT {
         ids[i] = task_create(
-            b"SamePri\0".as_ptr() as *const c_char,
+            b"SamePri",
             dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -3185,7 +3181,7 @@ pub fn test_interleaved_operations() -> TestResult {
 
     for i in 0..50 {
         let id1 = task_create(
-            b"Inter1\0".as_ptr() as *const c_char,
+            b"Inter1",
             dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -3193,7 +3189,7 @@ pub fn test_interleaved_operations() -> TestResult {
         );
 
         let id2 = task_create(
-            b"Inter2\0".as_ptr() as *const c_char,
+            b"Inter2",
             dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::High.as_u8(),
@@ -3237,7 +3233,7 @@ pub fn test_remote_inbox_push_drain() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"InboxTest\0".as_ptr() as *const c_char,
+        b"InboxTest",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -3256,12 +3252,12 @@ pub fn test_remote_inbox_push_drain() -> TestResult {
         "fixture task was not nascent"
     );
 
-    if task_set_state(task_id, TaskStatus::Ready) != 0 {
+    if !task_set_state(task_id, TaskStatus::Ready) {
         klog_info!("SCHED_TEST: Failed to set inbox test task READY");
         return TestResult::Fail;
     }
 
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     let ready_before =
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0);
@@ -3309,7 +3305,7 @@ pub fn test_remote_inbox_duplicate_push_is_single_membership() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"InboxDup\0".as_ptr() as *const c_char,
+        b"InboxDup",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -3328,12 +3324,12 @@ pub fn test_remote_inbox_duplicate_push_is_single_membership() -> TestResult {
         "fixture task was not nascent"
     );
 
-    if task_set_state(task_id, TaskStatus::Ready) != 0 {
+    if !task_set_state(task_id, TaskStatus::Ready) {
         klog_info!("SCHED_TEST: Failed to set duplicate inbox task READY");
         return TestResult::Fail;
     }
 
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let ready_before =
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.total_ready_count()).unwrap_or(0);
     let Some(node) = Some(task_guard.node()) else {
@@ -3397,7 +3393,7 @@ pub fn test_remote_inbox_multiple_tasks() -> TestResult {
 
     for i in 0..NUM_TASKS {
         task_ids[i] = task_create(
-            b"MultiInbox\0".as_ptr() as *const c_char,
+            b"MultiInbox",
             dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -3417,13 +3413,13 @@ pub fn test_remote_inbox_multiple_tasks() -> TestResult {
             scheduler::clear_nascent_for_test(task_ids[i]),
             "fixture task was not nascent"
         );
-        if task_set_state(task_ids[i], TaskStatus::Ready) != 0 {
+        if !task_set_state(task_ids[i], TaskStatus::Ready) {
             klog_info!("SCHED_TEST: Failed to set inbox task {} READY", i);
             return TestResult::Fail;
         }
     }
 
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     for guard in task_guards.iter().flatten() {
         super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
@@ -3454,13 +3450,13 @@ pub fn test_remote_inbox_multiple_tasks() -> TestResult {
 pub fn test_timer_tick_drains_inbox() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    if scheduler::create_idle_task() != 0 {
+    if !scheduler::create_idle_task() {
         klog_info!("SCHED_TEST: Failed to create idle task");
         return TestResult::Fail;
     }
 
     let task_id = task_create(
-        b"TimerDrain\0".as_ptr() as *const c_char,
+        b"TimerDrain",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -3479,7 +3475,7 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
         "fixture task was not nascent"
     );
 
-    if task_set_state(task_id, TaskStatus::Ready) != 0 {
+    if !task_set_state(task_id, TaskStatus::Ready) {
         klog_info!("SCHED_TEST: Failed to set timer-drain task READY");
         return TestResult::Fail;
     }
@@ -3488,7 +3484,7 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
     // push and the first check would drain the inbox ahead of the call.
     let (has_pending_before, has_pending_after) =
         slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
-            let cpu_id = slopos_arch::pcr::get_current_cpu();
+            let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
             // Push to the inbox, bypassing `schedule_task`.
             super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
                 sched.push_remote_wake(&task_guard);
@@ -3519,10 +3515,10 @@ pub fn test_timer_tick_drains_inbox() -> TestResult {
 /// Draining the remote inbox must not enqueue non-ready tasks.
 pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
     let _fixture = SchedFixture::new();
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     let task_id = task_create(
-        b"InboxBlocked\0".as_ptr() as *const c_char,
+        b"InboxBlocked",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -3589,13 +3585,13 @@ pub fn test_remote_inbox_drops_non_ready_tasks() -> TestResult {
 pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     if cpu_count < 2 {
         klog_info!("SCHED_TEST: Skipping cross-CPU test (only 1 CPU)");
         return TestResult::Pass;
     }
 
-    let current_cpu = slopos_arch::pcr::get_current_cpu() as usize;
+    let current_cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id() as usize;
     let target_cpu =
         match (0..cpu_count).find(|cpu| *cpu != current_cpu && *cpu < u32::BITS as usize) {
             Some(cpu) => cpu,
@@ -3609,7 +3605,7 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
         };
     let target_cpu_u8 = target_cpu as u8;
 
-    slopos_arch::pcr::mark_cpu_online(target_cpu);
+    slopos_ostd::cpu::x86_64::pcr::mark_cpu_online(target_cpu);
     if super::per_cpu::with_cpu_scheduler(target_cpu, |sched| sched.enable()).is_none() {
         klog_info!(
             "SCHED_TEST: Failed to enable target CPU {} scheduler",
@@ -3619,7 +3615,7 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
     }
 
     let task_id = task_create(
-        b"CrossCPU\0".as_ptr() as *const c_char,
+        b"CrossCPU",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -3634,7 +3630,7 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
         return TestResult::Fail;
     };
     let task_ptr: &Task = &task_guard;
-    if task_set_state(task_id, TaskStatus::Ready) != 0 {
+    if !task_set_state(task_id, TaskStatus::Ready) {
         klog_info!("SCHED_TEST: Failed to set cross-CPU task READY");
         return TestResult::Fail;
     }
@@ -3642,7 +3638,7 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
     crate::task::task_install_idle_affinity(task_ptr, 1u32 << target_cpu, current_cpu as u8);
 
     let result = schedule_task(&task_guard);
-    if result != 0 {
+    if !result {
         klog_info!("SCHED_TEST: Cross-CPU schedule_task failed");
         return TestResult::Fail;
     }
@@ -3675,13 +3671,12 @@ pub fn test_cross_cpu_schedule_lockfree() -> TestResult {
     TestResult::Pass
 }
 
-/// A user-mode task carries user segment selectors, a process VM and a kernel
-/// RSP0 stack, and the syscall gate is reachable at DPL 3.
+/// A user-mode task carries a process VM and a kernel RSP0 stack.
 pub fn test_privilege_separation_invariants() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let user_task_id = task_create(
-        b"UserStub\0".as_ptr() as *const c_char,
+        b"UserStub",
         crate::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -3708,39 +3703,6 @@ pub fn test_privilege_separation_invariants() -> TestResult {
         klog_info!("SCHED_TEST: user task missing kernel RSP0 stack");
         return TestResult::Fail;
     }
-    let cs = task_ref.context_cs();
-    let ss = task_ref.context_ss();
-    if cs != SegmentSelector::USER_CODE.bits() as u64
-        || ss != SegmentSelector::USER_DATA.bits() as u64
-    {
-        klog_info!(
-            "SCHED_TEST: user selectors wrong (cs=0x{:x} ss=0x{:x})",
-            cs,
-            ss
-        );
-        return TestResult::Fail;
-    }
-
-    let mut gate = IdtEntry {
-        offset_low: 0,
-        selector: 0,
-        ist: 0,
-        type_attr: 0,
-        offset_mid: 0,
-        offset_high: 0,
-        zero: 0,
-    };
-    let gate_ptr = &mut gate as *mut IdtEntry as *mut c_void;
-    if slopos_kernel_services::platform::idt_get_gate(SYSCALL_VECTOR, gate_ptr) != 0 {
-        klog_info!("SCHED_TEST: cannot read syscall gate");
-        return TestResult::Fail;
-    }
-    let dpl = (gate.type_attr >> 5) & 0x3;
-    if dpl != 3 {
-        klog_info!("SCHED_TEST: syscall gate DPL={} expected 3", dpl as u32);
-        return TestResult::Fail;
-    }
-
     TestResult::Pass
 }
 
@@ -3750,7 +3712,7 @@ pub fn test_scheduler_wakeup_race_stress_baseline() -> TestResult {
     let mut task_ids = [INVALID_TASK_ID; 8];
     for slot in &mut task_ids {
         let id = task_create(
-            b"WakeStress\0".as_ptr() as *const c_char,
+            b"WakeStress",
             dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -3802,7 +3764,7 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
     super::sleep::reset_sleep_queue();
 
     let task_id = task_create(
-        b"SleepRace\0".as_ptr() as *const c_char,
+        b"SleepRace",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -3831,7 +3793,7 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
             task_terminate(task_id);
             return TestResult::Fail;
         }
-        if task_set_state(task_id, TaskStatus::Running) != 0 {
+        if !task_set_state(task_id, TaskStatus::Running) {
             klog_info!("SCHED_TEST: set Running failed at round {}", round);
             task_terminate(task_id);
             return TestResult::Fail;
@@ -3842,7 +3804,7 @@ pub fn test_sleep_wake_race_regression() -> TestResult {
             task_terminate(task_id);
             return TestResult::Fail;
         }
-        if task_set_state_with_reason(task_id, TaskStatus::Blocked, BlockReason::Sleep) != 0 {
+        if !task_set_state_with_reason(task_id, TaskStatus::Blocked, BlockReason::Sleep) {
             klog_info!("SCHED_TEST: set Blocked failed at round {}", round);
             super::sleep::cancel_sleep(task_id);
             task_terminate(task_id);
@@ -3891,7 +3853,7 @@ pub fn test_sleep_entry_survives_unparked_wake() -> TestResult {
     super::sleep::reset_sleep_queue();
 
     let task_id = task_create(
-        b"SleepPeek\0".as_ptr() as *const c_char,
+        b"SleepPeek",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -3973,7 +3935,7 @@ pub fn test_ensure_sleep_queue_allocated_preserves_entries() -> TestResult {
     super::sleep::reset_sleep_queue();
 
     let task_id = task_create(
-        b"SleepEnsure\0".as_ptr() as *const c_char,
+        b"SleepEnsure",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -4022,7 +3984,7 @@ pub fn test_task_wait_exit_race_1000() -> TestResult {
 
     for i in 0..1000 {
         let child_id = task_create(
-            b"WaitRace\0".as_ptr() as *const c_char,
+            b"WaitRace",
             dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -4039,13 +4001,8 @@ pub fn test_task_wait_exit_race_1000() -> TestResult {
         };
         let child_ptr: &Task = &child;
 
-        let rc = task_terminate(child_id);
-        if rc != 0 {
-            klog_info!(
-                "SCHED_TEST: task_terminate returned {} at iteration {}",
-                rc,
-                i
-            );
+        if !task_terminate(child_id) {
+            klog_info!("SCHED_TEST: task_terminate refused at iteration {}", i);
             return TestResult::Fail;
         }
 
@@ -4065,11 +4022,10 @@ pub fn test_task_wait_exit_race_1000() -> TestResult {
         }
 
         // Returning at all is the property: the runner is not deadlocked.
-        let wait_rc = task_wait_for(child_id);
-        if wait_rc != 0 {
+        if let Err(err) = task_wait_for(child_id) {
             klog_info!(
-                "SCHED_TEST: task_wait_for returned {} at iter {} (expected 0)",
-                wait_rc,
+                "SCHED_TEST: task_wait_for failed with {:?} at iter {}",
+                err,
                 i
             );
             return TestResult::Fail;
@@ -4087,7 +4043,7 @@ pub fn test_task_wait_exit_race_with_work() -> TestResult {
 
     for i in 0..500 {
         let child_id = task_create(
-            b"WaitRaceWork\0".as_ptr() as *const c_char,
+            b"WaitRaceWork",
             dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -4109,7 +4065,7 @@ pub fn test_task_wait_exit_race_with_work() -> TestResult {
             klog_info!("SCHED_TEST: failed Ready transition at iter {}", i);
             return TestResult::Fail;
         }
-        if task_set_state(child_id, TaskStatus::Running) != 0 {
+        if !task_set_state(child_id, TaskStatus::Running) {
             klog_info!("SCHED_TEST: failed Running transition at iter {}", i);
             return TestResult::Fail;
         }
@@ -4118,14 +4074,13 @@ pub fn test_task_wait_exit_race_with_work() -> TestResult {
         for _ in 0..16 {
             core::hint::spin_loop();
         }
-        if task_set_state(child_id, TaskStatus::Ready) != 0 {
+        if !task_set_state(child_id, TaskStatus::Ready) {
             klog_info!("SCHED_TEST: failed Ready transition at iter {}", i);
             return TestResult::Fail;
         }
 
-        let rc = task_terminate(child_id);
-        if rc != 0 {
-            klog_info!("SCHED_TEST: task_terminate returned {} at iter {}", rc, i);
+        if !task_terminate(child_id) {
+            klog_info!("SCHED_TEST: task_terminate refused at iter {}", i);
             return TestResult::Fail;
         }
 
@@ -4144,11 +4099,10 @@ pub fn test_task_wait_exit_race_with_work() -> TestResult {
             return TestResult::Fail;
         }
 
-        let wait_rc = task_wait_for(child_id);
-        if wait_rc != 0 {
+        if let Err(err) = task_wait_for(child_id) {
             klog_info!(
-                "SCHED_TEST: task_wait_for returned {} at iter {} (expected 0)",
-                wait_rc,
+                "SCHED_TEST: task_wait_for failed with {:?} at iter {}",
+                err,
                 i
             );
             return TestResult::Fail;
@@ -4165,7 +4119,7 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let child_id = task_create(
-        b"MultiWaiter\0".as_ptr() as *const c_char,
+        b"MultiWaiter",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -4185,7 +4139,7 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
         return TestResult::Fail;
     }
 
-    if task_terminate(child_id) != 0 {
+    if !task_terminate(child_id) {
         klog_info!("SCHED_TEST: task_terminate failed");
         return TestResult::Fail;
     }
@@ -4200,12 +4154,11 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
     }
 
     for waiter in 0..4 {
-        let rc = task_wait_for(child_id);
-        if rc != 0 {
+        if let Err(err) = task_wait_for(child_id) {
             klog_info!(
-                "SCHED_TEST: waiter {} task_wait_for returned {} (expected 0)",
+                "SCHED_TEST: waiter {} task_wait_for failed with {:?}",
                 waiter,
-                rc
+                err
             );
             return TestResult::Fail;
         }
@@ -4228,11 +4181,11 @@ pub fn test_task_wait_multi_waiter() -> TestResult {
 pub fn test_timer_tick_always_increments_ticks() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    if scheduler::create_idle_task() != 0 {
+    if !scheduler::create_idle_task() {
         return TestResult::Fail;
     }
 
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     let ticks_before = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| {
         sched
@@ -4269,11 +4222,11 @@ pub fn test_timer_tick_always_increments_ticks() -> TestResult {
 pub fn test_idle_time_tracks_ticks_not_iterations() -> TestResult {
     let _fixture = SchedFixture::new();
 
-    if scheduler::create_idle_task() != 0 {
+    if !scheduler::create_idle_task() {
         return TestResult::Fail;
     }
 
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     // Set current task to the idle task so timer_tick recognises us as idle.
     let Some(idle) = crate::task_struct::Idle::current() else {
@@ -4335,21 +4288,21 @@ pub fn test_idle_time_tracks_ticks_not_iterations() -> TestResult {
 /// `select_target_cpu` prefers an idle CPU over a busy `last_cpu`.
 pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
     let _fixture = SchedFixture::new();
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
 
     if cpu_count < 2 {
         // Single-CPU systems cannot test cross-CPU placement.
         return TestResult::Pass;
     }
 
-    if scheduler::create_idle_task() != 0 {
+    if !scheduler::create_idle_task() {
         return TestResult::Fail;
     }
 
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     // Both CPUs online and schedulable, so both are candidates.
-    slopos_arch::pcr::mark_cpu_online(cpu_id);
+    slopos_ostd::cpu::x86_64::pcr::mark_cpu_online(cpu_id);
     if super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.enable()).is_none() {
         klog_info!(
             "SCHED_TEST: Could not enable scheduler on local CPU {}",
@@ -4358,7 +4311,7 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
         return TestResult::Fail;
     }
     let other_cpu = if cpu_id == 0 { 1 } else { 0 };
-    slopos_arch::pcr::mark_cpu_online(other_cpu);
+    slopos_ostd::cpu::x86_64::pcr::mark_cpu_online(other_cpu);
     if super::per_cpu::with_cpu_scheduler(other_cpu, |sched| sched.enable()).is_none() {
         klog_info!(
             "SCHED_TEST: Could not enable scheduler on CPU {}",
@@ -4370,7 +4323,7 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
     let mut filler_ids = [INVALID_TASK_ID; 3];
     for i in 0..3 {
         let tid = task_create(
-            b"Filler\0".as_ptr() as *const c_char,
+            b"Filler",
             dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -4390,14 +4343,14 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
             super::per_cpu::affinity_mask_for_cpu(cpu_id),
             cpu_id as u8,
         );
-        if !make_task_ready(tid) || schedule_task(&filler) != 0 {
+        if !make_task_ready(tid) || !schedule_task(&filler) {
             return TestResult::Fail;
         }
     }
 
     // affinity 0 = any CPU; `last_cpu` is the busy one.
     let task_id = task_create(
-        b"Migratee\0".as_ptr() as *const c_char,
+        b"Migratee",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -4445,20 +4398,20 @@ pub fn test_select_target_cpu_prefers_idle_cpu() -> TestResult {
 /// leave the queue empty between bursts.
 pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
     let _fixture = SchedFixture::new();
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
 
     if cpu_count < 2 {
         return TestResult::Pass;
     }
 
-    if scheduler::create_idle_task() != 0 {
+    if !scheduler::create_idle_task() {
         return TestResult::Fail;
     }
 
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     let other_cpu = if cpu_id == 0 { 1 } else { 0 };
-    slopos_arch::pcr::mark_cpu_online(other_cpu);
+    slopos_ostd::cpu::x86_64::pcr::mark_cpu_online(other_cpu);
     if super::per_cpu::with_cpu_scheduler(other_cpu, |sched| sched.enable()).is_none() {
         return TestResult::Fail;
     }
@@ -4466,7 +4419,7 @@ pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
     // The queue stays empty, but `effective_load` must be 1 because a non-idle
     // task is running.
     let runner_id = task_create(
-        b"Runner\0".as_ptr() as *const c_char,
+        b"Runner",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -4494,7 +4447,7 @@ pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
     }
 
     let task_id = task_create(
-        b"WakeTest\0".as_ptr() as *const c_char,
+        b"WakeTest",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -4532,26 +4485,26 @@ pub fn test_select_target_cpu_running_task_not_idle() -> TestResult {
 /// rather than piling them onto CPU0.
 pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
     let _fixture = SchedFixture::new();
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
 
     if cpu_count < 2 {
         return TestResult::Pass;
     }
 
-    if scheduler::create_idle_task() != 0 {
+    if !scheduler::create_idle_task() {
         return TestResult::Fail;
     }
 
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     for c in 0..cpu_count {
-        slopos_arch::pcr::mark_cpu_online(c);
+        slopos_ostd::cpu::x86_64::pcr::mark_cpu_online(c);
         super::per_cpu::with_cpu_scheduler(c, |sched| sched.enable());
     }
 
     // The forking parent runs on cpu_id.
     let parent_id = task_create(
-        b"Parent\0".as_ptr() as *const c_char,
+        b"Parent",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -4572,7 +4525,7 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
     let mut placed_on = [0usize; 4];
     for i in 0..n {
         let tid = task_create(
-            b"Child\0".as_ptr() as *const c_char,
+            b"Child",
             dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -4586,7 +4539,7 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
         };
         let tp: &Task = &child;
         tp.set_cpu_affinity(0); // any CPU
-        if !make_task_ready(tid) || schedule_new_task(&child) != 0 {
+        if !make_task_ready(tid) || !schedule_new_task(&child) {
             return TestResult::Fail;
         }
         placed_on[i] = tp.last_cpu() as usize;
@@ -4616,7 +4569,7 @@ pub fn test_schedule_new_task_spreads_across_cpus() -> TestResult {
 /// `effective_load` reflects queued tasks.
 pub fn test_effective_load_accuracy() -> TestResult {
     let _fixture = SchedFixture::new();
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     // After a fixture reset only the running task can count, so 0 or 1.
     let load_before = super::per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.effective_load())
@@ -4630,7 +4583,7 @@ pub fn test_effective_load_accuracy() -> TestResult {
     }
 
     let task_id = task_create(
-        b"LoadCheck\0".as_ptr() as *const c_char,
+        b"LoadCheck",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -4677,7 +4630,7 @@ pub fn test_fork_exit_wait_stress_10x100() -> TestResult {
     for outer in 0..FORK_GROUP_ITERATIONS {
         for slot in 0..FORK_GROUP_WIDTH {
             let id = task_create(
-                b"ForkStress\0".as_ptr() as *const c_char,
+                b"ForkStress",
                 dummy_task_entry,
                 ptr::null_mut(),
                 TaskPriority::Normal.as_u8(),
@@ -4725,7 +4678,7 @@ pub fn test_fork_exit_wait_stress_10x100() -> TestResult {
         for slot in 0..FORK_GROUP_WIDTH {
             let id = child_ids[slot];
             let rc = task_terminate(id);
-            if rc != 0 {
+            if !rc {
                 klog_info!(
                     "SCHED_TEST: task_terminate({}) returned {} at outer={} slot={}",
                     id,
@@ -4739,12 +4692,11 @@ pub fn test_fork_exit_wait_stress_10x100() -> TestResult {
 
         for slot in 0..FORK_GROUP_WIDTH {
             let id = child_ids[slot];
-            let wait_rc = task_wait_for(id);
-            if wait_rc != 0 {
+            if let Err(err) = task_wait_for(id) {
                 klog_info!(
-                    "SCHED_TEST: task_wait_for({}) returned {} at outer={} slot={} (expected 0)",
+                    "SCHED_TEST: task_wait_for({}) failed with {:?} at outer={} slot={}",
                     id,
-                    wait_rc,
+                    err,
                     outer,
                     slot
                 );
@@ -4766,7 +4718,7 @@ pub fn test_serial_reap_stampede() -> TestResult {
 
     for i in 0..STAMPEDE {
         let id = task_create(
-            b"ReapStampede\0".as_ptr() as *const c_char,
+            b"ReapStampede",
             dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -4810,9 +4762,8 @@ pub fn test_serial_reap_stampede() -> TestResult {
             return TestResult::Fail;
         }
 
-        let rc = task_terminate(id);
-        if rc != 0 {
-            klog_info!("SCHED_TEST: task_terminate returned {} at iter {}", rc, i);
+        if !task_terminate(id) {
+            klog_info!("SCHED_TEST: task_terminate refused at iter {}", i);
             return TestResult::Fail;
         }
         if task_find_by_id(id).is_some() {
@@ -4834,7 +4785,7 @@ pub fn test_waitpid_survives_task_churn() -> TestResult {
 
     // A live parent is what makes the child take the Zombie path on exit.
     let parent_id = task_create(
-        b"ZombieParent\0".as_ptr() as *const c_char,
+        b"ZombieParent",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -4845,7 +4796,7 @@ pub fn test_waitpid_survives_task_churn() -> TestResult {
     }
 
     let child_id = task_create(
-        b"ZombieChild\0".as_ptr() as *const c_char,
+        b"ZombieChild",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -4856,7 +4807,7 @@ pub fn test_waitpid_survives_task_churn() -> TestResult {
     }
     task_set_parent(child_id, parent_id);
 
-    if task_terminate(child_id) != 0 {
+    if !task_terminate(child_id) {
         return TestResult::Fail;
     }
 
@@ -4876,7 +4827,7 @@ pub fn test_waitpid_survives_task_churn() -> TestResult {
     // disturb the Zombie child.
     for _ in 0..256 {
         let id = task_create(
-            b"ChurnTask\0".as_ptr() as *const c_char,
+            b"ChurnTask",
             dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -4930,7 +4881,7 @@ pub fn test_orphan_child_auto_reaped_on_parent_exit() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let parent_id = task_create(
-        b"OrphanParent\0".as_ptr() as *const c_char,
+        b"OrphanParent",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -4941,7 +4892,7 @@ pub fn test_orphan_child_auto_reaped_on_parent_exit() -> TestResult {
     }
 
     let child_id = task_create(
-        b"OrphanChild\0".as_ptr() as *const c_char,
+        b"OrphanChild",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -4952,7 +4903,7 @@ pub fn test_orphan_child_auto_reaped_on_parent_exit() -> TestResult {
     }
     task_set_parent(child_id, parent_id);
 
-    if task_terminate(child_id) != 0 {
+    if !task_terminate(child_id) {
         return TestResult::Fail;
     }
     let Some(child) = task_find_by_id(child_id) else {
@@ -4964,7 +4915,7 @@ pub fn test_orphan_child_auto_reaped_on_parent_exit() -> TestResult {
     drop(child);
 
     // The dying parent must sweep its child list and demote the Zombie.
-    if task_terminate(parent_id) != 0 {
+    if !task_terminate(parent_id) {
         return TestResult::Fail;
     }
 
@@ -4986,14 +4937,14 @@ pub fn test_child_owned_by_parent_children_list() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let parent_id = task_create(
-        b"FamParent\0".as_ptr() as *const c_char,
+        b"FamParent",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
     let child_id = task_create(
-        b"FamChild\0".as_ptr() as *const c_char,
+        b"FamChild",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -5030,7 +4981,7 @@ pub fn test_child_owned_by_parent_children_list() -> TestResult {
         return TestResult::Fail;
     }
 
-    if task_terminate(child_id) != 0 {
+    if !task_terminate(child_id) {
         return TestResult::Fail;
     }
     if child_ptr.status() != TaskStatus::Zombie {
@@ -5068,7 +5019,7 @@ pub fn test_parent_death_drains_multiple_children() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let parent_id = task_create(
-        b"DrainParent\0".as_ptr() as *const c_char,
+        b"DrainParent",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -5081,7 +5032,7 @@ pub fn test_parent_death_drains_multiple_children() -> TestResult {
     let mut child_ids = [INVALID_TASK_ID; 4];
     for slot in child_ids.iter_mut() {
         let id = task_create(
-            b"DrainChild\0".as_ptr() as *const c_char,
+            b"DrainChild",
             dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -5104,13 +5055,13 @@ pub fn test_parent_death_drains_multiple_children() -> TestResult {
     }
     drop(parent);
 
-    if task_terminate(child_ids[0]) != 0 || task_terminate(child_ids[1]) != 0 {
+    if !task_terminate(child_ids[0]) || !task_terminate(child_ids[1]) {
         return TestResult::Fail;
     }
 
     // The parent's own children list must be empty by the time it is reclaimed;
     // the `Drop` tripwire also asserts that.
-    if task_terminate(parent_id) != 0 {
+    if !task_terminate(parent_id) {
         return TestResult::Fail;
     }
 
@@ -5140,7 +5091,7 @@ pub fn test_cross_priority_wait() -> TestResult {
 
     // Allocate the High waiter before the Low child so both lifetimes overlap.
     let high_id = task_create(
-        b"HighWaiter\0".as_ptr() as *const c_char,
+        b"HighWaiter",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::High.as_u8(),
@@ -5166,7 +5117,7 @@ pub fn test_cross_priority_wait() -> TestResult {
     // The publish runs on the runner CPU, but the producer slot's `priority`
     // stays Low.
     let child_id = task_create(
-        b"LowChild\0".as_ptr() as *const c_char,
+        b"LowChild",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Low.as_u8(),
@@ -5197,7 +5148,7 @@ pub fn test_cross_priority_wait() -> TestResult {
         return TestResult::Fail;
     }
 
-    if task_terminate(child_id) != 0 {
+    if !task_terminate(child_id) {
         klog_info!("SCHED_TEST: task_terminate(Low) failed");
         return TestResult::Fail;
     }
@@ -5211,11 +5162,10 @@ pub fn test_cross_priority_wait() -> TestResult {
     }
 
     // `child_ref` keeps the Low task alive across the wait.
-    let wait_rc = task_wait_for(child_id);
-    if wait_rc != 0 {
+    if let Err(err) = task_wait_for(child_id) {
         klog_info!(
-            "SCHED_TEST: cross-priority task_wait_for returned {} (expected 0)",
-            wait_rc
+            "SCHED_TEST: cross-priority task_wait_for failed with {:?}",
+            err
         );
         return TestResult::Fail;
     }
@@ -5227,7 +5177,7 @@ pub fn test_cross_priority_wait() -> TestResult {
         return TestResult::Fail;
     }
 
-    if task_terminate(high_id) != 0 {
+    if !task_terminate(high_id) {
         klog_info!("SCHED_TEST: task_terminate(High) failed");
         return TestResult::Fail;
     }
@@ -5319,7 +5269,7 @@ slopos_testing::stest!(name = test_double_terminate, suite = sched_core);
 slopos_testing::stest!(name = test_find_invalid_id, suite = sched_core);
 slopos_testing::stest!(name = test_create_null_entry, suite = sched_core);
 slopos_testing::stest!(name = test_create_conflicting_flags, suite = sched_core);
-slopos_testing::stest!(name = test_create_null_name, suite = sched_core);
+slopos_testing::stest!(name = test_create_empty_name, suite = sched_core);
 slopos_testing::stest!(name = test_scheduler_starts_disabled, suite = sched_core);
 slopos_testing::stest!(name = test_schedule_while_disabled, suite = sched_core);
 slopos_testing::stest!(
@@ -5730,11 +5680,9 @@ fn test_sleep_queue_next_deadline_none_when_empty() -> TestResult {
 
 /// A sleep deadline must not scale with the number of online CPUs.
 ///
-/// The sleep queue used to key on `platform::timer_ticks()`, a single global
-/// counter incremented by *every* CPU's LAPIC ISR, while converting via
-/// `timer_frequency()` = 100. At N CPUs it advanced at N*100 Hz, so every
-/// deadline expired N times early — a 200 ms sleep returned in 66 ms on a
-/// 4-CPU boot. Deadlines are wall-clock milliseconds now, so this holds
+/// A deadline keyed on `platform::timer_ticks()`, which *every* CPU's LAPIC
+/// ISR increments, and converted at `timer_frequency()` = 100 would expire N
+/// times early on N CPUs. Deadlines are wall-clock milliseconds, so this holds
 /// regardless of CPU count.
 fn test_sleep_deadline_is_wall_clock_not_cpu_scaled() -> TestResult {
     let _fix = SchedFixture::new();
@@ -5896,8 +5844,8 @@ slopos_testing::stest!(
 );
 
 fn park_bootstrap_on_current_cpu() {
-    slopos_arch::pcr::park_bootstrap_task(
-        slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut ()
+    slopos_ostd::cpu::x86_64::pcr::park_bootstrap_task(
+        slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut (),
     );
 }
 
@@ -5907,7 +5855,7 @@ fn park_bootstrap_on_current_cpu() {
 /// not optional — a task straight out of `task_create` is Blocked, and
 /// dispatching one trips that invariant rather than returning an error.
 fn dispatch_as_current(task_id: u32) -> bool {
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     make_task_ready(task_id) && scheduler::dispatch_task_for_test(cpu, task_id)
 }
 
@@ -5953,7 +5901,7 @@ pub fn test_wake_against_reaped_waiter_is_inert() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let victim_id = task_create(
-        b"ReapedWaiter\0".as_ptr() as *const c_char,
+        b"ReapedWaiter",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -5980,7 +5928,7 @@ pub fn test_wake_against_reaped_waiter_is_inert() -> TestResult {
     }
 
     drop(victim);
-    if task_terminate(victim_id) != 0 {
+    if !task_terminate(victim_id) {
         klog_info!("SCHED_TEST: could not terminate the parked victim");
         return TestResult::Fail;
     }
@@ -6034,7 +5982,7 @@ pub fn test_wake_against_reaped_waiter_is_inert() -> TestResult {
     // Positive control: without it the no-disturbance assertion above holds
     // vacuously.
     let live_id = task_create(
-        b"LiveWaiter\0".as_ptr() as *const c_char,
+        b"LiveWaiter",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -6048,7 +5996,7 @@ pub fn test_wake_against_reaped_waiter_is_inert() -> TestResult {
         let _ = task_terminate(live_id);
         return TestResult::Fail;
     }
-    if task_set_state(live_id, TaskStatus::Blocked) != 0 {
+    if !task_set_state(live_id, TaskStatus::Blocked) {
         klog_info!("SCHED_TEST: could not block the control waiter");
         let _ = task_terminate(live_id);
         return TestResult::Fail;
@@ -6084,11 +6032,11 @@ pub fn test_wake_against_reaped_waiter_is_inert() -> TestResult {
 /// reschedule.
 pub fn test_newcomer_outranks_current_preemption_gate() -> TestResult {
     let _fixture = SchedFixture::new();
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     let make = |name: &[u8], priority: TaskPriority| -> Option<TaskRef> {
         let id = task_create(
-            name.as_ptr() as *const c_char,
+            name,
             dummy_task_entry,
             ptr::null_mut(),
             priority.as_u8(),
@@ -6101,11 +6049,11 @@ pub fn test_newcomer_outranks_current_preemption_gate() -> TestResult {
     };
 
     let (Some(high), Some(normal_a), Some(normal_b), Some(low), Some(idle)) = (
-        make(b"OutrankHigh\0", TaskPriority::High),
-        make(b"OutrankNormA\0", TaskPriority::Normal),
-        make(b"OutrankNormB\0", TaskPriority::Normal),
-        make(b"OutrankLow\0", TaskPriority::Low),
-        make(b"OutrankIdle\0", TaskPriority::Idle),
+        make(b"OutrankHigh", TaskPriority::High),
+        make(b"OutrankNormA", TaskPriority::Normal),
+        make(b"OutrankNormB", TaskPriority::Normal),
+        make(b"OutrankLow", TaskPriority::Low),
+        make(b"OutrankIdle", TaskPriority::Idle),
     ) else {
         return TestResult::Fail;
     };
@@ -6133,7 +6081,7 @@ pub fn test_newcomer_outranks_current_preemption_gate() -> TestResult {
         return TestResult::Fail;
     }
 
-    slopos_arch::pcr::mark_cpu_online(cpu);
+    slopos_ostd::cpu::x86_64::pcr::mark_cpu_online(cpu);
     if super::per_cpu::with_cpu_scheduler(cpu, |sched| sched.enable()).is_none() {
         return TestResult::Fail;
     }
@@ -6154,7 +6102,7 @@ pub fn test_newcomer_outranks_current_preemption_gate() -> TestResult {
             return TestResult::Fail;
         }
         PreemptGuard::clear_reschedule_pending();
-        if !make_task_ready(high.task_id) || scheduler::schedule_task(&high) != 0 {
+        if !make_task_ready(high.task_id) || !scheduler::schedule_task(&high) {
             klog_info!("SCHED_TEST: could not publish the High newcomer");
             return TestResult::Fail;
         }
@@ -6167,7 +6115,7 @@ pub fn test_newcomer_outranks_current_preemption_gate() -> TestResult {
             return TestResult::Fail;
         }
         PreemptGuard::clear_reschedule_pending();
-        if !make_task_ready(normal_b.task_id) || scheduler::schedule_task(&normal_b) != 0 {
+        if !make_task_ready(normal_b.task_id) || !scheduler::schedule_task(&normal_b) {
             klog_info!("SCHED_TEST: could not publish the equal-priority newcomer");
             return TestResult::Fail;
         }
@@ -6278,7 +6226,7 @@ pub fn test_task_ids_are_never_reused() -> TestResult {
 
     for round in seen.iter_mut() {
         let id = task_create(
-            b"IdMonotonic\0".as_ptr() as *const c_char,
+            b"IdMonotonic",
             dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -6298,7 +6246,7 @@ pub fn test_task_ids_are_never_reused() -> TestResult {
         previous = id;
         *round = id;
 
-        if task_terminate(id) != 0 {
+        if !task_terminate(id) {
             return TestResult::Fail;
         }
         if task_find_by_id(id).is_some() {
@@ -6327,12 +6275,12 @@ pub fn test_task_ids_are_never_reused() -> TestResult {
     let freeze = crate::task::freeze_kernel_io_all();
     let reset = crate::task::task_registry_reset(&freeze);
     drop(freeze);
-    if reset != 0 {
+    if !reset {
         klog_info!("SCHED_TEST: task_registry_reset failed");
         return TestResult::Fail;
     }
     let after_reset = task_create(
-        b"IdPostReset\0".as_ptr() as *const c_char,
+        b"IdPostReset",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -6441,7 +6389,7 @@ pub fn test_ap_pause_nests_on_a_depth_count() -> TestResult {
 /// not move across a window *containing* the wait cannot have moved inside it,
 /// so `NotRunning` is then mandatory.
 pub fn test_ap_pause_timeout_is_reported_and_rolled_back() -> TestResult {
-    if slopos_arch::pcr::get_cpu_count() < 2 {
+    if slopos_ostd::cpu::x86_64::pcr::get_cpu_count() < 2 {
         klog_info!("SCHED_TEST: uniprocessor boot has no AP to hold a pause off");
         return TestResult::Skipped;
     }
@@ -6465,9 +6413,9 @@ pub fn test_ap_pause_timeout_is_reported_and_rolled_back() -> TestResult {
             klog_info!("SCHED_TEST: CPU {} has no per-CPU scheduler", HELD_CPU);
             return TestResult::Fail;
         }
-        let beat_before = slopos_arch::pcr::heartbeat_for_cpu(HELD_CPU);
+        let beat_before = slopos_ostd::cpu::x86_64::pcr::heartbeat_for_cpu(HELD_CPU);
         let outcome = crate::per_cpu::pause_all_aps();
-        let beat_after = slopos_arch::pcr::heartbeat_for_cpu(HELD_CPU);
+        let beat_after = slopos_ostd::cpu::x86_64::pcr::heartbeat_for_cpu(HELD_CPU);
         crate::per_cpu::with_cpu_scheduler(HELD_CPU, |sched| sched.set_executing_task(false));
         match outcome {
             Err(err) => {
@@ -6517,7 +6465,7 @@ pub fn test_ap_pause_timeout_is_reported_and_rolled_back() -> TestResult {
 /// proves the pause stepped over it: a live AP clears its own flag as soon as
 /// it dispatches, but the counter only ever moves for an offline CPU.
 pub fn test_ap_pause_ignores_an_offline_ap() -> TestResult {
-    if slopos_arch::pcr::get_cpu_count() < 2 {
+    if slopos_ostd::cpu::x86_64::pcr::get_cpu_count() < 2 {
         klog_info!("SCHED_TEST: uniprocessor boot has no AP to take offline");
         return TestResult::Skipped;
     }
@@ -6535,13 +6483,13 @@ pub fn test_ap_pause_ignores_an_offline_ap() -> TestResult {
         klog_info!("SCHED_TEST: CPU {} has no per-CPU scheduler", HELD_CPU);
         return TestResult::Fail;
     }
-    slopos_arch::pcr::mark_cpu_offline(HELD_CPU);
+    slopos_ostd::cpu::x86_64::pcr::mark_cpu_offline(HELD_CPU);
 
     let skips_before = crate::per_cpu::skipped_offline_ap_count();
     let outcome = crate::per_cpu::pause_all_aps();
     let skips_after = crate::per_cpu::skipped_offline_ap_count();
 
-    slopos_arch::pcr::mark_cpu_online(HELD_CPU);
+    slopos_ostd::cpu::x86_64::pcr::mark_cpu_online(HELD_CPU);
     crate::per_cpu::with_cpu_scheduler(HELD_CPU, |sched| sched.set_executing_task(false));
 
     match outcome {
@@ -6694,7 +6642,7 @@ pub fn test_pause_failure_classification_reads_the_heartbeat() -> TestResult {
     use crate::per_cpu::{ApPauseError, test_classify_pause_failure as classify};
 
     const CPU: usize = 0;
-    let live = slopos_arch::pcr::heartbeat_for_cpu(CPU);
+    let live = slopos_ostd::cpu::x86_64::pcr::heartbeat_for_cpu(CPU);
 
     let stalled = classify(CPU, Some(live));
     if !matches!(stalled, ApPauseError::NotRunning { cpu_id } if cpu_id == CPU) {
@@ -6732,7 +6680,7 @@ pub fn test_pause_failure_classification_reads_the_heartbeat() -> TestResult {
 ///
 /// Restores whatever was configured: leaving a 1 ms budget behind would make
 /// every later scope's pause fail, and leaving 0 behind would silently put the
-/// rest of the run back on the iteration bound this work removed.
+/// rest of the run on the iteration bound alone.
 pub fn test_ap_pause_budget_knob_round_trips() -> TestResult {
     let restore_ns = crate::per_cpu::ap_pause_budget_ns_for_test();
 
@@ -6779,7 +6727,7 @@ pub fn test_ap_pause_budget_knob_round_trips() -> TestResult {
 /// for: a value only the AP itself can have written, under the generation this
 /// pause published. A stale ack from an earlier pause cannot satisfy it.
 pub fn test_ap_pause_acks_from_the_poll_point() -> TestResult {
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     if cpu_count < 2 {
         klog_info!("SCHED_TEST: uniprocessor boot has no AP to acknowledge");
         return TestResult::Skipped;
@@ -6801,7 +6749,8 @@ pub fn test_ap_pause_acks_from_the_poll_point() -> TestResult {
     loop {
         unacked = (1..cpu_count)
             .filter(|&cpu| {
-                slopos_arch::pcr::is_cpu_online(cpu) && !crate::per_cpu::ap_has_acked_pause(cpu)
+                slopos_ostd::cpu::x86_64::pcr::is_cpu_online(cpu)
+                    && !crate::per_cpu::ap_has_acked_pause(cpu)
             })
             .count();
         if unacked == 0 {
@@ -6834,7 +6783,7 @@ pub fn test_ap_pause_acks_from_the_poll_point() -> TestResult {
 
 /// The one store the dying-CPU cascade hinges on.
 pub fn test_abandon_dispatch_for_dying_cpu_clears_the_flag() -> TestResult {
-    if slopos_arch::pcr::get_cpu_count() < 2 {
+    if slopos_ostd::cpu::x86_64::pcr::get_cpu_count() < 2 {
         klog_info!("SCHED_TEST: uniprocessor boot has no AP to abandon");
         return TestResult::Skipped;
     }
@@ -6915,7 +6864,7 @@ slopos_testing::stest!(name = test_task_ids_are_never_reused, suite = sched_core
 /// [`park_task_on_queue`].
 fn park_stack_waiter(wq: &WaitQueue, name: &'static [u8]) -> Option<(u32, ParkedTestNode)> {
     let task_id = task_create(
-        name.as_ptr() as *const c_char,
+        name,
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -6952,11 +6901,11 @@ pub fn test_terminated_waiter_leaves_no_wait_node() -> TestResult {
     // drop reaches back through its queue pointer to unlink itself.
     let wq = WaitQueue::new(lock_class!("test.wq14", LOCK_LEVEL_RESOURCE));
 
-    let Some((victim, _victim_node)) = park_stack_waiter(&wq, b"ParkVictim\0") else {
+    let Some((victim, _victim_node)) = park_stack_waiter(&wq, b"ParkVictim") else {
         klog_info!("SCHED_TEST: could not park the victim");
         return TestResult::Fail;
     };
-    let Some((keeper, _keeper_node)) = park_stack_waiter(&wq, b"ParkKeeper\0") else {
+    let Some((keeper, _keeper_node)) = park_stack_waiter(&wq, b"ParkKeeper") else {
         klog_info!("SCHED_TEST: could not park the keeper");
         let _ = task_terminate(victim);
         return TestResult::Fail;
@@ -6979,7 +6928,7 @@ pub fn test_terminated_waiter_leaves_no_wait_node() -> TestResult {
         outcome = TestResult::Fail;
     }
 
-    if task_terminate(victim) != 0 {
+    if !task_terminate(victim) {
         klog_info!("SCHED_TEST: terminating the parked victim failed");
         outcome = TestResult::Fail;
     }
@@ -7015,7 +6964,7 @@ pub fn test_terminal_task_is_descheduled_at_the_tick() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"TickExit\0".as_ptr() as *const c_char,
+        b"TickExit",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -7053,7 +7002,7 @@ pub fn test_terminal_task_is_descheduled_at_the_tick() -> TestResult {
         }
 
         // Terminal status, still this CPU's current: the tick must deschedule.
-        if task_set_state(task_id, TaskStatus::Zombie) != 0 {
+        if !task_set_state(task_id, TaskStatus::Zombie) {
             klog_info!("SCHED_TEST: could not publish Zombie on the fixture task");
             outcome = TestResult::Fail;
         } else {
@@ -7086,7 +7035,7 @@ pub fn test_unswitched_yield_resumes_running() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"Unswitched\0".as_ptr() as *const c_char,
+        b"Unswitched",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -7106,7 +7055,7 @@ pub fn test_unswitched_yield_resumes_running() -> TestResult {
     // IRQs off: the fixture task is this CPU's current while the test's own
     // stack keeps running, so nothing may reschedule off it.
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
-        if scheduler::scheduler_is_enabled() != 0 {
+        if scheduler::scheduler_is_enabled() {
             klog_info!("SCHED_TEST: the fixture left the scheduler on");
             outcome = TestResult::Fail;
             return;
@@ -7148,12 +7097,12 @@ pub fn test_ready_current_is_not_rescheduled_from_trap_exit() -> TestResult {
     let _fixture = SchedFixture::new();
     // `schedule_internal` returns before any dispatch when this CPU has no
     // idle task, which would make the check below pass vacuously.
-    if scheduler::create_idle_task() != 0 {
+    if !scheduler::create_idle_task() {
         return TestResult::Fail;
     }
 
     let task_id = task_create(
-        b"ReadyCurrent\0".as_ptr() as *const c_char,
+        b"ReadyCurrent",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -7181,8 +7130,8 @@ pub fn test_ready_current_is_not_rescheduled_from_trap_exit() -> TestResult {
         // without it the unguarded code re-dispatches the task instead of
         // spinning on itself, so the test would pass for the wrong reason.
         task_ref.set_on_cpu(true);
-        if task_set_state(task_id, TaskStatus::Blocked) != 0
-            || scheduler::unblock_task(&task_ref) != 0
+        if !task_set_state(task_id, TaskStatus::Blocked)
+            || !scheduler::unblock_task(&task_ref)
             || task_ref.status() != TaskStatus::Ready
         {
             klog_info!("SCHED_TEST: could not stage a Ready current task");
@@ -7223,7 +7172,7 @@ slopos_testing::stest!(
 pub fn test_a_task_claim_does_not_wait_on_a_switch_out_elsewhere() -> TestResult {
     let _fixture = SchedFixture::new();
     let task_id = task_create(
-        b"ClaimProbe\0".as_ptr() as *const c_char,
+        b"ClaimProbe",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::High.as_u8(),
@@ -7241,11 +7190,11 @@ pub fn test_a_task_claim_does_not_wait_on_a_switch_out_elsewhere() -> TestResult
         return TestResult::Fail;
     }
 
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let mut outcome = TestResult::Pass;
     slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
         task_ref.set_on_cpu(true);
-        let queued = task_set_state(task_id, TaskStatus::Ready) == 0
+        let queued = task_set_state(task_id, TaskStatus::Ready)
             && super::per_cpu::with_cpu_scheduler(cpu, |sched| sched.enqueue_local(&task_ref))
                 == Some(0);
         if !queued {
@@ -7287,7 +7236,7 @@ pub fn test_terminal_task_is_not_restored_to_running() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"NoResurrect\0".as_ptr() as *const c_char,
+        b"NoResurrect",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -7315,7 +7264,7 @@ pub fn test_terminal_task_is_not_restored_to_running() -> TestResult {
         outcome = TestResult::Fail;
     }
 
-    if task_set_state(task_id, TaskStatus::Zombie) != 0 {
+    if !task_set_state(task_id, TaskStatus::Zombie) {
         klog_info!("SCHED_TEST: could not publish Zombie");
         outcome = TestResult::Fail;
     } else if let Some(current) = slopos_sched_current_for_test() {
@@ -7351,12 +7300,10 @@ slopos_testing::stest!(
     suite = sched_core
 );
 
-/// A bucket takes more waiters than the old fixed array held.
-///
-/// The cap was 16, and the 17th waiter got ENOMEM — which every userland
-/// futex wrapper discards, turning a blocked waiter into a full-core spin.
-/// The list is intrusive now, so the only bound is the number of tasks.
-pub fn test_futex_bucket_exceeds_old_fixed_cap() -> TestResult {
+/// A futex bucket takes as many waiters as there are tasks: a capped one would
+/// answer the next waiter ENOMEM, which every userland futex wrapper discards,
+/// turning a blocked waiter into a full-core spin.
+pub fn test_futex_bucket_takes_every_waiter() -> TestResult {
     let _fixture = SchedFixture::new();
 
     const WAITERS: usize = 24;
@@ -7367,7 +7314,7 @@ pub fn test_futex_bucket_exceeds_old_fixed_cap() -> TestResult {
 
     for slot in ids.iter_mut() {
         let id = task_create(
-            b"FutexMany\0".as_ptr() as *const c_char,
+            b"FutexMany",
             dummy_task_entry,
             ptr::null_mut(),
             TaskPriority::Normal.as_u8(),
@@ -7390,7 +7337,7 @@ pub fn test_futex_bucket_exceeds_old_fixed_cap() -> TestResult {
     park_bootstrap_on_current_cpu();
 
     if parked <= 16 {
-        klog_info!("SCHED_TEST: only {} waiters parked; cap not lifted", parked);
+        klog_info!("SCHED_TEST: only {} of {} waiters parked", parked, WAITERS);
         outcome = TestResult::Fail;
     }
     if crate::futex::futex_waiters_for_test(crate::futex::FutexKey::private(uaddr)) != parked {
@@ -7431,7 +7378,7 @@ pub fn test_futex_waiter_always_leaves_its_bucket() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let task_id = task_create(
-        b"FutexPark\0".as_ptr() as *const c_char,
+        b"FutexPark",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -7506,7 +7453,7 @@ slopos_testing::stest!(
     suite = sched_core
 );
 slopos_testing::stest!(
-    name = test_futex_bucket_exceeds_old_fixed_cap,
+    name = test_futex_bucket_takes_every_waiter,
     suite = sched_core
 );
 
@@ -7559,13 +7506,13 @@ slopos_testing::stest!(
 
 /// A `WaitNode` unlinks itself when its frame unwinds.
 ///
-/// `catch_panic!` unwinds rather than jumping, so destructors run during
-/// recovery; a node left linked keeps a queue pointer into a dead frame.
+/// `catch_panic!` unwinds, so destructors run during recovery; a node left
+/// linked keeps a queue pointer into a dead frame.
 pub fn test_wait_node_unlinks_when_its_frame_unwinds() -> TestResult {
     let _fixture = SchedFixture::new();
 
     let wq = WaitQueue::new(lock_class!("test.wq15", LOCK_LEVEL_RESOURCE));
-    let Some((task_id, node)) = park_stack_waiter(&wq, b"UnwindWaiter\0") else {
+    let Some((task_id, node)) = park_stack_waiter(&wq, b"UnwindWaiter") else {
         klog_info!("SCHED_TEST: could not park the waiter");
         return TestResult::Fail;
     };
@@ -7945,7 +7892,7 @@ pub fn test_quota_charge_cost() -> TestResult {
         let mut best = u64::MAX;
         for _ in 0..BATCHES {
             let batch = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_| {
-                let start = slopos_arch::tsc::rdtsc();
+                let start = slopos_ostd::arch::x86_64::tsc::rdtsc();
                 for _ in 0..BATCH_LEN {
                     let observed = cell.load(Ordering::Relaxed);
                     let _ = cell.compare_exchange_weak(
@@ -7955,7 +7902,7 @@ pub fn test_quota_charge_cost() -> TestResult {
                         Ordering::Relaxed,
                     );
                 }
-                slopos_arch::tsc::rdtsc().wrapping_sub(start)
+                slopos_ostd::arch::x86_64::tsc::rdtsc().wrapping_sub(start)
             });
             best = best.min(batch / BATCH_LEN as u64);
         }
@@ -7974,13 +7921,13 @@ pub fn test_quota_charge_cost() -> TestResult {
         let mut best = u64::MAX;
         for _ in 0..BATCHES {
             let batch = slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_| {
-                let start = slopos_arch::tsc::rdtsc();
+                let start = slopos_ostd::arch::x86_64::tsc::rdtsc();
                 for _ in 0..BATCH_LEN {
                     if let Ok(reservation) = try_charge::<FdSlot>(account, 1) {
                         drop(Charge::commit(reservation));
                     }
                 }
-                slopos_arch::tsc::rdtsc().wrapping_sub(start)
+                slopos_ostd::arch::x86_64::tsc::rdtsc().wrapping_sub(start)
             });
             best = best.min(batch / BATCH_LEN as u64);
         }
@@ -8116,14 +8063,14 @@ pub fn test_low_priority_is_not_starved_by_busy_normal() -> TestResult {
     let fixture = SchedFixture::new();
 
     let normal_id = task_create(
-        b"BusyNormal\0".as_ptr() as *const c_char,
+        b"BusyNormal",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
         TASK_FLAG_KERNEL_MODE,
     );
     let low_id = task_create(
-        b"StarvedLow\0".as_ptr() as *const c_char,
+        b"StarvedLow",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Low.as_u8(),

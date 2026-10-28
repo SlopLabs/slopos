@@ -654,7 +654,10 @@ impl System {
             step: None,
             root: None,
         };
-        let result = match self.unchanged(choices, reviewed) {
+        let result = match self
+            .unchanged(choices, reviewed)
+            .and_then(|(open, p)| keepable(&open, &p).map(|()| (open, p)))
+        {
             Err(issue) => Err(Failure::Refused(issue)),
             Ok((open, p)) => self
                 .run(&mut run, &open, &p)
@@ -757,7 +760,6 @@ impl System {
 
         run.step(Step::Menu);
         boot::write_loader(&esp_node, p.own_esp, &p.limine_conf, medium)?;
-        boot::forget_slot_bases(&boot_node, run)?;
 
         run.step(Step::Default);
         let entry = boot::set_default()?;
@@ -794,6 +796,23 @@ impl Settled {
             )
             .chain(self.view.left_out())
             .collect()
+    }
+}
+
+/// A kept root is filled as its owners record says, so one that mounts
+/// without a record is refused before the disk is partitioned or formatted;
+/// one that does not mount stops the install where it is mounted, saying why.
+fn keepable(open: &OpenDisk, p: &Settled) -> Result<(), Issue> {
+    let Place::Existing(n) = p.plan.root else {
+        return Ok(());
+    };
+    if !p.view.keeps_root() {
+        return Ok(());
+    }
+    let node = open.node(n)?;
+    match root::Mounted::at(&node) {
+        Ok(mounted) if !mounted.records_owners() => Err(Issue::NothingToKeep(node)),
+        _ => Ok(()),
     }
 }
 

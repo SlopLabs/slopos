@@ -1,5 +1,5 @@
 //! The ring's shared-memory region: a vector of `UFrame<RingMeta>` frames
-//! addressed as one flat byte buffer (SLOPRING § 3, § 5).
+//! addressed as one flat byte buffer.
 //!
 //! Every kernel access to ring memory goes through this type. The frames are
 //! user-writable concurrently, so it never forms a `&Sqe` / `&mut Cqe` over
@@ -8,7 +8,7 @@
 
 use slopos_abi::addr::PhysAddr;
 use slopos_ostd::KVec;
-use slopos_ostd::mm::frame::{Paddr, RingMeta};
+use slopos_ostd::mm::frame::RingMeta;
 use slopos_ostd::mm::uframe::UFrame;
 
 const PAGE_SIZE: usize = 4096;
@@ -16,8 +16,7 @@ const PAGE_SIZE: usize = 4096;
 /// Owns the `UFrame<RingMeta>` frames backing one ring's SQ/CQ region. The
 /// kernel holds one ref per frame for the ring's whole lifetime; the user
 /// mapping holds an independent `from_in_use` ref per frame (taken in
-/// `mm::process_vm_map_ring`), so a mapping that outlives the ring fd cannot
-/// UAF (SLOPRING § 14).
+/// `mm::process_vm_map_ring`), so a mapping that outlives the ring fd cannot UAF.
 pub struct RingRegion {
     frames: KVec<UFrame<RingMeta>>,
     bytes: usize,
@@ -47,24 +46,12 @@ impl RingRegion {
         })
     }
 
-    #[allow(dead_code)]
-    pub fn byte_len(&self) -> usize {
-        self.bytes
-    }
-
-    #[allow(dead_code)]
-    pub fn page_count(&self) -> usize {
-        self.frames.len()
-    }
-
     /// Physical addresses of the backing frames, in region order — consumed by
     /// `process_vm_map_ring` to install the user PTEs.
     pub fn paddrs(&self) -> KVec<PhysAddr> {
         let mut out = KVec::with_capacity(self.frames.len()).expect("ring: paddrs alloc");
         for f in self.frames.iter() {
-            let pa: Paddr = f.paddr();
-            out.push(PhysAddr::new(pa.as_u64()))
-                .expect("ring: paddrs push");
+            out.push(f.paddr()).expect("ring: paddrs push");
         }
         out
     }
@@ -105,7 +92,7 @@ impl RingRegion {
     }
 
     /// Volatile byte-copy *out* of the region into a private kernel
-    /// buffer (the SQE snapshot path — SLOPRING § 5.3).
+    /// buffer (the SQE snapshot path).
     pub fn copy_out(&self, offset: usize, dst: &mut [u8]) -> Result<(), RegionError> {
         let (fi, off) = self.locate(offset, dst.len())?;
         self.frames[fi]

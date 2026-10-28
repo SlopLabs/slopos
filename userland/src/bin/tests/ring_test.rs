@@ -10,7 +10,7 @@ use slopos_abi::ring::{
     SLOPRING_SQE_BUFFER_SELECT, SLOPRING_SQE_FIXED_BUFFER, Sqe,
 };
 use slopos_abi::unix::SockAddrUn;
-use slopos_userland::ring::{Ring, slopfut};
+use slopos_rt::{Ring, slopfut};
 use slopos_userland::syscall::{fs, net};
 
 /// The process's first ring lands at the mmap-window base, so touching its
@@ -101,7 +101,7 @@ fn test_write_read_pipe() -> bool {
 
 /// The read on the empty pipe defers (-EAGAIN, recorded in-flight) while the
 /// raced write lands inline, so the deferred read completes in the same
-/// blocking harvest (SLOPRING § 7.1).
+/// blocking harvest.
 fn test_deferred_read() -> bool {
     let Ok((rd, wr)) = fs::pipe() else {
         return false;
@@ -271,7 +271,7 @@ fn test_recvfrom_null_addr2_efault() -> bool {
 
 /// With no datagram queued the recv probe returns -EAGAIN and the op is
 /// recorded in-flight, so a pure poll observes no CQE: deferred completions
-/// land only inside a blocking `ring_enter` (SLOPRING § 7.1).
+/// land only inside a blocking `ring_enter`.
 fn test_recvfrom_eagain_deferred() -> bool {
     let Ok(sock) = net::socket(AF_INET, SOCK_DGRAM, 0) else {
         return false;

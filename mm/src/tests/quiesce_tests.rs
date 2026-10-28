@@ -132,9 +132,8 @@ pub fn test_quarantine_rotate_does_not_splice() -> TestResult {
         klog_info!("QUIESCE_TEST: no frame to park");
         return TestResult::Fail;
     }
-    assert_eq_test!(
+    assert_test!(
         page_alloc::free_page_frame(parked),
-        0,
         "freeing inside the quarantine window must succeed"
     );
     assert_eq_test!(

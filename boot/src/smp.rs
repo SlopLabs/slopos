@@ -2,13 +2,14 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use limine::mp::{MP_FLAG_X2APIC, MpGotoFunction};
 
-use slopos_arch::{cpu, is_cpu_online, pcr};
 use slopos_drivers::apic;
 use slopos_mm::tlb;
 use slopos_ostd::arch::x86_64::safestack::{install_ap_trampoline_as, install_safestack_runtime};
 use slopos_ostd::boot::smp::register_ap_late_entry;
+use slopos_ostd::cpu::x86_64 as cpu;
+use slopos_ostd::cpu::x86_64::pcr::{self, is_cpu_online};
 use slopos_ostd::klog_info;
-use slopos_ostd::task::bootstrap as safestack_rt;
+use slopos_ostd::task::bootstrap;
 use slopos_sched::scheduler::{enter_scheduler, init_scheduler_for_ap};
 
 use crate::gdt::syscall_msr_init;
@@ -40,11 +41,11 @@ fn ap_late_entry(cpu_idx: usize) -> ! {
     slopos_drivers::tsc_clock::ap_check_behind(cpu_idx);
 
     slopos_ostd::sync::run_ap_init(cpu_idx, |ap_token| {
-        slopos_arch::cpu::xsave::enable_on_current_cpu();
+        slopos_ostd::cpu::x86_64::xsave::enable_on_current_cpu();
 
         // Must happen before this AP's first CR3 reload so global kernel
         // mappings are tagged consistently with the BSP.
-        slopos_arch::cpu::security::enable_supervisor_features();
+        slopos_ostd::cpu::x86_64::security::enable_supervisor_features();
 
         // Must run before any CR3 load that embeds a non-zero PCID.
         slopos_mm::mmu::init_ap();
@@ -55,15 +56,15 @@ fn ap_late_entry(cpu_idx: usize) -> ! {
         // all LAPIC access, and the transition back must go x2APIC → disabled →
         // xAPIC. Must precede `apic::enable()`, which writes through MMIO.
         {
-            use slopos_arch::cpu::apic_msr::ApicBaseMsr;
-            use slopos_arch::cpu::msr::Msr;
-            let msr_val = cpu::read_msr(Msr::APIC_BASE);
+            use slopos_ostd::arch::x86_64::msr::{Msr, read_msr, write_msr};
+            use slopos_ostd::cpu::x86_64::apic_msr::ApicBaseMsr;
+            let msr_val = read_msr(Msr::APIC_BASE);
             if msr_val & ApicBaseMsr::X2APIC_ENABLE != 0 {
-                cpu::write_msr(
+                write_msr(
                     Msr::APIC_BASE,
                     msr_val & !(ApicBaseMsr::GLOBAL_ENABLE | ApicBaseMsr::X2APIC_ENABLE),
                 );
-                cpu::write_msr(
+                write_msr(
                     Msr::APIC_BASE,
                     (msr_val & !ApicBaseMsr::X2APIC_ENABLE) | ApicBaseMsr::GLOBAL_ENABLE,
                 );
@@ -152,8 +153,8 @@ pub fn smp_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermetic::BspI
 
     // Seeds each AP PCR so `__safestack_pointer_address` finds a valid
     // bootstrap Task on the AP's very first instrumented call.
-    const MAX_STATIC_APS: usize = safestack_rt::MAX_STATIC_APS;
-    safestack_rt::init_bootstrap_tasks();
+    const MAX_STATIC_APS: usize = bootstrap::MAX_STATIC_APS;
+    bootstrap::init_bootstrap_tasks();
 
     // Must precede firing any AP: the OSTD trampoline waits on this `OnceLock`
     // after installing `IA32_GS_BASE`, and would otherwise spin forever.
@@ -168,7 +169,7 @@ pub fn smp_init<'b>(ctx: &mut slopos_hermetic::BootCtx<'b, slopos_hermetic::BspI
         install_ap_trampoline_as::<MpGotoFunction>(&bsp)
     };
 
-    let ap_task_ptrs = safestack_rt::ap_bootstrap_task_ptrs();
+    let ap_task_ptrs = bootstrap::ap_bootstrap_task_ptrs();
     // Must run exactly once, before any AP boots.
     pcr::init_ap_pcr_lookup(&ctx.bsp_token(), &ap_task_ptrs);
 

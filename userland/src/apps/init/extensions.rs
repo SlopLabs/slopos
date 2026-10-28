@@ -31,7 +31,7 @@ use super::service::{Budget, Child, STARTS, session_env};
 use super::session::{Ended, Termination};
 use crate::activation;
 use crate::apps::extctl::store::Store;
-use crate::init_control::{LISTEN_FDS_START, LOGGER, Tasks, service_tag};
+use crate::init_control::{LOGGER, Tasks, fds, service_tag};
 use crate::readiness::NOTIFIER_FD;
 use crate::syscall::process::{self, Endowment, WaitStatus};
 use crate::syscall::{OwnedFd, RawFd, core as sys_core, fs as sys_fs, net};
@@ -237,7 +237,7 @@ pub struct Units {
     /// Tags no unit or running extension claims, whose processes are ended,
     /// each batch on a clock of its own.
     strays: Vec<(Vec<u32>, Termination)>,
-    /// Ended for an image of init that keeps no services.
+    /// Ended for an image of init that cannot read the services' state.
     retired: bool,
     /// When the store, part of which could not be read, is read again, and
     /// how long the wait was.
@@ -500,7 +500,7 @@ impl Units {
         if self.retired {
             return refuse(
                 reply,
-                "init re-executes into an image that keeps no services",
+                "init re-executes into an image that cannot read the services' state",
             );
         }
         self.reread = true;
@@ -706,7 +706,8 @@ impl Units {
     }
 
     /// End every service for good, ahead of a re-execution into an image of
-    /// init that would leave them running unsupervised.
+    /// init that cannot read their state and so would leave them running
+    /// unsupervised.
     pub fn retire(&mut self, now: u64) {
         self.retired = true;
         self.recheck = None;
@@ -1066,7 +1067,7 @@ impl Unit {
                 .find(|(held, _)| held == listen)
                 .map(|(_, fd)| fd.raw())
                 .ok_or("a socket was not bound")?;
-            actions.push(process::clone_fd(fd, LISTEN_FDS_START + at as i32));
+            actions.push(process::clone_fd(fd, fds::LISTEN_START + at as i32));
             names.push(match listen {
                 Listen::Tcp(port) => format!("tcp-{port}"),
                 Listen::Udp(port) => format!("udp-{port}"),

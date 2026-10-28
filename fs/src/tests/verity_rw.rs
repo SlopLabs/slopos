@@ -1,8 +1,8 @@
-//! A v2 verity trailer: verified *and* writable (plan item 6.6).
+//! An attested verity trailer: verified *and* writable.
 //!
 //! The trailer is hand-encoded rather than generated, so it cross-checks the
-//! writer: `scripts/gen_verity.py --version 2`, `fs/src/verity.rs` and this
-//! fixture must agree byte for byte.
+//! writer: `scripts/gen_verity.py --kind attested`, `fs/src/verity.rs` and
+//! this fixture must agree byte for byte.
 //!
 //! The fixture omits the writer's pad to a 512-byte sector: a memory device
 //! has no sector granularity, and the parser locates every region from
@@ -19,27 +19,30 @@ use slopos_boot_core::crc32::{self, crc32};
 
 const BS: usize = 512;
 const N: usize = 8;
-/// The blocks the ext2 superblock (1024 bytes at byte 1024) lives in — two at
+/// The blocks the ext4 superblock (1024 bytes at byte 1024) lives in — two at
 /// 512-byte blocks, both permanently unattested.
 const SB_BLOCKS: core::ops::Range<usize> = 2..4;
+/// The header's `kind` field of each kind of trailer.
+const PROTECTED: u32 = 1;
+const ATTESTED: u32 = 2;
 
 struct Fixture {
-    version: u32,
+    kind: u32,
     /// Blocks flipped *after* their hash is recorded, so the stored hash no
     /// longer describes the disk.
     corrupt: &'static [usize],
     bad_bitmap_crc: bool,
 }
 
-const V1: Fixture = Fixture {
-    version: 1,
+const PROTECTED_FIXTURE: Fixture = Fixture {
+    kind: PROTECTED,
     corrupt: &[5],
     bad_bitmap_crc: false,
 };
 
-const fn v2(corrupt: &'static [usize]) -> Fixture {
+const fn attested(corrupt: &'static [usize]) -> Fixture {
     Fixture {
-        version: 2,
+        kind: ATTESTED,
         corrupt,
         bad_bitmap_crc: false,
     }
@@ -49,8 +52,8 @@ fn bitmap_len(n: usize) -> usize {
     n.div_ceil(8)
 }
 
-fn image_len(version: u32) -> usize {
-    let bitmap = if version >= 2 { bitmap_len(N) } else { 0 };
+fn image_len(kind: u32) -> usize {
+    let bitmap = if kind != PROTECTED { bitmap_len(N) } else { 0 };
     N * BS + N * 4 + bitmap + 32
 }
 
@@ -73,7 +76,7 @@ fn fill_image(img: &mut [u8], f: &Fixture) {
 
     let bm_off = arr_off + N * 4;
     let mut bitmap_crc = 0u32;
-    let hdr = if f.version >= 2 {
+    let hdr = if f.kind != PROTECTED {
         let len = bitmap_len(N);
         for i in 0..N {
             img[bm_off + (i >> 3)] |= 1u8 << (i & 7);
@@ -90,13 +93,13 @@ fn fill_image(img: &mut [u8], f: &Fixture) {
         bm_off
     };
 
-    write_header(img, hdr, f.version, N as u64, root, bitmap_crc);
+    write_header(img, hdr, f.kind, N as u64, root, bitmap_crc);
 }
 
 #[inline(never)]
-fn write_header(img: &mut [u8], at: usize, version: u32, blocks: u64, root: u32, bitmap_crc: u32) {
+fn write_header(img: &mut [u8], at: usize, kind: u32, blocks: u64, root: u32, bitmap_crc: u32) {
     img[at..at + 4].copy_from_slice(&0x5356_5254u32.to_le_bytes());
-    img[at + 4..at + 8].copy_from_slice(&version.to_le_bytes());
+    img[at + 4..at + 8].copy_from_slice(&kind.to_le_bytes());
     img[at + 8..at + 12].copy_from_slice(&1u32.to_le_bytes());
     img[at + 12..at + 16].copy_from_slice(&(BS as u32).to_le_bytes());
     img[at + 16..at + 24].copy_from_slice(&blocks.to_le_bytes());
@@ -128,7 +131,7 @@ impl BlockDevice for SharedMem {
 
 #[inline(never)]
 fn build_shared(f: &Fixture) -> Option<KArc<MemoryBlockDevice>> {
-    let dev = MemoryBlockDevice::allocate(image_len(f.version))?;
+    let dev = MemoryBlockDevice::allocate(image_len(f.kind))?;
     dev.with_buffer_mut(|img| fill_image(img, f));
     KArc::try_new(dev).ok()
 }
@@ -175,7 +178,7 @@ fn attested_of(status: VerityStatus) -> Result<u64, TestResult> {
         } => {
             if blocks != N as u64 || block_size != BS as u32 {
                 return Err(fail!(
-                    "v2 trailer geometry: {} blocks of {}",
+                    "attested trailer geometry: {} blocks of {}",
                     blocks,
                     block_size
                 ));
@@ -186,15 +189,15 @@ fn attested_of(status: VerityStatus) -> Result<u64, TestResult> {
     }
 }
 
-/// A v2 image is a writable root: writes go through, and the status still
+/// An attested image is a writable root: writes go through, and the status
 /// reports verified, so `verity=require` is satisfied.
-pub fn test_verity_rw_v2_mounts_writable() -> TestResult {
-    let Some(image) = build_shared(&v2(&[])) else {
-        return fail!("out of memory building the v2 fixture");
+pub fn test_verity_rw_attested_mounts_writable() -> TestResult {
+    let Some(image) = build_shared(&attested(&[])) else {
+        return fail!("out of memory building the attested fixture");
     };
     let (device, status) = match mount(&image, AttestTrust::Persisted) {
         Ok(v) => v,
-        Err(e) => return fail!("a v2 trailer must mount, got {:?}", e),
+        Err(e) => return fail!("an attested trailer must mount, got {:?}", e),
     };
     let attested = match attested_of(status) {
         Ok(n) => n,
@@ -202,67 +205,70 @@ pub fn test_verity_rw_v2_mounts_writable() -> TestResult {
     };
     if attested != all_but_superblock() {
         return fail!(
-            "a fresh v2 image must attest every block but the superblock's, got {}",
+            "a fresh attested image must attest every block but the superblock's, got {}",
             attested
         );
     }
     if device.write_protected() {
-        return fail!("a v2 device must accept writes");
+        return fail!("an attested device must accept writes");
     }
     match write_block(&*device, 4, 0xC3) {
         Ok(()) => TestResult::Pass,
-        Err(e) => fail!("write to a v2 device failed: {:?}", e),
+        Err(e) => fail!("write to an attested device failed: {:?}", e),
     }
 }
 
-/// v1 is unchanged by the v2 code path: write-protected, and every block
-/// verified on a full read.
-pub fn test_verity_rw_v1_stays_write_protected() -> TestResult {
-    let Some(image) = build_shared(&V1) else {
-        return fail!("out of memory building the v1 fixture");
+/// A protected image is write-protected, and every block is verified on a
+/// full read.
+pub fn test_verity_rw_protected_refuses_writes() -> TestResult {
+    let Some(image) = build_shared(&PROTECTED_FIXTURE) else {
+        return fail!("out of memory building the protected fixture");
     };
     let (device, status) = match mount(&image, AttestTrust::Persisted) {
         Ok(v) => v,
-        Err(e) => return fail!("a v1 trailer must still mount, got {:?}", e),
+        Err(e) => return fail!("a protected trailer must mount, got {:?}", e),
     };
     match status {
         VerityStatus::Verified { blocks, block_size } if blocks == N as u64 => {
             if block_size != BS as u32 {
-                return fail!("v1 block size {}", block_size);
+                return fail!("protected block size {}", block_size);
             }
         }
-        other => return fail!("a v1 trailer must report Verified, got {:?}", other),
+        other => return fail!("a protected trailer must report Verified, got {:?}", other),
     }
     if !device.write_protected() {
-        return fail!("a v1 device must refuse writes");
+        return fail!("a protected device must refuse writes");
     }
     match write_block(&*device, 4, 0xC3) {
         Err(BlockDeviceError::WriteProtected) => {}
         other => return fail!("want WriteProtected, got {:?}", other),
     }
     if read_block(&*device, 4).is_err() {
-        return fail!("a clean block must read on a v1 device");
+        return fail!("a clean block must read on a protected device");
     }
     match read_block(&*device, 5) {
         Err(BlockDeviceError::IntegrityFailure) => TestResult::Pass,
-        other => fail!("a corrupt block must fail on a v1 device, got {:?}", other),
+        other => fail!(
+            "a corrupt block must fail on a protected device, got {:?}",
+            other
+        ),
     }
 }
 
-/// An unknown version is refused, not read unverified.
-pub fn test_verity_rw_unknown_version_refused() -> TestResult {
-    let future = Fixture {
-        version: 7,
+/// An unknown kind is refused, not read unverified.
+pub fn test_verity_rw_unknown_kind_refused() -> TestResult {
+    let unknown = Fixture {
+        kind: 7,
         corrupt: &[],
         bad_bitmap_crc: false,
     };
-    let Some(image) = build_shared(&future) else {
+    let Some(image) = build_shared(&unknown) else {
         return fail!("out of memory building the fixture");
     };
     match mount(&image, AttestTrust::Persisted) {
         Err(VerityError::UnsupportedTrailer) => TestResult::Pass,
         other => fail!(
-            "an unknown version must refuse, got {:?}",
+            "an unknown kind must refuse, got {:?}",
             other.map(|(_, s)| s)
         ),
     }
@@ -270,12 +276,12 @@ pub fn test_verity_rw_unknown_version_refused() -> TestResult {
 
 /// Corruption in a block nobody wrote is still caught on a writable image.
 pub fn test_verity_rw_untouched_block_is_verified() -> TestResult {
-    let Some(image) = build_shared(&v2(&[5])) else {
-        return fail!("out of memory building the v2 fixture");
+    let Some(image) = build_shared(&attested(&[5])) else {
+        return fail!("out of memory building the attested fixture");
     };
     let (device, _) = match mount(&image, AttestTrust::Persisted) {
         Ok(v) => v,
-        Err(e) => return fail!("a v2 trailer must mount, got {:?}", e),
+        Err(e) => return fail!("an attested trailer must mount, got {:?}", e),
     };
     if let Err(e) = read_block(&*device, 4) {
         return fail!("an untouched clean block must verify, got {:?}", e);
@@ -292,12 +298,12 @@ pub fn test_verity_rw_untouched_block_is_verified() -> TestResult {
 /// A write un-attests exactly the blocks it touched: block 4 reads back
 /// unverified, corrupt block 5 — never written — still fails.
 pub fn test_verity_rw_write_un_attests_block() -> TestResult {
-    let Some(image) = build_shared(&v2(&[4, 5])) else {
-        return fail!("out of memory building the v2 fixture");
+    let Some(image) = build_shared(&attested(&[4, 5])) else {
+        return fail!("out of memory building the attested fixture");
     };
     let (device, _) = match mount(&image, AttestTrust::Persisted) {
         Ok(v) => v,
-        Err(e) => return fail!("a v2 trailer must mount, got {:?}", e),
+        Err(e) => return fail!("an attested trailer must mount, got {:?}", e),
     };
     match read_block(&*device, 4) {
         Err(BlockDeviceError::IntegrityFailure) => {}
@@ -318,12 +324,12 @@ pub fn test_verity_rw_write_un_attests_block() -> TestResult {
 /// A partial write leaves a block no hash describes, so it un-attests the
 /// whole block rather than the bytes it covered.
 pub fn test_verity_rw_partial_write_un_attests_block() -> TestResult {
-    let Some(image) = build_shared(&v2(&[6])) else {
-        return fail!("out of memory building the v2 fixture");
+    let Some(image) = build_shared(&attested(&[6])) else {
+        return fail!("out of memory building the attested fixture");
     };
     let (device, _) = match mount(&image, AttestTrust::Persisted) {
         Ok(v) => v,
-        Err(e) => return fail!("a v2 trailer must mount, got {:?}", e),
+        Err(e) => return fail!("an attested trailer must mount, got {:?}", e),
     };
     match read_block(&*device, 6) {
         Err(BlockDeviceError::IntegrityFailure) => {}
@@ -345,12 +351,12 @@ pub fn test_verity_rw_partial_write_un_attests_block() -> TestResult {
 /// The superblock's block is unattested from the start: the mount stamp
 /// rewrites its bytes on every boot.
 pub fn test_verity_rw_superblock_block_unattested() -> TestResult {
-    let Some(image) = build_shared(&v2(&[2, 3])) else {
-        return fail!("out of memory building the v2 fixture");
+    let Some(image) = build_shared(&attested(&[2, 3])) else {
+        return fail!("out of memory building the attested fixture");
     };
     let (device, status) = match mount(&image, AttestTrust::Persisted) {
         Ok(v) => v,
-        Err(e) => return fail!("a v2 trailer must mount, got {:?}", e),
+        Err(e) => return fail!("an attested trailer must mount, got {:?}", e),
     };
     let attested = match attested_of(status) {
         Ok(n) => n,
@@ -374,13 +380,13 @@ pub fn test_verity_rw_superblock_block_unattested() -> TestResult {
 /// The persist half of the crash-safety contract: after a checkpoint, the
 /// next mount sees exactly the blocks this boot rewrote.
 pub fn test_verity_rw_checkpoint_persists_bitmap() -> TestResult {
-    let Some(image) = build_shared(&v2(&[4, 5])) else {
-        return fail!("out of memory building the v2 fixture");
+    let Some(image) = build_shared(&attested(&[4, 5])) else {
+        return fail!("out of memory building the attested fixture");
     };
     {
         let (device, _) = match mount(&image, AttestTrust::Persisted) {
             Ok(v) => v,
-            Err(e) => return fail!("a v2 trailer must mount, got {:?}", e),
+            Err(e) => return fail!("an attested trailer must mount, got {:?}", e),
         };
         if let Err(e) = write_block(&*device, 4, 0xC3) {
             return fail!("write failed: {:?}", e);
@@ -421,12 +427,12 @@ pub fn test_verity_rw_checkpoint_persists_bitmap() -> TestResult {
 /// refused.
 pub fn test_verity_rw_bad_bitmap_crc_attests_nothing() -> TestResult {
     let torn = Fixture {
-        version: 2,
+        kind: ATTESTED,
         corrupt: &[4],
         bad_bitmap_crc: true,
     };
     let Some(image) = build_shared(&torn) else {
-        return fail!("out of memory building the v2 fixture");
+        return fail!("out of memory building the attested fixture");
     };
     let (device, status) = match mount(&image, AttestTrust::Persisted) {
         Ok(v) => v,
@@ -449,8 +455,8 @@ pub fn test_verity_rw_bad_bitmap_crc_attests_nothing() -> TestResult {
 /// The mount half of the crash-safety contract: an image never marked clean
 /// may have been written after its bitmap was persisted, so verify nothing.
 pub fn test_verity_rw_unclean_image_attests_nothing() -> TestResult {
-    let Some(image) = build_shared(&v2(&[4])) else {
-        return fail!("out of memory building the v2 fixture");
+    let Some(image) = build_shared(&attested(&[4])) else {
+        return fail!("out of memory building the attested fixture");
     };
     let (device, status) = match mount(&image, AttestTrust::NoneThisBoot) {
         Ok(v) => v,
@@ -617,7 +623,7 @@ fn build_big(corrupt: Option<u64>, bad_root: bool) -> Option<KArc<BigImage>> {
         }
         crc32(&buf[..bm_len])
     });
-    tail.with_buffer_mut(|buf| write_header(buf, bm_len, 2, BIG_N as u64, root, bitmap_crc));
+    tail.with_buffer_mut(|buf| write_header(buf, bm_len, ATTESTED, BIG_N as u64, root, bitmap_crc));
     KArc::try_new(BigImage {
         corrupt,
         hash_word,
@@ -698,7 +704,7 @@ pub fn test_verity_rw_multi_chunk_hash_array() -> TestResult {
     }
 }
 
-/// The streamed load still refuses a wrong root: the CRC covers the same
+/// The streamed load refuses a wrong root too: the CRC covers the same
 /// bytes in the same order as a single-read parse.
 pub fn test_verity_rw_streamed_bad_root_refused() -> TestResult {
     let Some(image) = build_big(None, true) else {
@@ -810,7 +816,7 @@ impl BlockDevice for HugeTrailer {
 /// attempted: the error is the ceiling's, not the allocator's.
 pub fn test_verity_rw_oversized_trailer_refused() -> TestResult {
     let mut header = [0u8; 32];
-    write_header(&mut header, 0, 2, HUGE_BLOCKS, 0, 0);
+    write_header(&mut header, 0, ATTESTED, HUGE_BLOCKS, 0, 0);
     let Ok(device) = KBox::try_new(HugeTrailer { header }) else {
         return fail!("out of memory building the oversized fixture");
     };
@@ -831,13 +837,16 @@ pub fn test_verity_rw_oversized_trailer_refused() -> TestResult {
     }
 }
 
-slopos_testing::stest!(name = test_verity_rw_v2_mounts_writable, suite = verity_rw);
 slopos_testing::stest!(
-    name = test_verity_rw_v1_stays_write_protected,
+    name = test_verity_rw_attested_mounts_writable,
     suite = verity_rw
 );
 slopos_testing::stest!(
-    name = test_verity_rw_unknown_version_refused,
+    name = test_verity_rw_protected_refuses_writes,
+    suite = verity_rw
+);
+slopos_testing::stest!(
+    name = test_verity_rw_unknown_kind_refused,
     suite = verity_rw
 );
 slopos_testing::stest!(

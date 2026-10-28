@@ -98,7 +98,7 @@ pub use kdiag::{
     kdiag_stack_word_at, kdiag_timestamp,
 };
 pub use klog::{
-    KlogBackend, KlogLevel, klog_force_restore_default, klog_get_level, klog_init, klog_is_enabled,
+    KlogBackend, KlogLevel, klog_force_restore_default, klog_get_level, klog_init,
     klog_register_backend, klog_set_level, klog_swap_backend,
 };
 pub use ring_buffer::RingBuffer;

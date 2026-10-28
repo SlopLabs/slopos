@@ -9,7 +9,6 @@ pub mod cpufreq;
 pub mod cpufreq_tests;
 pub mod fair;
 pub mod fate_api;
-pub mod ffi_boundary;
 pub mod futex;
 pub mod kconsole;
 #[cfg(feature = "test-hooks")]

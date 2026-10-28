@@ -32,7 +32,7 @@ use crate::iface::{self, IfaceKind};
 use crate::neighbor::NEIGHBOR_CACHE;
 use crate::netmon::netmon_post;
 use crate::route::ROUTE_TABLE;
-use crate::types::{DevIndex, Ipv4Addr};
+use crate::types::Ipv4Addr;
 
 /// How long evidence that something off-link answered stays good. Two minutes:
 /// long enough that an idle desktop does not flap to [`NET_CONN_LIMITED`],
@@ -406,7 +406,7 @@ pub fn ensure_armed() {
 }
 
 fn arm() {
-    crate::timer::NET_TIMER_WHEEL.schedule(TICK_MS, crate::timer::TimerKind::ConnProbe, 0);
+    crate::timer::wheel().schedule(TICK_MS, crate::timer::TimerKind::ConnProbe, 0);
 }
 
 /// One classifier tick: re-arm, re-evaluate, and probe if that is the only way
@@ -465,16 +465,6 @@ pub fn cached_gateway() -> Option<Ipv4Addr> {
     } else {
         Some(Ipv4Addr::from_u32_be(raw))
     }
-}
-
-/// The device the default route leaves by, if there is one — diagnostic use.
-pub fn default_device() -> Option<DevIndex> {
-    let routes = ROUTE_TABLE.all_routes();
-    routes
-        .iter()
-        .filter(|r| r.prefix_len == 0)
-        .min_by_key(|r| r.metric)
-        .map(|r| r.dev)
 }
 
 /// A human-readable name for a `NET_CONN_*` value.

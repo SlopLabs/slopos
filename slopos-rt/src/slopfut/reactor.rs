@@ -1,7 +1,7 @@
 //! The single-threaded reactor: it owns the one [`Ring`] and turns ring
 //! completions into woken tasks.
 //!
-//! SLOPRING §7.1: deferred completions progress *only* while a task is blocked
+//! Deferred completions progress *only* while a task is blocked
 //! inside `ring_enter`, so [`Reactor::park`] is the sole sleep point. The
 //! reactor lives in its **own** thread-local, separate from the scheduler's, so
 //! `park` can fire a waker — which borrows the *scheduler's* cell — without a
@@ -328,9 +328,9 @@ impl Reactor {
         }
     }
 
-    /// The sole blocking point (SLOPRING §7.1): block on the ring until at
-    /// least one completion lands, then drain every available CQE into its
-    /// slot and wake the owning task.
+    /// The sole blocking point: block on the ring until at least one completion
+    /// lands, then drain every available CQE into its slot and wake the owning
+    /// task.
     pub(super) fn park(&mut self) {
         self.enter_and_drain(1);
     }

@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use slopos_abi::net::SockAddrIn;
 
-use crate::ring::{Ring, slopfut};
+use slopos_rt::{Ring, slopfut};
 
 use super::{NcConfig, StdinResult, verbose_addr, verbose_bytes, verbose_msg, verbose_recv};
 
@@ -55,8 +55,8 @@ pub(super) fn udp_client(config: &NcConfig) -> u8 {
 }
 
 /// Listen mode must learn each datagram's source address to reply, which is
-/// what `OP_RECVFROM` (SLOPRING § 12) returns alongside the data. Replies go
-/// to the last peer heard from, and stdin is not read until there is one.
+/// what `OP_RECVFROM` returns alongside the data. Replies go to the last peer
+/// heard from, and stdin is not read until there is one.
 pub(super) fn udp_listen(config: &NcConfig) -> u8 {
     use slopos_abi::net::{AF_INET, SOCK_DGRAM};
 

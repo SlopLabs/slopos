@@ -25,7 +25,7 @@ use super::client::{
 use super::codec::{UDP_PORT_CLIENT, UDP_PORT_SERVER};
 use crate::iface::{self, AddrOrigin};
 use crate::netmon::netmon_post;
-use crate::timer::{NET_TIMER_WHEEL, TimerKind};
+use crate::timer::{self, TimerKind};
 use crate::types::{DevIndex, Ipv4Addr};
 
 /// Clients the kernel runs, one per interface.
@@ -453,7 +453,7 @@ fn post_dhcp_event(ifindex: u32, state: DhcpState, reason: u8, lease_secs: u32) 
 }
 
 fn arm_retransmit(ctx: SlotContext, retry_ms: u32) {
-    NET_TIMER_WHEEL.schedule(
+    timer::wheel().schedule(
         u64::from(retry_ms),
         TimerKind::DhcpRetransmit,
         timer_key(ctx.ifindex, ctx.retransmit),
@@ -467,17 +467,17 @@ fn arm_lease_timers(ctx: SlotContext, binding: &DhcpBinding) {
     if binding.lease_secs == 0 {
         return;
     }
-    NET_TIMER_WHEEL.schedule(
+    timer::wheel().schedule(
         u64::from(binding.t1_secs) * 1000,
         TimerKind::DhcpT1,
         ifindex,
     );
-    NET_TIMER_WHEEL.schedule(
+    timer::wheel().schedule(
         u64::from(binding.t2_secs) * 1000,
         TimerKind::DhcpT2,
         ifindex,
     );
-    NET_TIMER_WHEEL.schedule(
+    timer::wheel().schedule(
         u64::from(binding.lease_secs) * 1000,
         TimerKind::DhcpExpire,
         ifindex,

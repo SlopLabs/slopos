@@ -75,7 +75,7 @@ static BH_COUNTERS: [CacheAligned<BhCounters>; pcr::MAX_CPUS] =
 #[cfg(any(test, feature = "test-helpers"))]
 #[inline]
 fn counters() -> Option<&'static BhCounters> {
-    BH_COUNTERS.get(pcr::get_current_cpu()).map(|slot| &slot.0)
+    BH_COUNTERS.get(pcr::current_cpu_id()).map(|slot| &slot.0)
 }
 
 /// Wire the bottom-half point.

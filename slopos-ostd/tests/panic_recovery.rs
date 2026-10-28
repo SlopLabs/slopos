@@ -1,14 +1,14 @@
 //! Host-side tests for `slopos_ostd::sync::panic_recovery`.
 //!
 //! `poison_all_held_locks() -> !` halts forever, so these exercise the
-//! primitive it builds on, `lock_tracking::poison_unlock_all_held()`, and
+//! primitive it builds on, `lock_graph::poison_unlock_all_held()`, and
 //! pin the wrapper's signature at the type level.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use slopos_ostd::lock_class;
 use std::sync::Mutex;
 
-use slopos_ostd::sync::lock_tracking::{
+use slopos_ostd::sync::lock_graph::{
     LOCK_LEVEL_UNORDERED, enable_lock_tracking, held_lock_count, poison_unlock_all_held, pop_lock,
     push_lock,
 };

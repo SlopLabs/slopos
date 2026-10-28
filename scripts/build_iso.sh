@@ -9,7 +9,7 @@ set -euo pipefail
 #   KERNEL_ELF      - path to the kernel ELF to stage (required)
 #   LIMINE_DIR      - path to Limine directory (default: third_party/limine)
 #   INITRAMFS_FILE  - the base, staged where a boot partition keeps the current
-#                     one and loaded as that module
+#                     one and loaded as that module (required)
 #   INSTALL_ARCHIVE - the install medium's archive (scripts/build_install_medium.sh),
 #                     loaded as the module `install` the installer reads; the
 #                     image takes the GPT disk GUID it records, and the payload
@@ -27,11 +27,13 @@ LIMINE_DIR="${LIMINE_DIR:-${REPO_ROOT}/third_party/limine}"
 # Named by the caller, not defaulted: a default that happened to exist would
 # stage whichever variant was built last.
 KERNEL="${KERNEL_ELF:?build_iso: KERNEL_ELF must name the kernel ELF to stage}"
+BASE="${INITRAMFS_FILE:?build_iso: INITRAMFS_FILE must name the base to stage}"
 
 if [ ! -f "$KERNEL" ]; then
     echo "Kernel not found at $KERNEL. Build the kernel first." >&2
     exit 1
 fi
+[ -f "$BASE" ] || { echo "No base at $BASE" >&2; exit 1; }
 
 # Ensure Limine is available
 "$SCRIPT_DIR/ensure_limine.sh"
@@ -49,9 +51,9 @@ ISO_ROOT="${STAGING}/iso_root"
 mkdir -p "$ISO_ROOT/boot" "$ISO_ROOT/EFI/BOOT"
 
 cp "$KERNEL" "$ISO_ROOT/boot/kernel.elf"
-cp "$REPO_ROOT/limine.conf" "$ISO_ROOT/boot/limine.conf"
+mkdir -p "$ISO_ROOT$BASE_DIR"
+cp "$BASE" "$ISO_ROOT$BASE_CURRENT"
 
-# Inject framebuffer resolution into Limine config
 fb_w="${QEMU_FB_WIDTH:-1920}"
 fb_h="${QEMU_FB_HEIGHT:-1080}"
 if [ "${QEMU_FB_AUTO:-0}" != "0" ] && [ -x "$SCRIPT_DIR/detect_qemu_resolution.sh" ]; then
@@ -64,28 +66,25 @@ if [ "${QEMU_FB_AUTO:-0}" != "0" ] && [ -x "$SCRIPT_DIR/detect_qemu_resolution.s
         fb_h="${detected##* }"
     fi
 fi
-printf '    resolution: %sx%s\n' "$fb_w" "$fb_h" >> "$ISO_ROOT/boot/limine.conf"
 
-if [ -n "$CMDLINE" ]; then
-    printf '    cmdline: %s\n' "$CMDLINE" >> "$ISO_ROOT/boot/limine.conf"
-fi
+CONF="$ISO_ROOT/boot/limine.conf"
+{
+    printf 'timeout: 0\nserial: yes\nverbose: yes\n\n'
+    printf '/SlopOS Kernel\n'
+    printf '    protocol: limine\n'
+    printf '    path: boot():/boot/kernel.elf\n'
+    printf '    resolution: %sx%s\n' "$fb_w" "$fb_h"
+    [ -z "$CMDLINE" ] || printf '    cmdline: %s\n' "$CMDLINE"
+    printf '    module_path: boot():%s\n' "$BASE_CURRENT"
+    printf '    module_string: %s\n' "$BASE_MODULE"
+} >"$CONF"
 
-# Stage the initramfs as a Limine module and reference it from the boot entry.
-# Done dynamically (rather than statically in limine.conf) so an ISO built
-# without an initramfs never points Limine at a missing module.
-if [ -n "${INITRAMFS_FILE:-}" ] && [ -f "${INITRAMFS_FILE}" ]; then
-    mkdir -p "$ISO_ROOT$BASE_DIR"
-    cp "${INITRAMFS_FILE}" "$ISO_ROOT$BASE_CURRENT"
-    printf '    module_path: boot():%s\n' "$BASE_CURRENT" >> "$ISO_ROOT/boot/limine.conf"
-    printf '    module_string: %s\n' "$BASE_MODULE" >> "$ISO_ROOT/boot/limine.conf"
-fi
 GPT_ARGS=()
 if [ -n "${INSTALL_ARCHIVE:-}" ]; then
     [ -f "$INSTALL_ARCHIVE" ] || { echo "No install archive at $INSTALL_ARCHIVE" >&2; exit 1; }
     ln "$INSTALL_ARCHIVE" "$ISO_ROOT/boot/install.cpio" 2>/dev/null ||
         cp "$INSTALL_ARCHIVE" "$ISO_ROOT/boot/install.cpio"
-    printf '    module_path: boot():/boot/install.cpio\n' >> "$ISO_ROOT/boot/limine.conf"
-    printf '    module_string: %s\n' "$MEDIUM_MODULE" >> "$ISO_ROOT/boot/limine.conf"
+    printf '    module_path: boot():/boot/install.cpio\n    module_string: %s\n' "$MEDIUM_MODULE" >>"$CONF"
     disk_guid="$(cat "$INSTALL_ARCHIVE.disk-guid")" ||
         { echo "No disk GUID beside $INSTALL_ARCHIVE" >&2; exit 1; }
     GPT_ARGS=(--gpt_disk_guid "$disk_guid")

@@ -11,23 +11,18 @@ use slopos_abi::syscall::{
     SYSCALL_PRIVATE_BASE, SYSCALL_PRIVATE_END, SYSCALL_REBOOT, SYSCALL_ROULETTE_RESULT,
     SYSCALL_TABLE_SIZE,
 };
-use slopos_ostd::authority::{
-    AuthorityDecision, CAP_MASK_ALL, CAP_NONE, CAP_UNIVERSAL, Capability, decide, mask_permits,
-};
+use slopos_ostd::authority::{CAP_MASK_ALL, CAP_NONE, CAP_UNIVERSAL, Capability, mask_permits};
 use slopos_testing::{TestResult, fail, pass};
 
 use crate::syscall::handlers::{cap_counts, syscall_lookup};
 use crate::syscall::signal::Sender;
 use slopos_ostd::process::Cred;
 
-/// The finding phase 1 closed: `halt` and `reboot` had no authorization
-/// check at all, so one instruction from any task powered off the machine.
+/// `halt` and `reboot` take `Power`, so an ordinary task cannot power the
+/// machine off.
 fn power_is_denied_to_an_ordinary_task() -> TestResult {
     if mask_permits(CAP_UNIVERSAL, Capability::Power) {
         return fail!("an ordinary user task must not hold Power");
-    }
-    if decide(CAP_UNIVERSAL, Capability::Power) != AuthorityDecision::Deny {
-        return fail!("Power must be denied under the default enforce mode");
     }
     pass!()
 }
@@ -101,9 +96,6 @@ fn ungated_operations_need_nothing() -> TestResult {
         if !mask_permits(CAP_NONE, cap) {
             return fail!("{} must be permitted with no capabilities", cap.name());
         }
-        if decide(CAP_NONE, cap) != AuthorityDecision::Allow {
-            return fail!("{} must be allowed with no capabilities", cap.name());
-        }
     }
     pass!()
 }
@@ -171,7 +163,6 @@ slopos_testing::stest!(name = signalable_refuses_invalid_targets, suite = author
 /// the userland phase, the first in which init exists.
 fn init_is_told_apart_by_its_task_id() -> TestResult {
     use crate::syscall::signalable::resolve_signal_target;
-    use core::ffi::c_char;
     use slopos_abi::Errno;
     use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE};
     use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
@@ -182,7 +173,7 @@ fn init_is_told_apart_by_its_task_id() -> TestResult {
         return fail!("init is not running in the userland phase");
     };
     let other_id = task_create(
-        b"NotInit\0".as_ptr() as *const c_char,
+        b"NotInit",
         slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
         core::ptr::null_mut(),
         1,
@@ -225,7 +216,6 @@ slopos_testing::stest!(
 /// An exec keeps a task's capabilities only for init re-executing the base's
 /// `/sbin/init` as its sole thread; every other exec drops them.
 fn only_init_reexecuting_itself_keeps_its_authority() -> TestResult {
-    use core::ffi::c_char;
     use core::num::NonZeroU64;
     use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_USER_MODE};
     use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
@@ -238,7 +228,7 @@ fn only_init_reexecuting_itself_keeps_its_authority() -> TestResult {
         return fail!("init is not running in the userland phase");
     };
     let other_id = task_create(
-        b"NotInit\0".as_ptr() as *const c_char,
+        b"NotInit",
         slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64),
         core::ptr::null_mut(),
         1,
@@ -288,8 +278,8 @@ fn boot_entry_alone_reaches_no_variable() -> TestResult {
             return fail!("efivar syscall {} is not registered", sysno);
         };
         if entry.cap != Capability::Power
-            || decide(role_alone, entry.cap) != AuthorityDecision::Deny
-            || decide(installer, entry.cap) != AuthorityDecision::Allow
+            || mask_permits(role_alone, entry.cap)
+            || !mask_permits(installer, entry.cap)
         {
             return fail!("efivar must be gated on Power, which the role alone does not pass");
         }

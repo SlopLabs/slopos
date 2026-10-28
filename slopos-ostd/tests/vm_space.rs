@@ -12,7 +12,7 @@ use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::arch::x86_64::cr3::Pcid;
 use slopos_ostd::mm::frame::{
     AnonymousMeta, Frame, FrameAlloc, FrameAllocOptions, FrameReturnBatch, KernelMeta, MetaSlot,
-    Paddr, init_meta_slots,
+    init_meta_slots,
 };
 use slopos_ostd::mm::frame_alloc::register_frame_allocator;
 use slopos_ostd::mm::page_property::PageProperty;
@@ -35,7 +35,7 @@ struct BumpAlloc {
 }
 
 impl FrameAlloc for BumpAlloc {
-    fn alloc(&self, opts: FrameAllocOptions) -> Option<Paddr> {
+    fn alloc(&self, opts: FrameAllocOptions) -> Option<PhysAddr> {
         assert_eq!(opts.size_pages, 1, "test alloc supports single-page only");
         let page = self.next_page.fetch_add(1, Ordering::Relaxed);
         if page as usize >= N_PAGES {
@@ -53,21 +53,21 @@ impl FrameAlloc for BumpAlloc {
         Some(paddr)
     }
 
-    fn dealloc(&self, paddr: Paddr, _size_pages: usize) {
+    fn dealloc(&self, paddr: PhysAddr, _size_pages: usize) {
         // Bump allocator: leak, noting what came back.
         RETURNED.lock().unwrap().push(vec![paddr]);
     }
 
-    fn dealloc_batch(&self, pages: &[Paddr]) {
+    fn dealloc_batch(&self, pages: &[PhysAddr]) {
         RETURNED.lock().unwrap().push(pages.to_vec());
     }
 }
 
 /// Each `dealloc` / `dealloc_batch` call's pages, in call order.
-static RETURNED: Mutex<Vec<Vec<Paddr>>> = Mutex::new(Vec::new());
+static RETURNED: Mutex<Vec<Vec<PhysAddr>>> = Mutex::new(Vec::new());
 
 /// Reserve a 2 MiB-aligned page-index region and return its head paddr.
-fn alloc_2mb_aligned_paddr() -> Paddr {
+fn alloc_2mb_aligned_paddr() -> PhysAddr {
     let cur = BUMP_ALLOC.next_page.load(Ordering::Relaxed);
     let aligned = (cur + 511) & !511_u64;
     BUMP_ALLOC.next_page.store(aligned + 512, Ordering::Relaxed);
@@ -544,22 +544,18 @@ fn drop_user_half_returns_intermediate_tables_to_allocator() {
 
 struct CountingUnmapHook {
     after_unmap_calls: AtomicU64,
-    on_activate_calls: AtomicU64,
     flush_local_calls: AtomicU64,
     last_after_vaddr: AtomicU64,
     last_after_paddr: AtomicU64,
     last_after_handle: AtomicU64,
-    last_activate_handle: AtomicU64,
 }
 
 static COUNTING_HOOK: CountingUnmapHook = CountingUnmapHook {
     after_unmap_calls: AtomicU64::new(0),
-    on_activate_calls: AtomicU64::new(0),
     flush_local_calls: AtomicU64::new(0),
     last_after_vaddr: AtomicU64::new(0),
     last_after_paddr: AtomicU64::new(0),
     last_after_handle: AtomicU64::new(0),
-    last_activate_handle: AtomicU64::new(0),
 };
 static COUNTING_HOOK_REF: &'static dyn CursorUnmapHook = &COUNTING_HOOK;
 
@@ -575,11 +571,6 @@ impl CursorUnmapHook for CountingUnmapHook {
     }
     fn flush_local(&self) {
         self.flush_local_calls.fetch_add(1, Ordering::Relaxed);
-    }
-    fn on_activate(&self, mm_ctx_handle: u64) {
-        self.on_activate_calls.fetch_add(1, Ordering::Relaxed);
-        self.last_activate_handle
-            .store(mm_ctx_handle, Ordering::Relaxed);
     }
     fn select_cr3(&self, _mm_ctx_handle: u64, _tlb_gen: u64) -> Option<(u16, bool)> {
         // No pool in the host harness: OSTD must fall back to a flushing
@@ -723,7 +714,7 @@ fn arena_entry_ptr(table_phys: PhysAddr, index: usize) -> *mut u64 {
         .wrapping_add(index)
 }
 
-fn resolve(space: &VmSpace, vaddr: VirtAddr) -> Option<Paddr> {
+fn resolve(space: &VmSpace, vaddr: VirtAddr) -> Option<PhysAddr> {
     let cur = space
         .cursor(vaddr..VirtAddr::new(vaddr.as_u64() + 0x1000))
         .unwrap();
@@ -1064,7 +1055,7 @@ fn page_table_frames_are_charged_and_given_back() {
     assert_eq!(kernelmeta(), baseline, "every page-table charge came back");
 }
 
-fn map_4kb(space: &mut VmSpace, vaddr: u64) -> Paddr {
+fn map_4kb(space: &mut VmSpace, vaddr: u64) -> PhysAddr {
     let frame = fresh_user_frame();
     let paddr = frame.paddr();
     let mut cur = space

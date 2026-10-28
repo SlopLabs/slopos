@@ -11,16 +11,14 @@
 # through `is_schedulable_cpu`, so a CPU whose runqueue is online but not
 # enabled vanishes from every fork, exec and wakeup decision while still
 # dispatching whatever work stealing hands it. The machine boots, the suite
-# passes, and one core does all the work. It shipped that way once: the
-# scheduler boot step ran in the `services` phase and reset every runqueue —
-# including the three APs that had already entered their scheduler loops during
-# `drivers` — leaving `eligible` a single CPU for the life of the boot.
+# passes, and one core does all the work — as it does when a boot step resets
+# the runqueues of APs that have already entered their scheduler loops.
 #
 # Two numbers per phase are tracked, both measured:
 #   eligible-lag  how many online CPUs may legitimately not be eligible yet.
 #                 The BSP enters its scheduler loop only after boot init
-#                 finishes, so it is genuinely ineligible in the `boot` phase
-#                 and nowhere else.
+#                 finishes, so it is ineligible in the `boot` and
+#                 `post-kernel-tests` phases and nowhere else.
 #   allow-ineligible  *which* CPUs that lag may name, as a mask. A count alone
 #                 accepts an AP dropping out as readily as the BSP, which is
 #                 the failure this gate exists to catch.

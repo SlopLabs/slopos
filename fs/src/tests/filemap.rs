@@ -1,7 +1,7 @@
 //! File-backed `mmap` page sets: demand-paged population, both directions of
 //! the coherence rule, writeback, and the two caps.
 //!
-//! The fixture is a private ext2 mount over a `MemoryBlockDevice`, not the
+//! The fixture is a private ext4 mount over a `MemoryBlockDevice`, not the
 //! production singleton, which is already mounted on the root and refuses a
 //! second init. A device this module owns is also the only way to ask whether
 //! a writeback left the filesystem: a fresh `BlockCache` over the same image
@@ -16,9 +16,10 @@ use slopos_testing::TestResult;
 
 use super::ScratchProcess;
 use crate::blockdev::MemoryBlockDevice;
-use crate::ext2::cache::{BlockCache, CACHE_ENTRIES_MIN};
-use crate::ext2::geometry::Ext2Geometry;
-use crate::ext2::{Ext2Error, Ext2Fs, Ext2Superblock};
+use crate::ext4::cache::{BlockCache, CACHE_ENTRIES_MIN};
+use crate::ext4::geometry::Ext4Geometry;
+use crate::ext4::ondisk::Superblock;
+use crate::ext4::{Ext4Error, Ext4Fs};
 use crate::filemap::{self, FileMapError, MAX_INODES_PER_ACCOUNT, MAX_MAPPED_INODES};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 
@@ -41,9 +42,9 @@ struct TestMount {
     device: MemoryBlockDevice,
     cache: KBox<BlockCache>,
     /// Boxed so a per-call copy is the only 1 KiB superblock on any frame.
-    superblock: KBox<Ext2Superblock>,
+    superblock: KBox<Superblock>,
     superblock_dirty: bool,
-    geom: Ext2Geometry,
+    geom: Ext4Geometry,
 }
 
 static TEST_MOUNT: Mutex<Option<TestMount>> =
@@ -60,35 +61,35 @@ fn test_fs() -> &'static dyn FileSystem {
 /// One operation over the fixture mount, publishing the superblock the way the
 /// production mount does — a create allocates, and the next call must see it.
 #[inline(never)]
-fn with_ext2<R>(f: impl FnOnce(&mut Ext2Fs) -> Result<R, Ext2Error>) -> VfsResult<R> {
+fn with_ext4<R>(f: impl FnOnce(&mut Ext4Fs) -> Result<R, Ext4Error>) -> VfsResult<R> {
     let mut guard = TEST_MOUNT.lock().map_err(|_| VfsError::Interrupted)?;
     let mount = guard.as_mut().ok_or(VfsError::IoError)?;
     let dirty = mount.superblock_dirty;
-    let mut fs = Ext2Fs::new(
+    let mut fs = Ext4Fs::new(
         &mount.device,
         &mut mount.cache,
         *mount.superblock,
         mount.geom,
     );
     fs.set_superblock_dirty(dirty);
-    let result = f(&mut fs).map_err(report_ext2_error);
+    let result = f(&mut fs).map_err(report_ext4_error);
     *mount.superblock = fs.superblock();
     mount.superblock_dirty = fs.superblock_dirty();
     result
 }
 
-/// The fixture collapses every ext2 error into one `VfsError`, so the real
+/// The fixture collapses every ext4 error into one `VfsError`, so the real
 /// variant is logged here: a failing fixture step names its cause.
 #[cold]
 #[inline(never)]
-fn report_ext2_error(e: Ext2Error) -> VfsError {
-    slopos_ostd::klog_info!("FILEMAP_FIXTURE: ext2 refused the operation: {:?}", e);
+fn report_ext4_error(e: Ext4Error) -> VfsError {
+    slopos_ostd::klog_info!("FILEMAP_FIXTURE: ext4 refused the operation: {:?}", e);
     VfsError::IoError
 }
 
 impl FileSystem for TestFs {
     fn name(&self) -> &'static str {
-        "ext2-filemap-fixture"
+        "ext4-filemap-fixture"
     }
 
     fn root_inode(&self) -> InodeId {
@@ -96,7 +97,7 @@ impl FileSystem for TestFs {
     }
 
     fn lookup(&self, parent: InodeId, name: &[u8]) -> VfsResult<InodeId> {
-        with_ext2(|fs| {
+        with_ext4(|fs| {
             let mut found: Option<u32> = None;
             fs.for_each_dir_entry(parent as u32, |entry| {
                 if entry.name == name {
@@ -106,34 +107,34 @@ impl FileSystem for TestFs {
                     true
                 }
             })?;
-            found.map(|i| i as InodeId).ok_or(Ext2Error::PathNotFound)
+            found.map(|i| i as InodeId).ok_or(Ext4Error::PathNotFound)
         })
     }
 
     fn stat(&self, inode: InodeId) -> VfsResult<FileStat> {
-        with_ext2(|fs| {
-            let ext2_inode = fs.read_inode(inode as u32)?;
-            if ext2_inode.is_directory() {
+        with_ext4(|fs| {
+            let record = fs.read_inode(inode as u32)?;
+            if record.is_directory() {
                 return Ok(FileStat::new_directory(inode));
             }
-            let mut stat = FileStat::new_file(inode, ext2_inode.size as u64);
+            let mut stat = FileStat::new_file(inode, record.size as u64);
             // The seal has to reach the page set: it is what refuses a
             // writable set.
-            stat.sealed = ext2_inode.is_sealed();
+            stat.sealed = record.is_sealed();
             Ok(stat)
         })
     }
 
     fn read(&self, inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
-        with_ext2(|fs| fs.read_file(inode as u32, offset, buf))
+        with_ext4(|fs| fs.read_file(inode as u32, offset, buf))
     }
 
     fn read_pages(&self, inode: InodeId, offset: u64, pages: &mut [&mut [u8]]) -> VfsResult<usize> {
-        with_ext2(|fs| fs.read_file_pages(inode as u32, offset, pages))
+        with_ext4(|fs| fs.read_file_pages(inode as u32, offset, pages))
     }
 
     fn write(&self, inode: InodeId, offset: u64, buf: &[u8]) -> VfsResult<usize> {
-        with_ext2(|fs| fs.write_file(inode as u32, offset, buf))
+        with_ext4(|fs| fs.write_file(inode as u32, offset, buf))
     }
 
     fn create_owned(
@@ -144,22 +145,22 @@ impl FileSystem for TestFs {
         owner: crate::vfs::Owner,
         mode: u16,
     ) -> VfsResult<InodeId> {
-        with_ext2(|fs| match file_type {
+        with_ext4(|fs| match file_type {
             FileType::Regular => fs
                 .create_owned(
                     parent as u32,
                     name,
-                    crate::ext2::NewInode::File,
+                    crate::ext4::NewInode::File,
                     owner,
                     mode,
                 )
                 .map(|i| i as InodeId),
-            _ => Err(Ext2Error::InvalidInode),
+            _ => Err(Ext4Error::InvalidInode),
         })
     }
 
     fn unlink(&self, parent: InodeId, name: &[u8]) -> VfsResult<()> {
-        with_ext2(|fs| fs.unlink_entry(parent as u32, name))
+        with_ext4(|fs| fs.unlink_entry(parent as u32, name))
     }
 
     fn readdir(
@@ -169,7 +170,7 @@ impl FileSystem for TestFs {
         callback: &mut dyn FnMut(&[u8], InodeId, FileType) -> bool,
     ) -> VfsResult<usize> {
         let mut count = 0usize;
-        with_ext2(|fs| {
+        with_ext4(|fs| {
             fs.for_each_dir_entry_from(inode as u32, offset as u64, |_, entry| {
                 count += 1;
                 callback(entry.name, entry.inode.raw() as InodeId, FileType::Regular)
@@ -179,15 +180,15 @@ impl FileSystem for TestFs {
     }
 
     fn truncate(&self, inode: InodeId, size: u64) -> VfsResult<()> {
-        with_ext2(|fs| fs.truncate_file(inode as u32, size))
+        with_ext4(|fs| fs.truncate_file(inode as u32, size))
     }
 
     fn set_sealed(&self, inode: InodeId) -> VfsResult<()> {
-        with_ext2(|fs| fs.set_sealed(inode as u32))
+        with_ext4(|fs| fs.set_sealed(inode as u32))
     }
 
     fn sync(&self) -> VfsResult<()> {
-        with_ext2(|fs| fs.sync())
+        with_ext4(|fs| fs.sync())
     }
 }
 
@@ -205,7 +206,7 @@ fn ensure_mount() -> bool {
 
 #[inline(never)]
 fn install_mount(device: MemoryBlockDevice) -> bool {
-    let Ok((superblock, geom)) = Ext2Fs::mount_params(&device) else {
+    let Ok((superblock, geom)) = Ext4Fs::mount_params(&device) else {
         return false;
     };
     let Ok(boxed) = KBox::try_new(superblock) else {
@@ -337,13 +338,13 @@ fn device_read(inode: InodeId, offset: u64, len: usize) -> Option<KVec<u8>> {
     .then_some(buf)
 }
 
-/// Its own frame: an `Ext2Fs` handle carries a 1 KiB superblock copy, and the
+/// Its own frame: an `Ext4Fs` handle carries a 1 KiB superblock copy, and the
 /// caller's frame already holds the mount guard and the staging buffer.
 #[inline(never)]
 fn read_fresh(
     device: &MemoryBlockDevice,
-    superblock: &Ext2Superblock,
-    geom: Ext2Geometry,
+    superblock: &Superblock,
+    geom: Ext4Geometry,
     inode: InodeId,
     offset: u64,
     buf: &mut [u8],
@@ -351,7 +352,7 @@ fn read_fresh(
     let Ok(mut cache) = BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN) else {
         return false;
     };
-    let mut fs = Ext2Fs::new(device, &mut cache, *superblock, geom);
+    let mut fs = Ext4Fs::new(device, &mut cache, *superblock, geom);
     let mut done = 0usize;
     while done < buf.len() {
         match fs.read_file(inode as u32, offset + done as u64, &mut buf[done..]) {
@@ -677,7 +678,7 @@ pub fn test_filemap_read_stops_at_eof() -> TestResult {
 }
 
 /// A removed name takes its page set out of lookup, so a reallocated inode
-/// number cannot resolve to the previous file's pages. ext2 inode numbers
+/// number cannot resolve to the previous file's pages. ext4 inode numbers
 /// carry no generation, so the number is the only key there is.
 pub fn test_filemap_forget_unkeys_the_inode() -> TestResult {
     if !ensure_mount() {
@@ -1348,7 +1349,7 @@ pub fn test_filemap_readonly_mapping_does_not_arm_writeback() -> TestResult {
 
 /// The registry self-heals: a set queued by a caller with nobody to drain it
 /// must not hold its slot against the next mapping, or a boot whose root runs
-/// no ext2 flusher answers `ENOMEM` to file `mmap` forever.
+/// no ext4 flusher answers `ENOMEM` to file `mmap` forever.
 pub fn test_filemap_reserve_drains_a_queued_release() -> TestResult {
     if !ensure_mount() {
         return slopos_testing::fail!("could not build the fixture image");
@@ -1685,7 +1686,7 @@ const SHORT_FS_PAGES: usize = 3;
 
 impl FileSystem for ShortFs {
     fn name(&self) -> &'static str {
-        "ext2-filemap-short"
+        "ext4-filemap-short"
     }
 
     fn root_inode(&self) -> InodeId {

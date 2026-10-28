@@ -38,7 +38,7 @@ impl Client {
         let mut conn = Connection::new(fd);
 
         match conn.wait_recv(5000)? {
-            Event::Hello { version, .. } if version == PROTOCOL_VERSION => {}
+            Event::Hello { version } if version == PROTOCOL_VERSION => {}
             Event::Hello { .. } => return Err(ProtocolError::VersionMismatch),
             _ => return Err(ProtocolError::MalformedMessage),
         }
@@ -135,10 +135,6 @@ impl Client {
 
     pub fn surface_commit(&mut self, surface: SurfaceId) -> Result<(), ProtocolError> {
         self.conn.send(&Request::SurfaceCommit { surface })
-    }
-
-    pub fn surface_frame(&mut self, surface: SurfaceId) -> Result<(), ProtocolError> {
-        self.conn.send(&Request::SurfaceFrame { surface })
     }
 
     pub fn surface_destroy(&mut self, surface: SurfaceId) -> Result<(), ProtocolError> {
@@ -351,23 +347,7 @@ impl Client {
         self.conn.fd()
     }
 
-    pub fn display_width(&self) -> u32 {
-        self.output.width
-    }
-
-    pub fn display_height(&self) -> u32 {
-        self.output.height
-    }
-
     pub fn display_format(&self) -> u32 {
         self.output.format
-    }
-
-    pub fn display_pitch(&self) -> u32 {
-        self.output.pitch
-    }
-
-    pub fn display_scale(&self) -> u32 {
-        self.output.scale
     }
 }

@@ -17,8 +17,8 @@ use crate::cpu::preempt::PreemptGuard;
 use crate::cpu::x86_64 as cpu;
 use crate::mm::AllocError;
 use crate::mm::init::{Init, init_from_closure};
-use crate::sync::lock_tracking;
-use crate::sync::lock_tracking::LockClassKey;
+use crate::sync::lock_graph;
+use crate::sync::lock_graph::LockClassKey;
 
 // A `SpinLock` waiter spins with interrupts disabled, so it cannot service a
 // TLB-shootdown IPI. If the holder is itself waiting for this CPU's shootdown
@@ -61,7 +61,7 @@ fn spin_relax_fire() {
     if raw == 0 {
         return;
     }
-    let cpu_id = crate::cpu::x86_64::pcr::get_current_cpu();
+    let cpu_id = crate::cpu::x86_64::pcr::current_cpu_id();
     if cpu_id >= SPIN_RELAX_IN_HOOK.len() {
         return;
     }
@@ -90,7 +90,7 @@ pub struct SpinLock<T> {
 
 /// The ticket machinery, split out from the payload so it has one layout for
 /// every `T`. `#[repr(C)]` at offset zero makes `&SpinLock<T>` and `&LockCore`
-/// the same address, which [`lock_tracking::push_lock`] and the watchdog's
+/// the same address, which [`lock_graph::push_lock`] and the watchdog's
 /// wait-for graph both depend on, and lets the poison callback be one function
 /// rather than one monomorphisation per `T`.
 #[repr(C)]
@@ -154,18 +154,18 @@ impl LockCore {
         if self.now_serving.load(Ordering::Acquire) != my_ticket {
             self.await_ticket(my_ticket);
         }
-        let cpu = crate::cpu::x86_64::pcr::get_current_cpu() as u32;
+        let cpu = crate::cpu::x86_64::pcr::current_cpu_id() as u32;
         self.holder
             .store((cpu << 16) | my_ticket as u32, Ordering::Relaxed);
         // SAFETY: this CPU holds the lock, and `self` outlives the guard
         // the caller is about to build.
         unsafe {
-            lock_tracking::push_lock_ex(
+            lock_graph::push_lock_ex(
                 self as *const _ as *const (),
                 lock_core_poison_fn,
                 self.class,
                 subclass,
-                lock_tracking::ACQ_NONE,
+                lock_graph::ACQ_NONE,
             );
         }
     }
@@ -503,7 +503,7 @@ impl<T> SpinLock<T> {
 fn report_spin_stall(core: &LockCore, my_ticket: u16) {
     use crate::watchdog::{dump_wait_chain, nmi_emit, nmi_emit_dec, nmi_emit_hex, nmi_emit_line};
 
-    let me = crate::cpu::x86_64::pcr::get_current_cpu();
+    let me = crate::cpu::x86_64::pcr::current_cpu_id();
     nmi_emit("SPINSTALL: cpu ");
     nmi_emit_dec(me as u64);
     nmi_emit(" waiting on lock ");
@@ -544,7 +544,7 @@ impl<'a, T> Drop for SpinLockGuard<'a, T> {
     fn drop(&mut self) {
         // SAFETY: Lock is currently held by this guard.
         unsafe {
-            lock_tracking::pop_lock(&self.mutex.core as *const _ as *const ());
+            lock_graph::pop_lock(&self.mutex.core as *const _ as *const ());
         }
         self.mutex.core.now_serving.fetch_add(1, Ordering::Release);
         cpu::restore_flags(self.saved_flags);
@@ -592,7 +592,7 @@ impl<T> PreemptMutex<T> {
 
         // SAFETY: Preemption is disabled, self is a static lock.
         unsafe {
-            lock_tracking::push_lock(
+            lock_graph::push_lock(
                 self as *const _ as *const (),
                 preempt_mutex_poison_fn::<T>,
                 self.class,
@@ -621,7 +621,7 @@ impl<T> PreemptMutex<T> {
         {
             // SAFETY: Preemption is disabled, self is a static lock.
             unsafe {
-                lock_tracking::push_lock(
+                lock_graph::push_lock(
                     self as *const _ as *const (),
                     preempt_mutex_poison_fn::<T>,
                     self.class,
@@ -661,7 +661,7 @@ impl<'a, T> Drop for PreemptMutexGuard<'a, T> {
     fn drop(&mut self) {
         // SAFETY: Lock is currently held by this guard.
         unsafe {
-            lock_tracking::pop_lock(self.mutex as *const _ as *const ());
+            lock_graph::pop_lock(self.mutex as *const _ as *const ());
         }
         self.mutex.now_serving.fetch_add(1, Ordering::Release);
     }
@@ -749,12 +749,12 @@ impl<T> IrqRwLock<T> {
                     // Readers are recursive: nesting two read acquisitions
                     // of one instance is legal here and is not a deadlock.
                     unsafe {
-                        lock_tracking::push_lock_ex(
+                        lock_graph::push_lock_ex(
                             self as *const _ as *const (),
                             irq_rwlock_poison_fn::<T>,
                             self.class,
                             0,
-                            lock_tracking::ACQ_RECURSIVE,
+                            lock_graph::ACQ_RECURSIVE,
                         );
                     }
                     return IrqRwLockReadGuard {
@@ -784,12 +784,12 @@ impl<T> IrqRwLock<T> {
                 // SAFETY: Preemption is disabled, self is a static lock.
                 // Recursive for the same reason as `read`.
                 unsafe {
-                    lock_tracking::push_lock_ex(
+                    lock_graph::push_lock_ex(
                         self as *const _ as *const (),
                         irq_rwlock_poison_fn::<T>,
                         self.class,
                         0,
-                        lock_tracking::ACQ_RECURSIVE,
+                        lock_graph::ACQ_RECURSIVE,
                     );
                 }
                 return Some(IrqRwLockReadGuard {
@@ -821,7 +821,7 @@ impl<T> IrqRwLock<T> {
                 self.writer_waiting.fetch_sub(1, Ordering::Relaxed);
                 // SAFETY: Preemption is disabled, self is a static lock.
                 unsafe {
-                    lock_tracking::push_lock(
+                    lock_graph::push_lock(
                         self as *const _ as *const (),
                         irq_rwlock_poison_fn::<T>,
                         self.class,
@@ -850,7 +850,7 @@ impl<T> IrqRwLock<T> {
         {
             // SAFETY: Preemption is disabled, self is a static lock.
             unsafe {
-                lock_tracking::push_lock(
+                lock_graph::push_lock(
                     self as *const _ as *const (),
                     irq_rwlock_poison_fn::<T>,
                     self.class,
@@ -883,7 +883,7 @@ impl<'a, T> Drop for IrqRwLockReadGuard<'a, T> {
     fn drop(&mut self) {
         // SAFETY: Lock is currently held by this guard.
         unsafe {
-            lock_tracking::pop_lock(self.lock as *const _ as *const ());
+            lock_graph::pop_lock(self.lock as *const _ as *const ());
         }
         self.lock.state.fetch_sub(1, Ordering::Release);
         cpu::restore_flags(self.saved_flags);
@@ -913,7 +913,7 @@ impl<'a, T> Drop for IrqRwLockWriteGuard<'a, T> {
     fn drop(&mut self) {
         // SAFETY: Lock is currently held by this guard.
         unsafe {
-            lock_tracking::pop_lock(self.lock as *const _ as *const ());
+            lock_graph::pop_lock(self.lock as *const _ as *const ());
         }
         self.lock.state.store(0, Ordering::Release);
         cpu::restore_flags(self.saved_flags);

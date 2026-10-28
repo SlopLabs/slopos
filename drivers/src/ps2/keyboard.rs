@@ -3,8 +3,8 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use slopos_arch::cpu;
 use slopos_keymap_core::{LOCK_CAPS, LOCK_NUM, LOCK_SCROLL, Set1Decoder};
+use slopos_ostd::cpu::x86_64 as cpu;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{klog_info, klog_warn, lock_class};
 

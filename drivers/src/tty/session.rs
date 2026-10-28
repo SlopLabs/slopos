@@ -3,9 +3,6 @@
 //! Each TTY has at most one controlling session, and within it one foreground
 //! process group. Both are held as [`KWeak`] handles, so a terminal can never
 //! pin a dead session and a reused pid can never be mistaken for the old group.
-//!
-//! `focused_task_id` is compositor window focus and is independent of the
-//! foreground group.
 
 use slopos_ostd::task::{ProcessGroup, Session};
 use slopos_ostd::{KArc, KWeak};
@@ -16,8 +13,6 @@ use super::table::TTY_SLOTS;
 pub struct TtySession {
     session: KWeak<Session>,
     fg_pgrp: KWeak<ProcessGroup>,
-    /// `0` = none. Not a POSIX session/pgrp id.
-    pub(crate) focused_task_id: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +34,6 @@ impl TtySession {
         Self {
             session: KWeak::new(),
             fg_pgrp: KWeak::new(),
-            focused_task_id: 0,
         }
     }
 
@@ -56,7 +50,6 @@ impl TtySession {
     pub fn detach(&mut self) {
         self.session = KWeak::new();
         self.fg_pgrp = KWeak::new();
-        // focused_task_id is deliberately not cleared.
     }
 
     /// The controlling session's id, or `0` when none is attached / alive.

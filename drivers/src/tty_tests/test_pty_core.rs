@@ -1448,3 +1448,8 @@ slopos_testing::stest!(
     name = test_get_lock_non_master_error,
     suite = tty_test_pty_core
 );
+
+slopos_testing::stest!(
+    name = test_pty_open_slave_judges_the_owner_it_opens,
+    suite = tty_test_pty_core
+);

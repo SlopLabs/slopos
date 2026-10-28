@@ -691,7 +691,7 @@ pub(super) fn raw_block_entitled() -> bool {
 /// VFS, so this shortens only at the end of the device.
 ///
 /// Requires [`raw_block_entitled`]: a raw read bypasses every filesystem
-/// permission check above it, and ext2 does not zero a block it frees, so an
+/// permission check above it, and ext4 does not zero a block it frees, so an
 /// unprivileged reader could recover any unlinked file's contents.
 pub(super) fn block_read(inode: InodeId, offset: u64, buf: &mut [u8]) -> VfsResult<usize> {
     block_read_entitled(inode, offset, buf, raw_block_entitled())

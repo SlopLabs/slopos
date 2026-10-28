@@ -11,7 +11,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
 use std::path::Path;
 
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
-use slopos_abi::fs::{ROOT_LAYOUT, SESSION_GID, SESSION_UID};
+use slopos_abi::fs::{OWNERS_RECORD, ROOT_LAYOUT, SESSION_GID, SESSION_UID};
 use slopos_boot_core::layout;
 use slopos_tree_core::{Kind, Manifest};
 
@@ -76,6 +76,11 @@ impl Mounted {
 
     fn path(&self, path: &str) -> String {
         format!("{}{path}", self.dir)
+    }
+
+    /// Whether the root records who owns its trees, which keeping it needs.
+    pub fn records_owners(&self) -> bool {
+        Owners::read(Path::new(&self.dir)).is_some()
     }
 
     /// Whether `path` and each directory above it on the root is a directory,
@@ -183,7 +188,9 @@ pub fn lay_out(root: &Mounted, new: bool) -> Result<Owners, String> {
     let top = Path::new(&root.dir);
     let owners = match new {
         true => Owners::ONE_PERSON,
-        false => Owners::of(top),
+        false => Owners::read(top).ok_or_else(|| {
+            format!("{OWNERS_RECORD}: absent or unreadable, so this root cannot be kept")
+        })?,
     };
     for dir in ROOT_LAYOUT.iter().filter(|dir| dir.path != "/") {
         root.owned_dir(dir.path, owners.owner(dir.path), dir.mode)?;

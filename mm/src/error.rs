@@ -1,9 +1,9 @@
 //! Unified error type for the memory management subsystem. `ElfError` and
-//! `UserPtrError` stay in their own modules; they share no variants with this
-//! one.
+//! `user_copy::UserPtrError` stay in their own modules; they share no variants
+//! with this one.
 
-use crate::paging::page_table_defs::PageTableLevel;
 use core::fmt;
+use slopos_ostd::mm::page_table::PageTableLevel;
 
 /// Covers paging, copy-on-write, demand paging and general VM operations;
 /// variants are grouped by producing subsystem, but any MM operation may

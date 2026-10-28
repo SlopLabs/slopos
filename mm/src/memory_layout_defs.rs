@@ -70,8 +70,8 @@ pub const PROCESS_TLS_BASE_VA: u64 = 0x0000_0000_00C0_0000;
 
 pub const PROCESS_HEAP_START_VA: u64 = 0x0000_0000_0100_0000;
 
-/// Ceiling for `brk` (16 GB). A `brk`-fed allocator serving a compiler runs out
-/// of the 1 GB this used to be.
+/// Ceiling for `brk` (16 GB): a `brk`-fed allocator serving a compiler outgrows
+/// 1 GB.
 pub const PROCESS_HEAP_MAX_VA: u64 = 0x0000_0004_0000_0000;
 
 /// Unmapped address space between the heap ceiling and the mmap arena (4 GB),
@@ -169,12 +169,12 @@ pub const EXC_DSTACK_PAGES: u64 = EXC_DSTACK_USABLE_SIZE / PAGE_SIZE_4KB;
 // stack.
 const _: () = {
     assert!(
-        EXCEPTION_STACK_REGION_BASE == slopos_arch::pcr::SAFESTACK_IST_REGION_BASE,
+        EXCEPTION_STACK_REGION_BASE == slopos_ostd::cpu::x86_64::pcr::SAFESTACK_IST_REGION_BASE,
         "SafeStack IST-region base drifted from EXCEPTION_STACK_REGION_BASE",
     );
     assert!(
         EXCEPTION_STACK_REGION_END - EXCEPTION_STACK_REGION_BASE
-            == slopos_arch::pcr::SAFESTACK_IST_REGION_SPAN,
+            == slopos_ostd::cpu::x86_64::pcr::SAFESTACK_IST_REGION_SPAN,
         "SafeStack IST-region span drifted from EXCEPTION_STACK_REGION span",
     );
 };
@@ -185,8 +185,8 @@ const _: () = {
 // They are separate from the IST/EXC_DSTACK stacks so an NMI nested on top of
 // the panic cannot collide with the report in progress.
 
-pub const EMERGENCY_DSTACK_REGION_BASE: u64 =
-    EXC_DSTACK_REGION_BASE + (slopos_arch::pcr::MAX_CPUS as u64) * EXC_DSTACK_REGION_STRIDE;
+pub const EMERGENCY_DSTACK_REGION_BASE: u64 = EXC_DSTACK_REGION_BASE
+    + (slopos_ostd::cpu::x86_64::pcr::MAX_CPUS as u64) * EXC_DSTACK_REGION_STRIDE;
 
 /// Stride per CPU slot (128 KB: 4 KB guard + 124 KB usable).
 pub const EMERGENCY_DSTACK_REGION_STRIDE: u64 = 0x0002_0000;
@@ -200,7 +200,7 @@ pub const EMERGENCY_DSTACK_USABLE_SIZE: u64 =
 pub const EMERGENCY_DSTACK_PAGES: u64 = EMERGENCY_DSTACK_USABLE_SIZE / PAGE_SIZE_4KB;
 
 pub const EMERGENCY_SAFE_STACK_REGION_BASE: u64 = EMERGENCY_DSTACK_REGION_BASE
-    + (slopos_arch::pcr::MAX_CPUS as u64) * EMERGENCY_DSTACK_REGION_STRIDE;
+    + (slopos_ostd::cpu::x86_64::pcr::MAX_CPUS as u64) * EMERGENCY_DSTACK_REGION_STRIDE;
 
 /// Stride per CPU slot (64 KB: 4 KB guard + 60 KB usable).
 pub const EMERGENCY_SAFE_STACK_REGION_STRIDE: u64 = 0x0001_0000;
@@ -217,7 +217,7 @@ pub const EMERGENCY_SAFE_STACK_PAGES: u64 = EMERGENCY_SAFE_STACK_USABLE_SIZE / P
 /// kernel higher half as MAX_CPUS grows.
 const _: () = {
     let top = EMERGENCY_SAFE_STACK_REGION_BASE
-        + (slopos_arch::pcr::MAX_CPUS as u64) * EMERGENCY_SAFE_STACK_REGION_STRIDE;
+        + (slopos_ostd::cpu::x86_64::pcr::MAX_CPUS as u64) * EMERGENCY_SAFE_STACK_REGION_STRIDE;
     assert!(
         top > EMERGENCY_DSTACK_REGION_BASE && top <= 0xFFFF_FFFF_FF00_0000,
         "emergency stack regions overflow the kernel higher half",

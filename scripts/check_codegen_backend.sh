@@ -167,10 +167,8 @@ EOF
 # One `-Zbuild-std` fingerprint per RUSTFLAGS set, cached under builddir/, so
 # a re-run costs a cargo freshness check rather than a rebuild of core.
 #
-# Setting RUSTFLAGS overrides `.cargo/config.toml`'s `[target.…] rustflags`
-# wholesale, which is the point: the soft-float probe then measures the
-# guarantee `targets/x86_64-slos.json` carries on its own, not the belt-and-
-# braces `-C target-feature=-sse,…` beside it.
+# The soft-float probe measures the guarantee `targets/x86_64-slos.json`
+# carries on its own: no flag set below names a target feature.
 
 BACKEND_FLAG=""
 PROBE_DIR=""

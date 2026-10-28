@@ -4,8 +4,9 @@
 //! never change at runtime. `CR4.SMAP` is what forces every user-memory access
 //! through the dedicated `raw_usercopy` path — anything else faults.
 //!
-//! Called from `boot::early_init` on the BSP and `boot::smp::ap_entry_rust` on
-//! each AP, after SSE/XSAVE are brought up and before any user-visible work.
+//! Called from `boot::boot_memory`'s supervisor-features step on the BSP and
+//! `boot::smp::ap_late_entry` on each AP, after SSE/XSAVE are brought up and
+//! before any user-visible work.
 
 use super::control_regs::{Cr4Flags, read_cr4, write_cr4};
 use crate::arch::x86_64::cpuid::{

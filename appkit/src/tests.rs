@@ -1510,6 +1510,73 @@ fn test_drag_handle_reports_begin_move_end() {
     assert_eq!(sink.drain_typed::<DragInput>(), [DragInput::End]);
 }
 
+fn test_a_picture_reports_its_gestures() {
+    use super::node::ImageData;
+    use super::widgets::picture::{PictureInput, PictureWidget};
+    use slopos_abi::draw::Color32;
+    let image = ImageData::new(2, 2, vec![Color32::rgb(0, 0, 0); 4]).unwrap();
+    let mut picture = PictureWidget::new(
+        image,
+        1.0,
+        (0, 0),
+        false,
+        false,
+        Some(Box::new(|i: PictureInput| {
+            Box::new(i) as Box<dyn std::any::Any>
+        })),
+    );
+    let style = StyleSheet::current();
+    let mut ctx = MeasureCtx { style: &style };
+    measure_widget(
+        &mut picture,
+        BoxConstraints::tight(Size::new(100, 80)),
+        &mut ctx,
+    );
+    place_widget(&mut picture, Rect::new(10, 20, 100, 80));
+    let mut sink = MessageSink::new();
+    let release = WidgetEvent::PointerUp {
+        x: 300,
+        y: 300,
+        button: super::event::PointerButton::Left,
+    };
+    let wheel = |x, y| WidgetEvent::Scroll {
+        x,
+        y,
+        delta_x: 0,
+        delta_y: 40,
+    };
+    for event in [
+        WidgetEvent::PointerMove { x: 300, y: 300 },
+        WidgetEvent::PointerMove { x: 15, y: 25 },
+        press(20, 30, super::event::PointerButton::Left),
+        WidgetEvent::PointerMove { x: 300, y: 300 },
+        release.clone(),
+        release,
+        wheel(300, 300),
+        wheel(60, 60),
+        WidgetEvent::TextInput { character: 'f' },
+        WidgetEvent::FocusGained,
+        WidgetEvent::TextInput { character: 'f' },
+    ] {
+        picture.event(&event, &mut sink);
+    }
+    assert_eq!(
+        sink.drain_typed::<PictureInput>(),
+        [
+            PictureInput::Pointer { x: 5, y: 5 },
+            PictureInput::Grab { x: 10, y: 10 },
+            PictureInput::Pointer { x: 290, y: 280 },
+            PictureInput::Release,
+            PictureInput::Wheel {
+                x: 50,
+                y: 40,
+                delta: 40
+            },
+            PictureInput::Text('f'),
+        ]
+    );
+}
+
 fn test_a_release_outside_a_widget_still_reaches_it() {
     use super::widgets::drag_handle::{DragHandleWidget, DragInput};
     // Ending outside the handle's 6 px is the ordinary way to end a drag;
@@ -1855,6 +1922,10 @@ pub fn cases() -> &'static [(&'static str, fn())] {
         (
             "drag_handle_reports_begin_move_end",
             test_drag_handle_reports_begin_move_end,
+        ),
+        (
+            "a_picture_reports_its_gestures",
+            test_a_picture_reports_its_gestures,
         ),
         (
             "a_release_outside_a_widget_still_reaches_it",

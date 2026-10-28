@@ -11,9 +11,9 @@
 
 # min-records — the ELF must carry at least this many .stack_sizes entries;
 # llvm-readobj prints an empty `StackSizes [ ]` and exits 0 without the
-# section. Measured 2026-07-31: dev 31234, tests 44732, release 3830. The dev
-# floor sits deliberately above release's count, so `--variant dev` against a
-# release ELF trips here. Keep that relation when adjusting it.
+# section. Dev and tests carry tens of thousands, release a few thousand; the
+# dev floor sits above release's count, so `--variant dev` against a release
+# ELF trips here. Keep that relation when adjusting it.
 min-records 20000
 
 # few | many | any. A kernel/tests image links ~2742 104-byte .test_registry
@@ -38,17 +38,10 @@ expect-test-registry few
 2424	*slopos_acpi3aml14process_device*
 2344	*slopos_net4ipv49handle_rx*
 2200	*slopos_acpi3aml6interp*Interp4eval*
-2328	*slopos_core7syscall16process_handlers18syscall_spawn_path*
 
-# Staging the child's cwd (`SpawnAttrs.cwd_ptr`) added 256 B to the
-# `syscall_spawn_path` closure's frame; the path itself is a `KVec`, the
-# residual is the `CanonPath` the child is published with.
-
-# Sharing the signal-action table under `CLONE_SIGHAND` put a
-# `KArc<SigHandTable>` handoff in `task_clone`'s frame, which crossed the
-# threshold at 2072 B; giving a non-leader thread its group leader's
-# `real_parent` added a second owning handle and took it to 2136 B; charging
-# a clone its task once it is registered took it to 2152 B.
+# `task_clone` holds the `KArc<SigHandTable>` a `CLONE_SIGHAND` thread shares,
+# its group leader's `real_parent` and the task charge a registered clone
+# takes.
 2152	*slopos_sched4task14task_lifecycle10task_clone*
 
 # Library smallsort monomorphizations: scratch is the element size, not

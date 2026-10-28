@@ -27,7 +27,7 @@ fn runtime_current_task_pgrp_handle() -> Option<slopos_ostd::KWeak<ProcessGroup>
 /// The id is resolved through the registry rather than dereferenced: a waiter
 /// killed while parked never unwinds its own stack, so its wait node can
 /// outlive it.
-fn runtime_unblock_task(task_id: u32) -> i32 {
+fn runtime_unblock_task(task_id: u32) -> bool {
     scheduler::unblock_task_id(task_id)
 }
 
@@ -225,7 +225,6 @@ fn runtime_is_pgrp_orphaned(pgid: u32, sid: u32) -> bool {
 }
 
 static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
-    save_preempt_context: scheduler::save_preempt_context,
     scheduler_timer_tick: scheduler::scheduler_timer_tick,
     scheduler_handle_timer_interrupt: scheduler::scheduler_handle_timer_interrupt,
     request_reschedule_from_interrupt: scheduler::scheduler_request_reschedule_from_interrupt,
@@ -263,7 +262,6 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     pgrp_handle: slopos_sched::task::pgrp_handle_for_pgid,
     session_handle: slopos_sched::task::session_handle_for_sid,
     current_task_pgrp_handle: runtime_current_task_pgrp_handle,
-    pgrp_exists_in_session: runtime_pgrp_exists_in_session,
     is_current_signal_blocked_or_ignored: runtime_is_current_signal_blocked_or_ignored,
     is_pgrp_orphaned: runtime_is_pgrp_orphaned,
     has_pending_signal: runtime_has_pending_signal,
@@ -271,9 +269,7 @@ static DRIVER_RUNTIME_SERVICES: DriverRuntimeServices = DriverRuntimeServices {
     irq_set_route: irq::set_irq_route,
     irq_is_masked: irq::is_masked,
     irq_enable_line: irq::enable_line,
-    irq_disable_line: irq::disable_line,
     irq_get_timer_ticks: irq::get_timer_ticks,
-    irq_increment_timer_ticks: irq::increment_timer_ticks,
     irq_increment_keyboard_events: irq::increment_keyboard_events,
 };
 

@@ -26,7 +26,7 @@ pub const EXPIRY_MS: u64 = 120_000;
 /// The longest command line, and the longest directory, a question may carry:
 /// the person sees all of it or is not asked.
 pub const MAX_SHOWN: usize = 320;
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 1;
 /// What the dialog calls a program the kernel attests as none of the system's.
 pub const UNIDENTIFIED: &str = "An unidentified app";
 pub const APP_MAX: usize = 64;
@@ -594,13 +594,11 @@ pub fn ready_frame() -> Vec<u8> {
     )
 }
 
-/// The version a `READY` names; one naming none is 0, which no version is.
+/// The version a `READY` names. Every other field is ignored, so an agent of
+/// any version is told it is outdated rather than taken for a broken one.
 pub fn decode_ready(payload: &[u8]) -> Result<u32, Malformed> {
-    let fields = known(payload, &["version"])?;
-    match fields.all("version").count() {
-        0 => Ok(0),
-        _ => number(&fields, "version"),
-    }
+    let fields = Fields::decode(payload).map_err(|_| Malformed)?;
+    number(&fields, "version")
 }
 
 pub fn shown_frame(id: u64) -> Vec<u8> {

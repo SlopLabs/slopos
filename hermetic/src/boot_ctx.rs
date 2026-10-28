@@ -1,5 +1,5 @@
 //! `BootCtx<'brand, K>` — capability token gating boot-time-only kernel
-//! singleton mutators (`gdt_init`, `gdt_set_ist`, `syscall_msr_init`, …);
+//! singleton mutators (`gdt_set_ist`, `syscall_msr_init`, …);
 //! calling those after `enter_scheduler` is always a bug.
 //!
 //! The mint-by-token methods are kind-gated, so an AP-derived

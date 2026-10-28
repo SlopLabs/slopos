@@ -23,12 +23,12 @@ mod renderer;
 mod status_item;
 mod surface_cache;
 pub mod views;
+pub mod window_info;
 
 use crate::gfx::DamageRect;
 use crate::init_control::Command;
 use crate::net_query;
-use crate::ring::{Ring, slopfut};
-use crate::syscall::{DisplayInfo, UserWindowInfo, core as sys_core, process, window};
+use crate::syscall::{DisplayInfo, core as sys_core, process, window};
 use region::Region;
 use slopos_abi::input::POINTER_AXIS_VERTICAL;
 use slopos_abi::net::{
@@ -44,6 +44,7 @@ use slopos_chrome_core::netstate::{
 use slopos_chrome_core::positioner;
 use slopos_chrome_core::status::{BAR_HEIGHT, MAX_STATUS_ITEMS};
 use slopos_protocol::server::MAX_CLIENTS;
+use slopos_rt::{Ring, slopfut};
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -55,15 +56,15 @@ use menu_bar::MenuBar;
 use output::{CompositorOutput, FrameMetrics, RenderMode, estimate_present_bytes};
 use protocol::ProtocolBridge;
 use renderer::Renderer;
-use slopos_abi::surface::WINDOW_STATE_MINIMIZED;
 use surface_cache::ClientSurfaceCache;
+use window_info::{WindowInfo, WindowState};
 
 const MAX_WINDOWS: usize = 32;
 
 struct WindowManager {
-    windows: [UserWindowInfo; MAX_WINDOWS],
+    windows: [WindowInfo; MAX_WINDOWS],
     window_count: u32,
-    prev_windows: [UserWindowInfo; MAX_WINDOWS],
+    prev_windows: [WindowInfo; MAX_WINDOWS],
     prev_window_count: u32,
 
     input: InputHandler,
@@ -97,7 +98,7 @@ struct WindowManager {
     /// button is up, as `wl_pointer` has it, or 0: a drag that leaves the
     /// window still ends there.
     protocol_pointer_grab: u32,
-    /// The task id is a slot, which is recycled.
+    /// The grab's window is a slot, which is recycled.
     protocol_pointer_grab_gen: u32,
 
     first_frame: bool,
@@ -141,9 +142,9 @@ impl WindowManager {
         };
         let (undone_tx, undone) = std::sync::mpsc::channel();
         Self {
-            windows: [UserWindowInfo::default(); MAX_WINDOWS],
+            windows: [WindowInfo::default(); MAX_WINDOWS],
             window_count: 0,
-            prev_windows: [UserWindowInfo::default(); MAX_WINDOWS],
+            prev_windows: [WindowInfo::default(); MAX_WINDOWS],
             prev_window_count: 0,
             input: InputHandler::new(),
             renderer: Renderer::new(),
@@ -267,7 +268,7 @@ impl WindowManager {
             let window = self.windows[i];
             let curr_bounds = WindowBounds::from_window(&window);
 
-            let prev = self.find_prev_index(window.task_id);
+            let prev = self.find_prev_index(window.id);
 
             if let Some(prev_idx) = prev {
                 let old = saved_bounds[prev_idx];
@@ -285,19 +286,19 @@ impl WindowManager {
 
             self.prev_window_bounds[i] = curr_bounds;
 
-            if window.state == WINDOW_STATE_MINIMIZED {
+            if window.state == WindowState::Minimized {
                 continue;
             }
 
             if window.is_dirty() {
                 self.add_window_damage(&window);
-                self.frame_dirty_surfaces.push(window.task_id);
+                self.frame_dirty_surfaces.push(window.id);
             }
         }
 
         for i in 0..self.prev_window_count as usize {
             let prev = &self.prev_windows[i];
-            if !self.window_exists(prev.task_id) {
+            if !self.window_exists(prev.id) {
                 self.add_bounds_damage(&saved_bounds[i]);
             }
         }
@@ -324,7 +325,7 @@ impl WindowManager {
         }
     }
 
-    fn register_hover_regions(&mut self, buttons_hovered_task: u32) {
+    fn register_hover_regions(&mut self, buttons_hovered_window: u32) {
         self.hover_registry.begin_frame();
 
         if self.renderer.output_height == 0 {
@@ -332,13 +333,13 @@ impl WindowManager {
         }
 
         for w in self.windows[..self.window_count as usize].iter().rev() {
-            if w.state == WINDOW_STATE_MINIMIZED {
+            if w.state == WindowState::Minimized {
                 continue;
             }
             let group = decorations::buttons_group(w.x, w.y - TITLE_BAR_HEIGHT);
-            let hovered = w.task_id == buttons_hovered_task;
+            let hovered = w.id == buttons_hovered_window;
             self.hover_registry
-                .register(hover::HOVER_BUTTONS_BASE | w.task_id, group, hovered);
+                .register(hover::HOVER_BUTTONS_BASE | w.id, group, hovered);
         }
 
         let mut status_regions = [(0u32, DamageRect::invalid(), false); MAX_STATUS_ITEMS];
@@ -356,14 +357,14 @@ impl WindowManager {
         self.hover_registry.changed_regions(|rect| damage.add(rect));
     }
 
-    /// Where `task_id` was in the last frame's list, which is its rank from
+    /// Where `window` was in the last frame's list, which is its rank from
     /// the bottom.
-    fn find_prev_index(&self, task_id: u32) -> Option<usize> {
-        (0..self.prev_window_count as usize).find(|&i| self.prev_windows[i].task_id == task_id)
+    fn find_prev_index(&self, window: u32) -> Option<usize> {
+        (0..self.prev_window_count as usize).find(|&i| self.prev_windows[i].id == window)
     }
 
-    fn window_exists(&self, task_id: u32) -> bool {
-        (0..self.window_count as usize).any(|i| self.windows[i].task_id == task_id)
+    fn window_exists(&self, window: u32) -> bool {
+        (0..self.window_count as usize).any(|i| self.windows[i].id == window)
     }
 
     fn add_bounds_damage(&mut self, bounds: &WindowBounds) {
@@ -443,7 +444,7 @@ impl WindowManager {
                     && !self.consent.capturing()
                     && let Some(p) = proto_box.as_deref_mut()
                 {
-                    p.send_modifiers_for_task(self.input.focused_task(), mods);
+                    p.send_modifiers_for_window(self.input.focused_window(), mods);
                 }
                 continue;
             }
@@ -508,7 +509,7 @@ impl WindowManager {
                     let target = self.pointer_target(proto_box.as_deref());
                     if target != 0 {
                         if let Some(p) = proto_box.as_deref_mut() {
-                            p.send_pointer_motion_for_task(
+                            p.send_pointer_motion_for_window(
                                 target,
                                 time,
                                 self.input.mouse_x,
@@ -554,13 +555,13 @@ impl WindowManager {
                             self.protocol_pointer_grab_gen = proto_box
                                 .as_deref()
                                 .and_then(|p| {
-                                    p.surface_generation_for_task(self.protocol_pointer_focus)
+                                    p.surface_generation_for_window(self.protocol_pointer_focus)
                                 })
                                 .unwrap_or(0);
                         }
                         if let Some(p) = proto_box.as_deref_mut() {
                             self.protocol_serial = self.protocol_serial.wrapping_add(1);
-                            p.send_pointer_button_for_task(
+                            p.send_pointer_button_for_window(
                                 self.protocol_pointer_grab,
                                 self.protocol_serial,
                                 time,
@@ -582,7 +583,7 @@ impl WindowManager {
                     if pressed_on != 0 {
                         if let Some(p) = proto_box.as_deref_mut() {
                             self.protocol_serial = self.protocol_serial.wrapping_add(1);
-                            p.send_pointer_button_for_task(
+                            p.send_pointer_button_for_window(
                                 pressed_on,
                                 self.protocol_serial,
                                 time,
@@ -600,7 +601,7 @@ impl WindowManager {
                     let target = self.pointer_target(proto_box.as_deref());
                     if target != 0 {
                         if let Some(p) = proto_box.as_deref_mut() {
-                            p.send_pointer_axis_for_task(
+                            p.send_pointer_axis_for_window(
                                 target,
                                 time,
                                 event.axis_id(),
@@ -613,7 +614,7 @@ impl WindowManager {
                     let pressed = event.event_type == InputEventType::KeyPress;
                     let mods = event.key_modifiers();
                     self.input.set_modifier_state(mods);
-                    let kbd_focus = self.input.focused_task();
+                    let kbd_focus = self.input.focused_window();
                     if let Some(p) = proto_box.as_deref_mut() {
                         p.forward_key_event(
                             kbd_focus,
@@ -624,7 +625,6 @@ impl WindowManager {
                         );
                     }
                 }
-                _ => {}
             }
         }
 
@@ -650,7 +650,7 @@ impl WindowManager {
             return 0;
         }
         let live = proto
-            .and_then(|p| p.surface_generation_for_task(self.protocol_pointer_grab))
+            .and_then(|p| p.surface_generation_for_window(self.protocol_pointer_grab))
             .is_some_and(|generation| generation == self.protocol_pointer_grab_gen);
         if !live {
             self.release_pointer_grab();
@@ -684,7 +684,7 @@ impl WindowManager {
             &self.menu_bar,
         );
         let new_ptr_focus = match hit.part {
-            input::CursorPart::Content if !self.covered() => hit.task_id,
+            input::CursorPart::Content if !self.covered() => hit.window,
             _ => 0,
         };
         if new_ptr_focus == self.protocol_pointer_focus {
@@ -692,13 +692,13 @@ impl WindowManager {
         }
         if let Some(p) = proto {
             if self.protocol_pointer_focus != 0 {
-                p.send_pointer_leave_for_task(self.protocol_pointer_focus);
+                p.send_pointer_leave_for_window(self.protocol_pointer_focus);
             }
             if new_ptr_focus != 0 {
                 // 0 is the serial of no enter, which a cursor request may not
                 // carry.
                 self.protocol_serial = self.protocol_serial.wrapping_add(1).max(1);
-                p.send_pointer_enter_for_task(
+                p.send_pointer_enter_for_window(
                     new_ptr_focus,
                     self.protocol_serial,
                     self.input.mouse_x,
@@ -711,7 +711,7 @@ impl WindowManager {
 
     fn resync_windows_post_input(&mut self) {
         let pre_count = self.window_count as usize;
-        let mut pre_windows = [UserWindowInfo::default(); MAX_WINDOWS];
+        let mut pre_windows = [WindowInfo::default(); MAX_WINDOWS];
         let mut pre_bounds = [WindowBounds::default(); MAX_WINDOWS];
         for i in 0..pre_count {
             pre_windows[i] = self.windows[i];
@@ -731,10 +731,8 @@ impl WindowManager {
 
         for i in 0..self.window_count as usize {
             let curr_bounds = WindowBounds::from_window(&self.windows[i]);
-            let task_id = self.windows[i].task_id;
-            let prev_idx = pre_windows[..pre_count]
-                .iter()
-                .position(|w| w.task_id == task_id);
+            let id = self.windows[i].id;
+            let prev_idx = pre_windows[..pre_count].iter().position(|w| w.id == id);
             if let Some(j) = prev_idx {
                 let p = pre_bounds[j];
                 let geometry_changed = p != curr_bounds;
@@ -749,7 +747,7 @@ impl WindowManager {
         }
     }
 
-    fn add_window_damage(&mut self, window: &UserWindowInfo) {
+    fn add_window_damage(&mut self, window: &WindowInfo) {
         if window.damage_count == u8::MAX {
             let bounds = WindowBounds::from_window(window);
             self.add_bounds_damage(&bounds);
@@ -768,13 +766,13 @@ impl WindowManager {
         }
     }
 
-    /// What a change of focus repaints of the window `task_id`: its title
-    /// bar, its shadow, which darkens with focus, and its content's corners,
-    /// which blend over the shadow.
-    fn add_focus_damage_for_task(&mut self, task_id: u32) {
+    /// What a change of focus repaints of `window`: its title bar, its
+    /// shadow, which darkens with focus, and its content's corners, which
+    /// blend over the shadow.
+    fn add_focus_damage_for_window(&mut self, window: u32) {
         let Some(w) = self.windows[..self.window_count as usize]
             .iter()
-            .find(|w| task_id != 0 && w.task_id == task_id)
+            .find(|w| window != 0 && w.id == window)
         else {
             return;
         };
@@ -808,7 +806,7 @@ impl WindowManager {
             let w = windows
                 .iter()
                 .rev()
-                .find(|w| w.pid == pid && w.state != WINDOW_STATE_MINIMIZED)?;
+                .find(|w| w.pid == pid && w.state != WindowState::Minimized)?;
             let frame = frame::frame_box(w);
             Some(slopos_appkit::Rect::new(
                 frame.x0,
@@ -845,7 +843,7 @@ impl WindowManager {
         wm.refresh_windows();
         wm.gate.poll();
         wm.add_overlay_damage(screen);
-        let focus_before = wm.input.focused_task();
+        let focus_before = wm.input.focused_window();
 
         wm.input.sync_keyboard_focus(
             &wm.windows,
@@ -890,14 +888,14 @@ impl WindowManager {
             wm.renderer.output_width,
             &wm.menu_bar,
         );
-        let (cursor_shape, buttons_hovered_task) = match wm.covered() {
-            true => (slopos_abi::window::CURSOR_SHAPE_DEFAULT, 0),
+        let (cursor_shape, buttons_hovered_window) = match wm.covered() {
+            true => (slopos_protocol::CURSOR_SHAPE_DEFAULT, 0),
             false => (
                 wm.input.cursor_shape_for(&cursor_hit, &wm.windows),
-                wm.input.buttons_hovered_task(&cursor_hit, &wm.windows),
+                wm.input.buttons_hovered_window(&cursor_hit, &wm.windows),
             ),
         };
-        wm.register_hover_regions(buttons_hovered_task);
+        wm.register_hover_regions(buttons_hovered_window);
 
         if cursor_shape != wm.prev_cursor_shape {
             wm.output_damage
@@ -917,10 +915,10 @@ impl WindowManager {
             wm.hw_cursor_last_y = wm.input.mouse_y;
         }
 
-        let focus_after = wm.input.focused_task();
+        let focus_after = wm.input.focused_window();
         if focus_after != focus_before {
-            wm.add_focus_damage_for_task(focus_before);
-            wm.add_focus_damage_for_task(focus_after);
+            wm.add_focus_damage_for_window(focus_before);
+            wm.add_focus_damage_for_window(focus_after);
             wm.output_damage
                 .add(wm.menu_bar.app_name_damage(output.width));
         }
@@ -987,15 +985,15 @@ impl WindowManager {
                 let active_app_name = active_app_name(
                     &wm.windows,
                     wm.window_count,
-                    wm.input.focused_task(),
+                    wm.input.focused_window(),
                     &wm.dock,
                 );
 
                 wm.renderer.render(
                     &mut buf,
                     &wm.windows[..wm.window_count as usize],
-                    wm.input.focused_task(),
-                    buttons_hovered_task,
+                    wm.input.focused_window(),
+                    buttons_hovered_window,
                     wm.input.mouse_x,
                     wm.input.mouse_y,
                     cursor_shape,
@@ -1219,18 +1217,18 @@ pub fn compositor_user_main() {
     );
 }
 
-const GREETER_ARG: &str = "--greeter";
-/// Where init tells a compositor whether its session is in front.
-const SESSION_FD: i32 = 5;
+/// The login screen's argument; a desktop takes none.
+pub const GREETER_ARG: &str = "--greeter";
 const BEHIND_FRAME_MS: u64 = 100;
 
 fn session_pipe() -> Option<crate::syscall::OwnedFd> {
+    use crate::init_control::fds::COMPOSITOR_SESSION;
     use slopos_abi::syscall::F_GETFD;
     use slopos_slibc::pal::{Pal, Sys};
-    Sys::fcntl(SESSION_FD, F_GETFD as i32, 0).ok()?;
-    let _ = crate::syscall::fs::set_fd_cloexec(SESSION_FD);
+    Sys::fcntl(COMPOSITOR_SESSION, F_GETFD as i32, 0).ok()?;
+    let _ = crate::syscall::fs::set_fd_cloexec(COMPOSITOR_SESSION);
     // SAFETY: init handed this descriptor over and nothing else here owns it.
-    let fd = unsafe { crate::syscall::OwnedFd::from_raw(SESSION_FD) };
+    let fd = unsafe { crate::syscall::OwnedFd::from_raw(COMPOSITOR_SESSION) };
     let _ = crate::syscall::net::set_nonblocking(fd.raw());
     Some(fd)
 }
@@ -1695,14 +1693,14 @@ fn read_net_model() -> Option<NetPanelModel> {
 /// What the menu bar names the focused window by: its app's name in the
 /// dock when an entry there names the app, else its title.
 fn active_app_name(
-    windows: &[UserWindowInfo; MAX_WINDOWS],
+    windows: &[WindowInfo; MAX_WINDOWS],
     count: u32,
-    focused_task: u32,
+    focused: u32,
     dock: &Dock,
 ) -> String {
     let Some(window) = windows[..count as usize]
         .iter()
-        .find(|w| focused_task != 0 && w.task_id == focused_task)
+        .find(|w| focused != 0 && w.id == focused)
     else {
         return String::new();
     };

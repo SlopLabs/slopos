@@ -5,10 +5,10 @@
 //! [`synchronize_rcu`] to wait for a grace period, or [`call_rcu`] to defer the
 //! free until after one.
 //!
-//! Logging and the platform monotonic clock are reached via the
-//! one-shot-registered [`RcuBackend`] trait — OSTD does not depend on
-//! `slopos-utils` or `slopos-kernel-services`. Until a backend is
-//! registered, the logger is a no-op and the clock falls back to TSC.
+//! The platform monotonic clock is reached via the one-shot-registered
+//! [`RcuBackend`] trait, since OSTD does not depend on
+//! `slopos-kernel-services`. Until a backend is registered, the clock falls
+//! back to TSC.
 
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
@@ -17,8 +17,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering
 
 use crate::cpu::preempt::PreemptGuard;
 use crate::cpu::x86_64::pcr::{
-    MAX_CPUS, apic_id_from_cpu_index, get_cpu_count, get_current_cpu, is_cpu_online,
-    send_ipi_to_cpu,
+    MAX_CPUS, apic_id_from_cpu_index, current_cpu_id, get_cpu_count, is_cpu_online, send_ipi_to_cpu,
 };
 use crate::irq::idt::RCU_QS_IPI_VECTOR;
 use crate::mm::{raw_alloc, raw_dealloc};
@@ -52,7 +51,7 @@ pub fn rcu_read_lock() -> RcuReadGuard {
 /// context wants [`rcu_note_qs_from_interrupt`].
 #[inline]
 pub fn rcu_note_qs() {
-    let cpu = get_current_cpu();
+    let cpu = current_cpu_id();
     if cpu < MAX_CPUS {
         RCU_QS_CTR[cpu].0.fetch_add(1, Ordering::Release);
     }
@@ -86,7 +85,7 @@ static RCU_CPU_IDLE: [QsSlot; MAX_CPUS] = [const { QsSlot(AtomicU64::new(0)) }; 
 /// Enter the extended quiescent state: this CPU is about to halt.
 #[inline]
 pub fn rcu_note_cpu_idle_enter() {
-    let cpu = get_current_cpu();
+    let cpu = current_cpu_id();
     if cpu < MAX_CPUS {
         RCU_CPU_IDLE[cpu].0.store(1, Ordering::Release);
     }
@@ -96,7 +95,7 @@ pub fn rcu_note_cpu_idle_enter() {
 /// one, and a period that starts before the next report must still see it.
 #[inline]
 pub fn rcu_note_cpu_idle_exit() {
-    let cpu = get_current_cpu();
+    let cpu = current_cpu_id();
     if cpu < MAX_CPUS {
         RCU_CPU_IDLE[cpu].0.store(0, Ordering::Release);
     }
@@ -210,7 +209,7 @@ pub fn rcu_gp_poll_count(cpu: usize) -> u64 {
 pub fn rcu_gp_poll() {
     #[cfg(any(test, feature = "test-helpers"))]
     {
-        let counting_cpu = get_current_cpu();
+        let counting_cpu = current_cpu_id();
         if counting_cpu < MAX_CPUS {
             RCU_GP_POLLS[counting_cpu].fetch_add(1, Ordering::Release);
         }
@@ -240,7 +239,7 @@ pub fn rcu_gp_seq() -> u64 {
 ///
 /// Breaks a CPU busy in a long kernel path with no context switch of its own.
 fn kick_holdouts() {
-    let this_cpu = get_current_cpu();
+    let this_cpu = current_cpu_id();
     for cpu in 0..get_cpu_count().min(MAX_CPUS) {
         if cpu == this_cpu || !is_cpu_online(cpu) {
             continue;
@@ -259,32 +258,26 @@ fn holdout_cpu() -> Option<usize> {
     (0..get_cpu_count().min(MAX_CPUS)).find(|&cpu| is_cpu_online(cpu) && !cpu_is_quiescent(cpu))
 }
 
-/// Hooks the RCU machinery uses to talk to platform services it cannot
-/// reach from within OSTD: monotonic clock and warning log.
+/// The platform service the RCU machinery cannot reach from within OSTD:
+/// the monotonic clock.
 ///
 /// Registered exactly once at boot via [`register_rcu_backend`].
 ///
 /// # Safety
 ///
-/// `clock_monotonic_ns` must be safe to call from any context. `log_warn`
-/// is invoked from the stall path; implementations must avoid taking
-/// any lock held during `synchronize_rcu` (typically the platform
-/// console writer is fine).
+/// `clock_monotonic_ns` must be safe to call from any context.
 pub unsafe trait RcuBackend: Send + Sync + 'static {
     /// Current monotonic nanoseconds, or 0 before the platform clock is wired.
     fn clock_monotonic_ns(&self) -> u64;
-
-    fn log_warn(&self, args: core::fmt::Arguments<'_>);
 }
 
 struct UnregisteredBackend;
 
-// SAFETY: only reads the TSC fallback and discards log args.
+// SAFETY: answers 0, which sends `monotonic_ns` to the TSC fallback.
 unsafe impl RcuBackend for UnregisteredBackend {
     fn clock_monotonic_ns(&self) -> u64 {
         0
     }
-    fn log_warn(&self, _args: core::fmt::Arguments<'_>) {}
 }
 
 static DEFAULT_BACKEND: UnregisteredBackend = UnregisteredBackend;
@@ -296,8 +289,6 @@ static DEFAULT_BACKEND: UnregisteredBackend = UnregisteredBackend;
 pub struct RcuOps {
     /// See [`RcuBackend::clock_monotonic_ns`].
     pub clock_monotonic_ns: fn() -> u64,
-    /// See [`RcuBackend::log_warn`].
-    pub log_warn: fn(args: core::fmt::Arguments<'_>),
 }
 
 struct OpsBackend(&'static RcuOps);
@@ -308,9 +299,6 @@ struct OpsBackend(&'static RcuOps);
 unsafe impl RcuBackend for OpsBackend {
     fn clock_monotonic_ns(&self) -> u64 {
         (self.0.clock_monotonic_ns)()
-    }
-    fn log_warn(&self, args: core::fmt::Arguments<'_>) {
-        (self.0.log_warn)(args)
     }
 }
 
@@ -380,7 +368,7 @@ pub fn rcu_sync_entry_count(cpu: usize) -> u64 {
 pub fn synchronize_rcu() {
     #[cfg(any(test, feature = "test-helpers"))]
     {
-        let entry_cpu = get_current_cpu();
+        let entry_cpu = current_cpu_id();
         if entry_cpu < MAX_CPUS {
             RCU_SYNC_ENTRIES[entry_cpu].fetch_add(1, Ordering::Release);
         }
@@ -413,19 +401,27 @@ pub fn synchronize_rcu() {
         if (spins & 0xFFFF) == 0 {
             let now = monotonic_ns();
             if now.wrapping_sub(next_warn) < u64::MAX / 2 {
+                // One line per stall window across every waiter: each line goes
+                // out through the polled UART.
                 match holdout_cpu() {
-                    Some(cpu) => backend().log_warn(format_args!(
+                    Some(cpu) => crate::klog_ratelimited!(
+                        crate::klog::KlogLevel::Warn,
+                        RCU_STALL_TIMEOUT_NS / 1_000_000,
+                        1,
                         "RCU stall: CPU {} has not reported a quiescent state in {}ms (seq={}, target={})",
                         cpu,
                         RCU_STALL_TIMEOUT_NS / 1_000_000,
                         GP_SEQ.load(Ordering::Relaxed),
                         target,
-                    )),
-                    None => backend().log_warn(format_args!(
+                    ),
+                    None => crate::klog_ratelimited!(
+                        crate::klog::KlogLevel::Warn,
+                        RCU_STALL_TIMEOUT_NS / 1_000_000,
+                        1,
                         "RCU stall: no holdout but seq={} has not reached target={}",
                         GP_SEQ.load(Ordering::Relaxed),
                         target,
-                    )),
+                    ),
                 }
                 next_warn = now.wrapping_add(RCU_STALL_TIMEOUT_NS);
                 ipi_sent = false;
@@ -504,9 +500,9 @@ pub unsafe fn call_rcu(ptr: *mut u8, callback: RcuCallback) {
     let node = try_alloc_callback_node(ptr, callback);
 
     if node.is_null() {
-        backend().log_warn(format_args!(
+        crate::klog_warn_ratelimited!(
             "RCU: call_rcu allocation failed, falling back to synchronous grace period"
-        ));
+        );
         synchronize_rcu();
         // SAFETY: grace period has elapsed — callback contract satisfied.
         unsafe {
@@ -573,9 +569,9 @@ pub fn rcu_call_typed<T: Send + 'static>(arg: crate::mm::KBox<T>, drop_fn: fn(cr
     // is non-zero-sized.
     let pack = unsafe { raw_alloc(layout) }.cast::<TypedRcuPack<T>>();
     if pack.is_null() {
-        backend().log_warn(format_args!(
+        crate::klog_warn_ratelimited!(
             "RCU: rcu_call_typed allocation failed, falling back to synchronous grace period"
-        ));
+        );
         synchronize_rcu();
         drop_fn(arg);
         return;

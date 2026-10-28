@@ -116,8 +116,8 @@ pub fn test_bh_runs_at_the_outermost_unlock() -> TestResult {
 pub fn test_bh_is_not_re_entered() -> TestResult {
     // The claim and its restore are both gs-relative: a migration across this window would
     // strand the claiming CPU marked as draining, which the check below reports but cannot undo.
-    let claimed_on = slopos_arch::pcr::get_current_cpu();
-    let claimed_before = slopos_arch::pcr::bh_active_swap(true);
+    let claimed_on = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
+    let claimed_before = slopos_ostd::cpu::x86_64::pcr::bh_active_swap(true);
 
     let guard = PROBE_LOCK.lock();
     let drains_before = bh::drains();
@@ -127,8 +127,8 @@ pub fn test_bh_is_not_re_entered() -> TestResult {
     let drains = bh::drains();
     let reentrant = bh::declined_reentrant();
 
-    let restored_on = slopos_arch::pcr::get_current_cpu();
-    slopos_arch::pcr::bh_active_swap(claimed_before);
+    let restored_on = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
+    slopos_ostd::cpu::x86_64::pcr::bh_active_swap(claimed_before);
 
     if restored_on != claimed_on {
         return fail!(

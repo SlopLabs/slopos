@@ -77,13 +77,38 @@ func TestPreprocessLeavesBooleansAlone(t *testing.T) {
 	}
 }
 
-func TestParseArgsNoColorAlias(t *testing.T) {
+func TestParseArgsNoColor(t *testing.T) {
 	args, err := parseArgs(preprocessArgv([]string{"--no-color"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if args.ColorMode != "never" {
-		t.Errorf("ColorMode: got %q, want never", args.ColorMode)
+	if !args.NoColor || UseColour(args.ColorMode, args.NoColor, 0) {
+		t.Errorf("--no-color: NoColor %v, ColorMode %q", args.NoColor, args.ColorMode)
+	}
+}
+
+func TestParseArgsColorTakesAutoOrAlways(t *testing.T) {
+	for _, mode := range []string{"auto", "always"} {
+		args, err := parseArgs(preprocessArgv([]string{"--color", mode}))
+		if err != nil || args.ColorMode != mode {
+			t.Errorf("--color %s: args %+v, err %v", mode, args, err)
+		}
+	}
+	if _, err := parseArgs(preprocessArgv([]string{"--color=never"})); err == nil {
+		t.Errorf("--color=never: want an error, --no-color is the spelling")
+	}
+	if _, err := parseArgs(preprocessArgv([]string{"--color=always", "--no-color"})); err == nil {
+		t.Errorf("--color=always with --no-color: want a mutex error")
+	}
+}
+
+func TestUseColourAlwaysOverridesNoColorEnv(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	if !UseColour("always", false, 0) {
+		t.Errorf("--color=always must colour under NO_COLOR")
+	}
+	if UseColour("auto", false, 0) {
+		t.Errorf("auto must honour NO_COLOR")
 	}
 }
 

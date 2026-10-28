@@ -8,7 +8,7 @@ use slopos_fs::VfsError;
 use slopos_fs::basefs::{ActivateError, StageError};
 use slopos_fs::extension::{self, OpenError};
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_from_user};
-use slopos_mm::user_ptr::{UserBytes, UserPtr};
+use slopos_ostd::user::ptr::{UserBytes, UserPtr};
 
 use crate::syscall::args::{Fd, UserCStr};
 

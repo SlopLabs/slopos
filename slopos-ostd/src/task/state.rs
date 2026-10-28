@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! bits  0..4    TaskStatus    (4 bits, 7 variants)
-//! bits  4..12   BlockReason   (8 bits, 8 variants)
+//! bits  4..12   BlockReason   (8 bits, 6 variants)
 //! bits 12..14   poll          (2 bits: armed, pending — see below)
 //! bits 14..16   poll_era      (2 bits, wrapping token generation)
 //! bits 16..32   cpu_hint      (16 bits, currently zero — reserved for

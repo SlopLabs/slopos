@@ -55,9 +55,8 @@ type EvNonKtap struct {
 // reason line the kernel prints immediately after it (empty when no reason
 // reached the wire).
 //
-// It means some CPU is gone, NOT that the machine is gone: in the reference
-// log the abort was CPU 1 only and the BSP produced 2931 further results, so
-// the parser keeps parsing and the run keeps going.
+// It means some CPU is gone, NOT that the machine is gone: the others may keep
+// producing results, so the parser keeps parsing and the run keeps going.
 type EvKernelAbort struct {
 	Reason string
 }
@@ -159,9 +158,8 @@ func (p *KtapParser) Feed(rawLine string) []Event {
 
 	body := line[len(KtapPrefix):]
 	// A KTAP line resolves a pending banner with no reason of its own rather
-	// than swallowing the event: the abort must be reported either way, and a
-	// result line landing here is the recorded case — the surviving CPUs kept
-	// producing results across the abort.
+	// than swallowing the event: the abort must be reported either way, and the
+	// surviving CPUs may keep producing results across it.
 	return append(p.flushPendingAbort(""), p.feedKtap(body)...)
 }
 

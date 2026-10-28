@@ -84,9 +84,6 @@ pub fn cmd_env(_argc: i32, _argv: &[&[u8]]) -> i32 {
 }
 
 /// `set` — options, positional parameters, or a listing.
-///
-/// `set NAME=VALUE` is not POSIX and never was; it is kept because the shell
-/// accepted it before this and a script in the tree may use it.
 pub fn cmd_set(argc: i32, argv: &[&[u8]]) -> i32 {
     if argc < 2 {
         env::for_each(|key, value| {
@@ -150,21 +147,6 @@ pub fn cmd_set(argc: i32, argv: &[&[u8]]) -> i32 {
     }
 
     if index >= argc {
-        return 0;
-    }
-
-    // A first operand that is an assignment keeps the shell's own historical
-    // behaviour; anything else is a positional parameter list.
-    if find_eq(argv[index]).is_some() {
-        for bytes in argv.iter().take(argc).skip(index) {
-            match find_eq(bytes) {
-                Some(eq) if env::is_name(&bytes[..eq]) => env::set(&bytes[..eq], &bytes[eq + 1..]),
-                _ => {
-                    shell_write_idx(b"set: invalid identifier\n", COLOR_ERROR_RED);
-                    return 1;
-                }
-            }
-        }
         return 0;
     }
 

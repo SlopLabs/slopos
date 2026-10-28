@@ -644,10 +644,6 @@ fn every_rule_of_the_grammar_refuses() {
         ),
         ("  allow user confirm now", "allow ends with its level"),
         (
-            "  allow session",
-            "allow names root, greeter, user, admin, paired or program <path>",
-        ),
-        (
             "  allow everyone",
             "allow names root, greeter, user, admin, paired or program <path>",
         ),
@@ -714,7 +710,7 @@ fn values_outside_their_grammar_refuse() {
         ("program /bin/x/", "program"),
         ("program /bin/./x", "program"),
         ("program /bin/x /bin/y", "program"),
-        ("caps Launch", "caps"),
+        ("caps Frobnicate", "caps"),
         ("caps SetId", "caps"),
         ("caps ConsoleIo", "caps"),
         ("caps Power Power", "caps"),

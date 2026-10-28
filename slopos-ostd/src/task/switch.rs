@@ -1,7 +1,7 @@
 //! Low-level context switching using Rust naked functions.
 //!
 //! Sole context-switch implementation in the kernel. Field offsets come from
-//! `offset_of!`, so renames in [`super::task::TaskContext`] surface as build
+//! `offset_of!`, so renames in [`super::task::SwitchContext`] surface as build
 //! errors rather than silent corruption.
 
 use core::arch::naked_asm;
@@ -14,7 +14,7 @@ use crate::sync::BspToken;
 use crate::task::abi::TASK_UNSAFE_STACK_SP_OFFSET;
 use crate::task::cell::SwitchWindow;
 use crate::task::kernel_task::TaskInner;
-use crate::task::task::TaskContext;
+use crate::task::task::SwitchContext;
 
 /// Low-level register switch between two contexts.
 ///
@@ -28,7 +28,10 @@ use crate::task::task::TaskContext;
 /// - Caller handles FPU state save/restore separately.
 /// - Inv. 8 — the calling CPU is the sole accessor of both contexts.
 #[unsafe(naked)]
-pub unsafe extern "sysv64" fn switch_registers(prev: *mut TaskContext, next: *const TaskContext) {
+pub unsafe extern "sysv64" fn switch_registers(
+    prev: *mut SwitchContext,
+    next: *const SwitchContext,
+) {
     naked_asm!(
         // rdi = prev context pointer (nullable)
         // rsi = next context pointer
@@ -69,15 +72,15 @@ pub unsafe extern "sysv64" fn switch_registers(prev: *mut TaskContext, next: *co
         "popfq",
         "ret",
 
-        off_rbx = const offset_of!(TaskContext, rbx),
-        off_r12 = const offset_of!(TaskContext, r12),
-        off_r13 = const offset_of!(TaskContext, r13),
-        off_r14 = const offset_of!(TaskContext, r14),
-        off_r15 = const offset_of!(TaskContext, r15),
-        off_rbp = const offset_of!(TaskContext, rbp),
-        off_rsp = const offset_of!(TaskContext, rsp),
-        off_rflags = const offset_of!(TaskContext, rflags),
-        off_rip = const offset_of!(TaskContext, rip),
+        off_rbx = const offset_of!(SwitchContext, rbx),
+        off_r12 = const offset_of!(SwitchContext, r12),
+        off_r13 = const offset_of!(SwitchContext, r13),
+        off_r14 = const offset_of!(SwitchContext, r14),
+        off_r15 = const offset_of!(SwitchContext, r15),
+        off_rbp = const offset_of!(SwitchContext, rbp),
+        off_rsp = const offset_of!(SwitchContext, rsp),
+        off_rflags = const offset_of!(SwitchContext, rflags),
+        off_rip = const offset_of!(SwitchContext, rip),
     );
 }
 
@@ -85,7 +88,7 @@ pub unsafe extern "sysv64" fn switch_registers(prev: *mut TaskContext, next: *co
 /// save/restore.
 ///
 /// Both counts are logically owned by the task but cached in the per-CPU PCR
-/// (see [`TaskContext`]). This is the *only* switch entry point the scheduler
+/// (see [`SwitchContext`]). This is the *only* switch entry point the scheduler
 /// should use: it brackets the raw [`switch_registers`] swap with a save of the
 /// live counts into `prev` and a load of `next`'s into the PCR, so a
 /// preempt/lock guard's increment and its matching decrement balance against
@@ -102,9 +105,9 @@ pub unsafe extern "sysv64" fn switch_registers(prev: *mut TaskContext, next: *co
 /// - Must be called with interrupts disabled so the count swap and the
 ///   register switch are atomic with respect to this CPU.
 /// - The calling CPU must be the sole accessor of both contexts (Inv. 8).
-/// - `next` must point to a valid, initialised [`TaskContext`]; `prev`
+/// - `next` must point to a valid, initialised [`SwitchContext`]; `prev`
 ///   must be null or point to a valid, exclusively-owned context.
-pub fn switch_context(prev: *mut TaskContext, next: *const TaskContext) {
+pub fn switch_context(prev: *mut SwitchContext, next: *const SwitchContext) {
     // Always-on: an IRQ interleaving the count swap and the register switch
     // corrupts the per-task preempt_count, and only surfaces frames later as an
     // unrelated over/underflow panic.
@@ -453,13 +456,13 @@ extern "sysv64" fn dispatch_task_exit() -> ! {
 
 /// Entry trampoline for new kernel tasks.
 ///
-/// [`TaskContext::new_for_task`] sets `rip` to this trampoline, `r12` to the
+/// [`SwitchContext::new_for_task`] sets `rip` to this trampoline, `r12` to the
 /// entry point, and `r13` to the argument.
 ///
 /// # Safety
 ///
 /// Reachable only via [`switch_registers`] dispatching a context built
-/// by [`TaskContext::new_for_task`].
+/// by [`SwitchContext::new_for_task`].
 #[unsafe(naked)]
 pub unsafe extern "sysv64" fn task_entry_trampoline() {
     naked_asm!(

@@ -7,13 +7,27 @@
 //! only plain data and reaches the `video`-side install work through
 //! [`register_scanout_installer`] / [`run_scanout_install`].
 
-use core::ffi::c_int;
 use slopos_ostd::lock_class;
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::{DisplayInfo, FramebufferData};
 use slopos_ostd::klog_info;
 use slopos_ostd::sync::{LockClassKey, SpinLock, LOCK_LEVEL_RESOURCE};
+
+/// What a present did with a frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Present {
+    /// The frame reached the scanout.
+    Shown,
+    /// Deliberately not shown — the kernel log owns the screen, or a present is
+    /// still in flight — so the compositor keeps the damage pending.
+    Suppressed,
+    /// The backend could not present it.
+    Failed,
+}
+
+/// A backend's present hook. An empty damage list presents the whole frame.
+pub type FlushFn = fn(&[DamageRect]) -> Present;
 
 /// Outcome of a [`SingletonResource::claim`] reservation attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,7 +154,7 @@ pub struct GpuControlFns {
 pub struct InstallCtx {
     pub fb: FramebufferData,
     /// Present hook, or `None` for a direct-write (firmware) backing.
-    pub flush: Option<fn(*const DamageRect, u32) -> c_int>,
+    pub flush: Option<FlushFn>,
     pub gpu_control: Option<GpuControlFns>,
 }
 

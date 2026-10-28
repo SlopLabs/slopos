@@ -1,6 +1,5 @@
 //! Coverage for the filesystem syscall surface a build system needs.
 
-use core::ffi::c_char;
 use core::ptr;
 
 use slopos_abi::Errno;
@@ -19,10 +18,10 @@ use slopos_fs::fileio::{
 };
 use slopos_fs::vfs::path::{RESOLVE_FOLLOW, RESOLVE_NOFOLLOW_FINAL};
 
-use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::process_vm_alloc;
 use slopos_mm::user_copy::set_test_process_id;
 use slopos_mm::user_io_buf::UserIovecBuf;
+use slopos_ostd::mm::page_property::PageProperty;
 use slopos_ostd::user::context::UserContext;
 use slopos_ostd::{KBox, KVec};
 use slopos_sched::task::{task_create, task_find_by_id, task_terminate};
@@ -32,7 +31,7 @@ use crate::syscall::args::UserPath;
 use crate::syscall::ui_handlers::syscall_getrandom;
 use slopos_mm::user_io_buf::stage_iovec;
 
-type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
+use slopos_sched::test_fixture::KernelTestScope;
 
 /// Where every fixture in this file lives: `/tmp` is not guaranteed to exist
 /// on a boot whose root is the initramfs.
@@ -44,7 +43,7 @@ fn create_user_task() -> u32 {
         slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA as u64,
     );
     let id = task_create(
-        b"BuildFloorFs\0".as_ptr() as *const c_char,
+        b"BuildFloorFs",
         entry,
         ptr::null_mut(),
         1,
@@ -124,17 +123,17 @@ fn make_file(table: FdTable, name: &[u8], contents: &[u8]) -> Option<KVec<u8>> {
 pub(crate) fn map_user_pages(table: FdTable, pages: usize) -> Option<u64> {
     let process = table.process()?;
     let len = (pages * 4096) as u64;
-    let base = process_vm_alloc(process, len, PageFlags::USER_RW.bits() as u32);
+    let base = process_vm_alloc(process, len, true);
     if base == 0 {
         return None;
     }
     for page in 0..pages {
         let addr = base + (page * 4096) as u64;
         let mapped = slopos_mm::process_vm::process_vm_with_vm_space(process, |vs| {
-            slopos_mm::user_mappings::ostd_map_4kb_user_fresh(
+            slopos_mm::user_mappings::map_4kb_user_fresh(
                 vs,
                 slopos_abi::addr::VirtAddr::new(addr),
-                PageFlags::USER_RW.bits(),
+                PageProperty::USER_RW,
             )
             .is_ok()
         });
@@ -164,7 +163,7 @@ pub(crate) fn with_user_process_context<R>(table: FdTable, f: impl FnOnce() -> R
 
 fn fill_user_bytes(table: FdTable, addr: u64, bytes: &[u8]) -> bool {
     with_user_process_context(table, || {
-        let Ok(user) = slopos_mm::user_ptr::UserBytes::try_new(addr, bytes.len()) else {
+        let Ok(user) = slopos_ostd::user::ptr::UserBytes::try_new(addr, bytes.len()) else {
             return false;
         };
         slopos_mm::user_copy::copy_bytes_to_user(user, bytes).is_ok()
@@ -175,7 +174,7 @@ fn fill_user_bytes(table: FdTable, addr: u64, bytes: &[u8]) -> bool {
 /// A truncated path names a different file, which is how a caller ends up
 /// writing to one.
 pub fn test_user_path_over_max_is_refused_not_truncated() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -227,7 +226,7 @@ slopos_testing::stest!(
 );
 
 pub fn test_openat_resolves_against_cwd_and_dirfd() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -321,7 +320,7 @@ slopos_testing::stest!(
 /// `EISDIR` tells a remover to retry with the flag, and `FileSystem::rmdir`
 /// defaults to `unlink`, so the filesystem draws no distinction of its own.
 pub fn test_unlinkat_removedir_separates_file_from_directory() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -369,7 +368,7 @@ slopos_testing::stest!(
 /// Reporting the target for both forms is what makes a symlink invisible to
 /// a build system that has to copy one.
 pub fn test_fstatat_nofollow_reports_the_link() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -434,7 +433,7 @@ slopos_testing::stest!(
 /// it would have named, which is what keeps `shm_open` from being redirected
 /// by a link planted in `/dev/shm`.
 pub fn test_open_nofollow_refuses_a_final_symlink() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -488,7 +487,7 @@ slopos_testing::stest!(
 /// `ENOTDIR`, as Linux does: the guard a directory walk such as Rust's
 /// `remove_dir_all` takes against a link swapped in underneath it.
 pub fn test_open_directory_nofollow_refuses_a_link_to_a_directory() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -537,10 +536,10 @@ slopos_testing::stest!(
     suite = syscall_fs_build_floor
 );
 
-/// The bug the widened `struct stat` fixes: `FileType as u8` landed in the
-/// `FS_TYPE_*` space, so a regular file reported as a directory.
+/// `st_mode`'s `S_IFMT` field is POSIX's, not `FileType`'s own numbering, so a
+/// regular file must report `S_IFREG`.
 pub fn test_stat_reports_a_regular_file_as_s_ifreg() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -665,7 +664,7 @@ fn drop_dirents(dir: &[u8]) {
 }
 
 /// The cursor is committed explicitly, as the syscall does after its
-/// copy-out: the read itself no longer advances it.
+/// copy-out: the read itself does not advance it.
 #[inline(never)]
 fn drain_dirents(
     table: FdTable,
@@ -696,7 +695,7 @@ fn drain_dirents(
 }
 
 pub fn test_getdents64_resumes_across_calls() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -753,7 +752,7 @@ slopos_testing::stest!(
 /// Answering `0` would read as end-of-directory and silently lose every
 /// remaining entry.
 pub fn test_getdents64_rejects_a_buffer_below_one_record() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -786,7 +785,7 @@ slopos_testing::stest!(
 );
 
 pub fn test_pread_leaves_the_position_where_read_moves_it() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -854,7 +853,7 @@ slopos_testing::stest!(
 );
 
 pub fn test_vectored_io_spans_segments_and_the_staging_bound() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -958,7 +957,7 @@ slopos_testing::stest!(
 
 /// The count is refused before any of the array is read.
 pub fn test_iovcnt_above_uio_maxiov_is_refused() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     assert_eq_test!(
         stage_iovec(0x1000, UIO_MAXIOV + 1).err(),
         Some(Errno::EINVAL),
@@ -977,7 +976,7 @@ slopos_testing::stest!(
 );
 
 pub fn test_flock_exclusive_conflict_is_eagain() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -1041,7 +1040,7 @@ slopos_testing::stest!(
 /// The lock belongs to the description, not to the descriptor number, so it
 /// survives a `dup` and dies with the last alias.
 pub fn test_flock_survives_dup_and_dies_with_the_last_close() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -1108,7 +1107,7 @@ slopos_testing::stest!(
 
 /// The 256-byte cap is on the CSPRNG's lock hold, not on the request.
 pub fn test_getrandom_serves_a_four_kilobyte_request() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -1139,7 +1138,7 @@ pub fn test_getrandom_serves_a_four_kilobyte_request() -> TestResult {
     // An all-zero tail would mean the loop never ran past the first slice.
     let tail = with_user_process_context(table, || {
         let mut out = [0u8; 256];
-        let user = slopos_mm::user_ptr::UserBytes::try_new(base + 3840, 256).ok()?;
+        let user = slopos_ostd::user::ptr::UserBytes::try_new(base + 3840, 256).ok()?;
         slopos_mm::user_copy::copy_bytes_from_user(user, &mut out).ok()?;
         Some(out.iter().any(|&b| b != 0))
     })
@@ -1192,7 +1191,7 @@ pub(crate) fn stage_cstr(table: FdTable, addr: u64, bytes: &[u8]) -> bool {
 /// has to be read at this boundary or not at all — dropping it made
 /// `unlink("file/")` remove `file`.
 pub fn test_a_trailing_slash_requires_a_directory() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -1305,7 +1304,7 @@ slopos_testing::stest!(
 /// Linux's `path_init` never touches `dfd` for an absolute path, which is why
 /// libc wrappers pass whatever descriptor they happen to hold.
 pub fn test_openat_ignores_the_dirfd_for_an_absolute_path() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -1322,7 +1321,7 @@ pub fn test_openat_ignores_the_dirfd_for_an_absolute_path() -> TestResult {
     assert_test!(stage_cstr(table, base, &file), "could not stage the path");
 
     let openat = crate::syscall::fs::at_handlers::syscall_openat;
-    // Not `AT_FDCWD` and not a descriptor: previously `EBADF`.
+    // Not `AT_FDCWD` and not a descriptor, and an absolute path ignores it.
     let junk = call_syscall(
         table,
         &task,
@@ -1337,7 +1336,7 @@ pub fn test_openat_ignores_the_dirfd_for_an_absolute_path() -> TestResult {
         let _ = file_close_fd(table, fd as i32);
     }
 
-    // A regular-file descriptor is equally irrelevant: previously `ENOTDIR`.
+    // A regular-file descriptor is equally irrelevant.
     let filefd = file_open_at(
         table,
         &file,
@@ -1395,7 +1394,7 @@ slopos_testing::stest!(
 /// filesystem's root, and the `let _ =` on that chmod hid its failure.
 pub fn test_mkdirat_modes_the_directory_it_created() -> TestResult {
     const SHADOW: &[u8] = b"/build_floor_fs/mkdir_shadow";
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -1460,11 +1459,11 @@ slopos_testing::stest!(
     suite = syscall_fs_build_floor
 );
 
-/// The all-`UTIME_OMIT` short-circuit used to answer 0 before the descriptor
-/// or the name was looked at, and `UTIME_NOW` without a set wall clock
-/// resolved to "omit", so `touch` reported success and moved nothing.
+/// An all-`UTIME_OMIT` call still looks the descriptor and the name up before
+/// it answers 0, and `UTIME_NOW` without a set wall clock is not "omit", so
+/// `touch` cannot report success and move nothing.
 pub fn test_utimensat_validates_before_it_no_ops() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -1575,7 +1574,7 @@ slopos_testing::stest!(
 /// gone from the filesystem's view, so a cursor advanced ahead of a faulting
 /// destination loses the batch outright.
 pub fn test_getdents64_keeps_its_cursor_when_the_copy_out_faults() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -1645,7 +1644,7 @@ slopos_testing::stest!(
 /// `write(fd, NULL, 0)` writes nothing and succeeds, as on Linux; a count at
 /// NULL still faults.
 pub fn test_a_zero_byte_transfer_at_null_is_not_a_fault() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");
     };
@@ -1716,7 +1715,7 @@ impl Drop for PageSetRegistry {
 /// nothing has loaded from, so the copy has to read the page in itself.
 pub fn test_a_write_from_an_untouched_file_mapping_reads_it_in() -> TestResult {
     const CONTENTS: &[u8] = b"read in by the copy, not by a load";
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
     let _registry = PageSetRegistry::publish();
     let Some(scratch) = Scratch::new() else {
         return fail!("could not build the fixture");

@@ -11,11 +11,11 @@
 /// fatal NMI watchdog hand-off, both of which already obey the
 /// single-writer invariant the held-lock list assumes.
 pub fn poison_all_held_locks() -> ! {
-    super::lock_tracking::enter_fatal_bypass();
+    super::lock_graph::enter_fatal_bypass();
     // SAFETY: per-CPU held-lock list is sound to walk from the
     // panicking CPU itself (single-writer).
     unsafe {
-        super::lock_tracking::poison_unlock_all_held();
+        super::lock_graph::poison_unlock_all_held();
     }
     halt_forever()
 }
@@ -25,10 +25,10 @@ pub fn poison_all_held_locks() -> ! {
 ///
 /// Safe-fn surface: same contract as [`poison_all_held_locks`].
 pub fn poison_all_held_locks_no_halt() {
-    super::lock_tracking::enter_fatal_bypass();
+    super::lock_graph::enter_fatal_bypass();
     // SAFETY: as `poison_all_held_locks`.
     unsafe {
-        super::lock_tracking::poison_unlock_all_held();
+        super::lock_graph::poison_unlock_all_held();
     }
 }
 

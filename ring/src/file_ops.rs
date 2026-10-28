@@ -1,4 +1,4 @@
-//! `FileKind::Ring` file operations (SLOPRING § 3, § 14).
+//! `FileKind::Ring` file operations.
 //!
 //! A ring inherits the fd lifecycle (`close`, `dup`, exec teardown) but is
 //! *not* inherited across `fork` — the descriptor is installed

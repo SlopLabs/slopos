@@ -6,7 +6,7 @@
 //! here.
 
 use slopos_ostd::lock_class;
-use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
+use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use std::sync::Mutex;
 
 use slopos_ostd::sync::wait_queue::{WaitAbort, WaitQueue, WaitResult};

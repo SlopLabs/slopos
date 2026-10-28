@@ -13,35 +13,24 @@ use crate::syscall::fs;
 pub const SHELL_FG_COLOR: Color32 = Color32::rgb(0xE6, 0xE6, 0xE6);
 
 pub const COLOR_DEFAULT: u8 = 0;
-pub const COLOR_DIR_BLUE: u8 = 1;
-pub const COLOR_EXEC_GREEN: u8 = 2;
-pub const COLOR_ERROR_RED: u8 = 3;
-pub const COLOR_WARN_YELLOW: u8 = 4;
-pub const COLOR_PROMPT_ACCENT: u8 = 5;
-pub const COLOR_COMMENT_GRAY: u8 = 6;
-pub const COLOR_PATH_BLUE: u8 = 7;
-pub const COLOR_SELECTION_BG: u8 = 8;
+pub const COLOR_EXEC_GREEN: u8 = 1;
+pub const COLOR_ERROR_RED: u8 = 2;
+pub const COLOR_WARN_YELLOW: u8 = 3;
+pub const COLOR_PROMPT_ACCENT: u8 = 4;
+pub const COLOR_COMMENT_GRAY: u8 = 5;
+pub const COLOR_PATH_BLUE: u8 = 6;
 
-pub const PALETTE_SIZE: usize = 16;
+pub const PALETTE_SIZE: usize = 7;
 
 /// Indexed foreground-color palette; the indices are the `COLOR_*` constants.
 pub static PALETTE: [Color32; PALETTE_SIZE] = [
-    SHELL_FG_COLOR,                 // 0: default
-    Color32::rgb(0x5C, 0x9E, 0xD6), // 1: directory blue
-    Color32::rgb(0x98, 0xC3, 0x79), // 2: executable green
-    Color32::rgb(0xE0, 0x6C, 0x75), // 3: error red
-    Color32::rgb(0xE5, 0xC0, 0x7B), // 4: warning yellow
-    Color32::rgb(0xC6, 0x78, 0xDD), // 5: prompt accent
-    Color32::rgb(0x5C, 0x63, 0x70), // 6: comment gray
-    Color32::rgb(0x61, 0xAF, 0xEF), // 7: path blue
-    Color32::rgb(0x26, 0x4F, 0x78), // 8: selection background
     SHELL_FG_COLOR,
-    SHELL_FG_COLOR,
-    SHELL_FG_COLOR,
-    SHELL_FG_COLOR,
-    SHELL_FG_COLOR,
-    SHELL_FG_COLOR,
-    SHELL_FG_COLOR,
+    Color32::rgb(0x98, 0xC3, 0x79),
+    Color32::rgb(0xE0, 0x6C, 0x75),
+    Color32::rgb(0xE5, 0xC0, 0x7B),
+    Color32::rgb(0xC6, 0x78, 0xDD),
+    Color32::rgb(0x5C, 0x63, 0x70),
+    Color32::rgb(0x61, 0xAF, 0xEF),
 ];
 
 /// When set, no SGR escape is ever emitted: a shell running a script stays
@@ -62,16 +51,6 @@ pub fn set_plain_output(plain: bool) {
 #[inline]
 fn palette_color(color_idx: u8) -> Color32 {
     PALETTE[color_idx as usize % PALETTE_SIZE]
-}
-
-fn palette_index_for(color: Color32) -> u8 {
-    let target = color.to_u32();
-    for (i, c) in PALETTE.iter().enumerate() {
-        if c.to_u32() == target {
-            return i as u8;
-        }
-    }
-    COLOR_DEFAULT
 }
 
 /// Write every byte of `bytes` to `fd`, or report failure.
@@ -193,12 +172,6 @@ fn emit_colored(bytes: &[u8], color_idx: u8) -> bool {
 /// onto fd 1 around the call, so `echo hi > f` is the same path as `echo hi`.
 pub fn shell_write(buf: &[u8]) -> bool {
     emit_stdout(buf)
-}
-
-/// Write colored text to standard output. Colour is dropped when fd 1 is not
-/// a terminal.
-pub fn shell_write_colored(buf: &[u8], fg: Color32) -> bool {
-    emit_colored(buf, palette_index_for(fg))
 }
 
 /// Write text with a palette color index to standard output.

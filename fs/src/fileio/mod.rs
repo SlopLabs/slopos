@@ -8,7 +8,7 @@ use slopos_abi::fs::{
     O_ACCMODE, O_APPEND, O_CREAT, O_DSYNC, O_RDONLY, O_RDWR, O_SYNC, O_WRONLY, S_IFCHR, UserFsStat,
 };
 use slopos_abi::io::{IO_STAGING_SIZE, IoBufRead, IoBufWrite};
-use slopos_abi::syscall::{O_NOCTTY, O_NONBLOCK, POLLIN, POLLNVAL, POLLOUT, TtyIndex};
+use slopos_abi::syscall::{O_NOCTTY, O_NONBLOCK, POLLIN, POLLNVAL, TtyIndex};
 use slopos_ostd::KArc;
 use slopos_ostd::KVec;
 use slopos_ostd::process::quota::FileBacking;
@@ -550,7 +550,7 @@ pub(super) static PROCESS_TABLES: [FileTableSlot; MAX_PROCESSES] = [const {
 pub(super) const OPEN_FILE_POSITION_CLASS: &LockClassKey = lock_class!(
     "OPEN_FILE_POSITION",
     LOCK_LEVEL_REGISTRY,
-    slopos_ostd::sync::lock_tracking::LO_DUPOK
+    slopos_ostd::sync::lock_graph::LO_DUPOK
 );
 
 pub(super) static OPEN_FILES_STATE: SpinLock<OpenFilesState> = SpinLock::new(
@@ -698,7 +698,7 @@ pub(super) struct FdSnapshot {
     pub(super) open_file: KArc<OpenFile>,
     /// Copied from the entry at lookup, so every caller that snapshots an fd
     /// also gets what may be done with it. `snapshot_fd` and `get_fd_entry`
-    /// are the two lookup choke points, which is where the plan puts the test.
+    /// are the two lookup choke points, which is where the test belongs.
     pub(super) rights: FdRights,
 }
 
@@ -984,8 +984,8 @@ pub const PTMX_MINOR: usize = 2;
 
 /// The single producer of a character device's `fstat`: it has no
 /// [`FileStat`](crate::vfs::FileStat) to go through `FileStat::fill_user_stat`,
-/// and a second copy of the type-bit mapping once reported a regular file as a
-/// directory.
+/// and one mapping of the type bits is what keeps a regular file from
+/// reporting as a directory.
 pub fn fill_char_device_stat(out: &mut UserFsStat, minor: usize, major: u32, mode: u32) {
     *out = UserFsStat::default();
     out.st_ino = minor as u64;
@@ -1005,10 +1005,6 @@ pub(super) fn effective_tty_ops(external_ops: &ExternalOpsState) -> &'static dyn
 
 pub(super) fn external_socket_ops(external_ops: &ExternalOpsState) -> Option<&'static dyn FileOps> {
     external_ops.socket_ops
-}
-
-pub(super) fn kind_is_tty(kind: FileKind) -> bool {
-    kind == FileKind::Tty
 }
 
 mod fdops;

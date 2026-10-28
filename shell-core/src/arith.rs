@@ -194,8 +194,8 @@ struct Parser<'a, 'v> {
     vars: &'v mut dyn Vars,
     /// Set on the probe that consumes a short-circuited operand, where a
     /// division by zero yields 0 rather than an error: stopping at the error
-    /// left the cursor inside the operand and its tail was then read as the
-    /// left side's continuation.
+    /// would leave the cursor inside the operand, and its tail would then be
+    /// read as the left side's continuation.
     skipping: bool,
 }
 

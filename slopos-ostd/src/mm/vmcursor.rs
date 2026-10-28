@@ -1,5 +1,5 @@
-//! Volatile byte cursors over a chain of untyped frames (SlopRing
-//! single-direct-copy — SLOPRING § 5.3 / § 13).
+//! Volatile byte cursors over a chain of untyped frames (SlopRing's
+//! single-direct-copy path).
 //!
 //! [`VmReader`] / [`VmWriter`] walk a borrowed `&[UFrame<AnonymousMeta>]` from an
 //! absolute byte offset, copying volatilely between the pinned user pages and a

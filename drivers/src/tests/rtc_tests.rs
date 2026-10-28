@@ -316,7 +316,7 @@ pub fn test_set_realtime_rejects_and_does_not_move_the_clock() -> TestResult {
 
 pub fn test_wall_clock_anchored_at_boot() -> TestResult {
     let Some(first) = clock::realtime_ns() else {
-        return fail!("CLOCK_REALTIME unset after boot; ext2 will stamp no mtime");
+        return fail!("CLOCK_REALTIME unset after boot; ext4 will stamp no mtime");
     };
     let Some(second) = clock::realtime_ns() else {
         return fail!("CLOCK_REALTIME became unset between two reads");

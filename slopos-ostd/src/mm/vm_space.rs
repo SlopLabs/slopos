@@ -34,7 +34,7 @@ use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 
 use crate::arch::x86_64::cr3::{Pcid, write_cr3_pcid};
-use crate::mm::frame::{AnyFrameMeta, Frame, FrameAllocOptions, Paddr, PageTableMeta};
+use crate::mm::frame::{AnyFrameMeta, Frame, FrameAllocOptions, PageTableMeta};
 use crate::mm::frame_alloc::current_frame_allocator;
 use crate::mm::page_property::PageProperty;
 use crate::mm::page_size::{PageSize, Size4Kb};
@@ -140,7 +140,7 @@ pub struct CursorMut<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct CursorEntry {
     pub vaddr: VirtAddr,
-    pub paddr: Option<Paddr>,
+    pub paddr: Option<PhysAddr>,
     pub property: PageProperty,
     pub level: PageTableLevel,
 }
@@ -189,9 +189,6 @@ pub fn activate_kernel_master_cr3() {
     if master == KERNEL_MASTER_UNINIT {
         return;
     }
-    if let Some(hook) = current_cursor_unmap_hook() {
-        hook.on_activate(0);
-    }
     // SAFETY: `register_kernel_master_pml4`'s contract is exactly
     // `write_cr3_pcid`'s — a 4 KiB-aligned, HHDM-reachable PML4 whose kernel
     // half is canonical and lives for the static lifetime of the kernel — and
@@ -215,9 +212,6 @@ pub trait CursorUnmapHook: Send + Sync {
     /// per-page local invalidation: at least every one an `invlpg` would
     /// reach, i.e. the context CR3 carries.
     fn flush_local(&self);
-
-    /// Fired at the start of [`VmSpace::activate`].
-    fn on_activate(&self, mm_ctx_handle: u64);
 
     /// Choose the `(pcid, no_flush)` pair for a CR3 load of `mm_ctx_handle`.
     ///
@@ -430,14 +424,10 @@ impl VmSpace {
     }
 
     /// Switch the current CPU to this address space. The only
-    /// sanctioned CR3 write path. Fires the registered
-    /// [`CursorUnmapHook::on_activate`] callback, if any.
+    /// sanctioned CR3 write path.
     pub unsafe fn activate(&self) {
         let ctx = self.mm_ctx_handle.load(Ordering::Acquire);
         let hook = current_cursor_unmap_hook();
-        if let Some(hook) = hook {
-            hook.on_activate(ctx);
-        }
         // NOFLUSH is architecturally legal only when `CR4.PCIDE` is
         // enabled; setting it on a platform that never enabled PCIDE
         // yields a #GP.
@@ -727,9 +717,9 @@ impl<'a> CursorMut<'a> {
     /// never freed by a path that reports failure. VERIFIED:
     /// `verification/proofs/vm_space_cursor.rs`'s (REF-CONSERVE) proves the
     /// offered frame is installed xor handed back, and
-    /// `broken_map_failed_drops` is the witness for the `Result<(), MapError>`
-    /// shape this replaced — there `?` dropped the frame and freed a page the
-    /// caller went on to free again.
+    /// `broken_map_failed_drops` is the witness that a `Result<(), MapError>`
+    /// shape breaks it: there `?` drops the frame and frees a page the caller
+    /// goes on to free again.
     ///
     /// A refusal out of the walk is not a no-op on the tables: the Create-mode
     /// descent links missing intermediates and splits any blocking huge page
@@ -908,7 +898,7 @@ impl<'a> CursorMut<'a> {
     /// Errors: as [`Self::map_kernel`], minus the frame-alignment arm.
     pub fn map_io<S: PageSize>(
         &mut self,
-        paddr: Paddr,
+        paddr: PhysAddr,
         prop: PageProperty,
     ) -> Result<(), MapError> {
         if prop.user {
@@ -962,7 +952,7 @@ impl<'a> CursorMut<'a> {
     fn walk_to_leaf_for_map<S: PageSize>(
         &self,
         user_mapping: bool,
-    ) -> Result<(Paddr, usize), MapError> {
+    ) -> Result<(PhysAddr, usize), MapError> {
         let outcome = walk_to_leaf(
             self.space.pml4_paddr(),
             self.cur,
@@ -1487,7 +1477,7 @@ impl CursorMut<'_> {
     {
         // The 2 MiB block last descended into, its leaf table, and whether
         // that descent made the path user-reachable.
-        let mut last: Option<(u64, Paddr, bool)> = None;
+        let mut last: Option<(u64, PhysAddr, bool)> = None;
         let mut count = 0usize;
         for (vaddr, frame, prop) in items {
             if let Err(e) = self.seek(vaddr) {
@@ -1520,7 +1510,7 @@ impl CursorMut<'_> {
     /// and the index span `[first, last)` of it the range covers, with the
     /// cursor on `first`; `None`, with the cursor at `range.end`, once there is
     /// none.
-    fn next_leaf_table(&mut self) -> Result<Option<(Paddr, usize, usize)>, MapError> {
+    fn next_leaf_table(&mut self) -> Result<Option<(PhysAddr, usize, usize)>, MapError> {
         let end = self.range.end.as_u64();
         while self.cur.as_u64() < end {
             let skip = match walk_to_leaf(
@@ -1626,7 +1616,7 @@ impl Drop for VmSpace {
     }
 }
 
-fn drop_user_half_tree(pml4_phys: Paddr) {
+fn drop_user_half_tree(pml4_phys: PhysAddr) {
     for i in 0..KERNEL_HALF_START_INDEX {
         let pte = entry_in_table(pml4_phys, i);
         if !pte.is_present() {
@@ -1645,7 +1635,7 @@ fn drop_user_half_tree(pml4_phys: Paddr) {
     }
 }
 
-fn recursively_reclaim_subtree(table_phys: Paddr, level: PageTableLevel) {
+fn recursively_reclaim_subtree(table_phys: PhysAddr, level: PageTableLevel) {
     use crate::mm::page_table::PAGE_TABLE_ENTRIES;
     for i in 0..PAGE_TABLE_ENTRIES {
         let pte = entry_in_table(table_phys, i);

@@ -4,7 +4,7 @@
 //! The trait is `unsafe` because an incorrect impl silently corrupts the
 //! kernel between tests. It lives in OSTD so the [`crate::hermetic_state`]
 //! macro can emit `unsafe impl HermeticState for X` without reaching across
-//! crates; the kernel-side `slopos-hermetic` crate re-exports it.
+//! crates.
 
 use crate::AllocError;
 

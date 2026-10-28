@@ -1,6 +1,6 @@
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
+use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::sync::{InitFlag, LockClassKey, OnceLock, register_class_eagerly};
 use slopos_ostd::{KArc, KBox, lock_class};
 
@@ -9,7 +9,7 @@ use crate::devfs::{
     DEV_NAME_MAX, DevFs, devfs_block_node_is, devfs_resolve_block_node,
     devfs_standalone_block_device,
 };
-use crate::ext2_vfs::{Ext2Mount, Ext2MountInfo};
+use crate::ext4_vfs::{Ext4Mount, Ext4MountInfo};
 use crate::ramfs::RamFs;
 use crate::vfs::mount::{MOUNT_RDONLY, mount, mount_at, unmount, with_mount_table};
 use crate::vfs::orphan::{drain_releasable, forget_filesystem, has_open_refs};
@@ -54,37 +54,35 @@ const POOL_RETIRED: u8 = 2;
 static RAMFS_POOL_STATE: [AtomicU8; RAMFS_POOL_LEN] =
     [const { AtomicU8::new(POOL_FREE) }; RAMFS_POOL_LEN];
 
-/// How many ext2 instances may be attached at once.
+/// How many ext4 instances may be attached at once.
 ///
 /// At or below both [`crate::vfs::MAX_MOUNTS`] and the block layer's device
 /// ceiling: a slot with no device to put in it buys nothing.
-pub const EXT2_POOL_LEN: usize = 4;
+pub const EXT4_POOL_LEN: usize = 4;
 
 /// One `lock_class!` site per instance `mount(2)` hands out for `fstype`
-/// `ext2`, `ext3` or `ext4`, for the reason [`RAMFS_POOL`] gives; slot 0 keeps
-/// the historical `CACHED_EXT2` name so the class the boot phase registers
-/// survives.
-const EXT2_POOL_CLASSES: [&LockClassKey; EXT2_POOL_LEN] = [
-    lock_class!("CACHED_EXT2", LOCK_LEVEL_RESOURCE),
-    lock_class!("EXT2_POOL_1", LOCK_LEVEL_RESOURCE),
-    lock_class!("EXT2_POOL_2", LOCK_LEVEL_RESOURCE),
-    lock_class!("EXT2_POOL_3", LOCK_LEVEL_RESOURCE),
+/// `ext2`, `ext3` or `ext4`, for the reason [`RAMFS_POOL`] gives.
+const EXT4_POOL_CLASSES: [&LockClassKey; EXT4_POOL_LEN] = [
+    lock_class!("EXT4_POOL_0", LOCK_LEVEL_RESOURCE),
+    lock_class!("EXT4_POOL_1", LOCK_LEVEL_RESOURCE),
+    lock_class!("EXT4_POOL_2", LOCK_LEVEL_RESOURCE),
+    lock_class!("EXT4_POOL_3", LOCK_LEVEL_RESOURCE),
 ];
 
-static EXT2_POOL: [Ext2Mount; EXT2_POOL_LEN] = [
-    Ext2Mount::new_const(EXT2_POOL_CLASSES[0]),
-    Ext2Mount::new_const(EXT2_POOL_CLASSES[1]),
-    Ext2Mount::new_const(EXT2_POOL_CLASSES[2]),
-    Ext2Mount::new_const(EXT2_POOL_CLASSES[3]),
+static EXT4_POOL: [Ext4Mount; EXT4_POOL_LEN] = [
+    Ext4Mount::new_const(EXT4_POOL_CLASSES[0]),
+    Ext4Mount::new_const(EXT4_POOL_CLASSES[1]),
+    Ext4Mount::new_const(EXT4_POOL_CLASSES[2]),
+    Ext4Mount::new_const(EXT4_POOL_CLASSES[3]),
 ];
 
 /// A mount's sleeping lock registers its class only when it contends, and
 /// which slot a mount lands in is timing too, so the whole pool registers on
 /// the first claim: the class count is then the same on every run.
-static EXT2_POOL_CLASSES_REGISTERED: InitFlag = InitFlag::new();
+static EXT4_POOL_CLASSES_REGISTERED: InitFlag = InitFlag::new();
 
-static EXT2_POOL_STATE: [AtomicU8; EXT2_POOL_LEN] =
-    [const { AtomicU8::new(POOL_FREE) }; EXT2_POOL_LEN];
+static EXT4_POOL_STATE: [AtomicU8; EXT4_POOL_LEN] =
+    [const { AtomicU8::new(POOL_FREE) }; EXT4_POOL_LEN];
 
 fn ramfs_pool_slot_of(fs: &'static dyn FileSystem) -> Option<usize> {
     RAMFS_POOL
@@ -92,8 +90,8 @@ fn ramfs_pool_slot_of(fs: &'static dyn FileSystem) -> Option<usize> {
         .position(|candidate| same_filesystem(candidate, fs))
 }
 
-fn ext2_pool_slot_of(fs: &'static dyn FileSystem) -> Option<usize> {
-    EXT2_POOL
+fn ext4_pool_slot_of(fs: &'static dyn FileSystem) -> Option<usize> {
+    EXT4_POOL
         .iter()
         .position(|candidate| same_filesystem(candidate, fs))
 }
@@ -164,15 +162,15 @@ pub fn vfs_ramfs_pool_release(fs: &'static dyn FileSystem, retire: bool) -> bool
     true
 }
 
-/// Run `f` over every ext2 instance with a device attached, one at a time: the
+/// Run `f` over every ext4 instance with a device attached, one at a time: the
 /// flusher, the shutdown sweep and the reclaim tier all come through here, and
 /// none of them may hold two mounts' locks at once.
-pub(crate) fn ext2_pool_for_each_bound(f: &mut dyn FnMut(&'static Ext2Mount)) {
-    for (idx, state) in EXT2_POOL_STATE.iter().enumerate() {
+pub(crate) fn ext4_pool_for_each_bound(f: &mut dyn FnMut(&'static Ext4Mount)) {
+    for (idx, state) in EXT4_POOL_STATE.iter().enumerate() {
         if state.load(Ordering::Acquire) == POOL_FREE {
             continue;
         }
-        let instance = &EXT2_POOL[idx];
+        let instance = &EXT4_POOL[idx];
         if instance.is_initialized() {
             f(instance);
         }
@@ -181,16 +179,16 @@ pub(crate) fn ext2_pool_for_each_bound(f: &mut dyn FnMut(&'static Ext2Mount)) {
 
 /// Whether any attached instance wants the flusher before its timer. The
 /// flusher's park predicate, so it reads atomics and takes no lock.
-pub(crate) fn ext2_pool_needs_flusher() -> bool {
-    EXT2_POOL.iter().any(|mount| mount.needs_flusher_now())
+pub(crate) fn ext4_pool_needs_flusher() -> bool {
+    EXT4_POOL.iter().any(|mount| mount.needs_flusher_now())
 }
 
-/// Detach every retired ext2 instance whose last reference has gone. The
+/// Detach every retired ext4 instance whose last reference has gone. The
 /// `POOL_RETIRED -> POOL_BOUND` step makes the teardown exclusive, exactly as
 /// it does for [`reclaim_retired_slots`].
-fn reclaim_retired_ext2_slots() {
-    for (idx, state) in EXT2_POOL_STATE.iter().enumerate() {
-        let instance: &'static dyn FileSystem = &EXT2_POOL[idx];
+fn reclaim_retired_ext4_slots() {
+    for (idx, state) in EXT4_POOL_STATE.iter().enumerate() {
+        let instance: &'static dyn FileSystem = &EXT4_POOL[idx];
         if state.load(Ordering::Acquire) != POOL_RETIRED
             || has_open_refs(instance)
             || state
@@ -208,7 +206,7 @@ fn reclaim_retired_ext2_slots() {
         // A teardown that could not take the mount lock leaves the device
         // attached; the slot goes back to retired so the next claim tries
         // again from a task that is not dying.
-        let next = if EXT2_POOL[idx].detach() {
+        let next = if EXT4_POOL[idx].detach() {
             POOL_FREE
         } else {
             POOL_RETIRED
@@ -217,62 +215,62 @@ fn reclaim_retired_ext2_slots() {
     }
 }
 
-/// Claim an ext2 instance for a mount, or `None` when all of them are in use.
+/// Claim an ext4 instance for a mount, or `None` when all of them are in use.
 /// It comes back with no device attached; the caller owes it one.
-pub fn vfs_ext2_pool_claim() -> Option<&'static Ext2Mount> {
-    if EXT2_POOL_CLASSES_REGISTERED.init_once() {
-        EXT2_POOL_CLASSES
+pub fn vfs_ext4_pool_claim() -> Option<&'static Ext4Mount> {
+    if EXT4_POOL_CLASSES_REGISTERED.init_once() {
+        EXT4_POOL_CLASSES
             .iter()
             .for_each(|class| register_class_eagerly(class));
     }
-    reclaim_retired_ext2_slots();
+    reclaim_retired_ext4_slots();
 
-    for (idx, state) in EXT2_POOL_STATE.iter().enumerate() {
+    for (idx, state) in EXT4_POOL_STATE.iter().enumerate() {
         if state
             .compare_exchange(POOL_FREE, POOL_BOUND, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
         {
-            return Some(&EXT2_POOL[idx]);
+            return Some(&EXT4_POOL[idx]);
         }
     }
 
     None
 }
 
-/// Give back the ext2 instance `fs` names, answering whether it was one.
+/// Give back the ext4 instance `fs` names, answering whether it was one.
 ///
 /// The detach drops the block device — and with it the exclusive write token
 /// — so the same disk can be mounted again. `retire` when a lazy unmount left
 /// a live descriptor behind: detaching under a reader would answer it `EIO`.
-pub fn vfs_ext2_pool_release(fs: &'static dyn FileSystem, retire: bool) -> bool {
-    let Some(idx) = ext2_pool_slot_of(fs) else {
+pub fn vfs_ext4_pool_release(fs: &'static dyn FileSystem, retire: bool) -> bool {
+    let Some(idx) = ext4_pool_slot_of(fs) else {
         return false;
     };
     // The instance's address is what the page sets key on, and the next
     // mount of the slot reuses it for another volume.
     crate::filemap::forget_filesystem(fs);
-    let torn_down = !retire && EXT2_POOL[idx].detach();
+    let torn_down = !retire && EXT4_POOL[idx].detach();
     if torn_down {
-        EXT2_POOL_STATE[idx].store(POOL_FREE, Ordering::Release);
+        EXT4_POOL_STATE[idx].store(POOL_FREE, Ordering::Release);
     } else {
-        EXT2_POOL_STATE[idx].store(POOL_RETIRED, Ordering::Release);
+        EXT4_POOL_STATE[idx].store(POOL_RETIRED, Ordering::Release);
     }
     true
 }
 
-/// The ext2 instance already in the mount table, which is what `mount(2)`
+/// The ext4 instance already in the mount table, which is what `mount(2)`
 /// with an empty `source` means by "the one this boot attached" — whether
 /// boot put it at `/` or demoted it to `/mnt`.
-pub fn vfs_ext2_mounted_instance() -> Option<&'static Ext2Mount> {
+pub fn vfs_ext4_mounted_instance() -> Option<&'static Ext4Mount> {
     let mut found: Option<usize> = None;
     with_mount_table(|table| {
         table.for_each_mount(&mut |mounted| {
             if found.is_none() {
-                found = ext2_pool_slot_of(mounted);
+                found = ext4_pool_slot_of(mounted);
             }
         });
     });
-    found.map(|idx| &EXT2_POOL[idx])
+    found.map(|idx| &EXT4_POOL[idx])
 }
 
 /// What the block layer does for devfs and `mount(2)`. `slopos-fs` cannot
@@ -389,7 +387,7 @@ fn read_only_block_device(source: &[u8]) -> VfsResult<KBox<dyn BlockDevice + Sen
     held_to_node(name, inode, ops.claim_read)
 }
 
-/// Attach the block device `source` names to a pooled ext2 instance and mount
+/// Attach the block device `source` names to a pooled ext4 instance and mount
 /// it at `target`. `source` takes every spelling
 /// [`devfs_resolve_block_source`] reads; probe order renames devices, so a
 /// `UUID=`, `PARTUUID=` or `LABEL=` is the stable one.
@@ -397,16 +395,16 @@ fn read_only_block_device(source: &[u8]) -> VfsResult<KBox<dyn BlockDevice + Sen
 /// `read_only` is the caller's *intent*, and an `MS_RDONLY` mount needs both
 /// halves of it: the write-refusing device view, and the instance's own
 /// refusal, which does not follow from the view.
-pub fn vfs_ext2_mount_named(
+pub fn vfs_ext4_mount_named(
     source: &[u8],
     target: &[u8],
     read_only: bool,
-) -> VfsResult<Ext2MountInfo> {
+) -> VfsResult<Ext4MountInfo> {
     // The slot first, the device only once one is held: a slot retired by a
     // lazy unmount still owns its device claim and *claiming* a slot is what
     // sweeps it, so resolving the device first meets that stale claim and
     // answers `Busy`.
-    let fs = vfs_ext2_pool_claim().ok_or(VfsError::NoSpace)?;
+    let fs = vfs_ext4_pool_claim().ok_or(VfsError::NoSpace)?;
     let device = match if read_only {
         read_only_block_device(source)
     } else {
@@ -414,14 +412,14 @@ pub fn vfs_ext2_mount_named(
     } {
         Ok(device) => device,
         Err(e) => {
-            vfs_ext2_pool_release(fs, false);
+            vfs_ext4_pool_release(fs, false);
             return Err(e);
         }
     };
     let info = match fs.attach(device, read_only) {
         Ok(info) => info,
         Err(e) => {
-            vfs_ext2_pool_release(fs, false);
+            vfs_ext4_pool_release(fs, false);
             return Err(e);
         }
     };
@@ -431,35 +429,35 @@ pub fn vfs_ext2_mount_named(
         0
     };
     if let Err(e) = mount(target, fs, flags) {
-        vfs_ext2_pool_release(fs, false);
+        vfs_ext4_pool_release(fs, false);
         return Err(e);
     }
     Ok(info)
 }
 
-/// [`vfs_mount_readonly`] for `device` on a pooled ext2 instance, which with
+/// [`vfs_mount_readonly`] for `device` on a pooled ext4 instance, which with
 /// the device is held for the rest of the boot.
-pub fn vfs_ext2_mount_readonly(
+pub fn vfs_ext4_mount_readonly(
     path: &[u8],
     device: KBox<dyn BlockDevice + Send + Sync>,
-) -> VfsResult<Ext2MountInfo> {
-    let fs = vfs_ext2_pool_claim().ok_or(VfsError::NoSpace)?;
+) -> VfsResult<Ext4MountInfo> {
+    let fs = vfs_ext4_pool_claim().ok_or(VfsError::NoSpace)?;
     let mounted = fs
         .attach(device, true)
         .and_then(|info| vfs_mount_readonly(path, fs).map(|()| info));
     if mounted.is_err() {
-        vfs_ext2_pool_release(fs, false);
+        vfs_ext4_pool_release(fs, false);
     }
     mounted
 }
 
-/// Unmount the ext2 filesystem at `target` and detach its instance.
+/// Unmount the ext4 filesystem at `target` and detach its instance.
 ///
 /// The detach is what gives the write claim back, so a re-mount of the same
 /// disk succeeds; without it every later claim answers `Busy`.
-pub fn vfs_ext2_unmount_named(target: &[u8]) -> VfsResult<()> {
+pub fn vfs_ext4_unmount_named(target: &[u8]) -> VfsResult<()> {
     let mounted = mount_at(target).ok_or(VfsError::InvalidArgument)?;
-    if ext2_pool_slot_of(mounted.fs).is_none() {
+    if ext4_pool_slot_of(mounted.fs).is_none() {
         return Err(VfsError::InvalidArgument);
     }
     if has_open_refs(mounted.fs) {
@@ -471,7 +469,7 @@ pub fn vfs_ext2_unmount_named(target: &[u8]) -> VfsResult<()> {
     drain_releasable(mounted.fs);
     forget_filesystem(mounted.fs);
     unmount(target)?;
-    vfs_ext2_pool_release(mounted.fs, false);
+    vfs_ext4_pool_release(mounted.fs, false);
     Ok(())
 }
 
@@ -487,9 +485,9 @@ pub fn vfs_devfs_instance() -> &'static DevFs {
 #[derive(Clone, Copy)]
 pub enum RootBacking {
     Ramfs,
-    /// The ext2 instance boot attached a device to; read-only when it refuses
+    /// The ext4 instance boot attached a device to; read-only when it refuses
     /// writes. Falls back to ramfs when nothing is attached to it.
-    Ext2(&'static Ext2Mount),
+    Ext4(&'static Ext4Mount),
 }
 
 /// The one-shot mount of `/`, `/tmp`, `/run`, `/dev` and `/dev/shm`. Later calls are no-ops
@@ -501,7 +499,7 @@ pub fn vfs_init_builtin_filesystems_with(root: RootBacking) -> VfsResult<()> {
     }
 
     match root {
-        RootBacking::Ext2(fs) if fs.is_initialized() => {
+        RootBacking::Ext4(fs) if fs.is_initialized() => {
             let flags = if fs.is_read_only() { MOUNT_RDONLY } else { 0 };
             mount(b"/", fs, flags)?;
         }

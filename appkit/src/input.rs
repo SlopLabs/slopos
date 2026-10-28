@@ -39,7 +39,9 @@ fn classify_key(keycode: u16, codepoint: u32, modifiers: u8) -> Key {
 
 pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
     match event {
-        Event::PointerMotion { x, y } => Some(WidgetEvent::PointerMove { x: *x, y: *y }),
+        Event::PointerEnter { x, y } | Event::PointerMotion { x, y } => {
+            Some(WidgetEvent::PointerMove { x: *x, y: *y })
+        }
         // The run loop fills in where the pointer is, and the modifiers.
         Event::PointerPress { button } => Some(WidgetEvent::PointerDown {
             x: 0,
@@ -96,6 +98,7 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
             })
         }
         Event::PointerLeave
+        | Event::Modifiers { .. }
         | Event::Configure { .. }
         | Event::CloseRequest
         | Event::ClipboardOffer { .. }

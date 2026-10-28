@@ -29,28 +29,14 @@ fails the build when the materialized sysroot has drifted from the pin.
 Nothing on this path writes inside the rustup toolchain directory; the only
 thing it adds to `$RUSTUP_HOME` is the `slopos` symlink that registration is.
 
-The fork is cut against a *pristine* `rust-src`, and the retired std patcher
-this replaces mutated that component in place, so a machine that ever ran it
-needs a one-time reset. `make_slopos_sysroot.sh` refuses to run while the
-residue is there and prints the fix; both halves are required, because
-`rustup component remove` deletes only what its own manifest lists, so the
-files the patcher *added* survive a reinstall (measured — a remove/add left
-six of them behind):
-
-```sh
-ch="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)"
-rustup component remove rust-src --toolchain "$ch" && rustup component add rust-src --toolchain "$ch"
-find "$(rustc +"$ch" --print sysroot)/lib/rustlib/src" -name '*slopos*' -prune -exec rm -rf -- {} +
-```
-
 **The compiler itself is forked too, and it is a different tree.** A JSON
 target is enough to build *for*; bootstrap's `--host` resolves a triple
 through rustc's own built-in list, so hosting a compiler needs
 `x86_64-unknown-slopos` to be a built-in spec. That is
 `toolchain/compiler/0001-slopos-target.patch` over the pinned nightly's
-sources, with `0003`, which maps the tuple to a `CMAKE_SYSTEM_NAME` — an
+sources, with `0002`, which maps the tuple to a `CMAKE_SYSTEM_NAME` — an
 unrecognised one falls back to `Generic`, which loses `LLVM_ON_UNIX` and with
-it every `Unix/*.inc` file the LLVM port patches — and `0004`, which links the
+it every `Unix/*.inc` file the LLVM port patches — and `0003`, which links the
 C++ runtime statically (below). All three, and
 `toolchain/llvm-rustc/0001-slopos-support.patch` (the LLVM port in rustc's
 bundled llvm-project), are pinned by `toolchain/compiler/PIN` and materialised by
@@ -69,7 +55,7 @@ sysroot's own `library/Cargo.lock`, which nothing in the workspace can see.
 set, and is passed with `--config` rather than folded into
 `.cargo/config.toml` because the same checkout drives cargo inside
 `third_party/`'s materialised toolchain trees, whose dependencies are not
-vendored here — so a host build still reads crates.io as it always did, and
+vendored here — so a host build reads crates.io, and
 the vendored road is the one the self-hosting root's clone and the offline
 gate take.
 `scripts/check_offline_build.sh` holds it: `--pins-only`, from
@@ -131,7 +117,7 @@ disk, 11 s), and held by `scripts/check_llvm_port.sh` and
 That build is the one place SlopOS needs host tools beyond rust and QEMU:
 `clang`, `clang++`, `ld.lld` and `llvm-ar` of **one** LLVM major at or above
 `clang_major_min`, plus `cmake` and `ninja`. The floor is a floor and not an
-equality because no Linux ships LLVM 18 by default any more — Arch is at 22
+equality because the distributions ship different defaults — Arch is at 22
 and packages no versioned `llvm18` in either the repositories or the AUR,
 Fedora is at 20 with an `llvm18` compat tree, Debian 13 at 19, Ubuntu 24.04 at
 18 — and the two pins protect different things: the *sources* fix the C++ ABI
@@ -195,13 +181,13 @@ rpath, and unwinds: a build script, a proc macro or a panicking rustc needs
 nothing a SlopOS program cannot have. The system's own artifacts keep their
 hand-written link line and `panic = abort` — `build_userland.sh` puts
 `SYSTEM_RUSTFLAGS` (`-C linker=rust-lld -C linker-flavor=ld.lld -C
-panic=abort`) on every build line — which is why `userland.ld` still discards
+panic=abort`) on every build line — which is why `userland.ld` discards
 `.eh_frame`. The compiler links LLVM against `libc++`: `rustc_llvm` picks it
 for `slopos` as it does for FreeBSD, and `llvm.use-libcxx` is not set because it
 would do the same to the Linux stage1 compiler. `llvm.static-libstdcpp` links
 it statically into libLLVM, which exports it to libclang-cpp and the LLVM
 executables (one copy, because libc++'s error categories are compared by
-address), and into librustc_driver (`toolchain/compiler/0004` has bootstrap
+address), and into librustc_driver (`toolchain/compiler/0003` has bootstrap
 find `libc++.a`), with `-Bsymbolic` for LLVM's shared objects and
 `-Bsymbolic-functions` for the Rust ones, and every SlopOS object of the
 toolchain is linked with `-z pack-relative-relocs` (`DT_RELR`, which slibc's
@@ -317,7 +303,7 @@ wrapper changes and a triple's LLVM and lld when its settings, profile or
 host clang do; a plain build clears only what a `--pgo` build left. cc-rs
 forwards `-Cprofile-generate`/`-Cprofile-use` to a clang, so the profile
 build's C compiler drops the rustc profile flags: the host clang's LLVM is not
-rustc's, and mixed records crashed the instrumented compiler at exit.
+rustc's, and mixed records crash the instrumented compiler at exit.
 
 **The result lands on the root.** `just boot` installs the prefix `just
 toolchain` built, or the one `TOOLCHAIN_STAGE` names, at `/usr/local` on the
@@ -342,7 +328,7 @@ what the manifest names removed, whatever the guest put beside it kept. The
 image is read only through `ls -l` listings of directories bound to the
 inodes their parents gave them, so no symlink the guest makes redirects a
 request, and an install that would overwrite something the guest left, or
-something that is no longer the kind the manifest names, is refused before
+something of another kind than the manifest names, is refused before
 anything is written: the tree stays as it was, the build warns and goes on,
 and the next build tries again. A seed tree (`FS_SEED_TREES`) is the guest's
 once it is there and is copied only onto a root without its directory. The
@@ -353,8 +339,8 @@ carries a 64M log, the size its grown volume would get. `gen_verity.py`
 streams the image and reads only the blocks a seal attests, so a grown root
 costs what the host wrote rather than its size. A seal keeps what it attested,
 the bitmap and each block's hash, in `<image>.host/verity`, since the guest can
-write every byte of the image, trailer included; before a preserved v2 image
-is grown or refreshed, the blocks the guest owns are the allocated ones not
+write every byte of the image, trailer included; before a preserved image
+with an attested trailer is grown or refreshed, the blocks the guest owns are the allocated ones not
 attested there with the recorded content still in place, and those stay
 un-attested through what follows. A trailer is one only past the filesystem's
 extent and describing exactly it, so bytes the guest writes that look like one
@@ -403,7 +389,7 @@ fetch fs/assets/guest-push.git <branch>` on the host); `just export-file`
 copies one file, a kernel the guest built, off a root whose guest has shut
 down.
 
-**The heavy checks boot a root of their own.** `fs/assets/ext2-selfhost.img`
+**The heavy checks boot a root of their own.** `fs/assets/ext4-selfhost.img`
 (`just _fs-image-selfhost`), rebuilt every run as the tests image is, is the
 persistent root's shape, booted with the tests base: the toolchain at
 `/usr/local`, the clone seeded `--vendored`, so no build reads a registry,
@@ -465,8 +451,8 @@ base carries is `scripts/lib/base.sh`, which the justfile and
 recipes' prefix on the host and from `/usr/local` in the guest, where the
 toolchain installs them. The embedded symbol table comes from
 `tools/kallsyms`, an ELF reader
-built for whichever machine runs the build, byte-identical to what `llvm-nm`
-gave less LLVM's `.llvm.<hash>` promotion suffix, which would keep a release
+built for whichever machine runs the build, listing what `llvm-nm` lists
+less LLVM's `.llvm.<hash>` promotion suffix, which would keep a release
 table from ever reaching a fixed point; the driver writes the empty safestack runtime archive itself; and
 `trim-paths` keeps every absolute path out of the image. `just test-selfhost`
 is the whole loop: the guest builds the dev and tests systems — kernel,
@@ -550,7 +536,7 @@ descriptor, a mapping or a program of one never reads another's bytes; an open
 whose walk began before a switch keeps the generation it found, and exec holds
 the files it reads open. The booted generation stays for the boot: it costs
 no copy, and what init made at boot, the consent pair among it, names its
-programs. Any other no longer current is freed by the `basefs-reap` thread
+programs. Any other that is not current is freed by the `basefs-reap` thread
 once two passes a second apart find nothing holding it — an open file, a page
 set, or a live process whose program it is — which reads those tables rather
 than counting references beside them; a socket's captured identity holds
@@ -586,7 +572,7 @@ Nothing is copied: a read-only block device over the file
 against the tree, keeping the sixteen hash blocks it checked last, so a block
 the tree refuses fails the read that meets it with `EIO`. The volume must say
 it holds exactly the tree's data blocks, carry ext4's `read-only` feature and
-need no recovery; it is mounted through an `Ext2Mount` of its own that keeps
+need no recovery; it is mounted through an `Ext4Mount` of its own that keeps
 no name cache, looks for no CRC trailer and caches from 64 frames up to the
 volume's size (`READ_ENTRIES_MIN`), and walked once at activation into the path index
 `SO_PEERPROGRAM` answers from (`extension::index`), which refuses an inode at
@@ -599,7 +585,7 @@ is lowercase letters, digits and `-`, at most 32 bytes, none of
 `slopos_abi::extension::RESERVED`, and `extctl` installs none of
 `slopos_extension_core::TAKEN` either, the names whose `/var/log`, `/run` or
 `/etc` directory the system's own paths hold, though it still shows, stops
-and removes one installed before its name was taken. Each activation is an instance
+and removes one the store holds under such a name. Each activation is an instance
 of its own from a pool of `MAX_ACTIVATIONS` (32), numbered across every
 activation and never within a boot again; the number is the high half of
 each inode it serves, and `statfs` names it `EXTENSION_MAGIC`. It carries the
@@ -607,12 +593,11 @@ name and the root its caller vouched for, its label, which `SO_PEEREXTENSION`
 answers. The kernel checks no signature: the caller holds `ExtensionUpdate`
 and has checked the image, and the kernel serves only the bytes that root
 vouches for. One replaced or deactivated is freed by the `basefs-reap` thread
-once nothing holds it, as a retired base generation is. `/opt` is made where
+once nothing holds it, as a replaced base generation is. `/opt` is made where
 the root lacks it and held by identity, as `/usr` is for the base; a mount
 there that is no activation is neither replaced nor taken away (`EBUSY`,
-`ENOENT`), and the mount table grew by the pool's 32 mounts. Interface 5's
-`ext_activate`, which copied an archive from the caller's memory, is retired:
-its slot answers `ENOSYS` and is never given to another call. Under
+`ENOENT`), and the mount table holds a mount for each of the pool's 32
+activations beside its own 32. Under
 `extensions=off` (`BOOT_FLAG_EXTENSIONS_OFF` in `sys_info`) `ext_activate`
 answers `EPERM`. Its log lines are `EXT: activation <n> is <name>`, `EXT:
 <name> deactivated`, `EXT: activation <n> freed` and `EXT: image block <n>
@@ -631,10 +616,7 @@ breadth first in name order, its UUID from the manifest's digest — and its
 reader believes no other: a feature or inode flag that changes what a block
 means, an inode type, generation or hard link it does not write, a block the
 kernel would not serve, a checksum that fails or a block the tree refuses is
-no image, so what extctl reads is what the kernel's index serves. An image of the archive form extensions took before
-is refused, saying to install it again, and a floor such an image set binds
-its version and not its bytes while the store holds it, so the same version
-goes back in rebuilt. A signed install whose sidecar names the bytes its
+no image, so what extctl reads is what the kernel's index serves. A signed install whose sidecar names the bytes its
 record runs, or one its record refuses whatever the image holds, is answered
 before the image is read. What it is
 granted is the capabilities its services and actions hold, the actions a
@@ -860,8 +842,8 @@ constant those calls take. `scripts/check_base_interface.sh` holds that
 surface, as rustdoc's JSON describes `slopos-abi`, to the digest recorded for
 the number in `scripts/gates/base-interface.txt`, so the surface cannot change
 while the number stays. A kernel serves `BASE_INTERFACE_MIN` through
-`BASE_INTERFACE` and says so twice: in `sys_info`, which the shell's `info`
-prints, and in the ELF note `.note.slopos.base-interface` (owner `SlopOS`,
+`BASE_INTERFACE`, both 10, and says so twice: in `sys_info`, which the shell's
+`info` prints, and in the ELF note `.note.slopos.base-interface` (owner `SlopOS`,
 type `NT_SLOPOS_BASE_INTERFACE`, `slopos_abi::base_interface`), readable from
 the file without booting it; `link.ld` fails a link that lost it, and
 `boot-core::kernel` finds it by name through the section headers. A base
@@ -875,14 +857,12 @@ way to one a directory, `/tmp`, `/run` and `/dev` directories with nothing
 in devfs, no symlink the kernel refuses, at most 2048 records, an interface,
 and the manifest — which `bootctl base install` and `bootdisk base` hold an
 image to as well, so a base the kernel would refuse to index, mount or
-unpack after freeing the other never reaches the boot partition. The minimum
-rises only when a change reshapes something an older base calls: a call
-taken away keeps its slot and answers `ENOSYS`, as interface 5's
-`ext_activate` does, so an older base still boots, without what that call
-did — an interface-5 base on a newer kernel activates no extension, and its
-`extctl` stops each at boot, which `extctl enable` under a newer base brings
-back; rolled back to while the system runs, its init and privd read the
-newer activations as nothing shown and wait for them. A program outside the base reaches SlopOS through `libc.so` alone,
+unpack after freeing the other never reaches the boot partition. A change
+to the surface takes the next number. The minimum rises only when a change
+reshapes something an older base calls, which a kernel then cannot serve: a
+change that only adds leaves it where it is, and a call taken away keeps its
+slot and answers `ENOSYS`, so an older base still boots, without what that
+call did. A program outside the base reaches SlopOS through `libc.so` alone,
 which only grows: `scripts/check_libc_exports.sh` holds its dynamic symbols
 to `scripts/gates/libc/exports.txt` and the layout of every struct and union
 `slibc/include` defines to `scripts/gates/libc/layouts.txt`. The compositor
@@ -900,11 +880,17 @@ viewer and the widget gallery are `slopos-apps` (`apps/`), built as `cargo
 build` builds a program for this target — the target's std and panic
 strategy, linked dynamically against `libc.so` by the line the clang driver
 writes — and staged by `build_userland.sh`, the first three with their app
-entries and icons, as `builddir/apps`:
+entries and icons and the editor with its manual (`share/slopos/doc/editor.md`,
+read from the first share holding it, as the dock ranks them), as `builddir/apps`:
 the tree `apps`, which every root holds at `/usr/local` beside the toolchain's
 `usr_local`. `scripts/check_loose_programs.sh`, after every host userland
 build, fails one that is static, names another interpreter, lacks `libc.so`
-in `DT_NEEDED` or holds a `syscall` instruction. The toolkit under them
+in `DT_NEEDED` or holds a `syscall` instruction. `scripts/check_app_deps.sh`,
+from `check-framekernel-gates`, fails a crate under `apps/` that depends on
+anything but `slopos-appkit`, `slopos-editor-core` and `slopos-image`, so an
+app names neither the kernel ABI nor the toolkit's internals; appkit
+re-exports what one needs, as the colour type a syntax palette is made of.
+The toolkit under them
 (`appkit`, `windowing`, `slop-protocol`) reaches the system only through
 `slopos-cabi`, safe wrappers over functions `libc.so` exports — never slibc's
 raw calls or the ring — so the same code links into a static base program
@@ -962,7 +948,8 @@ as the compositor's chrome does. Text is reached only by a `TextRole`.
 fails an app — a file under `apps/`, or a module of `userland/src/apps/` that
 implements `App` or calls `run_app` — that constructs or derives a colour or
 gives a spacing or an inset a number, and appkit for constructing a colour; a
-file whose colours are its content, as the editor's syntax palette, is
+file whose colours are its content, as the editor's syntax palette or the
+checks appkit's picture view draws behind transparent pixels, is
 exempt from that one check by a line of `scripts/gates/ui-literals.txt`,
 which fails once the line matches nothing. `theme-core::words` is the voice
 where words are data: the glossary — computer, disk, installer, partition,
@@ -1126,8 +1113,7 @@ install only those bytes, which `remote.py install` passes for what it
 pushed, since the session may replace the file; `set-default` takes only a
 slot whose kernel serves a base on the partition. A base installed or rolled
 back to runs at once through `BaseUpdate` when the system booted from that
-partition, the running kernel serves its interface and that interface is 3
-or newer, whose init takes over a running system's, and otherwise at the
+partition and the running kernel serves its interface, and otherwise at the
 next boot, and says which (a session's install or rollback asks the person,
 since either replaces the running base); `bootctl status` names
 each base's interface, build tag and whether it runs. It then sets
@@ -1162,7 +1148,8 @@ the test's and wait for nobody at the machine.
 
 **An install medium installs SlopOS.** The live ISO is the medium: `just iso`
 builds `builddir/install.cpio` (`scripts/build_install_medium.sh`), which
-Limine loads as the module `install` beside the base, holding Limine for the
+Limine loads as the module `install` beside the base by the `limine.conf`
+`build_iso.sh` writes, holding Limine for the
 ESP and the source tarball of every recipe the base takes programs from. The
 kernel serves it read-only and pinned at `/media/install`
 (`layout::MEDIUM_DIR`), a second `basefs` instance where Limine put it, with
@@ -1265,7 +1252,7 @@ under `/var/lib/slopos/trees` names is replaced, what the user added kept), as
 whoever a kept root's owners record says holds it, and
 seeds `/src` once, its origin
 where the user says; writes a kernel into both slots, the base as current and
-previous, removing a slot's `base.img` a disk laid out before kept, and `limine.conf` — `root=PARTUUID=`, a
+previous, and `limine.conf` — `root=PARTUUID=`, a
 five-second menu, an `efi_boot_entry` for each other system `BootOrder` lists
 that Limine can boot and the install leaves in place — makes `slopos-a` the
 default, holds the root to
@@ -1356,7 +1343,7 @@ every image, behind slibc's `unwinder` cargo feature which only those two
 wrapper crates enable, and both are built `-C force-unwind-tables` because the
 first frame of every unwind is one of their own. The cost is that the shipped
 `libc.so` carries the DWARF reader — 45 904 bytes of a 571 696-byte library,
-re-measured by building the cdylib with the feature off — which `--gc-sections` cannot drop while startup registers the frame finder
+measured by building the cdylib with the feature off — which `--gc-sections` cannot drop while startup registers the frame finder
 unconditionally. The base's static Rust binaries are unaffected: they take
 slibc as an rlib with the feature off, and `userland/userland.ld` discards
 `.eh_frame` outright. The apps outside the base unwind through `libc.so`'s.
@@ -1389,7 +1376,7 @@ tests run on all three, and names how long a request waits for a free slot:
 stick. Spans
 are cut into the device's logical blocks: partition tables count in them, a
 partial block is read, patched and written back inside one slot's pages, and
-ext2 refuses a block smaller than one, whose write would tear its neighbours.
+ext4 refuses a block smaller than one, whose write would tear its neighbours.
 devfs publishes `/dev/disk/by-partuuid`, `by-uuid` and `by-label` (ext2/3/4,
 FAT and btrfs identities, udev's escaping), and `root=`, `mount=` and
 `mount(2)` take `PARTUUID=`, `UUID=`, `LABEL=` and those paths as well as a
@@ -1571,7 +1558,11 @@ of `MAX_KEYBOARDS`: a modifier is held while any keyboard holds it, the locks,
 the layout and its dead key, the diagnostic console's trigger, the boot log's
 Esc, Shift+PageUp/PageDown and the TTY fallback are the machine's, and a
 press of a key its source already holds is delivered with
-`KEY_FLAG_IS_REPEAT` and toggles no lock. A keyboard that leaves releases
+`KEY_FLAG_IS_REPEAT` and toggles no lock. A key reaches the input sink's
+holder as its HID usage, the text it makes and the modifiers, and while
+nothing holds the sink reaches the console as the bytes a VT sends — text as
+UTF-8, a named key as xterm's escape sequence (`keymap_core::vt`, which the
+terminal encodes its keys with too). A keyboard that leaves releases
 every key it held. `ps2::keyboard` only decodes set 1 and owns the i8042's
 LED exchange, which a lock change starts from any context and the i8042's
 interrupt carries on, each ACK sending the next byte and a RESEND, or 250 ms
@@ -1579,7 +1570,8 @@ of silence noticed at the next byte, lock change or `usb` pass, sending one
 again, twice at most, so nothing masks its lines or polls port 0x60 after
 boot; each USB keyboard gets an output report from the
 `usb` thread. `input_event` owns the cursor and the screen bounds
-the video layer publishes: a pointing device claims a `PointerSource` and
+the video layer publishes, and queues every event for the input sink's holder
+alone, a pointer event while nothing holds the sink going nowhere: a pointing device claims a `PointerSource` and
 reports a `hid-core` `Motion`, relative axes moving the cursor and absolute
 ones mapping their logical range onto the screen when they change, and a
 button stays down while any device holds it; a report changes only the
@@ -1740,9 +1732,10 @@ packs the paired base into the live ISO instead, so the medium and every
 system installed from it dial the broker from their first boot; that ISO
 carries the token and is for your own machines. State lives in
 `~/.config/slopos-remote`, outside the tree. `just test-remote` grades all of
-it under QEMU, a pairing planted under `/etc/remote` included.
+it under QEMU, including that a pairing planted under `/etc/remote` is never
+dialled.
 
-**The disk is the root.** `root=auto` mounts a writable `disk0` — the first disk probed that is not a USB disk, `nvme0n1` under QEMU, so a stick left in a port never changes what boots — at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the verified `ext2.img` boots `/sbin/init` from RAM with the attested disk at `/mnt`). `root=disk` insists on the disk, and `root=initramfs` mounts no disk it was not asked to by a `mount=` but an install medium's payload, which is what the live ISO boots with. A device `root=` or a `mount=` names that is absent is waited for until USB settles, up to `usb.settle_ms`; beyond `tests=on`'s `usb settle` step and an install medium's search for its payload, nothing else in boot waits for USB, the crash store included. `root=` also takes a device in any spelling a mount source does — `/dev/nvme0n1p2`, `vda1`, `PARTUUID=…`, `UUID=…`, `LABEL=…` — where a partition comes from the GPT or MBR table on its disk; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot` is the developer's persistent machine: it boots this build's kernel and base from an A/B boot disk it rebuilds every run, with `fs/assets/ext2-persist.img` as `/`, built `VERITY=rw` (a v2 trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`: the host's toolchain only) so what the guest wrote survives. `VERITY=on` builds the verified image's v1 trailer, which write-protects the device and is what `verity=require` asserts; `VERITY=off` builds no trailer. The verified and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
+**The disk is the root.** `root=auto` mounts a writable `disk0` — the first disk probed that is not a USB disk, `nvme0n1` under QEMU, so a stick left in a port never changes what boots — at `/`, so what a boot writes there persists; the initramfs is the fallback for no disk and for a disk that mounted read-only (the verified `ext4.img` boots `/sbin/init` from RAM with the attested disk at `/mnt`). `root=disk` insists on the disk, and `root=initramfs` mounts no disk it was not asked to by a `mount=` but an install medium's payload, which is what the live ISO boots with. A device `root=` or a `mount=` names that is absent is waited for until USB settles, up to `usb.settle_ms`; beyond `tests=on`'s `usb settle` step and an install medium's search for its payload, nothing else in boot waits for USB, the crash store included. `root=` also takes a device in any spelling a mount source does — `/dev/nvme0n1p2`, `vda1`, `PARTUUID=…`, `UUID=…`, `LABEL=…` — where a partition comes from the GPT or MBR table on its disk; a named device or partition that is absent degrades to the initramfs exactly as no disk does. `just boot` is the developer's persistent machine: it boots this build's kernel and base from an A/B boot disk it rebuilds every run, with `fs/assets/ext4-persist.img` as `/`, built `VERITY=rw` (an attested trailer, so the image is writable *and* attested everywhere the guest has not written) and refreshed in place across builds (`PRESERVE_FS_IMAGE=1`: the host's toolchain only) so what the guest wrote survives. `VERITY=on` builds the verified image's protected trailer, which write-protects the device and is what `verity=require` asserts; `VERITY=off` builds no trailer. The verified and *tests* images are regenerated on every build on purpose — a persistent `/` would make every filesystem test a mutation of the image the next run boots from.
 
 **Every volume the tree builds is ext4, in one profile.** `ext4-core/profile`
 names it — `extent`, `64bit`, `flex_bg`, 256-byte inodes with nanosecond
@@ -1760,13 +1753,9 @@ volume has `extent`, directories stay linear (an htree is linearised by the
 first change to it) and so hold at most 64998 subdirectories, a group left
 `BLOCK_UNINIT` or `INODE_UNINIT` is initialised on first use, and block
 numbers are 32-bit inside the kernel, so a volume past 16 TiB at 4 KiB blocks
-is refused. `build_fs_image.sh` converts a preserved image short of the
-profile in place — an ext2-era root's sealed `/.journal` file dropped, the
-features added in the order `tune2fs`, `resize2fs -b` and `e2fsck -fD` need,
-on a copy that replaces the image only once it meets the profile, and the
-journal added after — and otherwise refuses, showing the step that failed,
-and names `just reset root`. `ext_attr`, which `tune2fs` cannot clear,
-survives a conversion, and the kernel reads such a volume like any other.
+is refused, and a volume carrying `ext_attr` reads like any other.
+`build_fs_image.sh` refuses a preserved image short of the profile and names
+`just reset root`.
 `FS_IOC_GETFLAGS` and `FS_IOC_SETFLAGS` are `lsattr`'s and `chattr`'s: the
 immutable flag is the VFS seal, an append-only file another system marked is
 sealed too, ext4 also stores `nodump` and `noatime`, any other change is
@@ -1789,12 +1778,10 @@ sealer reads back once the seal is set is what every reader reads after.
 `source` naming a block device — `mount("/dev/nvme0n1p3", "/home", "ext4", …)`
 or `mount("LABEL=home", …)` — claims that device's exclusive writer (or, with
 `MS_RDONLY`, a read claim shared with other readers), and binds it to one of
-four pooled `Ext2Mount` instances, each with **its own lock**. A path walk
+four pooled `Ext4Mount` instances, each with **its own lock**. A path walk
 crossing a mount therefore holds one mount's lock while taking the next one's,
-which is why the four instances carry four separate `lock_class!` sites rather
-than one shared class;
-slot 0's is still named `CACHED_EXT2`, so the class boot registers is the class
-it always was. `umount` of the last mount of an instance flushes it, marks the
+which is why the four instances carry four separate `lock_class!` sites,
+`EXT4_POOL_0` to `EXT4_POOL_3`, rather than one shared class. `umount` of the last mount of an instance flushes it, marks the
 image clean, drops the device and returns the slot, so the write claim is
 released and the same disk can be mounted again — a leaked claim answers
 `Busy` forever, and that is the failure the remount test exists to
@@ -1802,13 +1789,13 @@ catch.
 
 **A warm path walk does not take the mount lock.** Each component is a
 `lookup` and a `stat`, and both answer from per-mount caches
-(`fs/src/ext2_dcache.rs`) of names — negative ones included — and of inode
+(`fs/src/ext4_dcache.rs`) of names — negative ones included — and of inode
 attributes, checked against
-generation counters that the ext2 code bumps under the mount lock whenever a
+generation counters that the ext4 code bumps under the mount lock whenever a
 record is rewritten, an entry of a name is added or removed, or an inode is
 allocated or freed. Attach and detach bump every counter, so a pool slot handed
 another image cannot answer from the last one. A new path that changes a
-record or a directory without `Ext2Fs::write_inode_num` or the `dir` entry
+record or a directory without `Ext4Fs::write_inode_num` or the `dir` entry
 helpers must bump the counters itself, or the walk serves what it replaced.
 
 **A rude exit is survivable.** The flusher marks the image at rest *on the
@@ -1816,7 +1803,7 @@ medium* once a pass leaves nothing dirty, nothing unbarriered, no
 superblock drift and an empty journal, and the mount has had nothing to write
 for a second — the state ext4 reaches for `fsfreeze`, here reached
 automatically at idle; a busy mount would pay a superblock read, write and
-barrier each way on every pass — and `Ext2Fs::transaction` re-stamps it
+barrier each way on every pass — and `Ext4Fs::transaction` re-stamps it
 in use before the next mutation reaches the device. At rest is the
 journal's superblock emptied before `needs_recovery` is cleared; in use is
 the reverse, the flag set before the journal says it is live, so no crash
@@ -1824,11 +1811,12 @@ leaves a live journal under a clear flag, which `e2fsck -p` will not decide
 alone. A volume without a journal is stamped through `s_state` instead. A
 mount owes the stamp from the moment it attaches, since attaching stamped it
 in use and a mount nothing writes to runs no pass. Closing the QEMU window
-therefore costs at most the last idle window's writes, instead of leaving an
-image that mounts read-only forever after and that `root=auto` then demotes to
+therefore costs at most the last idle window's writes, and never leaves an
+image that mounts read-only forever after, which `root=auto` would demote to
 `/mnt` while booting the initramfs. The host half is the same promise:
 `build_fs_image.sh` never deletes a `PRESERVE_FS_IMAGE=1` image. One that is
-damaged, not at rest, or built under a different `VERITY` stops the build
+damaged, not at rest, short of the profile, or built under a different
+`VERITY` stops the build
 naming the command that repairs it, except that `just boot` boots a disk
 closed mid-write without refreshing it, so the kernel replays its journal;
 `just reset root` is the only
@@ -1836,12 +1824,12 @@ thing that discards one; a larger `PERSIST_IMAGE_SIZE`, or free space under
 the floor, grows the image with `resize2fs` rather than rebuilding it; and a
 block the guest wrote stays un-attested across rebuilds, because the seal
 leaves out every block that was allocated and unattested once the build has
-converted and grown the image, before it installs anything, and every block a
+grown the image, before it installs anything, and every block a
 later resize allocates, which is where a resize moves what it must. `PERSIST_IMAGE_SIZE` is a minimum, 512M by default; the
 ceiling is what the machine's RAM allows rather than what one allocation
 allows, because
 the verity hash array is chunked (4 bytes per 4 KiB block, in 256 KiB pieces,
-refused past a stated share of usable memory) instead of one contiguous `KVec`.
+refused past a stated share of usable memory).
 
 **A write is logged before it lands.** A writable image carries a jbd2
 journal in its journal inode (`FS_JOURNAL_SIZE`, default 1/64 of the image
@@ -1865,7 +1853,7 @@ The journal is an *image* property, not a kernel one — an image without one
 gets undo-scoped operations and still refuses an unclean mount — and the boot
 log says which of the two a mount got. The journal inode has no name, and a
 name that reaches any reserved inode is refused as damage. The default image
-is 32M rather than 16M because the journal takes 4M of it.
+is 32M, of which the journal takes 4M.
 
 **A commit is grouped, not synchronous.** An operation's records are staged
 into an in-memory ring (`Journal::pending`, up to `PENDING_SLOTS_MAX` slots)
@@ -1894,16 +1882,15 @@ until the flusher has made those blocks dirty again. The block cache is sized fr
 
 **A writeback pass is bounded, and a mount has one.** `sync(2)`, the flusher
 and a writer short of log room all drive the mount's one open pass through
-`Ext2Fs::sync_step`, in chunks of `WRITEBACK_CHUNK` device writes, releasing
+`Ext4Fs::sync_step`, in chunks of `WRITEBACK_CHUNK` device writes, releasing
 the mount lock between them, so a path walk or an `exec` queued behind a pass
 waits for a chunk rather than for the whole pass, and a burst of callers pays
 for one pass rather than one each. A pass fixes a *dirty epoch* and the log's
 head and generation when it opens, which is what keeps the ordered phases
 ordered across those gaps: an operation that runs in one is entirely outside
 the pass — so a `sync` that finds a pass open drives it to its end and then
-the next one, the way a jbd2 commit waiter does. Mutations remain serialised
-per mount — the plan's per-inode locking is deliberately not what landed,
-because the wait, not the lock count, is what G5 was about.
+the next one, the way a jbd2 commit waiter does. Mutations are serialised
+per mount: what a waiter pays is the wait for a chunk, not the lock count.
 
 **Memory is promised before it is touched — except a fork's copy, which the
 OOM killer stands behind.** Every private mapping is charged against a
@@ -1917,7 +1904,7 @@ and `sys_info` reports the limit, the promised total and the headroom left, and
 how many processes the OOM killer has taken and the last one's pid. The
 same boot step derives the per-process `PinnedBytes` default — an eighth of
 usable memory, the share the file map hands one owner — since the `abi`
-default was sized for an appliance, a compiler's shared objects exceed it
+default is sized for an appliance, a compiler's shared objects exceed it
 before `main`, and a linker maps every rlib of the kernel at once. A region is charged one of three ways, and `VmaRegion::commit` says which: an
 `Extent` region owes its whole span when it is created, so a fault in it never
 finds itself unaccounted for; a `Frames` region — the loader's eager segments,
@@ -1997,9 +1984,6 @@ no address space is copied at all — and the std fork takes that road for
 `Command::spawn` because it is the cheaper one, falling back to `fork` for
 `pre_exec` closures and attributes the primitive cannot express.
 
-## Knowledge Index (AI)
-`knowledge/` hosts a local semantic index for querying the codebase. Build once with `python3 -m venv knowledge/.venv && . knowledge/.venv/bin/activate && pip install -r knowledge/requirements.txt && python knowledge/index.py`, then query via `python knowledge/query.py "<question>"` for signatures, drivers, or file locations. Rebuild after large refactors or merges. Never commit the venv or embedding database artifacts.
-
 ## Coding Style & Naming Conventions
 All kernel code is Rust `#![no_std]` on nightly with `#![forbid(unsafe_op_in_unsafe_fn)]`. Keep unsafe blocks tiny and well-documented; prefer `pub(crate)` helpers and prefix cross-module APIs with their subsystem (e.g., `mm::`, `sched::`). Match the existing four-space indentation and brace-on-same-line style. Assembly sources (when needed) are Intel syntax (`*.s`) and should document register contracts.
 
@@ -2013,7 +1997,7 @@ Write code that does not need comments. Most comments are useless: they restate 
 - Exempt from the above: `# Safety` sections, `///` public API docs, and register-contract notes in assembly. These are contracts, not commentary.
 
 ### Unsafe-code surface
-**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `boot-core`, `core`, `cpufreq-core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `karch`, `kernel-services`, `hid-core`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `rtl8168-core`, `sched`, `service-core`, `signalfd`, `usb-core`, `verity-core`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `apps/`, `cabi/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`, `tree-core/`, `remote-core/`) are out of scope for this discipline.
+**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `boot-core`, `core`, `cpufreq-core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `kernel-services`, `hid-core`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `rtl8168-core`, `sched`, `service-core`, `signalfd`, `usb-core`, `verity-core`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `apps/`, `cabi/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`, `tree-core/`, `remote-core/`) are out of scope for this discipline.
 
 `forbid` is necessary but not sufficient: rustc drops any `unsafe_code` diagnostic whose primary span satisfies `in_external_macro`, so a macro defined in another crate expands `unsafe` into a forbid crate silently, and the call site holds no keyword for a source scan to find. `scripts/check_unsafe_expansion.sh` is what closes that — see below.
 
@@ -2023,28 +2007,29 @@ One documented exempt site exists outside `slopos-ostd/`:
 
 Three C-ABI entry points keep `#[unsafe(no_mangle)]` in `boot/src/ffi_boundary.rs` — `kernel_main`, `common_exception_handler`, `isr_iret_frame_corrupt`. Their callers are assembly, so the symbols have to resolve at link time; routing them through a registered hook would leave an uninstalled window across early boot in which a fault triple-faults instead of panicking. `check_unsafe_expansion.sh` allowlists them by name.
 
-These gates enforce the discipline. The source-scanning gates run via `just check-framekernel` and CI (and from a build when `KERNEL_BUILD_GATES=1`); the two ELF-inspecting gates (`check_stack_sizes.sh`, `check_kernel_softfloat.sh`) run on every kernel build, for every variant. A third class builds a probe and inspects what came out (`check_codegen_backend.sh`, `check_linker_script.sh`); those run from `just check-framekernel-gates` and CI only, never from a build, because the codegen one compiles `core` once per flag set. The source scans are kept off the default build path so the interactive boot loop stays fast.
+These gates enforce the discipline. The source-scanning gates run via `just check-framekernel` and CI (and from a build when `KERNEL_BUILD_GATES=1`); the ELF gates (`check_stack_sizes.sh`, `check_kernel_softfloat.sh`, `check_registry_sections.sh`, `check_bootstrap_stack_rewind.sh`) and `check_kernel_pml4_writer.sh`, a few greps, run on every kernel build, for every variant. A third class builds a probe and inspects what came out (`check_codegen_backend.sh`, `check_linker_script.sh`); those run from `just check-framekernel-gates` and CI only, never from a build, because the codegen one compiles `core` once per flag set. The source scans are kept off the default build path so the interactive boot loop stays fast.
 
-Every gate carries a `--self-test`, run from `check-framekernel-gates` before the real scan. A check that has never been observed to reject has not been observed to work: the source scanners assert exact hit counts against planted violations *and* silence against the forms they deliberately accept, while the three ELF gates synthesise objects with `llc` (an oversized frame, a `movups`, an unblessed `link_section`) and assert the gate rejects them. A gate whose self-test fails is a build failure.
+Every gate carries a `--self-test`, run from `check-framekernel-gates` before the real scan. A check that has never been observed to reject has not been observed to work: the source scanners assert exact hit counts against planted violations *and* silence against the forms they deliberately accept, while the stack, soft-float and registry gates synthesise objects with `llc` (an oversized frame, a `movups`, an unblessed `link_section`) and assert the gate rejects them. A gate whose self-test fails is a build failure.
 
-The build produces one ELF per variant — `builddir/kernel-dev.elf`, `kernel-release.elf`, `kernel-tests.elf` — because their codegen differs and a single shared path meant whichever build ran last silently answered for all three, to the gates, to gdb, and to the ISO builder. The two ELF gates take a required `--variant` and read their measured allowlist from `scripts/gates/{stack,vector}/<variant>.txt`. Those files also carry the input-sanity floors, so weakening a check is a diff on a tracked file rather than an edit to a script. Every allowlist entry must match something in the ELF being checked: an entry that matches nothing is a dead exemption and fails the gate, which is both the ratchet (a frame that shrinks hands its exemption back) and what makes a mis-stated `--variant` fail closed rather than pass on a list that happens to fit.
+The build produces one ELF per variant — `builddir/kernel-dev.elf`, `kernel-release.elf`, `kernel-tests.elf` — because their codegen differs, and one shared path would let whichever build ran last answer for all three, to the gates, to gdb, and to the ISO builder. The stack and soft-float gates take a required `--variant` and read their measured allowlist from `scripts/gates/{stack,vector}/<variant>.txt`. Those files also carry the input-sanity floors, so weakening a check is a diff on a tracked file rather than an edit to a script. Every allowlist entry must match something in the ELF being checked: an entry that matches nothing is a dead exemption and fails the gate, which is both the ratchet (a frame that shrinks hands its exemption back) and what makes a mis-stated `--variant` fail closed rather than pass on a list that happens to fit.
 
 - **`scripts/check_unsafe_outside_ostd.sh`** — fails if any `.rs` file under a kernel crate (other than `slopos-ostd/`, `slopos-ostd-derive/`, or the exempt file above) contains an `unsafe` keyword that is not a comment, not the `#[unsafe(...)]` attribute form, and not `#[cfg(...)]`-gated. Mirrors `check_alloc_dep.sh`'s cfg-aware lookback. Also asserts that every crate in the kernel binary's dependency closure carries `#![forbid(unsafe_code)]` at its crate root, so a newly linked crate cannot start life without the lint.
 - **`scripts/check_alloc_dep.sh`** — fails if any kernel crate's `Cargo.toml` declares a direct `alloc` dependency **and** fails if any kernel `.rs` file (other than `kernel/src/main.rs` and the `slopos-ostd/` tree) contains a bare `extern crate alloc;` / `use alloc::` / `use ::alloc::` statement (with `#[cfg(...)]`-aware lookback so cfg-gated usages that compile out of the kernel build are accepted).
 - **`scripts/check_stack_sizes.sh`** — fails if any function in the kernel ELF has a stack frame larger than `STACK_SIZE_THRESHOLD` (default **2048 bytes / 2 KiB**, matching Linux mainline's `CONFIG_FRAME_WARN` default on x86_64/arm64 but stricter in enforcement — SlopOS fails the build, Linux merely warns). This is the load-bearing enforcement of SlopOS invariant **S-5** (bounded kernel stack use — named to avoid collision with the framekernel paper's own Inv. 5, *sensitive memory cannot be tampered with by user programs*). Driven by `-Zemit-stack-sizes`; inspects the final ELF's `.stack_sizes` section, so it catches NRVO failures, inlining, and trait-object dispatch that a source-level heuristic would miss. Above the threshold sits a second limit no allowlist can raise: the 4 KiB guard page. The target sets `"stack-probes": {"kind": "none"}`, so a frame larger than that steps clean over the guard in one instruction — a measured cap records how big a frame is, not whether that size is survivable. `min-records` is what stops a dropped `-Zemit-stack-sizes` from reading as a kernel with no large frames: `llvm-readobj` prints an empty `StackSizes [ ]` and exits **0** for an ELF carrying no section at all.
-- **`scripts/check_kernel_softfloat.sh`** — fails if the kernel ELF touches XCR0-managed register state outside the sanctioned save/restore. The kernel must be built `+soft-float` so it never touches that register file: a syscall/exception entering from userland does **not** save the caller's FPU/vector state (only a full context switch does, via `xsave`/`xrstor`), so a single kernel instruction that disturbs it in a fault/IRQ path clobbers the interrupted user task's live registers. The scope is all four classes XCR0 enumerates, not just the vector one — x87 and MMX share one physical register file with XMM under XCR0 bit 0, and `xrstor64` overwrites the whole area at once — because XMM is only the instance rustc is likely to emit, and hand-written `asm!` is not subject to target features at all. The soft-float guarantee lives in `targets/x86_64-slos.json` (`features: …,-sse,…,+soft-float` + `rustc-abi: softfloat`) — **not** in `.cargo/config.toml`, because a `RUSTFLAGS` env var fully overrides `target.*.rustflags`. The `slopos-ostd` xsave-conformance helpers in the `kernel/tests` build are one allowlist entry with a measured instruction budget rather than a whole-binary exemption, so a vector instruction anywhere *else* in the tests kernel still fails.
+- **`scripts/check_kernel_softfloat.sh`** — fails if the kernel ELF touches XCR0-managed register state outside the sanctioned save/restore. The kernel must be built `+soft-float` so it never touches that register file: a syscall/exception entering from userland does **not** save the caller's FPU/vector state (only a full context switch does, via `xsave`/`xrstor`), so a single kernel instruction that disturbs it in a fault/IRQ path clobbers the interrupted user task's live registers. The scope is all four classes XCR0 enumerates, not just the vector one — x87 and MMX share one physical register file with XMM under XCR0 bit 0, and `xrstor64` overwrites the whole area at once — because XMM is only the instance rustc is likely to emit, and hand-written `asm!` is not subject to target features at all. The soft-float guarantee lives in `targets/x86_64-slos.json` (`features: …,-sse,…,+soft-float` + `rustc-abi: softfloat`); `.cargo/config.toml` names no kernel codegen flag, and `build_kernel.sh`'s `RUSTFLAGS` names no target feature. The `slopos-ostd` xsave-conformance helpers in the `kernel/tests` build are one allowlist entry with a measured instruction budget rather than a whole-binary exemption, so a vector instruction anywhere *else* in the tests kernel still fails.
 - **`scripts/check_unsafe_expansion.sh`** — expands every kernel crate with `-Zunpretty=expanded`, over each crate's feature configurations, and holds the result to a constant rather than a recorded count: zero executable `unsafe`, `unsafe impl` only of an allowlisted trait, `#[unsafe(link_section)]` only of a `link.ld` section, `#[unsafe(no_mangle)]` only of an asm-called symbol. This is the only mechanism that sees macro-injected `unsafe`; `forbid` and the source scan are both blind to it. A golden fixture fails the gate if a toolchain bump moves the compiler's own emitted shapes. ~16 s warm.
-- **`scripts/check_process_designator.sh`** — fails if a process-keyed table entry point (`mm/src/process_vm.rs`, `fs/src/fileio/`) takes a bare `u32` process id, or if a lock-free scan for a matching id grows back. Ids recycle, so a `u32` parameter is a confused-deputy surface: a stale one designates whichever process holds that number *now*, and the kernel services the call against a stranger's address space or open files. The replacements — `slopos_ostd::process::ProcessId` and `slopos_fs::fileio::FdTable` — carry a generation and can only be built from a live process, so a stale one fails the check instead of resolving. Scope is deliberately narrow: a `u32` pid is still correct at the ABI boundary (`getpid` returns one, the PCR carries one across a syscall); what must not happen is a *table lookup* keyed on one.
+- **`scripts/check_process_designator.sh`** — fails if a process-keyed table entry point (`mm/src/process_vm.rs`, `fs/src/fileio/`) takes a bare `u32` process id, or if a lock-free scan of the tables for a matching id appears. Ids recycle, so a `u32` parameter is a confused-deputy surface: a stale one designates whichever process holds that number *now*, and the kernel services the call against a stranger's address space or open files. The designators — `slopos_ostd::process::ProcessId` and `slopos_fs::fileio::FdTable` — carry a generation and can only be built from a live process, so a stale one fails the check instead of resolving. Scope is deliberately narrow: a `u32` pid is still correct at the ABI boundary (`getpid` returns one, the PCR carries one across a syscall); what must not happen is a *table lookup* keyed on one.
+- **`scripts/check_kernel_pml4_writer.sh`** — holds the kernel master's page tables to one writer: outside `slopos-ostd`, only `slopos_mm::kernel_mappings` takes a `CursorMut` on the space `kernel_vm_space()` hands out, `KERNEL_VM_SPACE` itself is named only where `kernel-services` defines it and the boot step installs it, and a file that reaches a page-table word through `ptr_buf::with_atomic_u64_in_page` only loads it. `verification/STATUS.md`'s tier-2 argument for `vm_space` rests on it. A few greps over comment-stripped sources; runs on every kernel build from `check_kernel_elf_gates.sh`, and from `check-framekernel-gates` with its `--self-test`.
 - **`scripts/check_registry_sections.sh`** — holds the kernel ELF to `link.ld`'s section set and each linker registry's span to a whole number of entries. Catches a *dependency's* `link_section`, which no first-party scan can see, and the wrong-entry-size case that would make `registry_slice`'s `offset_from` unsound.
-- **`scripts/check_authority_reachability.sh`** — walks the linked ELF's call graph from every syscall handler to the terminal power primitives, and fails unless each handler that can reach one is either classified `Power` itself or carries a stated reason in `scripts/gates/authority/<variant>.txt`. The `rustc`-level classification gate in `core/src/syscall/handlers.rs` covers *the table*, not *reachability*: `roulette_result` was classified, the gate was green, and its loss arm called `kernel_reboot` two syscalls from an unprivileged caller. The ELF is the input rather than the source because inlining, generic instantiation and trait-object dispatch all change who really calls whom. Indirect calls (`call *%rax`) are the seam it cannot see, which is why the kernel-initiated `PowerOps` callers are a tracked list rather than something it discovers. Runs against the dev kernel from `check-framekernel-gates`, and separately in CI against the **tests** and **release** ELFs — the tests kernel is the only variant whose allowlist carries `run_userland_tests`, which powers the machine off to end the run. Gated in CI rather than on the build path because the walk disassembles the whole ELF (~8 s).
+- **`scripts/check_authority_reachability.sh`** — walks the linked ELF's call graph from every syscall handler to the terminal power primitives, and fails unless each handler that can reach one is either classified `Power` itself or carries a stated reason in `scripts/gates/authority/<variant>.txt`. The `rustc`-level classification gate in `core/src/syscall/handlers.rs` covers *the table*, not *reachability*: `roulette_result` is classified `Fate`, which the table gate passes, while its loss arm reaches the reboot primitive two calls away. The ELF is the input rather than the source because inlining, generic instantiation and trait-object dispatch all change who really calls whom. Indirect calls (`call *%rax`) are the seam it cannot see, which is why the kernel-initiated `PowerOps` callers are a tracked list rather than something it discovers. Runs against the dev kernel from `check-framekernel-gates`, and separately in CI against the **tests** and **release** ELFs — the tests kernel is the only variant whose allowlist carries `run_userland_tests`, which powers the machine off to end the run. Gated in CI rather than on the build path because the walk disassembles the whole ELF (~8 s).
 - **`scripts/check_safe_contract_surface.sh`** — ratchet on safe `pub fn`s in `slopos-ostd/` that carry a `# Safety` section. Those are self-declared caller obligations the compiler does not check, so a fault lands in the trusted core while the cause is an ordinary safe call in a service crate. The baseline is **0**: every such contract is currently expressed instead, as a capability witness (`&IrqDisabled`, `&BspToken`, `Osxsave`), a validated newtype (`Xcr0Mask`), a linear handle (`ptr_buf::OneShotBuf`), an owning reference (`KArc`), a sealed trait (`ApTrampolineAbi`), a runtime-checked borrow (`sync::PerCpuSlot`), or a slice in place of a pointer and a length. Reach for those before raising the baseline. Not a count of safe fns containing `unsafe` — that is the design working, not a defect.
-- **`scripts/check_toolchain_pin.sh`** — holds the userland target's standard library to the fork it is pinned to. `x86_64-unknown-slopos` builds on an owned sysroot (`third_party/rust-slopos`, materialised by `scripts/make_slopos_sysroot.sh` out of the patches under `toolchain/{rust,libc}`), and every way that can drift is silent: a fork cut against a different `rust-toolchain.toml` channel, a patch edited without its `toolchain/PIN` checksum, a sysroot left over from a previous overlay, or a `slopos` toolchain registered against some other directory. A stale sysroot compiles — it just compiles the previous std. It is the replacement for the retired std-patching script's `cfg_select!` arm-order check, whose failure mode (an arm placed after the `_` wildcard, dead code that still compiles — it shipped once as a `ud2` in `std::process::exit`) cannot occur now that the target is unix-family and rides std's own `sys/pal/unix`. It also asserts that every file the patches *create* is present in a materialized sysroot: the stamp describes the overlay, not the result, so a tree a broken run left half-patched — patched std, unpatched libc — otherwise carries a correct stamp and passes (observed). It grades both materialised trees the same way — the sysroot and the compiler source tree (`third_party/slopos-rustc-src`) — each against the stamp of the overlay half it was built from, so a compiler-fork edit does not restamp the sysroot and a std edit does not restamp the source tree; a `libc` edit restamps both, because the compiler tree carries its own copy of the fork for rustc and cargo. The tree checks and the link check are conditional on those existing, so CI that never materialises either still passes on the pin alone. It also grades `toolchain/crates/PIN` — every crate port pinned by its `.crate` checksum and its patch — and the ports and the libc copy in the materialised compiler tree.
+- **`scripts/check_toolchain_pin.sh`** — holds the userland target's standard library to the fork it is pinned to. `x86_64-unknown-slopos` builds on an owned sysroot (`third_party/rust-slopos`, materialised by `scripts/make_slopos_sysroot.sh` out of the patches under `toolchain/{rust,libc}`), and every way that can drift is silent: a fork cut against a different `rust-toolchain.toml` channel, a patch edited without its `toolchain/PIN` checksum, a sysroot left over from a previous overlay, or a `slopos` toolchain registered against some other directory. A stale sysroot compiles — it just compiles the previous std. It also asserts that every file the patches *create* is present in a materialized sysroot: the stamp describes the overlay, not the result, so a tree a broken run left half-patched — patched std, unpatched libc — otherwise carries a correct stamp and passes. It grades both materialised trees the same way — the sysroot and the compiler source tree (`third_party/slopos-rustc-src`) — each against the stamp of the overlay half it was built from, so a compiler-fork edit does not restamp the sysroot and a std edit does not restamp the source tree; a `libc` edit restamps both, because the compiler tree carries its own copy of the fork for rustc and cargo. The tree checks and the link check are conditional on those existing, so CI that never materialises either still passes on the pin alone. It also grades `toolchain/crates/PIN` — every crate port pinned by its `.crate` checksum and its patch — and the ports and the libc copy in the materialised compiler tree.
 - **`scripts/check_rustc_target.sh`** — holds the built-in `x86_64-unknown-slopos` target to `targets/x86_64-unknown-slopos.json`. The compiler fork exists so bootstrap can resolve `--host=x86_64-unknown-slopos`, which leaves two specs describing one machine, and nothing about a disagreement between them fails to compile: a cross-built toolchain would simply produce binaries for a slightly different target than the tree tests. The comparison is `Target::to_json()` on both sides — rustc's own normalisation, every field — plus the two facts the fork is for: the tuple is in `TARGETS`, and the target still allows dynamic linking, which is what `rustc_driver`'s `crate-type = ["dylib"]` and `libc.so` both need. It then runs rustc's own per-target test (`check_consistency(TargetKind::Builtin)` and a JSON round trip), which is what upstream CI would run on the patch. That check is also why the JSON says `relocation-model: pic`: rustc refuses a built-in target that allows dynamic linking under any other model, and the static images pin `-C relocation-model=static` on the build line instead. 28 s cold and 1.3 s warm, at 1.1 GB under `builddir/gates/` that `just clean` removes; `skipped` without a materialised source tree, `--require` in the CI job that materialises one.
-- **`scripts/check_cxx_pin.sh`** — holds the cross-built C++ runtime to `toolchain/cxx/PIN` and to what `libc.so` exports. Two silent failures: a `third_party/slopos-cxx` built from a different llvm-project or a different clang still links, it just links a different C++ ABI; and `libc++.so` is linked without `-z defs`, because an undefined symbol in a shared object is legal and the loader resolves it at load time — so a libc gap that would have been a link error is instead a `dlopen` that fails on a machine, at the point the runtime is first needed. The gate holds every symbol `libc++.so` leaves undefined (171 today) to being one `libc.so` defines, and holds the built tree's stamp to what `make_slopos_cxx.sh --print-stamp` says it should be — asked of the build script rather than recomputed, so there is no second copy of that digest to drift. It also holds the LLVM port to its *scope*: `make_slopos_cxx.sh`'s stamp leaves `toolchain/llvm/*.patch` out on the grounds that a tree carrying them builds the same libc++, and a hunk reaching into `libcxx/` or `libcxxabi/` would make that false while leaving the stamp — and so the decision not to rebuild — unchanged. Both symbol and stamp halves are conditional on the tests userland having *staged* the runtime (`builddir/libc++.so`), so a checkout that never cross-built it still passes on the pin's own consistency. Deliberately not on `builddir/libc.so`: the shipped userland build stages that one too, two steps before the tests build that refreshes the runtime, so keying on it graded a cache-restored tree and turned every commit moving the pin, the build line or slibc's headers into a red gates step.
-- **`scripts/check_llvm_port.sh`** — compiles LLVM's `LLVMSupport` and `LLVMTargetParser` for `x86_64-unknown-slopos` against slibc's headers and the cross-built C++ runtime. Those two and not LLVM: `Unix/{Path,Process,Program,Signals}.inc` are the files that name a libc, `raw_ostream.cpp` and `ConvertUTF.cpp` the ones that name a C++ library, `Triple.{h,cpp}` are where the port's `SlopOS` enumerator lives, and the other twelve hundred objects in a full build are portable C++ over them. That covers four of the port's six files; clang's `OSTargets.h` and `Targets.cpp` are held by nothing but `git apply --reverse --check`, because reaching `SlopOSTargetInfo` means building clang, which is a different order of cost from this gate's minute. Two things break it and neither fails to compile on the host — `toolchain/llvm/*.patch` stopping to describe the tree, and slibc losing an entry point or one of the four headers (`<inttypes.h>`, `<endian.h>`, `<sysexits.h>`, `<wctype.h>`) these files include. `--self-test` grades the skip and `--require` paths on any host, and wherever there is a tree to plant one in it grades two rejections against their own positive controls, which a rejection test without one does not have: `Path.cpp` with `-U__slopos__`, the OS-dispatch half's effect removed, and a `static_assert` that `Triple::LastOSType` is `SlopOS` rather than the `Vulkan` it was before the patch. 47 s cold on four cores and 1.5 s warm, the self-test 3.5 s; `skipped` without a materialised source tree, a staged runtime or a host `llvm-tblgen`, `--require` in the CI job that has all three — `toolchain`, which builds the tests userland first, since the stamp it checks reads a `builddir/libbuiltins.a` only a userland build produces. It borrows a host `llvm-tblgen` of the pinned major, because it builds no host tools and what tablegen emits is data tables.
+- **`scripts/check_cxx_pin.sh`** — holds the cross-built C++ runtime to `toolchain/cxx/PIN` and to what `libc.so` exports. Two silent failures: a `third_party/slopos-cxx` built from a different llvm-project or a different clang still links, it just links a different C++ ABI; and `libc++.so` is linked without `-z defs`, because an undefined symbol in a shared object is legal and the loader resolves it at load time — so a libc gap that would have been a link error is instead a `dlopen` that fails on a machine, at the point the runtime is first needed. The gate holds every symbol `libc++.so` leaves undefined (171 today) to being one `libc.so` defines, and holds the built tree's stamp to what `make_slopos_cxx.sh --print-stamp` says it should be — asked of the build script rather than recomputed, so there is no second copy of that digest to drift. It also holds the LLVM port to its *scope*: `make_slopos_cxx.sh`'s stamp leaves `toolchain/llvm/*.patch` out on the grounds that a tree carrying them builds the same libc++, and a hunk reaching into `libcxx/` or `libcxxabi/` would make that false while leaving the stamp — and so the decision not to rebuild — unchanged. Both symbol and stamp halves are conditional on the tests userland having *staged* the runtime (`builddir/libc++.so`), so a checkout that never cross-built it still passes on the pin's own consistency. Deliberately not on `builddir/libc.so`: the shipped userland build stages that one too, two steps before the tests build that refreshes the runtime, so keying on it would grade a cache-restored tree and turn every commit moving the pin, the build line or slibc's headers into a red gates step.
+- **`scripts/check_llvm_port.sh`** — compiles LLVM's `LLVMSupport` and `LLVMTargetParser` for `x86_64-unknown-slopos` against slibc's headers and the cross-built C++ runtime. Those two and not LLVM: `Unix/{Path,Process,Program,Signals}.inc` are the files that name a libc, `raw_ostream.cpp` and `ConvertUTF.cpp` the ones that name a C++ library, `Triple.{h,cpp}` are where the port's `SlopOS` enumerator lives, and the other twelve hundred objects in a full build are portable C++ over them. That covers four of the port's six files; clang's `OSTargets.h` and `Targets.cpp` are held by nothing but `git apply --reverse --check`, because reaching `SlopOSTargetInfo` means building clang, which is a different order of cost from this gate's minute. Two things break it and neither fails to compile on the host — `toolchain/llvm/*.patch` stopping to describe the tree, and slibc losing an entry point or one of the four headers (`<inttypes.h>`, `<endian.h>`, `<sysexits.h>`, `<wctype.h>`) these files include. `--self-test` grades the skip and `--require` paths on any host, and wherever there is a tree to plant one in it grades two rejections against their own positive controls, which a rejection test without one does not have: `Path.cpp` with `-U__slopos__`, the OS-dispatch half's effect removed, and a `static_assert` that `Triple::LastOSType` is `SlopOS` rather than the `Vulkan` it is in unpatched LLVM. 47 s cold on four cores and 1.5 s warm, the self-test 3.5 s; `skipped` without a materialised source tree, a staged runtime or a host `llvm-tblgen`, `--require` in the CI job that has all three — `toolchain`, which builds the tests userland first, since the stamp it checks reads a `builddir/libbuiltins.a` only a userland build produces. It borrows a host `llvm-tblgen` of the pinned major, because it builds no host tools and what tablegen emits is data tables.
 - **`scripts/check_clang_driver.sh`** — builds `clangDriver` and `clangBasic` out of the pinned tree for the *host*, drives a `clang::driver::Driver` at `x86_64-unknown-slopos` and grades the link job's argv. `toolchains::SlopOS` is a second copy of what `build_userland.sh` writes by hand — `crt0.o` first, `--image-base=0x400000`, `--dynamic-linker=/lib/ld-slopos.so.1`, `--eh-frame-hdr`, `-z now`, `-L<sysroot>/lib -lc`, `libbuiltins.a` last — and a driver that disagrees with it is not a compile error: it links on the host and produces a binary that dies at `execve`, with no interpreter, no `crt0.o` and no `PT_GNU_EH_FRAME`, at a load address the loader does not map. Seventy-one assertions over the five shapes of link (static, dynamic, shared, C++, and rustc's `-no-pie` executable), each taken without a driver diagnostic, plus the toolchain's own answers: `ld.lld`, the integrated assembler, no PIC or PIE default, asynchronous unwind tables, libc++, compiler-rt, and `<sysroot>/include/c++/v1` ahead of `<sysroot>/include` — the order libc++'s `#include_next` needs. `skipped` without a materialised source tree; the self-test's rejection is the same probe at a triple the port does not name, which is the `Generic_ELF` a missing dispatch hunk leaves behind. 2 min 29 s cold on 20 cores and 219 MB of build directory, ~4 s warm.
-- **`scripts/check_bootstrap_config.sh`** — holds the cross-build configuration to the toolchain it claims to produce, by running bootstrap's own dry run and then compiling and linking with the generated wrapper. Three silent failures: the step graph quietly loses an artifact — `cargo` is an *extended* tool and a stage2 rustc does not depend on it, so a config that stops naming it still builds a compiler and the root arrives with no cargo on it; `toolchain/compiler/0003-bootstrap-cmake-system-name.patch` goes away, and an unrecognised triple prints a note, sets `CMAKE_SYSTEM_NAME=Generic` and exits 0, losing `LLVM_ON_UNIX` and every `Unix/*.inc` file the port patches; and the wrapper stops producing SlopOS binaries, which it does by naming two triples and would regress by naming one. ~1.4 s warm, after a first run that downloads bootstrap's stage0 (~200 MB). Once `just toolchain` has installed a prefix, the gate also grades that: no `DT_NEEDED` outside SlopOS's own libraries, no `R_X86_64_TLSDESC` (the loader does not bind one), every `DT_NEEDED` found through the object's own `$ORIGIN` search path, and every undefined name defined somewhere in its closure — the loader binds eagerly and nothing there links with `-z defs`, so each of those is otherwise a program that does not start, found only in the guest.
-- **`scripts/check_offline_build.sh`** — holds the tree to building with no registry. Two silent failures: `Cargo.lock` moves and the vendored copy no longer describes it, which every host build survives because the host has a registry, and the self-hosting root arrives with a tree its own cargo cannot resolve; and `-Zbuild-std` needs std's crates.io dependencies, which cargo resolves from a lockfile the workspace never reads, so a directory holding only the workspace's crates passes every check but a build. The pins half also fails on a vendored package no lockfile names, since that is a pin nobody reviews, and on a vendored `library.lock` that is not std's, since that copy is what the self-hosting root's guest grades its tree against. `--self-test` grades six fixtures, five of them rejections. The build half is 63 s cold on four cores and ~30 s warm; `skipped` without `third_party/vendor`, `--require` in CI.
+- **`scripts/check_bootstrap_config.sh`** — holds the cross-build configuration to the toolchain it claims to produce, by running bootstrap's own dry run and then compiling and linking with the generated wrapper. Three silent failures: the step graph quietly loses an artifact — `cargo` is an *extended* tool and a stage2 rustc does not depend on it, so a config that stops naming it still builds a compiler and the root arrives with no cargo on it; `toolchain/compiler/0002-bootstrap-cmake-system-name.patch` stops applying, and an unrecognised triple prints a note, sets `CMAKE_SYSTEM_NAME=Generic` and exits 0, losing `LLVM_ON_UNIX` and every `Unix/*.inc` file the port patches; and the wrapper stops producing SlopOS binaries, which it does by naming two triples and would regress by naming one. ~1.4 s warm, after a first run that downloads bootstrap's stage0 (~200 MB). Once `just toolchain` has installed a prefix, the gate also grades that: no `DT_NEEDED` outside SlopOS's own libraries, no `R_X86_64_TLSDESC` (the loader does not bind one), every `DT_NEEDED` found through the object's own `$ORIGIN` search path, and every undefined name defined somewhere in its closure — the loader binds eagerly and nothing there links with `-z defs`, so each of those is otherwise a program that does not start, found only in the guest.
+- **`scripts/check_offline_build.sh`** — holds the tree to building with no registry. Two silent failures: `Cargo.lock` moves and the vendored copy stops describing it, which every host build survives because the host has a registry, and the self-hosting root arrives with a tree its own cargo cannot resolve; and `-Zbuild-std` needs std's crates.io dependencies, which cargo resolves from a lockfile the workspace never reads, so a directory holding only the workspace's crates passes every check but a build. The pins half also fails on a vendored package no lockfile names, since that is a pin nobody reviews, and on a vendored `library.lock` that is not std's, since that copy is what the self-hosting root's guest grades its tree against. `--self-test` grades six fixtures, five of them rejections. The build half is 63 s cold on four cores and ~30 s warm; `skipped` without `third_party/vendor`, `--require` in CI.
 - **`scripts/check_codegen_backend.sh`** — holds a rustc codegen backend to seven of the capabilities `targets/x86_64-slos.json` depends on: an ELF object format, soft-float, `.stack_sizes`, safestack instrumentation through `__safestack_pointer_address`, `#[unsafe(link_section)]`, `#[unsafe(naked)]`, and `sym` operands in `asm!`. Two of those are flags a backend can *accept and ignore* — `-Zemit-stack-sizes` and `-Zsanitizer=safestack` — so a backend swap can leave the build green with S-5 and the dual-stack split enforced by nothing. Tracked verdicts live in `scripts/gates/codegen/<backend>.txt` and a mismatch fails **in either direction**: a `lacks` the probe finds present is the signal to re-decide whether the toolchain can be Rust-hosted — this measurement is why it is LLVM's. `disable-redzone` and the `unwind` panic strategy are stated as residual rather than probed — the gate's header says why. Cold it costs ~60 s and ~460 MB for `llvm` / ~310 MB for `cranelift` under `builddir/gates/codegen-probe/` (which `just clean` removes); warm it is ~1 s. `llvm` is graded on every `just check-framekernel-gates`; `cranelift` reports `skipped` when the rustup component is absent, and CI installs it after the gates, in the same job, so the answer is re-taken rather than assumed.
 - **`scripts/check_linker_script.sh`** — holds a linker to the eighteen linker-script constructs `link.ld` uses, from `. = KERNEL_VIRT_BASE` through `PHDRS`, `(NOLOAD)`, all three spellings of `ALIGN`, `KEEP` under `--gc-sections` and the four page-table reservations past `_bss_end`. Each probe's script carries the construct under test and nothing else a probe grades — a script that scaffolds itself with an `ALIGN` reports the linker's `ALIGN` support under whatever name that probe carries — with one deliberate exception, `composed-layout`, which links a `link.ld`-shaped script because a linker can take every construct alone and compose them differently. That exception is what the gate is built around: wild 0.10.0 refuses `link.ld` on its location-counter assignment, and given the shape it does accept it keeps the script's section order and still starts the image 0x13e8 past the base it was given. A second, self-maintaining half compares the constructs probed against the keywords `link.ld` actually uses, so a construct added to the script with no probe fails the gate and a probe whose construct left the script fails as a dead entry. `scripts/gates/linker/<linker>.txt`; `lld` is graded on every `just check-framekernel-gates`, `wild` reports `skipped` when it is not installed and is pinned in the CI job that installs it.
 - **`scripts/check_recipes.sh`** — holds every recipe under `toolchain/recipes/` to a pinned upstream tarball built as shipped bar a patch that teaches the target: one 64-hex `sha256`, an `https` URL naming the recipe's version, a licence, a known template, a `soname` or `program` to install, dependencies that are recipes, no file beside `recipe` but its declared `config` and `patch`es, each named `NNNN-slopos-<what>.patch` and held to the grammar the recipes paragraph above states, `arg`s that pick among upstream's options (a `cmake` or `meson` arg is `-D<name>=<value>` with the built-in names a recipe may set allowlisted and no flag, file, program or search root among the project's; an `autotools` arg a `--enable`/`--disable`/`--with`/`--without` switch or a configure cache answer naming no program, path or system triple), a `NOTICE.md` entry, and — for a recipe that has been built — the stamp `build_recipes.sh --print-stamp` computes now, and, for a built `GPL-2.0-only` recipe, a `DT_NEEDED` closure of libraries a recipe or the sysroot provides under a licence that code may be combined with, each of whose objects carries a symbol table and defines, even locally, no symbol an incompatible recipe's library exports. Nothing built (CI's gates job) skips the stamp and closure halves.
@@ -2064,9 +2049,8 @@ The in-place-init primitive (`slopos_ostd::Init<T, E>`, `Zeroable`, `init_from_c
 ### Authority discipline
 
 **The per-task capability mask is the only authority.** `task.flags` says
-where and how a task runs, never what it may do; the privilege bits it once
-carried are reserved, and a spawn naming one is `EINVAL`, as is a spawn
-naming a retired capability's bit (`caps::RETIRED`). Every check reads the
+where and how a task runs, never what it may do, and a spawn naming a flag
+bit it does not define, or a bit no capability names, is `EINVAL`. Every check reads the
 mask (`slopos_ostd::authority`, its bits stated once in `abi/src/caps.rs`): a
 syscall slot through its `cap(...)` clause, anything finer through
 `SyscallContext::holds` or a witness, and a kernel thread passes a gate only
@@ -2111,7 +2095,7 @@ or effective uid to be the target's real or saved uid; `ProcSignal` waives both
 halves, and `SIGCONT` to a task of the sender's session needs neither.
 `process_list` reports every task to everyone, with its process's login tag:
 a number fork, spawn and exec pass on and that only a `SetId` holder sets, at
-spawn (`SpawnLoginAttrs`, under `SPAWN_SET_LOGIN`), as Linux's audit session
+spawn (`SpawnAttrs::login`, under `SPAWN_SET_LOGIN`), as Linux's audit session
 id is inherited and set once at login. Init gives each session one of its
 own (`slopos_abi::task::SESSION_LOGINS`), remoted another (`REMOTE`) and each
 extension service its own (`init_control::service_tag`), so a session's
@@ -2125,7 +2109,9 @@ reached through the name's write check at `connect`; a bound socket holds its
 inode open as a descriptor holds a file, so the inode is no other node's and
 its volume will not unmount, and a ring's `OP_CONNECT` takes only an absolute
 name. `/run` is memory, and each person's runtime directory, `/run/user/<uid>`,
-mode 0700, holds their compositor's socket. A symlink in a sticky directory
+mode 0700, holds their compositor's socket, which a client finds as
+`$XDG_RUNTIME_DIR/compositor`, or in `/run/user/<euid>` when that is unset or
+not absolute. A symlink in a sticky directory
 every class may write is followed only for its owner or the directory's, as
 Linux's `protected_symlinks` has it, `DacOverride` or not.
 
@@ -2149,17 +2135,13 @@ root made for one person does for all three. The first person's home is
 0755 until a second person joins, and every later person's 0700. The
 image builders lay the map out and write the record on a new image and follow
 the one a preserved image carries, read through the listings its trees are
-(`fs_tree.py read`, which tells a record that is absent from one it cannot
-read), one they cannot read granting nothing; `tools/initramfs` packs the one-person record so a RAM root is never
-migrated; and the installer lays out a new root by it and fills a kept one as
-its record says. Init makes whatever
+(`fs_tree.py read`), one that is absent or that they cannot read granting
+nothing; `tools/initramfs` packs the one-person record; and the installer
+lays out a new root by it and fills a kept one as its record says, refusing
+to keep one whose record is absent or cannot be read. Init makes whatever
 directory of the map a root lacks at every boot, and the home the record
-names; a record or accounts it cannot read grant nothing and change nothing;
-once per root without the record, it hands the first person what uid 0
-holds in their trees, never descending into what another uid holds, and writes
-the record (`userland/src/root_layout.rs`), so a root that ran everything as
-uid 0 is migrated in place, and it rewrites a record from before the map named
-the home `/home`, moving nothing. `check_fs_image.sh --map`, the default for
+names (`userland/src/root_layout.rs`); a record that is absent or cannot be
+read grants nothing and changes nothing. `check_fs_image.sh --map`, the default for
 the tests image, holds a root to the map and its record, and a `/usr/local`
 the record does not name to being uid 0's, and writable by uid 0 alone, to its
 last entry (`fs_tree.py walk`).
@@ -2178,9 +2160,9 @@ every name it leads through, link by link, is in a directory only uid 0 may
 change and it ends at what only uid 0 may change, a directory only within
 `/usr/local`; last the record without `/usr/local`. It leaves
 `/var/lib/slopos/owners.sharing` from its first change until the record is
-written, and init finishes at the next boot a hand-over that mark or a root
-of two people whose record still names `/usr/local` shows cut short; none is
-undone, and an add on a root whose record cannot be read adds nobody. Owners
+written, and init finishes at the next boot a hand-over that mark shows cut
+short; none is undone, and an add on a root whose record is absent or cannot
+be read adds nobody. Owners
 change in place, so a descriptor the first person opened there for writing
 before writes until it closes; init notes at a boot whose record it read
 without `/usr/local` (`root_layout::settled`, `/run/slopos-local`) that none
@@ -2252,7 +2234,7 @@ holding `Seal`, which writes the database and gives a disk root without a
 record the one person's; a RAM root keeps every seal for good, so it keeps
 slibc's own rows, which are the one person's rendering
 (`slopos_slibc_core::passwd::BASE_PASSWD`). The kernel keeps `/etc` and
-`/var/lib/slopos` (`KEPT_DIRS`, which base interface 7 counts, since a
+`/var/lib/slopos` (`KEPT_DIRS`, which the base interface counts, since a
 base's stores rest on it), so no mount covers the database or the record and
 no volume holding either is unmounted, and
 the seal keeps a `DacOverride` holder from rewriting either; what such a
@@ -2321,18 +2303,16 @@ once done, eight at most waiting on the sessions but uid 0's, and the
 sessions uid 0 ended stay down until uid 0 restarts them or a test run fails.
 Init re-executes `/sbin/init
 --resume <fd>`, as systemd's `daemon-reexec` does, carrying its service table
-and budgets, the session table (`slopos-init 2`, a console session's
+and budgets, the session table (a console session's
 terminal name among it, so `/run/sessions` keeps naming it and `/bin/login`
 keeps relaying), the consent links and the sessions' pair, its listener,
-each compositor's session pipe and the request in a pipe, and keeps its pid, its children and its capabilities, and the
+each compositor's session pipe and the request in a pipe, under the header
+`slopos-init-state 1`, and keeps its pid, its children and its capabilities, and the
 extensions' services in pipes of their own; an image that cannot read the
 state closes the descriptors its first line names, adopts the privd and
 remoted among its children, starts the sessions again, and runs without
-consent until the next boot. Before an image of the first version, which
-knows one desktop, the sessions end and none starts again until it runs; an
-image that resumes the first
-version's state takes its desktop over as the first person's, under
-`DESKTOP`, and starts privd again to hear the table. A test boot runs the userland tests in a
+consent until the next boot. Before an image whose text lacks that header
+line, the sessions end and none starts again until it runs. A test boot runs the userland tests in a
 copy of init (`/sbin/init --run-tests`, holding `TestHarness`), so init serves
 while they run, and starts no session until one is asked for or the tests
 fail.
@@ -2567,14 +2547,12 @@ mechanism waiting on its terminal outlasts; the new one takes no exclusive group
 while a mechanism the old one started runs, and a program whose requests span a
 switch waits a minute for it (`privd::SWITCH_WAIT`). Consent travels socket
 pairs init makes and keeps for the boot, one per desktop or login screen
-running at once (`sessions::LINKS`, four): privd holds them at fd 5 to 8
-with a broker on each and, started `--hear-sessions`, the table's pair at fd
-9, which init makes anew for each privd it starts so one still draining
-reads end of file; fd 4, where a privd of a base from before the table looks
-for its one link, is left empty, so that privd asks nobody on a screen that
-may be anyone's, and one told to hear a table and handed none reaches nobody
-and knows nobody logged in. Each compositor holds its own link at fd 4, and
-each side refuses a pair init did not make. Init holds both ends, so neither reads end of file when the other side exits,
+running at once (`sessions::LINKS`, four): privd holds them at fd 4 to 7
+with a broker on each and the table's pair at fd 8, which init makes anew for
+each privd it starts so one still draining reads end of file; a privd handed
+no table reaches nobody and knows nobody logged in. Each compositor holds its
+own link at fd 4 and its session pipe at fd 5, the layout `init_control::fds`
+states once, and each side refuses a pair init did not make. Init holds both ends, so neither reads end of file when the other side exits,
 and each new instance first sends
 `RESET` naming an epoch of its own and acts on nothing until a `RESET_SEEN`
 naming it comes back (`consent::Link`), sending the `RESET` again with each
@@ -2583,8 +2561,8 @@ had pending — privd interrupts every question — and init sends one on behalf
 of a side that exited, and discards what is written to a side not running.
 privd puts a question to the compositor only after a `READY` sent since the
 last, so one question at most is in flight and no frame is ever left torn in
-the pair's buffer. `READY` names the channel's `consent::VERSION`, and privd
-asks a compositor naming any other, or none, nothing, refusing what needs
+the pair's buffer. `READY` names the channel's `consent::VERSION`, the one
+field privd reads of it, and privd asks a compositor naming any other nothing, refusing what needs
 consent, and what waited for it, with *Restart the desktop, then try again.*
 (`Refusal::Outdated`), so a desktop older than a live base switch asks nothing
 until its session restarts, and a compositor refuses a question it cannot
@@ -2772,7 +2750,7 @@ The invariants the gate protects:
   abandoned, a write could land after a later one to the same sectors. A new
   caller owes the same kind of reason. The residual is a kernel loop that
   reaches no blocking primitive at all: nothing can stop one, and
-  `task_terminate`'s remote branch survives only as the bounded shutdown
+  `task_terminate`'s remote branch serves only as the bounded shutdown
   fallback and the IRQ-exit self-kill.
 
 I1–I7 above are the tree's naming for this discipline. The proof in
@@ -2785,13 +2763,13 @@ file's header before changing `task_is_dispatch_pinned`, because the proof
 keeps verifying whether or not the model still describes the tree.
 
 ## Testing Guidelines
-The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`utest!` registration in lex order, and reports results over serial in KTAP grammar. A test flagged `FLAG_EXPLICIT` runs only when a `tests.run` pattern is its full name — `utest!(…, explicit)` is that for a userland test a host drives, its log uncaptured — and `stest!(…, kind = Userland)` runs a kernel test in the userland phase, sorted among the userland tests. A utest runs as uid 0 holding every capability unless it declares `caps = …` (`none`, or the gated capabilities it holds beside the universal ones) and `uid = …`, which a test of an unprivileged gate or of the person's work sets to `caps = none, uid = 1000`. A test answers the desktop as a person would by `test_key` (`TestHarness`, `ENOSYS` but on a test boot), which hands the input sink's holder a key a keyboard sent after its layout, past the diagnostic console and the TTY; `userland/src/bin/tests/support/asking.rs` is the requester and the keys `privd_test` and `extension_action_test` answer privd's dialog with. The Go host wrapper (`tools/run_tests/` → `builddir/run_tests`) parses that stream into a live progress bar + per-failure detail. `just test` builds `builddir/slop-tests.iso` with `tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on`, runs QEMU with `isa-debug-exit`, and exits 0 green / 1 on any failure.
+The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`utest!` registration in lex order, and reports results over serial in KTAP grammar. A test flagged `FLAG_EXPLICIT` runs only when a `tests.run` pattern is its full name — `utest!(…, explicit)` is that for a userland test a host drives, its log uncaptured — and `stest!(…, kind = Userland)` runs a kernel test in the userland phase, sorted among the userland tests. A utest runs as uid 0 holding every capability unless it declares `caps = …` (`none`, or the gated capabilities it holds beside the universal ones) and `uid = …`, which a test of an unprivileged gate or of the person's work sets to `caps = none, uid = 1000`. A test answers the desktop as a person would by `test_key` (`TestHarness`, `ENOSYS` but on a test boot), which hands the input sink's holder a key a keyboard sent after its layout, past the diagnostic console and the TTY; `userland/src/bin/tests/support/asking.rs` is the requester and the keys `privd_test` and `extension_action_test` answer privd's dialog with. The Go host wrapper (`tools/run_tests/` → `builddir/run_tests`) parses that stream into a live progress bar + per-failure detail. `just test` builds `builddir/slop-tests.iso` with the justfile's `test_cmdline`, which `builddir/run_tests` reads with `just --evaluate`, runs QEMU with `isa-debug-exit`, and exits 0 green / 1 on any failure.
 
-**Run `just test` before sending changes.** A green `just test` is necessary but **not** sufficient — it runs neither the framekernel gates nor the three boot-log ratchets, all of which CI runs and any of which can fail on a commit whose tests pass. See **Pre-commit (MANDATORY)** below for the full sequence. For manual inspection use `just boot` or `just boot-log` (serial transcript in `test_output.log`; `VIDEO=1` for a framebuffer). Note regressions or warnings in your PR description.
+**Run `just test` before sending changes.** A green `just test` is necessary but **not** sufficient — it runs neither the framekernel gates nor the boot-log ratchets, all of which CI runs and any of which can fail on a commit whose tests pass. See **Pre-commit (MANDATORY)** below for the full sequence. For manual inspection use `just boot` or `just boot-log` (serial transcript in `test_output.log`; `VIDEO=1` for a framebuffer). Note regressions or warnings in your PR description.
 
 ### `just test` recipes
 - `just test` — full run; dotted progress, per-failure blocks, summary line.
-- `just test 'slopos_mm::*'` — run only tests whose `<module>::<name>` matches the glob (positional — a `FILTER=` prefix is passed through literally and breaks the first glob). Comma-separated globs supported (`'mm::*,core::*'`). Filtered runs that create files must include `'*ext2_aaa*'` so the lex-first ext2 root mount runs.
+- `just test 'slopos_mm::*'` — run only tests whose `<module>::<name>` matches the glob (positional — a `FILTER=` prefix is passed through literally and breaks the first glob). Comma-separated globs supported (`'mm::*,core::*'`). Filtered runs that create files must include `'*ext4_aaa*'` so the lex-first ext4 root mount runs.
 - `just test-rerun-failed` — re-run only the names in `builddir/last-fail.list` (written automatically after every non-aborted run).
 - `just test-verbose ['glob']` — also dump captured klog of every passing test.
 - `just test-quiet ['glob']` — render only failures + summary; suppresses pass lines on the wire too.
@@ -2807,16 +2785,16 @@ The kernel ships a per-test harness that boots under QEMU, runs every `stest!`/`
 - `just test-capacity` — the capacity check: build (once, then preserve) a 16 GiB ext4 volume, attach it as `nvme0n3`, and let the suite mount it, walk it, write to it and report. Separate from `just test` because the image takes minutes to build and ~70M of host disk once populated; what CI grades per run is the cheaper `check-fs-throughput` ratchet below. `CAPACITY_IMAGE_SIZE` overrides the size; the guest measures a *mount* in device reads rather than in seconds, because reads are deterministic and wall time is not.
 - `just test-toolchain` — the toolchain check: build the self-hosting root, boot it twice at 6G with no rebuild between, and let `toolchain_test` hold the toolchain to its manifest and the clone to its vendored crates and climb the ladder on both boots — the clone's `git status` must be clean, since nobody has edited that tree — while `reboot_clone_test` makes a clone on `/` on the first boot and finds it intact on the second; the host holds the root to `e2fsck -fn` after each. Without a toolchain the root still carries the clone, and the run stops after one boot: in CI it grades the seeded clone, its vendored crates and the grown root. Separate from `just test`, where the same utests pass by reporting that the root carries no toolchain.
 - `just test-install` — the install check: boot from `builddir/boot-disk.img`, one disk in the bare-metal layout (an ESP holding Limine and `limine.conf` under `\EFI\SlopOS\` and at the removable-media path, the boot partition with a kernel per slot under `/boot/<slot>/` and the tests base as both `/boot/base/current.img` and `previous.img`, the tests image as the root partition every slot boots with as `root=PARTUUID=`, and the crash partition), and across the resets of one QEMU let `install_test` register SlopOS's firmware entry first in `BootOrder`, clone slot a into b with `/bin/bootctl`, boot it once through the Boot Loader Interface's `LoaderEntryOneShot` and through that entry, commit it as `LoaderEntryDefault`, then boot once into a slot whose kernel panics with `panic=reboot` and see the reset land on the committed default, through the entry again, and find the panic's record moved from the crash partition to `/var/log/crash/` and reported by `bootctl status` as that slot's last boot; then the same for a slot that takes the format-free abort; then install a base the test repacks from the current one under another build tag, named by its SHA-256 once another digest is refused, which moves the running base to previous and runs at once, boot it and find it kept, roll it back, which runs the first at once, and boot that again, and install one naming an interface the kernel does not serve, which the next boot passes over for previous, freeing its pages (the kernel's `base_tests` grade them on every boot); there a base installed replaces current alone, since previous runs, a kernel serving neither base is refused a slot, and a base the default slot's kernel would not serve is refused while that slot is the default. The host then holds the ESP to the bytes it built, so no commit touched `limine.conf`, each slot to its kernel alone, both bases to `bootdisk base`, current to the base the disk was built with after the last rollback, and the root partition to `e2fsck -fn` and to being at rest. Boot-disk runs use a second, pinned OVMF (`third_party/ovmf-nv`, Arch's `edk2-ovmf`), because the nightly the ISO boots needs a secure varstore and keeps UEFI variables in RAM.
-- `just test-installer` — the installer check: the tests system on a USB stick (`INSTALL_STICK`, `qemu-xhci`), which the kernel reads as `sda` and the installer never offers — write-protected but for the blank disk's install, which takes a writable copy that only its GPT disk GUID excludes and that the host holds to the ISO's bytes afterwards — its install medium carrying the payload in the partition the kernel mounts over USB, which the module Limine loads does not carry, on the pinned NV-varstore OVMF with the varstore kept from one QEMU run to the next (`OVMF_VARS_FILE`) but for the reinstall's, which starts afresh as a person picking the stick from the firmware's menu does, and one NVMe disk without the suite's own (`QEMU_TEST_DISKS=0`), one of three `scripts/make_installer_disk.sh` makes: a blank one, erased; another system's, holding an ESP with `\EFI\other\`, a data partition and the firmware entry `installer_test` gives it, which SlopOS goes beside in free space; and one whose partition is reused as the root. A second blank disk, `optical`, is installed from the ISO in a CD drive the kernel has no driver for (`INSTALL_CDROM`): its install must say `the medium carries no toolchain`, and its disk must clone a slot rather than build one. On the live boot that installs each blank disk, `installer_test` first finds the installer's entry among those the dock reads and has init restart the sessions as at boot, whose desktop must open `installer-ui` as the first person and no terminal, and its terminal once restarted. `installer_test` runs `/bin/installer`, for the blank disk as a person does — typed at `/bin/shell`, holding nothing, so it asks privd, its questions answered on standard input — for the other system's disk and the reinstall with flags, a root size among the other system's, and for the partition to reuse as a window does, asking privd as `root` for `installer --serve` and speaking its protocol, an engine whose input ends before an install writing nothing and an install of a proposal it did not make last refused; booted from the disk with the stick gone, through SlopOS's own firmware entry (`BootCurrent`), it takes the loop once — `scripts/selfhost.sh install tests` and `install-kernel tests`, a boot of slot b and `bootctl commit` — after holding the other system's entry to `BootOrder` and Limine's menu. The blank disk then takes a reinstall from the stick that keeps its root, with a file left in it and a base left in slot a as a disk laid out before the bases moved beside the slots holds one, which the reinstall removes once the new configuration is written, and a boot that finds the file and the old slots' state gone. A built system must run the base it built as well as its kernel. The host holds each table to `sfdisk --verify`, each FAT volume to `fsck.fat -n`, each boot partition to a kernel alone per slot and two bases `bootdisk base` takes, each root to `e2fsck -fn`, to being at rest and to sealed base mount points, the other system's entries, partition and files to their bytes, its root to the size asked with the crash partition after it and free space after both, and a reused root to a new PARTUUID. Each installed root, the reinstalled one too, must hold the install's log, and an install of the other system's disk confirmed after its table changed must write nothing. `INSTALLER_PAYLOAD=0` installs without the toolchain, cloning a slot where it would build one, and needs no `just toolchain`; `just test-installer foreign` runs one disk.
+- `just test-installer` — the installer check: the tests system on a USB stick (`INSTALL_STICK`, `qemu-xhci`), which the kernel reads as `sda` and the installer never offers — write-protected but for the blank disk's install, which takes a writable copy that only its GPT disk GUID excludes and that the host holds to the ISO's bytes afterwards — its install medium carrying the payload in the partition the kernel mounts over USB, which the module Limine loads does not carry, on the pinned NV-varstore OVMF with the varstore kept from one QEMU run to the next (`OVMF_VARS_FILE`) but for the reinstall's, which starts afresh as a person picking the stick from the firmware's menu does, and one NVMe disk without the suite's own (`QEMU_TEST_DISKS=0`), one of three `scripts/make_installer_disk.sh` makes: a blank one, erased; another system's, holding an ESP with `\EFI\other\`, a data partition and the firmware entry `installer_test` gives it, which SlopOS goes beside in free space; and one whose partition is reused as the root. A second blank disk, `optical`, is installed from the ISO in a CD drive the kernel has no driver for (`INSTALL_CDROM`): its install must say `the medium carries no toolchain`, and its disk must clone a slot rather than build one. On the live boot that installs each blank disk, `installer_test` first finds the installer's entry among those the dock reads and has init restart the sessions as at boot, whose desktop must open `installer-ui` as the first person and no terminal, and its terminal once restarted. `installer_test` runs `/bin/installer`, for the blank disk as a person does — typed at `/bin/shell`, holding nothing, so it asks privd, its questions answered on standard input — for the other system's disk and the reinstall with flags, a root size among the other system's, and for the partition to reuse as a window does, asking privd as `root` for `installer --serve` and speaking its protocol, an engine whose input ends before an install writing nothing and an install of a proposal it did not make last refused; booted from the disk with the stick gone, through SlopOS's own firmware entry (`BootCurrent`), it takes the loop once — `scripts/selfhost.sh install tests` and `install-kernel tests`, a boot of slot b and `bootctl commit` — after holding the other system's entry to `BootOrder` and Limine's menu. The blank disk then takes a reinstall from the stick that keeps its root, with a file left in it, and a boot that finds the file and the old slots' state gone. A built system must run the base it built as well as its kernel. The host holds each table to `sfdisk --verify`, each FAT volume to `fsck.fat -n`, each boot partition to a kernel alone per slot and two bases `bootdisk base` takes, each root to `e2fsck -fn`, to being at rest and to sealed base mount points, the other system's entries, partition and files to their bytes, its root to the size asked with the crash partition after it and free space after both, and a reused root to a new PARTUUID. Each installed root, the reinstalled one too, must hold the install's log, and an install of the other system's disk confirmed after its table changed must write nothing. `INSTALLER_PAYLOAD=0` installs without the toolchain, cloning a slot where it would build one, and needs no `just toolchain`; `just test-installer foreign` runs one disk.
 - `just test-remote` — the remote-control check: an installed machine under QEMU, a boot disk whose base is paired with a broker on this host's loopback (SLIRP's 10.0.2.2), and a root carrying a decoy pairing under `/etc/remote` for a second, live broker; driven through `scripts/remote.py`: the agent's identity and build tags; commands' stdout, stderr, exit codes, cwd, env, stdin, a timeout and two at once; an 8 MiB file pushed and pulled back byte-identical; `/dev/kmsg`; the base's pairing unwritable and the decoy never dialled; a second daemon, preferred as the newest; a base built under another tag installed and running at once, the agent reporting its tag and the kernel logging `BASE: generation 2 is the base`, and then a kernel put into the spare slot, the boot into it and its commit, keeping that base current and the one that ran before it previous, every `bootctl` asked of privd as the paired agent; and `/bin/halt`, which must end QEMU.
 - `just test-install-guest` — the two loops in one QEMU: a clean tree, `just toolchain` and the self-hosting root; slot a is the optimized tests kernel, and `install_test`, finding a workspace at `/src/slopos`, fetches the host's `HEAD` into its clone, checks it out and runs `scripts/selfhost.sh install tests` and `install-kernel tests` there with a fresh `SLOPOS_BUILD_TAG` — a build-time variable that appears in `uname -v` and in the boot log's `BOOT: kernel <path> (<n> bytes), build tag <tag>` line, and is otherwise unset — which build the tests userland and base and install the base as current, running it at once, and the tests kernel into slot b, then checks the tree's own branch out again; the run boots them once, and that boot must report the tag in `uname -v` and in the base's `/usr/share/slopos/build-tag`. The kernel the guest built then commits a change on the fetched `HEAD` in a scratch clone and pushes it into a scratch repository, which the host fetches and holds to that commit's parent being `HEAD`. The run then commits and rolls back as `test-install` does, and the host holds slot b's kernel and the current base to the root's `kernel-tests.elf` and `initramfs-tests.cpio` byte for byte, and the boot log's `BOOT: base current` line to the base's size. `INSTALL_TIMEOUT_SECS` defaults to the self-hosting budget.
 - `just test-selfhost` — the self-hosting check: needs `just toolchain` and a clean working tree (the host grades the guest's build of `HEAD` with its own gates and tests). The guest, booted on the optimized tests kernel (`release-tests`, gated by its own allowlists under `scripts/gates/{stack,vector}/`), fetches the host's `HEAD` into the self-hosting root's clone and checks it out — refusing a tree with uncommitted edits — builds the dev and tests systems — kernel, userland and base — with `scripts/selfhost.sh build` (`selfhost_test`), leaving cargo's `--timings` report under the clone's `builddir/target/cargo-timings`, and checks the tree's own branch out again; the host holds the commit the guest names to `HEAD`, the root to `e2fsck -fn` and to being at rest, exports both kernels and the tests base, runs the ELF gates on the kernels and runs the suite on the guest's tests kernel and base. The boot's budget is eight hours, sized for KVM; `SELFHOST_TIMEOUT_SECS` raises it for TCG, which runs the guest's build about 25 times slower.
-- `just bench-selfhost` — the self-hosting build as a profile: boots the optimized tests kernel on the self-hosting root with `prof=on` (`BENCH_PROF=` turns it off), runs only `selfhost_test`, so the guest builds the host's `HEAD`, and hands the log to `scripts/prof_report.py`, which prints the guest's build times, per-CPU busy and halted time, the ext2 lock's wait and hold (writeback's share apart) and the same lock and the per-process VM lock by call site, block I/O counts and latency, syscall costs, and kernel and user ticks symbolized — user ticks through the exec-mapping table the kernel prints, `builddir/bench-libc.so` and the installed toolchain's libraries. No grading and no clean-tree requirement; run it with nothing else loading the host, because every number in it is wall time.
+- `just bench-selfhost` — the self-hosting build as a profile: boots the optimized tests kernel on the self-hosting root with `prof=on` (`BENCH_PROF=` turns it off), runs only `selfhost_test`, so the guest builds the host's `HEAD`, and hands the log to `scripts/prof_report.py`, which prints the guest's build times, per-CPU busy and halted time, the ext4 lock's wait and hold (writeback's share apart) and the same lock and the per-process VM lock by call site, block I/O counts and latency, syscall costs, and kernel and user ticks symbolized — user ticks through the exec-mapping table the kernel prints, `builddir/bench-libc.so` and the installed toolchain's libraries. No grading and no clean-tree requirement; run it with nothing else loading the host, because every number in it is wall time.
 - `just check-fs-throughput` — filesystem cost ratchet over the `FSPERF[…]` / `FSCAP[…]` report lines, with gate data in `scripts/gates/fsperf/<variant>.txt`. Counts per MiB — transactions, journal commits, device write requests, barriers — are deterministic for one ISO and carry caps; a write rate is not, so the only rate graded is the quotient of the filesystem's write rate and the **same run's** raw block-device write rate, which is invariant under a change of accelerator (the gate's `--self-test` asserts exactly that: a uniformly three-times-slower machine must still pass). Floors (`min-bytes`, `min-volume-gib`, `min-dirents`) exist because a measurement that stopped happening looks exactly like one that got free. `--log` / `--emit-allowlist` / `--self-test` as in the other ratchets.
-- `just check-quota-headroom` — resource-quota ratchet; asserts every account's peak stays under its measured cap in `scripts/gates/quota/<variant>.txt`, that nothing was denied, and that the charge path has not got slower. What the `used`/`peak` packing buys is that a *reported* peak is a value that was genuinely held — the caps themselves are measured maxima carrying the observed spread as margin, exact only on the rows the gate file records as deterministic (`process`, and the fd/object rows). The **cost** check is one cap and two floors, never a cycle count: a cycle count on that path measures the accelerator, not the kernel, and the absolute caps this gate used to carry failed on the *unmodified* tree on any machine without `/dev/kvm`. The cap is `max-depth-cost-ratio` — depth 7 against depth 1, the only quantity here invariant under a change of accelerator. The floors are `min-charge-over-reference` (one charge+refund round trip against a same-run bare CAS, a floor and not a ceiling because that ratio *does* move with the accelerator) and `min-reference-cycles` (an absolute physical bound on the reference itself, since the first floor is a ratio over it). Stated plainly: a slowdown that scales the whole charge path uniformly passes every one of them, and catching it would need the absolute ceiling that failed without KVM. `--log` / `--emit-allowlist` / `--self-test` as in the lockdep gate, with one difference: this gate's `--log` is a single run, so its file records spreads in prose rather than merging several logs mechanically. `--emit-allowlist` emits a depth cap a quarter above the observation, and its own output is round-tripped through the check path by the self-test — the property that makes "re-measure with `--emit-allowlist`" a remedy that actually works.
-- `just check-lockdep-headroom` — lock-order ratchet; boots the test ISO and fails unless every phase the kernel reports (`boot`, `post-kernel-tests`, `post-userland-tests`) says `ACTIVE`, reports no violation, and stays inside the gate file's `max-fill-pct`. Gate data lives in `scripts/gates/lockdep/<variant>.txt` in the same measured-and-tracked style as the stack/vector gates, and an entry matching nothing fails as a dead entry. The three pools are not graded alike. Class counts are deterministic — a class registers on the first acquire of a declaration site, a mutex's or a wait queue's on its first lock or wait rather than the first waiter that sleeps, and three runs of one pinned ISO measured boot at 71 every time — so they carry **exact caps**, and under `tests=on` each report is followed by `LOCKDEP-CLASS[<phase>]:` lines naming the classes that phase registered, so a count that moved names its lock. Boot's edge and chain counts carry caps rather than bands for the same reason, though the recorded values still hold the old convention's slack until they are re-measured onto the observed 43/110. The two test phases' edge and chain counts measure which orderings a run *happened to observe* and move between runs of identical code, so they carry **bands** (`band <phase> <pool> <lo> <hi>`) instead: leaving one prints `DRIFT` on stderr and the run still passes. Be clear about what that gives up — a banded pool has no upper failure of its own, so growth up to `max-fill-pct` (~3.5x observed) reaches you only as that DRIFT line; an *inverted* order is caught by the cycle detector and still fails. `min-classes` / `min-edges` / `min-chains` are the floors that stop a validator which quietly stopped recording from reading as maximally healthy. `--emit-allowlist` writes a fresh baseline (and accepts several `--log`s to merge), a single `--log FILE` parses a capture instead of booting, and `--self-test` (run from `check-framekernel-gates`) drives its crafted logs through the parser — proving both that the gate rejects and that it stays silent on the forms it deliberately accepts.
+- `just check-quota-headroom` — resource-quota ratchet; asserts every account's peak stays under its measured cap in `scripts/gates/quota/<variant>.txt`, that nothing was denied, and that the charge path has not got slower. What the `used`/`peak` packing buys is that a *reported* peak is a value that was genuinely held — the caps themselves are measured maxima carrying the observed spread as margin, exact only on the rows the gate file records as deterministic (`process`, and the fd/object rows). The **cost** check is one cap and two floors, never a cycle count: a cycle count on that path measures the accelerator, not the kernel, and an absolute cap fails the *unmodified* tree on any machine without `/dev/kvm`. The cap is `max-depth-cost-ratio` — depth 7 against depth 1, the only quantity here invariant under a change of accelerator. The floors are `min-charge-over-reference` (one charge+refund round trip against a same-run bare CAS, a floor and not a ceiling because that ratio *does* move with the accelerator) and `min-reference-cycles` (an absolute physical bound on the reference itself, since the first floor is a ratio over it). Stated plainly: a slowdown that scales the whole charge path uniformly passes every one of them, and catching it would need an absolute ceiling, which fails without KVM. `--log` / `--emit-allowlist` / `--self-test` as in the lockdep gate, with one difference: this gate's `--log` is a single run, so its file records spreads in prose rather than merging several logs mechanically. `--emit-allowlist` emits a depth cap a quarter above the observation, and its own output is round-tripped through the check path by the self-test — the property that makes "re-measure with `--emit-allowlist`" a remedy that actually works.
+- `just check-lockdep-headroom` — lock-order ratchet; boots the test ISO and fails unless every phase the kernel reports (`boot`, `post-kernel-tests`, `post-userland-tests`) says `ACTIVE`, reports no violation, and stays inside the gate file's `max-fill-pct`. Gate data lives in `scripts/gates/lockdep/<variant>.txt` in the same measured-and-tracked style as the stack/vector gates, and an entry matching nothing fails as a dead entry. The three pools are not graded alike. Class counts are deterministic — a class registers on the first acquire of a declaration site, a mutex's or a wait queue's on its first lock or wait rather than the first waiter that sleeps — so they carry **exact caps**, and under `tests=on` each report is followed by `LOCKDEP-CLASS[<phase>]:` lines naming the classes that phase registered, so a count that moved names its lock. Boot's edge and chain counts carry caps rather than bands too: boot reaches its report by a fixed sequence with no test dispatch in it. The two test phases' edge and chain counts measure which orderings a run *happened to observe* and move between runs of identical code, so they carry **bands** (`band <phase> <pool> <lo> <hi>`) instead: leaving one prints `DRIFT` on stderr and the run still passes. Be clear about what that gives up — a banded pool has no upper failure of its own, so growth up to `max-fill-pct` (~3.5x observed) reaches you only as that DRIFT line; an *inverted* order is caught by the cycle detector and still fails. `min-classes` / `min-edges` / `min-chains` are the floors that stop a validator which quietly stopped recording from reading as maximally healthy. `--emit-allowlist` writes a fresh baseline (and accepts several `--log`s to merge), a single `--log FILE` parses a capture instead of booting, and `--self-test` (run from `check-framekernel-gates`) drives its crafted logs through the parser — proving both that the gate rejects and that it stays silent on the forms it deliberately accepts.
 
-- `just check-sched-spread` — SMP placement-eligibility gate. Reads the `SCHEDCPU[<phase>]:` lines and holds the run to one structural invariant: **a CPU that is online is eligible for task placement.** Not a measured ceiling — the only tracked number is `eligible-lag`, how many online CPUs may legitimately not be eligible yet, which is `1` at `boot` and at `post-kernel-tests` (the BSP executes boot steps on the bootstrap stub and cannot dispatch until `enter_scheduler(0)` runs at the end of boot init) and `0` afterwards. A lag above that is a bug, not a number to raise. It exists because the failure is invisible: every placement helper filters candidates through `is_schedulable_cpu`, so a CPU whose runqueue is online but not *enabled* disappears from every fork, exec and wakeup while still dispatching whatever work stealing hands it — the machine boots, the suite passes, and one core does all the work. It shipped that way: `boot_step_scheduler_init` ran in the `services` phase and `init_all_percpu_schedulers` reset every runqueue it found, including the three APs that had already entered their scheduler loops during `drivers`. `allow-ineligible` records *which* CPUs that lag may name, because a count alone accepts an AP dropping out as readily as the BSP. `require-dispatch` is the companion check, so a CPU that is eligible but never actually dispatches also fails — and it is a flag, never a volume: how *many* switches a CPU makes is a property of the machine, so any floor above zero fails on a runner that is merely faster or slower. `--log` / `--emit-allowlist` / `--self-test` as in the lockdep gate.
+- `just check-sched-spread` — SMP placement-eligibility gate. Reads the `SCHEDCPU[<phase>]:` lines and holds the run to one structural invariant: **a CPU that is online is eligible for task placement.** Not a measured ceiling — the only tracked number is `eligible-lag`, how many online CPUs may legitimately not be eligible yet, which is `1` at `boot` and at `post-kernel-tests` (the BSP executes boot steps on the bootstrap stub and cannot dispatch until `enter_scheduler(0)` runs at the end of boot init) and `0` afterwards. A lag above that is a bug, not a number to raise. It exists because the failure is invisible: every placement helper filters candidates through `is_schedulable_cpu`, so a CPU whose runqueue is online but not *enabled* disappears from every fork, exec and wakeup while still dispatching whatever work stealing hands it — the machine boots, the suite passes, and one core does all the work. `allow-ineligible` records *which* CPUs that lag may name, because a count alone accepts an AP dropping out as readily as the BSP. `require-dispatch` is the companion check, so a CPU that is eligible but never actually dispatches also fails — and it is a flag, never a volume: how *many* switches a CPU makes is a property of the machine, so any floor above zero fails on a runner that is merely faster or slower. `--log` / `--emit-allowlist` / `--self-test` as in the lockdep gate.
 
 All four boot-based ratchets (`check_test_count.sh`, `check_lockdep_headroom.sh`, `check_quota_headroom.sh`, `check_sched_spread.sh`) accept `--log`, and CI feeds them one `builddir/run_tests --raw --no-color` capture rather than booting QEMU once per question. Do the same locally — see the pre-commit sequence below — rather than paying four boots.
 
@@ -2897,8 +2875,7 @@ Three properties are load-bearing:
   other caller of `kconsole::request` is `request_informational`, which refuses
   any key a `KCMD_DESTRUCTIVE` command takes and is reached only by
   `kconsole(2)` for a `SysInspect` holder — the shape of Linux's root-only
-  `/proc/sysrq-trigger`, narrowed to the commands that only print. The facility
-  this replaced was reachable by any process holding a PTY master.
+  `/proc/sysrq-trigger`, narrowed to the commands that only print.
 - **One execution tier.** Every command runs at the bottom-half point with
   interrupts and preemption enabled. No command runs in NMI context and none may
   assume it can: a *returning* NMI handler must be fault-free, and the
@@ -2970,9 +2947,9 @@ scripts/check_bootstrap_config.sh
 scripts/check_authority_reachability.sh --variant tests builddir/kernel-tests.elf
 scripts/check_test_count.sh        --log builddir/ci-test.log
 scripts/check_lockdep_headroom.sh  --log builddir/ci-test.log
-scripts/check_quota_headroom.sh    --log builddir/ci-test.log   # not yet a CI step; run it anyway
+scripts/check_quota_headroom.sh    --log builddir/ci-test.log   # not a CI step; run it anyway
 scripts/check_sched_spread.sh      --log builddir/ci-test.log
-scripts/check_fs_throughput.sh     --log builddir/ci-test.log   # not yet a CI step; run it anyway
+scripts/check_fs_throughput.sh     --log builddir/ci-test.log   # not a CI step; run it anyway
 ```
 
 The capture is reused deliberately: booting QEMU once per ratchet is a boot per
@@ -2991,7 +2968,7 @@ CI is four parallel jobs, and its wall clock is the longest one: the boot lane (
 Commit order: `cargo fmt --all` → the sequence above → stage → `caveman-commit` for the message → `git commit`.
 
 ## Environment & Tooling Tips
-First-time developers should run `scripts/setup_ovmf.sh` to download firmware blobs; keep them under `third_party/ovmf/`. The ISO builder auto-downloads the pinned Limine binary release into `third_party/limine`; offline environments should pre-populate that directory with the pinned release's `limine-binary.tar.xz`, unpacked, or set `LIMINE_URL`/`LIMINE_VERSION` to avoid network stalls. Rust crates are auto-discovered via the workspace, so most build changes belong in `justfile`, `scripts/`, `Cargo.toml`, and `targets/*.json`; ensure `link.ld` maps any new sections intentionally. The entry point is the assembly `_start` trampoline, which jumps into `kernel_main`; keep `no_std`, rely on `rust-lld`, and avoid host installs. **SlopOS requires LAPIC + IOAPIC hardware (or QEMU `q35`/`-machine q35,accel=kvm:tcg` with IOAPIC enabled); the legacy 8259 PIC path has been sacrificed to the Wheel of Fate, so the kernel panics immediately if an IOAPIC cannot be discovered. VirtIO devices require MSI-X (preferred) or MSI as a minimum — legacy polling has been removed; probe panics if neither interrupt mechanism is available.**
+First-time developers should run `scripts/setup_ovmf.sh` to download firmware blobs; keep them under `third_party/ovmf/`. The ISO builder auto-downloads the pinned Limine binary release into `third_party/limine`; offline environments should pre-populate that directory with the pinned release's `limine-binary.tar.xz`, unpacked, or set `LIMINE_URL`/`LIMINE_VERSION` to avoid network stalls. Rust crates are auto-discovered via the workspace, so most build changes belong in `justfile`, `scripts/`, `Cargo.toml`, and `targets/*.json`; ensure `link.ld` maps any new sections intentionally. The entry point is the assembly `_start` trampoline, which jumps into `kernel_main`; keep `no_std`, rely on `rust-lld`, and avoid host installs. **SlopOS requires LAPIC + IOAPIC hardware (or QEMU `q35`/`-machine q35,accel=kvm:tcg` with IOAPIC enabled); the 8259 PIC is sacrificed to the Wheel of Fate, so the kernel panics immediately if an IOAPIC cannot be discovered. VirtIO devices require MSI-X (preferred) or MSI; probe panics if neither interrupt mechanism is available.**
 
 `scripts/make_slopos_sysroot.sh` needs the pinned `libc` crate; it takes it from `$CARGO_HOME/registry/cache` when it is already there and only falls back to `static.crates.io`, so an offline environment should pre-populate that cache (or point `LIBC_URL` at a local copy). It also needs the `rust-src` component, which `scripts/ensure_toolchain.sh` installs.
 
@@ -3015,7 +2992,8 @@ All agents must run a recurring vulnerability review loop for newly written and 
    - Reproducibility (0-30): deterministic repro or strong step-by-step plausibility
 3. Only findings with **confidence >= 80** are considered **guaranteed issues**.
 4. Only guaranteed issues get a CVSS vector/score entry.
-5. Use `scripts/cvss_calc.py` to compute CVSS v3.1 vectors/scores consistently across agents.
+5. A finding below 80 whose trigger an attacker reaches is still recorded, with no vector and a note of the evidence that would raise it; one no attacker reaches belongs in `plans/`.
+6. Use `scripts/cvss_calc.py` to compute CVSS v3.1 vectors/scores consistently across agents.
 
 ### CVSS file lifecycle requirements
 1. Maintain `CVSS.md` as the single living ledger of **open findings only** (pre-alpha policy).
@@ -3028,7 +3006,7 @@ All agents must run a recurring vulnerability review loop for newly written and 
 3. When an issue is fixed (pre-alpha policy):
    - **Remove it** from `CVSS.md`. SlopOS is pre-alpha with no audit-trail obligation, so resolved findings are deleted rather than retained as historical `fixed` records.
    - Internal IDs stay stable for findings that remain open; gaps in the numbering are expected.
-4. When new guaranteed issues are found, append them with incremented IDs.
+4. When new guaranteed issues, or findings below the bar that are recorded, are found, append them with incremented IDs.
 
 ### Repro/examples (required when possible)
 1. Add a minimal repro recipe for each guaranteed issue when technically feasible.

@@ -363,8 +363,6 @@ pub const POLLERR: u16 = 0x0008;
 pub const POLLHUP: u16 = 0x0010;
 pub const POLLNVAL: u16 = 0x0020;
 
-pub const FDSET_WORD_BITS: usize = 64;
-
 // Clone flag values follow the Linux ABI.
 
 /// Child and parent share the same virtual address space.

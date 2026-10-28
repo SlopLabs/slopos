@@ -618,10 +618,10 @@ pub static SOCKET_ALLOC: slopos_ostd::sync::SpinLock<SocketAllocBitmap> =
         slopos_ostd::lock_class!("SOCKET_ALLOC", slopos_ostd::sync::LOCK_LEVEL_REGISTRY),
     );
 
-pub static NEW_SOCKET_TABLE: slopos_ostd::sync::SpinLock<SlabSocketTable> =
+pub static SOCKET_TABLE: slopos_ostd::sync::SpinLock<SlabSocketTable> =
     slopos_ostd::sync::SpinLock::new(
         SlabSocketTable::empty(),
-        slopos_ostd::lock_class!("NEW_SOCKET_TABLE", slopos_ostd::sync::LOCK_LEVEL_REGISTRY),
+        slopos_ostd::lock_class!("SOCKET_TABLE", slopos_ostd::sync::LOCK_LEVEL_REGISTRY),
     );
 
 pub static EPHEMERAL_PORTS: slopos_ostd::sync::SpinLock<EphemeralPortAllocator> =
@@ -713,10 +713,6 @@ fn map_net_err(err: NetError) -> i32 {
 
 fn alloc_ephemeral_port() -> Option<Port> {
     EPHEMERAL_PORTS.lock().alloc()
-}
-
-fn be_port(port: u16) -> [u8; 2] {
-    port.to_be_bytes()
 }
 
 pub fn socket_send_tcp_segment(seg: &TcpOutSegment, payload: &[u8]) -> i32 {
@@ -944,7 +940,7 @@ fn socket_is_icmp(sock: &Socket) -> bool {
 /// Lets the ring's `OP_SEND_ZC` dispatch pick the TCP `MSG_ZEROCOPY`
 /// send-queue path over the UDP/ICMP one-shot NIC-DMA leaf.
 pub fn socket_is_tcp(sock_idx: u32) -> bool {
-    let table = NEW_SOCKET_TABLE.lock();
+    let table = SOCKET_TABLE.lock();
     table
         .get(sock_idx as usize)
         .map(|s| matches!(s.inner, SocketInner::Tcp(_)))
@@ -952,7 +948,7 @@ pub fn socket_is_tcp(sock_idx: u32) -> bool {
 }
 
 fn socket_notify_tcp_idx_waiters(tcp_idx: tcp::ConnId) {
-    let table = NEW_SOCKET_TABLE.lock();
+    let table = SOCKET_TABLE.lock();
     for (idx, slot) in table.slots.iter().enumerate() {
         let Some(slot) = slot.as_ref() else {
             continue;
@@ -978,7 +974,7 @@ fn socket_notify_tcp_idx_waiters(tcp_idx: tcp::ConnId) {
 }
 
 fn socket_notify_accept_waiters() {
-    let mut table = NEW_SOCKET_TABLE.lock();
+    let mut table = SOCKET_TABLE.lock();
     for (idx, slot) in table.slots.iter_mut().enumerate() {
         let Some(sock) = slot.as_mut() else {
             continue;
@@ -1002,7 +998,7 @@ fn socket_notify_accept_waiters() {
 }
 
 fn socket_note_tcp_ended(conn_id: tcp::ConnId, why: NetError) {
-    let mut table = NEW_SOCKET_TABLE.lock();
+    let mut table = SOCKET_TABLE.lock();
     for sock in table.slots.iter_mut().flatten() {
         if socket_tcp_conn_id(sock) == Some(conn_id) {
             sock.pending_error = Some(match why {
@@ -1024,7 +1020,7 @@ pub fn socket_notify_tcp_timed_out(conn_id: u32) {
 }
 
 fn tcp_end_reason_or(sock_idx: u32, clean: i64) -> i64 {
-    NEW_SOCKET_TABLE
+    SOCKET_TABLE
         .lock()
         .get_mut(sock_idx as usize)
         .and_then(Socket::take_pending_error)
@@ -1065,7 +1061,7 @@ pub fn socket_notify_tcp_activity(actions: &tcp::Actions) {
                         // `None`: not a listener — a client's own `connect`
                         // completing. `Some(false)`: listener backlog full.
                         let queued = {
-                            let mut table = NEW_SOCKET_TABLE.lock();
+                            let mut table = SOCKET_TABLE.lock();
                             match table.get_mut(listener_idx as usize) {
                                 Some(listener_sock)
                                     if listener_sock.state == SocketState::Listening =>
@@ -1125,7 +1121,7 @@ pub fn socket_deliver_udp(sock_idx: u32, src_ip: [u8; 4], src_port: u16, payload
     let src = SockAddr::new(Ipv4Addr(src_ip), Port(src_port));
 
     let queued = {
-        let mut table = NEW_SOCKET_TABLE.lock();
+        let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return false;
         };
@@ -1153,7 +1149,7 @@ pub fn socket_deliver_icmp(sock_idx: u32, src_ip: [u8; 4], icmp_message: &[u8]) 
 
     let mut should_wake = false;
     {
-        let mut table = NEW_SOCKET_TABLE.lock();
+        let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return;
         };
@@ -1181,7 +1177,7 @@ pub fn socket_deliver_udp_from_dispatch(
     let mut exact = None;
     let mut wildcard = None;
     {
-        let table = NEW_SOCKET_TABLE.lock();
+        let table = SOCKET_TABLE.lock();
         for (idx, sock) in table.slots.iter().enumerate() {
             let Some(sock) = sock else {
                 continue;
@@ -1238,7 +1234,7 @@ pub fn socket_create(domain: u16, sock_type: u16, protocol: u16, owner: SocketOw
     // a cli-spinlock. Idempotent after the first call.
     slopos_ostd::sync::event_bus::ensure_socket_queues_allocated();
 
-    let mut table = NEW_SOCKET_TABLE.lock();
+    let mut table = SOCKET_TABLE.lock();
     let Some(idx) = table.alloc(inner, owner) else {
         return errno_i32(ERRNO_ENOMEM);
     };
@@ -1276,7 +1272,7 @@ pub fn socket_sendto(sock_idx: u32, payload: &[u8], dst_ip: [u8; 4], dst_port: u
     let mut auto_bind_udp: Option<(SockAddr, bool)> = None;
     let mut auto_bind_icmp: Option<(u16, bool)> = None;
     let (local, is_udp, identifier, tos) = {
-        let mut table = NEW_SOCKET_TABLE.lock();
+        let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK) as i64;
         };
@@ -1334,7 +1330,7 @@ pub fn socket_sendto(sock_idx: u32, payload: &[u8], dst_ip: [u8; 4], dst_port: u
     if let Some((bind_addr, reuse_addr)) = auto_bind_udp
         && let Err(err) = crate::udp::udp_bind(sock_idx, bind_addr.ip, bind_addr.port, reuse_addr)
     {
-        let mut table = NEW_SOCKET_TABLE.lock();
+        let mut table = SOCKET_TABLE.lock();
         if let Some(sock) = table.get_mut(sock_idx as usize)
             && socket_is_udp(sock)
             && sock.local_addr == Some(bind_addr)
@@ -1350,7 +1346,7 @@ pub fn socket_sendto(sock_idx: u32, payload: &[u8], dst_ip: [u8; 4], dst_port: u
     if let Some((identifier, reuse_addr)) = auto_bind_icmp
         && let Err(err) = crate::icmp::icmp_bind(sock_idx, identifier, reuse_addr)
     {
-        let mut table = NEW_SOCKET_TABLE.lock();
+        let mut table = SOCKET_TABLE.lock();
         if let Some(sock) = table.get_mut(sock_idx as usize)
             && socket_is_icmp(sock)
             && sock
@@ -1393,7 +1389,7 @@ pub fn socket_sendto(sock_idx: u32, payload: &[u8], dst_ip: [u8; 4], dst_port: u
 
 pub fn socket_recvfrom(sock_idx: u32, out: &mut [u8], src_out: Option<&mut SockAddr>) -> i64 {
     let (nonblocking, timeout_ms) = {
-        let table = NEW_SOCKET_TABLE.lock();
+        let table = SOCKET_TABLE.lock();
         let Some(sock) = table.get(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK) as i64;
         };
@@ -1411,7 +1407,7 @@ pub fn socket_recvfrom(sock_idx: u32, out: &mut [u8], src_out: Option<&mut SockA
 
     loop {
         let packet = {
-            let mut table = NEW_SOCKET_TABLE.lock();
+            let mut table = SOCKET_TABLE.lock();
             let Some(sock) = table.get_mut(sock_idx as usize) else {
                 return errno_i32(ERRNO_ENOTSOCK) as i64;
             };
@@ -1436,7 +1432,7 @@ pub fn socket_recvfrom(sock_idx: u32, out: &mut [u8], src_out: Option<&mut SockA
         match wait_socket_event(
             sock_recv_ev(sock_idx),
             || {
-                let table = NEW_SOCKET_TABLE.lock();
+                let table = SOCKET_TABLE.lock();
                 table
                     .get(sock_idx as usize)
                     .map(|sock| !sock.recv_queue.is_empty())
@@ -1458,7 +1454,7 @@ pub fn socket_bind(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
     let mut icmp_bind_args: Option<(u16, bool)> = None;
     let mut drawn = false;
     {
-        let mut table = NEW_SOCKET_TABLE.lock();
+        let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK);
         };
@@ -1504,7 +1500,7 @@ pub fn socket_bind(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
             if claimed {
                 EPHEMERAL_PORTS.lock().release(local.port);
             }
-            let mut table = NEW_SOCKET_TABLE.lock();
+            let mut table = SOCKET_TABLE.lock();
             if let Some(sock) = table.get_mut(sock_idx as usize)
                 && socket_is_udp(sock)
                 && sock.local_addr == Some(local)
@@ -1520,7 +1516,7 @@ pub fn socket_bind(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
     if let Some((identifier, reuse_addr)) = icmp_bind_args
         && let Err(err) = crate::icmp::icmp_bind(sock_idx, identifier, reuse_addr)
     {
-        let mut table = NEW_SOCKET_TABLE.lock();
+        let mut table = SOCKET_TABLE.lock();
         if let Some(sock) = table.get_mut(sock_idx as usize)
             && socket_is_icmp(sock)
             && sock
@@ -1542,7 +1538,7 @@ pub fn socket_bind(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
 }
 
 pub fn socket_listen(sock_idx: u32, backlog: u32) -> i32 {
-    let mut table = NEW_SOCKET_TABLE.lock();
+    let mut table = SOCKET_TABLE.lock();
     let Some(sock) = table.get_mut(sock_idx as usize) else {
         return errno_i32(ERRNO_ENOTSOCK);
     };
@@ -1598,7 +1594,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
     slopos_ostd::sync::event_bus::ensure_socket_queues_allocated();
     loop {
         let (nonblocking, timeout_ms) = {
-            let table = NEW_SOCKET_TABLE.lock();
+            let table = SOCKET_TABLE.lock();
             let Some(sock) = table.get(sock_idx as usize) else {
                 return errno_i32(ERRNO_ENOTSOCK);
             };
@@ -1612,7 +1608,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
         };
 
         {
-            let mut table = NEW_SOCKET_TABLE.lock();
+            let mut table = SOCKET_TABLE.lock();
             let Some(listen_sock) = table.get_mut(sock_idx as usize) else {
                 return errno_i32(ERRNO_ENOTSOCK);
             };
@@ -1703,7 +1699,7 @@ pub fn socket_accept(sock_idx: u32, peer_addr: *mut [u8; 4], peer_port: *mut u16
         match wait_socket_event(
             sock_accept_ev(sock_idx),
             || {
-                let table = NEW_SOCKET_TABLE.lock();
+                let table = SOCKET_TABLE.lock();
                 let Some(sock) = table.get(sock_idx as usize) else {
                     return true;
                 };
@@ -1782,7 +1778,7 @@ fn connect_initiate_tcp_locked(
 
 pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
     let (tcp_idx, nonblocking, syn_seg) = {
-        let mut table = NEW_SOCKET_TABLE.lock();
+        let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK);
         };
@@ -1822,7 +1818,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
     loop {
         if slopos_kernel_services::driver_runtime::current_task_wait_aborted() {
             let _ = tcp::abort(tcp_idx);
-            let mut table = NEW_SOCKET_TABLE.lock();
+            let mut table = SOCKET_TABLE.lock();
             if let Some(sock) = table.get_mut(sock_idx as usize) {
                 sock.state = SocketState::Closed;
             }
@@ -1837,7 +1833,7 @@ pub fn socket_connect(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
 
         if slopos_kernel_services::clock::uptime_ms() >= deadline_ms {
             let _ = tcp::abort(tcp_idx);
-            let mut table = NEW_SOCKET_TABLE.lock();
+            let mut table = SOCKET_TABLE.lock();
             if let Some(sock) = table.get_mut(sock_idx as usize) {
                 sock.state = SocketState::Closed;
             }
@@ -1860,7 +1856,7 @@ pub fn socket_connect_nonblock(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
     }
 
     let action = {
-        let mut table = NEW_SOCKET_TABLE.lock();
+        let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK);
         };
@@ -1891,7 +1887,7 @@ pub fn socket_connect_nonblock(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
             let rc = socket_send_tcp_segment(&syn, &[]);
             if rc != 0 {
                 let _ = tcp::abort(tcp_idx);
-                let mut table = NEW_SOCKET_TABLE.lock();
+                let mut table = SOCKET_TABLE.lock();
                 if let Some(sock) = table.get_mut(sock_idx as usize) {
                     sock.state = SocketState::Closed;
                 }
@@ -1910,7 +1906,7 @@ pub fn socket_connect_nonblock(sock_idx: u32, addr: [u8; 4], port: u16) -> i32 {
 /// A peer whose FIN followed the handshake at once still leaves the socket
 /// connected.
 fn connect_resolved(sock_idx: u32, state: Option<TcpState>) -> i32 {
-    let mut table = NEW_SOCKET_TABLE.lock();
+    let mut table = SOCKET_TABLE.lock();
     let Some(sock) = table.get_mut(sock_idx as usize) else {
         return errno_i32(ERRNO_ENOTSOCK);
     };
@@ -1948,7 +1944,7 @@ enum SendTarget {
 /// the negated errno already widened to `i64`.
 fn socket_send_resolve(sock_idx: u32, payload_len: usize) -> Result<SendTarget, i64> {
     let (is_udp, is_icmp) = {
-        let table = NEW_SOCKET_TABLE.lock();
+        let table = SOCKET_TABLE.lock();
         let Some(sock) = table.get(sock_idx as usize) else {
             return Err(errno_i32(ERRNO_ENOTSOCK) as i64);
         };
@@ -1966,7 +1962,7 @@ fn socket_send_resolve(sock_idx: u32, payload_len: usize) -> Result<SendTarget, 
         let mut auto_bind_udp: Option<(SockAddr, bool)> = None;
         let mut auto_bind_icmp: Option<(u16, bool)> = None;
         let (local, remote, state, identifier, tos) = {
-            let mut table = NEW_SOCKET_TABLE.lock();
+            let mut table = SOCKET_TABLE.lock();
             let Some(sock) = table.get_mut(sock_idx as usize) else {
                 return Err(errno_i32(ERRNO_ENOTSOCK) as i64);
             };
@@ -2020,7 +2016,7 @@ fn socket_send_resolve(sock_idx: u32, payload_len: usize) -> Result<SendTarget, 
             && let Err(err) =
                 crate::udp::udp_bind(sock_idx, bind_addr.ip, bind_addr.port, reuse_addr)
         {
-            let mut table = NEW_SOCKET_TABLE.lock();
+            let mut table = SOCKET_TABLE.lock();
             if let Some(sock) = table.get_mut(sock_idx as usize)
                 && socket_is_udp(sock)
                 && sock.local_addr == Some(bind_addr)
@@ -2036,7 +2032,7 @@ fn socket_send_resolve(sock_idx: u32, payload_len: usize) -> Result<SendTarget, 
         if let Some((identifier, reuse_addr)) = auto_bind_icmp
             && let Err(err) = crate::icmp::icmp_bind(sock_idx, identifier, reuse_addr)
         {
-            let mut table = NEW_SOCKET_TABLE.lock();
+            let mut table = SOCKET_TABLE.lock();
             if let Some(sock) = table.get_mut(sock_idx as usize)
                 && socket_is_icmp(sock)
                 && sock
@@ -2071,7 +2067,7 @@ fn socket_send_resolve(sock_idx: u32, payload_len: usize) -> Result<SendTarget, 
     }
 
     let (tcp_idx, state, nonblocking, timeout_ms) = {
-        let mut table = NEW_SOCKET_TABLE.lock();
+        let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return Err(errno_i32(ERRNO_ENOTSOCK) as i64);
         };
@@ -2402,7 +2398,7 @@ enum RecvKind {
 /// returns the negated errno widened to `i64`.
 fn socket_recv_resolve(sock_idx: u32) -> Result<RecvKind, i64> {
     let (is_udp, is_icmp, is_shut_rd) = {
-        let table = NEW_SOCKET_TABLE.lock();
+        let table = SOCKET_TABLE.lock();
         let Some(sock) = table.get(sock_idx as usize) else {
             return Err(errno_i32(ERRNO_ENOTSOCK) as i64);
         };
@@ -2419,7 +2415,7 @@ fn socket_recv_resolve(sock_idx: u32) -> Result<RecvKind, i64> {
 
     if is_udp || is_icmp {
         let (nonblocking, timeout_ms, peer_filter) = {
-            let table = NEW_SOCKET_TABLE.lock();
+            let table = SOCKET_TABLE.lock();
             let Some(sock) = table.get(sock_idx as usize) else {
                 return Err(errno_i32(ERRNO_ENOTSOCK) as i64);
             };
@@ -2442,7 +2438,7 @@ fn socket_recv_resolve(sock_idx: u32) -> Result<RecvKind, i64> {
     }
 
     let (tcp_idx, state, nonblocking, timeout_ms) = {
-        let mut table = NEW_SOCKET_TABLE.lock();
+        let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return Err(errno_i32(ERRNO_ENOTSOCK) as i64);
         };
@@ -2489,7 +2485,7 @@ fn udp_recv_loop(
 ) -> i64 {
     loop {
         let packet = {
-            let mut table = NEW_SOCKET_TABLE.lock();
+            let mut table = SOCKET_TABLE.lock();
             let Some(sock) = table.get_mut(sock_idx as usize) else {
                 return errno_i32(ERRNO_ENOTSOCK) as i64;
             };
@@ -2517,7 +2513,7 @@ fn udp_recv_loop(
         }
 
         let queued = || {
-            let table = NEW_SOCKET_TABLE.lock();
+            let table = SOCKET_TABLE.lock();
             table
                 .get(sock_idx as usize)
                 .map(|sock| !sock.recv_queue.is_empty())
@@ -2660,7 +2656,7 @@ pub fn socket_recv_pinned(sock_idx: u32, writer: &mut VmWriter<'_>) -> i64 {
 
 pub fn socket_close(sock_idx: u32) -> i32 {
     let (tcp_idx, udp_unbind, icmp_unbind, was_listener) = {
-        let mut table = NEW_SOCKET_TABLE.lock();
+        let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK);
         };
@@ -2740,7 +2736,7 @@ pub fn socket_close(sock_idx: u32) -> i32 {
 
 pub fn socket_poll_readable(sock_idx: u32) -> u32 {
     let (state, is_datagram, tcp_idx, has_dgram_data, failed) = {
-        let mut table = NEW_SOCKET_TABLE.lock();
+        let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return 0;
         };
@@ -2755,7 +2751,7 @@ pub fn socket_poll_readable(sock_idx: u32) -> u32 {
     };
 
     if state == SocketState::Listening {
-        let table = NEW_SOCKET_TABLE.lock();
+        let table = SOCKET_TABLE.lock();
         let Some(sock) = table.get(sock_idx as usize) else {
             return 0;
         };
@@ -2837,7 +2833,7 @@ pub fn socket_poll_dequeue_send(sock_idx: u32) {
 
 pub fn socket_poll_writable(sock_idx: u32) -> u32 {
     let (is_datagram, tcp_idx, state) = {
-        let mut table = NEW_SOCKET_TABLE.lock();
+        let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return 0;
         };
@@ -2883,14 +2879,11 @@ pub fn socket_poll_writable(sock_idx: u32) -> u32 {
 }
 
 pub fn socket_get_state(sock_idx: u32) -> Option<SocketState> {
-    NEW_SOCKET_TABLE
-        .lock()
-        .get(sock_idx as usize)
-        .map(|s| s.state)
+    SOCKET_TABLE.lock().get(sock_idx as usize).map(|s| s.state)
 }
 
 pub fn socket_set_nonblocking(sock_idx: u32, nonblocking: bool) -> i32 {
-    let mut table = NEW_SOCKET_TABLE.lock();
+    let mut table = SOCKET_TABLE.lock();
     let Some(sock) = table.get_mut(sock_idx as usize) else {
         return errno_i32(ERRNO_ENOTSOCK);
     };
@@ -2902,14 +2895,14 @@ pub fn socket_set_nonblocking(sock_idx: u32, nonblocking: bool) -> i32 {
 /// out-of-range index. Used by the SlopRing `OP_ACCEPT` glue to restore
 /// the listener's original mode after a forced-nonblocking probe.
 pub fn socket_is_nonblocking(sock_idx: u32) -> Option<bool> {
-    let table = NEW_SOCKET_TABLE.lock();
+    let table = SOCKET_TABLE.lock();
     table
         .get(sock_idx as usize)
         .map(|sock| sock.is_nonblocking())
 }
 
 pub fn socket_set_timeouts(sock_idx: u32, recv_timeout_ms: u64, send_timeout_ms: u64) -> i32 {
-    let mut table = NEW_SOCKET_TABLE.lock();
+    let mut table = SOCKET_TABLE.lock();
     let Some(sock) = table.get_mut(sock_idx as usize) else {
         return errno_i32(ERRNO_ENOTSOCK);
     };
@@ -2928,7 +2921,7 @@ pub fn socket_set_timeouts(sock_idx: u32, recv_timeout_ms: u64, send_timeout_ms:
 
 pub fn socket_reset_all() {
     {
-        let mut table = NEW_SOCKET_TABLE.lock();
+        let mut table = SOCKET_TABLE.lock();
         table.init_if_needed();
         let cap = table.capacity();
         for idx in 0..cap {
@@ -2948,7 +2941,7 @@ pub fn socket_reset_all() {
     }
 
     {
-        let table = NEW_SOCKET_TABLE.lock();
+        let table = SOCKET_TABLE.lock();
         let mut alloc = SOCKET_ALLOC.lock();
         alloc.clear();
         alloc.set_capacity(table.capacity());
@@ -2956,7 +2949,7 @@ pub fn socket_reset_all() {
 
     EPHEMERAL_PORTS.lock().reset();
     crate::icmp::ICMP_DEMUX.lock().clear();
-    crate::udp::UDP_DEMUX.lock().clear();
+    crate::udp::demux::clear();
     tcp::reset_all();
     crate::neighbor::NEIGHBOR_CACHE.reset();
 }
@@ -2976,7 +2969,7 @@ pub struct SocketSnapshot {
 /// grows from 64 to 1024 as sockets are opened, and the two diverge on exactly
 /// the busy system where the answer matters most.
 pub fn socket_table_capacity() -> usize {
-    NEW_SOCKET_TABLE.lock().capacity()
+    SOCKET_TABLE.lock().capacity()
 }
 
 /// One row of `NET_Q_SOCKETS`, in network-domain terms.
@@ -3001,7 +2994,7 @@ pub struct SocketRow {
 
 /// Collect every socket in the table into `out`.
 ///
-/// **Two phases, and the split is load-bearing.** `NEW_SOCKET_TABLE` is a
+/// **Two phases, and the split is load-bearing.** `SOCKET_TABLE` is a
 /// `LOCK_LEVEL_REGISTRY` lock and the TCP PCB slots are `LOCK_LEVEL_RESOURCE`;
 /// resolving a connection's state from inside the table lock would nest one
 /// under the other for no reason. Phase one copies what the socket table
@@ -3013,7 +3006,7 @@ pub struct SocketRow {
 /// caller sizes it from [`socket_table_capacity`].
 pub fn collect_sockets(out: &mut KVec<SocketRow>) {
     {
-        let table = NEW_SOCKET_TABLE.lock();
+        let table = SOCKET_TABLE.lock();
         let capacity = table.capacity();
         for idx in 0..capacity {
             let Some(sock) = table.get(idx) else {
@@ -3106,7 +3099,7 @@ const fn tcp_state_to_abi(state: tcp::TcpState) -> u8 {
 }
 
 pub fn socket_snapshot(sock_idx: u32) -> Option<SocketSnapshot> {
-    NEW_SOCKET_TABLE.lock().get(sock_idx as usize).map(|sock| {
+    SOCKET_TABLE.lock().get(sock_idx as usize).map(|sock| {
         let local = sock
             .local_addr
             .unwrap_or(SockAddr::new(Ipv4Addr::UNSPECIFIED, Port(0)));
@@ -3125,7 +3118,7 @@ pub fn socket_snapshot(sock_idx: u32) -> Option<SocketSnapshot> {
 }
 
 pub fn socket_lookup_tcp_idx(sock_idx: u32) -> Option<tcp::ConnId> {
-    NEW_SOCKET_TABLE
+    SOCKET_TABLE
         .lock()
         .get(sock_idx as usize)
         .and_then(socket_tcp_conn_id)
@@ -3141,7 +3134,7 @@ const IP_TOS_ECN_MASK: u8 = 0x03;
 pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) -> i32 {
     use slopos_abi::syscall::*;
 
-    let mut table = NEW_SOCKET_TABLE.lock();
+    let mut table = SOCKET_TABLE.lock();
     let Some(sock) = table.get_mut(sock_idx as usize) else {
         return errno_i32(ERRNO_ENOTSOCK);
     };
@@ -3278,7 +3271,7 @@ pub fn socket_setsockopt(sock_idx: u32, level: i32, optname: i32, val: &[u8]) ->
 pub fn socket_getsockopt(sock_idx: u32, level: i32, optname: i32, out: &mut [u8]) -> i32 {
     use slopos_abi::syscall::*;
 
-    let mut table = NEW_SOCKET_TABLE.lock();
+    let mut table = SOCKET_TABLE.lock();
     let Some(sock) = table.get_mut(sock_idx as usize) else {
         return errno_i32(ERRNO_ENOTSOCK);
     };
@@ -3388,7 +3381,7 @@ pub fn socket_shutdown(sock_idx: u32, how: i32) -> i32 {
     use slopos_abi::syscall::*;
 
     let tcp_idx = {
-        let mut table = NEW_SOCKET_TABLE.lock();
+        let mut table = SOCKET_TABLE.lock();
         let Some(sock) = table.get_mut(sock_idx as usize) else {
             return errno_i32(ERRNO_ENOTSOCK);
         };
@@ -3437,18 +3430,12 @@ pub fn socket_shutdown(sock_idx: u32, how: i32) -> i32 {
     0
 }
 
-pub fn socket_send_queued(sock_idx: u32) -> i32 {
-    match socket_lookup_tcp_idx(sock_idx) {
-        Some(tcp_idx) => tcp_drain_segments(tcp_idx) as i32,
-        None => errno_i32(ERRNO_ENOTCONN),
-    }
-}
-
 pub fn socket_process_timers() {
     if crate::ingress::dataplane_quiesced() {
         return;
     }
-    // Retransmit timers fire exclusively via NET_TIMER_WHEEL → tcp::on_retransmit.
+    // Retransmits fire from the timer wheel (`tcp::on_retransmit`); only the
+    // delayed ACK is polled here.
     // `crate::clock`, not raw uptime: the deadlines compared here are set in that same domain.
     let now_ms = crate::clock::now_ms();
     if let Some((_idx, seg)) = tcp::delayed_ack_check(now_ms) {
@@ -3456,53 +3443,12 @@ pub fn socket_process_timers() {
     }
 }
 
-pub fn socket_from_tcp_idx_pub(tcp_idx: tcp::ConnId) -> Option<u32> {
-    socket_from_tcp_idx(tcp_idx)
-}
-
 pub fn socket_keepalive_enabled_by_index(sock_idx: usize) -> bool {
-    let table = NEW_SOCKET_TABLE.lock();
+    let table = SOCKET_TABLE.lock();
     table
         .get(sock_idx)
         .map(|sock| sock.options.keepalive)
         .unwrap_or(false)
-}
-
-fn socket_from_tcp_idx(tcp_idx: tcp::ConnId) -> Option<u32> {
-    let table = NEW_SOCKET_TABLE.lock();
-    for (idx, sock) in table.slots.iter().enumerate() {
-        if let Some(sock) = sock
-            && socket_tcp_conn_id(sock) == Some(tcp_idx)
-        {
-            return Some(idx as u32);
-        }
-    }
-    None
-}
-
-pub fn socket_debug_set_connected(sock_idx: u32, remote_ip: [u8; 4], remote_port: u16) -> i32 {
-    let mut table = NEW_SOCKET_TABLE.lock();
-    let Some(sock) = table.get_mut(sock_idx as usize) else {
-        return errno_i32(ERRNO_ENOTSOCK);
-    };
-    let Some(tcp_idx) = socket_tcp_conn_id(sock) else {
-        return errno_i32(ERRNO_ENOTCONN);
-    };
-
-    if tcp::get_state(tcp_idx) == Some(TcpState::Established) {
-        sock.state = SocketState::Connected;
-        sock.remote_addr = Some(SockAddr::new(Ipv4Addr(remote_ip), Port(remote_port)));
-        return 0;
-    }
-    errno_i32(ERRNO_ENOTCONN)
-}
-
-pub fn socket_host_to_be_port(port: u16) -> u16 {
-    u16::from_be_bytes(be_port(port))
-}
-
-pub fn socket_be_to_host_port(port: u16) -> u16 {
-    u16::from_be(port)
 }
 
 pub fn socket_max_send_probe(sock_idx: u32, max_len: usize) -> i32 {
@@ -3514,13 +3460,13 @@ pub fn socket_max_send_probe(sock_idx: u32, max_len: usize) -> i32 {
 }
 
 pub fn socket_get_peer_addr(sock_idx: u32) -> Option<SockAddr> {
-    let table = NEW_SOCKET_TABLE.lock();
+    let table = SOCKET_TABLE.lock();
     let sock = table.get(sock_idx as usize)?;
     sock.remote_addr
 }
 
 pub fn socket_get_local_addr(sock_idx: u32) -> Option<SockAddr> {
-    let table = NEW_SOCKET_TABLE.lock();
+    let table = SOCKET_TABLE.lock();
     let sock = table.get(sock_idx as usize)?;
     sock.local_addr
 }

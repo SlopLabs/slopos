@@ -8,6 +8,3 @@ pub mod dir;
 pub mod dirent;
 pub mod misc;
 pub mod poll;
-#[allow(dead_code)]
-pub(crate) mod shim;
-pub mod tests;

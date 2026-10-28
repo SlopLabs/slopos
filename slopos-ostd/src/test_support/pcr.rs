@@ -10,7 +10,7 @@ use crate::cpu::x86_64::pcr;
 #[inline]
 fn assert_on_bsp() {
     assert_eq!(
-        pcr::get_current_cpu(),
+        pcr::current_cpu_id(),
         0,
         "test_support::pcr helpers address the BSP's PCR and must run on the BSP"
     );

@@ -9,8 +9,8 @@ use slopos_fs::fileio::{
 use slopos_fs::vfs::Subject;
 use slopos_mm::user_copy::copy_bytes_to_user;
 use slopos_mm::user_io_buf::{UserReadBuf, UserWriteBuf};
-use slopos_mm::user_ptr::UserBytes as MmUserBytes;
 use slopos_ostd::KVec;
+use slopos_ostd::user::ptr::UserBytes as OstdUserBytes;
 
 use crate::syscall::args::{Fd, UserBytes, UserPath, UserPtr};
 use crate::syscall::common::{USER_PATH_MAX, errno_from_neg};
@@ -97,7 +97,7 @@ pub(crate) fn raise_sigpipe_on_epipe(
 }
 
 // Commits one inode, so the lock is held for that inode's blocks rather than
-// every dirty block on the mount. It is still ext2's one global sleeping
+// every dirty block on the mount. It is still the mount's one sleeping
 // mutex, so a path walk on the same filesystem waits behind it.
 define_syscall!(syscall_fsync
     (ctx, fd: Fd)
@@ -120,7 +120,7 @@ define_syscall!(syscall_fdatasync
 });
 
 // No fd and no capability, and it commits every mount — so this is the one
-// that can still stall the machine. `ext2_vfs_sync` coalesces callers so a
+// that can still stall the machine. `Ext4Mount::sync_fs` coalesces callers so a
 // loop of them costs one writeback pass rather than one per call; what stays
 // unbounded is the wait behind the pass in flight.
 define_syscall!(syscall_sync
@@ -232,7 +232,7 @@ pub(crate) fn readlink_at_into_user(
         return Err(errno_from_neg(rc as i32));
     }
     let n = (rc as usize).min(len);
-    let user = MmUserBytes::try_new(user_buf, n).map_err(|_| Errno::EFAULT)?;
+    let user = OstdUserBytes::try_new(user_buf, n).map_err(|_| Errno::EFAULT)?;
     copy_bytes_to_user(user, &staging[..n]).map_err(|_| Errno::EFAULT)?;
     Ok(n)
 }

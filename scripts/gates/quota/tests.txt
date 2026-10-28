@@ -10,145 +10,10 @@
 # A cap matching nothing is a dead entry and fails, because a kind that
 # stopped being reported looks exactly like a kind that stayed cheap.
 #
-# Caps on the rows that move between runs of one ISO -- kernelmeta, pages,
-# residentpages, diskblocks, pinnedbytes, task -- keep the previously tracked
-# value where it still holds, since one capture is a point and not a spread;
-# the deterministic rows and every new row carry this capture's exact peak.
-# The custody row after userland rose from 8 to 12 with `privd_test`: every
-# request it sends carries three or four descriptors as SCM_RIGHTS, held in
-# custody until privd reads them or drops a connection it refused unread.
-# The task row after userland rose from 10 with `install_test`, which runs
-# `/bin/bootctl` as a child; it is timing-dependent, and two captures of one
-# tree measured 11 and 12, then 13 once an interrupt-delivered wake preempted
-# an equal-priority task and an enqueue behind a running task began kicking an
-# idle CPU: more of the userland suite's children overlap, and 14 once the
-# flusher wrote data without the mount lock and file faults stopped sharing
-# one I/O mutex, and 16 once `pthread_kill` reached a thread: the libc ABI
-# test holds one of its own blocked, and a jobserver helper thread that used
-# to outlive its process by a second of failed shutdown now exits with it, so
-# the children the suite starts overlap differently. The process row fell
-# from 256 to 20 because an exited process is now torn down and retired
-# instead of leaking until shutdown, and rose to 21 with that same scheduling
-# change, since its peak is how many exited children are still being torn
-# down while the next ones start, and to 23 with the same `pthread_kill`
-# change. The commitpages row
-# after userland is the build-loop OOM test's hog, which promises the whole
-# headroom less 3072 pages so its forked child's writes outrun the ceiling:
-# two captures measured 193 853 each. The expected refusals count through
-# both phases. The kernel phase refuses four: the stest that lowers the root
-# ceiling and over-asks once, the forked child's write past a full ceiling
-# (tests_commit), and the COW signal frame pushed into a full ceiling on the
-# syscall-exit and the IRQ-exit roads (tests_build_floor_signal). The userland
-# phase adds three: the build-loop over-ask is refused twice, because the mmap
-# handler reclaims and retries a refused request once, and the hog's forked
-# child has one write refused before the OOM killer takes the hog. The
-# residentpages row after the kernel tests rose from 772 to 2049 once a memfd
-# charged its sizer's resident pages at ftruncate rather than when mapped: the
-# OOM tests size 64-page memfds per process, and one row holds a 2048-page
-# memfd. With the credential tests the kernel-phase task row rose from 8 to 9
-# and its residentpages row to 2308: `test_signals_need_the_uid_rule` holds
-# four principals at once, each a process of 257 resident pages, beside the
-# five tasks and 1280 pages earlier syscall tests leave for their scope's
-# teardown. Two captures measured 9 and 2308 each; skipping the `cred` suite
-# measured 7 and 2049. The kernel-phase commitpages row rose from 2560
-# to 2564 with delegation at spawn: `test_spawn_delegates_within_the_spawner`
-# holds a principal beside each child it spawns, and alone sets the cred
-# suite's peak, 1284 pages with it and 1028 without. The boot kernelmeta row measured 1708, and 1713 once every disk went
-# through the block layer and NVMe: the controllers' queues and engines, the
-# disk registry and the devfs node table. A boot on which an AP is slow to
-# answer its startup peaks 48 pages higher, 1761, and the wired network's
-# table of published NICs and their handles adds 4 at every AP timing (1666,
-# 1713 and 1761 on the tree before it, 1670, 1717 and 1765 on it), so 1765 was
-# the cap. The `qemu-xhci` and scratch stick `just test` attaches from USB mass
-# storage on are bound at boot: the controller's device table and rings, the
-# stick's device, transport and engine. On a host without KVM the tree before
-# it peaked at 1766 and this one at 1800, 1801, 1802 and 1802 over four boots,
-# so 1802 is the cap.
-# The kernelmeta row after the kernel tests measured 6230 and 6192 in
-# two captures once the OOM and signal tests spawned more processes, then
-# 6290, 6229 and 6283 in three once slibc gained the functions git needs, then
-# 6292, 6294, 6196, 6298, 6197, 6213, 6240 and 6199 in eight once every test
-# boot attached and mounted a labelled media volume, then 6226, 6313, 6255,
-# 6306 and 6320 in five once the volumes became ext4 — a jbd2 journal keeps
-# its superblock and an escape map per mount, and the suite gained the ext4
-# and journal tests — then 6321, 6271, 6321, 6312 and 6322 in five once the
-# crash store's tests opened stores over scratch disks, all but 6271 on boots
-# whose AP answered late, then 6526, 6514 and 6528 in three once a basefs test
-# indexed a 5000-entry medium, the index's vectors briefly doubled as they
-# grow, and the block-ceiling test made a user task, then 6552 in one whose
-# new tests hold nothing past their end (the PTY echo test leaves the root's
-# kernelmeta where it found it), then 6578, 6615, 6663, 6670, 6672, 6672 and
-# 6681 in seven once the wired network landed. The previous tree's kernel
-# measured 6472 on this host against the same images, and the peak sat 384
-# pages above what the phase ends holding in every run of both: the growth is
-# in what the drivers and net suites leave allocated (each suite alone: 188 to
-# 234 and 242 to 262 pages, the two virtio-net tests that moved into the
-# drivers suite and the NIC tests), while core, fs, mm and sched end where
-# they did. Then 6628, 6689, 6628, 6586 and 6695 in five once full speed
-# landed, whose kernel tests allocate nothing: the two highest ended 61 and 67
-# pages above the others too, the late-AP spread the boot row records, and the
-# tree before it reached 6681. The spread, and the cap is the largest.
-# Then 6866 and 6883 in two captures once bases were replaced live: the
-# generation tests' `BaseFs` instances are statics, so the generations they
-# activate stay indexed and copied for the rest of the phase.
-# Then 7147 and 7217 in two captures once extensions were activated beside the
-# base, ending the phase holding 6763 and 6833; the same tree with its nine new
-# extension and peer tests skipped measured 6886 and ended at 6502, as the
-# parent's 6896 and 6512, so the growth is what those tests leave allocated,
-# the static `BaseFs` the replacement test mounts at a name among it, while
-# every activation they make is freed.
-# Then 8455 in one capture on a host without KVM, where the parent measured
-# 7222, once activations served images from disk:
-# `test_activations_stay_within_the_pool` holds 32 at once, each its image as
-# a file of the RAM root beside its volume's cache, index and verifying
-# device, and the heap keeps the pages that peak took.
-# The kernelmeta row after userland measured 10197 in one capture on a host
-# without KVM, 162 pages over the single capture 10035 recorded, once the shell
-# forked its registry programs instead of spawning them, two kernel tests moved
-# into the userland phase and privd_test and spawn_privilege_test began
-# starting shells, cpufreq and a descriptor probe; the phase ends holding 9927,
-# so the row follows what the suite leaves allocated. Then 10239, 9887 and 9914
-# in three captures of the tree that added `protocol_test`, the last with it
-# skipped: the spread, not the compositor it starts, and the cap is the largest.
-# Then 10588 in one capture once init became a service manager:
-# `supervision_test` re-executes init, kills privd for init to start again and
-# restarts the session around stand-ins, and privd_test's consent case starts
-# the session twice; the phase ends holding 10270. Then 53079 and 52323 in two
-# captures once bases were replaced live: `live_base_test` copies the 80 MB
-# tests base into a generation twice, and the fixture's stays held by its
-# privd while the base again is staged, so both are resident at the peak; the
-# second stays for the rest of the suite. Then 53102 and 52622 in two captures
-# once extensions were activated beside the base, which carries what the kernel
-# phase's extension tests leave allocated. Then 57719 and 57729 in two
-# captures on a host without KVM once extensions went in through extctl:
-# `extension_test` ends the phase holding 3674 pages more than `dac_test` in
-# its place on otherwise identical filtered boots (7353 against 3679), the
-# heap its images in /tmp's RAM filesystem, its activations' copies and some
-# sixty extctl runs grew, and the suite with it skipped measured 54210.
-# Then 57450, 58189 and 59006 in three captures on a host without KVM, where
-# the parent measured 57179, once init ran extensions' services:
-# `extension_service_test` installs the test extension three times, each
-# activation's copy held while its daemon runs, beside the daemons, their
-# loggers, the sockets init keeps and the extctl runs that tell init.
-# Then 63720 in one capture on a host without KVM, once extensions' actions
-# ran and the tests image grew to 128M: `extension_action_test` installs and
-# updates its extension, runs its mechanisms through privd and its
-# configuration through extctl, and has privd read the actions again.
-# Then 90858, 90268 and 90239 in three captures on a host without KVM once
-# each person's processes shared a quarter of the process and task tables:
-# `sessions_test`'s fork bomb fills a person's 2048 tasks, each a kernel stack
-# and a task the heap keeps the pages of once the bomb is reaped.
-# The process, task and fdslot rows after userland are the bomb's too, the
-# root row's peak with a person's 256 processes and 2048 tasks live beside
-# the suite's own: 270, 2061 and 861 in all three captures.
-# The diskblocks row after userland is `persist_test`'s filler meeting the
-# root's reserve: 7058 once the tests image grew from 96M, where it was 3658.
-# The pages row
-# after the kernel tests is test_fork_and_exec_walk_what_is_mapped_not_what_is_reserved
-# holding a 1 GiB MAP_NORESERVE reservation in a parent and in its fork, which
-# the row counts twice: captures measured 538 714, 535 332, 538 832, 539 004
-# and 539 006, then 537 120, 536 334, 538 728, 531 830, 538 822, 531 794,
-# 539 050 and 533 730 in the eight above, and the cap is the largest.
+# The rows that move between runs of one ISO — kernelmeta, pages,
+# residentpages, diskblocks, pinnedbytes, task — carry the largest peak
+# measured over several captures (a slow AP, or a host without KVM, peaks
+# higher); every other row is deterministic and carries its exact peak.
 
 # The peak of a kind nobody exercised is zero, and a cap derived from
 # it would bound nothing. Every listed kind must have been reached.
@@ -162,6 +27,11 @@ max-denials 0
 
 # The refusals the suite provokes on purpose, held to their exact count:
 # fewer means a test stopped refusing, more means something else was.
+# Kernel phase: the stest that lowers the root ceiling and over-asks, the
+# forked child's write past a full ceiling (tests_commit), and the COW signal
+# frame pushed into a full ceiling on the syscall-exit and IRQ-exit roads.
+# Userland adds the build-loop over-ask, refused twice because the mmap
+# handler reclaims and retries once, and the hog's child's refused write.
 expect-denials post-kernel-tests commitpages 4
 expect-denials post-userland-tests commitpages 7
 # The bomb stops once twenty forks in a row are refused, at a person's task
@@ -173,6 +43,26 @@ require-phase boot
 require-phase post-kernel-tests
 require-phase post-userland-tests
 
+# What sets each moving or non-obvious cap:
+#   boot kernelmeta            the block layer's, NVMe's, xHCI's and the NIC
+#                              table's device state, on a boot with a late AP.
+#   kernel commitpages         `test_spawn_delegates_within_the_spawner` holds a
+#                              principal beside each child it spawns.
+#   kernel kernelmeta          `test_activations_stay_within_the_pool` holds 32
+#                              activations at once; the heap keeps those pages.
+#   kernel pages               a 1 GiB MAP_NORESERVE reservation held in a
+#                              parent and its fork, counted twice.
+#   kernel residentpages, task `test_signals_need_the_uid_rule` holds four
+#                              principals of 257 resident pages at once.
+#   userland commitpages       the build-loop OOM test's hog, which promises
+#                              the whole headroom less 3072 pages.
+#   userland custody           `privd_test`'s requests, each carrying three or
+#                              four descriptors as SCM_RIGHTS.
+#   userland diskblocks        `persist_test`'s filler meeting the reserve of
+#                              the 128M tests image.
+#   userland kernelmeta, process, task, fdslot
+#                              `sessions_test`'s fork bomb: a person's 256
+#                              processes and 2048 tasks beside the suite's own.
 boot	kernelmeta	1802
 post-kernel-tests	commitpages	2564
 post-kernel-tests	custody	8

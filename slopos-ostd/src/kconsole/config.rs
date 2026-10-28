@@ -81,12 +81,10 @@ pub fn enabled() -> bool {
     (PACKED.load(Ordering::Relaxed) as u8) != 0
 }
 
-/// Accepts the spellings the test harness already does, so one boot line reads
-/// consistently.
 fn parse_bool(value: &str) -> Option<bool> {
     match value {
-        "on" | "true" | "yes" | "enabled" | "1" => Some(true),
-        "off" | "false" | "no" | "disabled" | "0" => Some(false),
+        "on" => Some(true),
+        "off" => Some(false),
         _ => None,
     }
 }
@@ -107,78 +105,124 @@ fn parse_mask(value: &str) -> Option<u8> {
     u8::from_str_radix(digits, 16).ok()
 }
 
+/// A cmdline's `kconsole*` keys: the policy they name, and which of them were
+/// ignored because their value did not parse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Parsed {
+    pub config: KConfig,
+    /// [`Parsed::BAD_MASK`], [`Parsed::BAD_SERIAL`], [`Parsed::BAD_ARM_MS`],
+    /// [`Parsed::BAD_MAX_LINES`], [`Parsed::BAD_PROBE_MS`].
+    pub rejected: u8,
+}
+
+impl Parsed {
+    pub const BAD_MASK: u8 = 1 << 0;
+    pub const BAD_SERIAL: u8 = 1 << 1;
+    pub const BAD_ARM_MS: u8 = 1 << 2;
+    pub const BAD_MAX_LINES: u8 = 1 << 3;
+    pub const BAD_PROBE_MS: u8 = 1 << 4;
+}
+
 /// Parse every `kconsole*` key out of a cmdline.
 ///
-/// Unknown keys and malformed values keep the default, so a typo degrades to
-/// the shipped policy rather than to a disabled console.
-pub fn parse(cmdline: &str) -> KConfig {
+/// A malformed value keeps the default and is reported in
+/// [`Parsed::rejected`], so a typo degrades to the shipped policy rather than
+/// to a disabled console, and says so.
+pub fn parse(cmdline: &str) -> Parsed {
     let mut cfg = KConfig::defaults();
+    let mut rejected = 0;
     for token in cmdline.split_whitespace() {
         let Some((key, value)) = token.split_once('=') else {
             continue;
         };
         match key {
-            "kconsole" => {
-                if let Some(mask) = parse_mask(value) {
-                    cfg.mask = mask;
-                }
-            }
-            "kconsole.serial" => {
-                if let Some(flag) = parse_bool(value) {
-                    cfg.serial = flag;
-                }
-            }
-            "kconsole.arm_ms" => {
-                if let Some(ms) = parse_u16(value) {
-                    cfg.arm_ms = ms;
-                }
-            }
-            "kconsole.max_lines" => {
-                if let Some(lines) = parse_u16(value) {
-                    cfg.max_lines = lines;
-                }
-            }
-            "kconsole.probe_ms" => {
-                if let Some(ms) = parse_u16(value) {
-                    cfg.probe_ms = ms;
-                }
-            }
+            "kconsole" => match parse_mask(value) {
+                Some(mask) => cfg.mask = mask,
+                None => rejected |= Parsed::BAD_MASK,
+            },
+            "kconsole.serial" => match parse_bool(value) {
+                Some(flag) => cfg.serial = flag,
+                None => rejected |= Parsed::BAD_SERIAL,
+            },
+            "kconsole.arm_ms" => match parse_u16(value) {
+                Some(ms) => cfg.arm_ms = ms,
+                None => rejected |= Parsed::BAD_ARM_MS,
+            },
+            "kconsole.max_lines" => match parse_u16(value) {
+                Some(lines) => cfg.max_lines = lines,
+                None => rejected |= Parsed::BAD_MAX_LINES,
+            },
+            "kconsole.probe_ms" => match parse_u16(value) {
+                Some(ms) => cfg.probe_ms = ms,
+                None => rejected |= Parsed::BAD_PROBE_MS,
+            },
             _ => {}
         }
     }
-    cfg
+    Parsed {
+        config: cfg,
+        rejected,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn empty_cmdline_is_the_default() {
-        assert_eq!(parse(""), KConfig::defaults());
-        assert_eq!(parse("tests=on lockdep=warn"), KConfig::defaults());
+    fn config(cmdline: &str) -> KConfig {
+        parse(cmdline).config
     }
 
     #[test]
-    fn master_switch_accepts_both_spellings() {
-        assert_eq!(parse("kconsole=off").mask, 0);
-        assert_eq!(parse("kconsole=0").mask, 0);
-        assert_eq!(parse("kconsole=on").mask, MASK_DEFAULT);
+    fn empty_cmdline_is_the_default() {
+        for cmdline in ["", "tests=on lockdep=warn"] {
+            let parsed = parse(cmdline);
+            assert_eq!(parsed.config, KConfig::defaults());
+            assert_eq!(parsed.rejected, 0);
+        }
+    }
+
+    #[test]
+    fn master_switch_takes_on_and_off() {
+        assert_eq!(config("kconsole=off").mask, 0);
+        assert_eq!(config("kconsole=on").mask, MASK_DEFAULT);
+        assert_eq!(parse("kconsole=off kconsole=on").rejected, 0);
+    }
+
+    #[test]
+    fn other_boolean_spellings_keep_the_default_and_are_reported() {
+        for value in [
+            "true", "yes", "enabled", "false", "no", "disabled", "ON", "Off", "0", "1",
+        ] {
+            let line = std::format!("kconsole.serial={value}");
+            let parsed = parse(&line);
+            assert!(parsed.config.serial, "{line}");
+            assert_eq!(parsed.rejected, Parsed::BAD_SERIAL, "{line}");
+        }
+        for value in ["true", "false", "no", "disabled"] {
+            let line = std::format!("kconsole={value}");
+            let parsed = parse(&line);
+            assert_eq!(parsed.config.mask, MASK_DEFAULT, "{line}");
+            assert_eq!(parsed.rejected, Parsed::BAD_MASK, "{line}");
+        }
     }
 
     #[test]
     fn hex_mask_names_a_class_the_default_refuses() {
-        assert_eq!(parse("kconsole=0x3").mask, MASK_ALL);
-        assert_eq!(parse("kconsole=3").mask, MASK_ALL);
-        assert!(parse("kconsole=0x3").mask & KCMD_DESTRUCTIVE != 0);
-        assert!(parse("kconsole=on").mask & KCMD_DESTRUCTIVE == 0);
+        assert_eq!(config("kconsole=0x3").mask, MASK_ALL);
+        assert_eq!(config("kconsole=3").mask, MASK_ALL);
+        assert_eq!(config("kconsole=0").mask, 0);
+        assert!(config("kconsole=0x3").mask & KCMD_DESTRUCTIVE != 0);
+        assert!(config("kconsole=on").mask & KCMD_DESTRUCTIVE == 0);
     }
 
     #[test]
     fn sub_knobs_parse() {
-        let cfg = parse(
+        let parsed = parse(
             "kconsole.serial=off kconsole.arm_ms=500 kconsole.max_lines=64 kconsole.probe_ms=10",
         );
+        assert_eq!(parsed.rejected, 0);
+        let cfg = parsed.config;
         assert!(!cfg.serial);
         assert_eq!(cfg.arm_ms, 500);
         assert_eq!(cfg.max_lines, 64);
@@ -186,16 +230,27 @@ mod tests {
     }
 
     #[test]
-    fn malformed_values_keep_the_default() {
-        assert_eq!(parse("kconsole=maybe").mask, MASK_DEFAULT);
-        assert_eq!(parse("kconsole.arm_ms=99999999").arm_ms, DEFAULT_ARM_MS);
-        assert_eq!(parse("kconsole.arm_ms=").arm_ms, DEFAULT_ARM_MS);
-        assert!(parse("kconsole.serial=perhaps").serial);
+    fn malformed_values_keep_the_default_and_are_reported() {
+        let parsed = parse(
+            "kconsole=maybe kconsole.serial=perhaps kconsole.arm_ms=99999999 \
+             kconsole.max_lines= kconsole.probe_ms=-1",
+        );
+        assert_eq!(parsed.config, KConfig::defaults());
+        assert_eq!(
+            parsed.rejected,
+            Parsed::BAD_MASK
+                | Parsed::BAD_SERIAL
+                | Parsed::BAD_ARM_MS
+                | Parsed::BAD_MAX_LINES
+                | Parsed::BAD_PROBE_MS
+        );
     }
 
     #[test]
     fn a_bare_key_is_ignored() {
-        assert_eq!(parse("kconsole"), KConfig::defaults());
+        let parsed = parse("kconsole");
+        assert_eq!(parsed.config, KConfig::defaults());
+        assert_eq!(parsed.rejected, 0);
     }
 
     #[test]

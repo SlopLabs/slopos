@@ -404,7 +404,7 @@ pub enum IfaceError {
 impl IfaceTable {
     /// An empty table. The class comes from the caller so a scratch table is a
     /// different lockdep class from the live one.
-    pub const fn new(class: &'static slopos_ostd::sync::lock_tracking::LockClassKey) -> Self {
+    pub const fn new(class: &'static slopos_ostd::sync::LockClassKey) -> Self {
         Self {
             inner: SpinLock::new(
                 IfaceTableInner {

@@ -1,4 +1,4 @@
-use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS, MAX_INTERNAL_DAMAGE_REGIONS};
+use slopos_abi::damage::{DamageRect, MAX_DAMAGE_REGIONS};
 
 #[derive(Clone)]
 pub struct DamageTracker<const N: usize = MAX_DAMAGE_REGIONS> {
@@ -33,31 +33,6 @@ impl<const N: usize> DamageTracker<N> {
 
         if (self.count as usize) >= N {
             self.merge_smallest_pair();
-        }
-
-        if (self.count as usize) < N {
-            self.regions[self.count as usize] = rect;
-            self.count += 1;
-        } else {
-            self.full_damage = true;
-        }
-    }
-
-    pub fn add_merge_overlapping(&mut self, rect: DamageRect) {
-        if !rect.is_valid() {
-            return;
-        }
-
-        if self.full_damage {
-            return;
-        }
-
-        for i in 0..(self.count as usize) {
-            if self.regions[i].intersects(&rect) {
-                self.regions[i] = self.regions[i].union(&rect);
-                self.merge_all_overlapping();
-                return;
-            }
         }
 
         if (self.count as usize) < N {
@@ -108,27 +83,6 @@ impl<const N: usize> DamageTracker<N> {
         self.count -= 1;
     }
 
-    fn merge_all_overlapping(&mut self) {
-        if self.count <= 1 {
-            return;
-        }
-
-        let mut i = 0;
-        while i < self.count as usize {
-            let mut j = i + 1;
-            while j < self.count as usize {
-                if self.regions[i].intersects(&self.regions[j]) {
-                    self.regions[i] = self.regions[i].union(&self.regions[j]);
-                    self.count -= 1;
-                    self.regions[j] = self.regions[self.count as usize];
-                } else {
-                    j += 1;
-                }
-            }
-            i += 1;
-        }
-    }
-
     #[inline]
     pub fn clear(&mut self) {
         self.count = 0;
@@ -145,17 +99,6 @@ impl<const N: usize> DamageTracker<N> {
         &self.regions[..self.count as usize]
     }
 
-    pub fn bounding_box(&self) -> DamageRect {
-        if self.count == 0 {
-            return DamageRect::invalid();
-        }
-        let mut result = self.regions[0];
-        for i in 1..self.count as usize {
-            result = result.union(&self.regions[i]);
-        }
-        result
-    }
-
     #[inline]
     pub fn is_dirty(&self) -> bool {
         self.count > 0 || self.full_damage
@@ -165,35 +108,4 @@ impl<const N: usize> DamageTracker<N> {
     pub fn is_empty(&self) -> bool {
         self.count == 0 && !self.full_damage
     }
-
-    #[inline]
-    pub fn is_full_damage(&self) -> bool {
-        self.full_damage
-    }
-
-    #[inline]
-    pub fn set_full_damage(&mut self) {
-        self.full_damage = true;
-    }
-
-    pub fn export_to_array<const M: usize>(&self) -> ([DamageRect; M], u8) {
-        let mut out = [DamageRect::invalid(); M];
-
-        if self.full_damage {
-            return (out, u8::MAX);
-        }
-
-        let export_count = (self.count as usize).min(M);
-        for i in 0..export_count {
-            out[i] = self.regions[i];
-        }
-
-        if (self.count as usize) > M {
-            return (out, u8::MAX);
-        }
-
-        (out, export_count as u8)
-    }
 }
-
-pub type InternalDamageTracker = DamageTracker<MAX_INTERNAL_DAMAGE_REGIONS>;

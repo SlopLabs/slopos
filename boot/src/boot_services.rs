@@ -1,7 +1,7 @@
 use slopos_hermetic::{BootCtx, BspInit};
 use slopos_ostd::klog_info;
 
-use crate::early_init::{boot_init_priority, boot_mark_initialized};
+use crate::early_init::boot_init_priority;
 use slopos_core::exec;
 use slopos_sched::scheduler::{
     boot_step_idle_task, boot_step_scheduler_init, boot_step_task_manager_init,
@@ -14,11 +14,11 @@ use slopos_drivers::block::LocateError;
 use slopos_drivers::{block, crash};
 use slopos_fs::blockdev::BlockDevice;
 use slopos_fs::devfs::{DEV_NAME_MAX, devfs_register_crash_store, devfs_resolve_block_source};
-use slopos_fs::ext2_vfs::Ext2Mount;
+use slopos_fs::ext4_vfs::Ext4Mount;
 use slopos_fs::verity::VerityStatus;
 use slopos_fs::vfs::{
-    MOUNT_RDONLY, VfsError, mount, unmount, vfs_claim_block_source, vfs_ext2_pool_claim,
-    vfs_ext2_pool_release, vfs_register_block_layer,
+    MOUNT_RDONLY, VfsError, mount, unmount, vfs_claim_block_source, vfs_ext4_pool_claim,
+    vfs_ext4_pool_release, vfs_register_block_layer,
 };
 use slopos_fs::{RootBacking, vfs_init_builtin_filesystems_with};
 use slopos_ostd::KBox;
@@ -54,7 +54,7 @@ pub fn set_verity_required(required: bool) {
     VERITY_REQUIRED.store(required, Ordering::Relaxed);
 }
 
-/// Set once the initramfs is unpacked, so [`boot_step_fs_init`] demotes the ext2
+/// Set once the initramfs is unpacked, so [`boot_step_fs_init`] demotes the ext4
 /// disk to a `/mnt` secondary instead of replacing `/`.
 static ROOTFS_IS_RAMFS: AtomicBool = AtomicBool::new(false);
 /// The boot module's base is indexed for a disk root, which `fs init` mounts
@@ -138,7 +138,7 @@ crate::boot_init!(
 /// Bring up the RAM-resident root from a Limine-loaded initramfs (cpio) module.
 ///
 /// Runs before [`boot_step_fs_init`]; a no-op on the disk path, where that
-/// step mounts the ext2 disk at `/` instead.
+/// step mounts the ext4 disk at `/` instead.
 fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     if let crate::base::Choice::Refused { current, previous } = crate::base::choice() {
         klog_info!(
@@ -172,7 +172,7 @@ fn boot_step_rootfs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
             return -1;
         }
         klog_info!(
-            "ROOTFS: root=disk — / is the ext2 disk{}",
+            "ROOTFS: root=disk — / is the ext4 disk{}",
             if writable_disk {
                 ", and what it holds persists"
             } else {
@@ -273,9 +273,9 @@ fn mount_base() -> i32 {
     0
 }
 
-/// Mount flags for the ext2 disk: read-only when the filesystem or its device
+/// Mount flags for the ext4 disk: read-only when the filesystem or its device
 /// refuses writes, so the refusal reaches userland as `EROFS` at the VFS.
-fn ext2_mount_flags(fs: &'static Ext2Mount) -> u32 {
+fn ext4_mount_flags(fs: &'static Ext4Mount) -> u32 {
     if fs.is_read_only() { MOUNT_RDONLY } else { 0 }
 }
 
@@ -288,7 +288,7 @@ enum DiskAttachOutcome {
     Unclaimable,
     NoMemory,
     MountFailed,
-    Mounted(slopos_fs::Ext2MountInfo),
+    Mounted(slopos_fs::Ext4MountInfo),
 }
 
 /// The attach verdict, computed once: two boot steps need it, and
@@ -309,13 +309,13 @@ fn attach_root_once() -> DiskAttachOutcome {
         .unwrap_or(DiskAttachOutcome::NoDisk)
 }
 
-/// The pooled ext2 instance the root disk is attached to. Named here because
+/// The pooled ext4 instance the root disk is attached to. Named here because
 /// two boot steps mount it and `mount(2)` must not be able to claim it.
-static ROOT_EXT2: OnceLock<&'static Ext2Mount> = OnceLock::new();
+static ROOT_EXT4: OnceLock<&'static Ext4Mount> = OnceLock::new();
 
 /// The instance `/` (or `/mnt`) is backed by, once [`attach_root`] has run.
-fn root_ext2() -> Option<&'static Ext2Mount> {
-    ROOT_EXT2.get().copied()
+fn root_ext4() -> Option<&'static Ext4Mount> {
+    ROOT_EXT4.get().copied()
 }
 
 /// A device a boot step names that is not there yet may be a USB disk the
@@ -383,19 +383,19 @@ fn attach_root() -> DiskAttachOutcome {
         Err(outcome) => return outcome,
     };
     let name = core::str::from_utf8(&buf[..len]).unwrap_or("?");
-    let Some(fs) = vfs_ext2_pool_claim() else {
-        klog_info!("FS: no ext2 instance left for the root disk");
+    let Some(fs) = vfs_ext4_pool_claim() else {
+        klog_info!("FS: no ext4 instance left for the root disk");
         return DiskAttachOutcome::NoMemory;
     };
     match fs.attach(window, false) {
         Ok(info) => {
             klog_info!("FS: the root disk is {}", name);
-            ROOT_EXT2.call_once(|| fs);
+            ROOT_EXT4.call_once(|| fs);
             DiskAttachOutcome::Mounted(info)
         }
         Err(e) => {
-            klog_info!("FS: {} found but ext2 init failed: {:?}", name, e);
-            vfs_ext2_pool_release(fs, false);
+            klog_info!("FS: {} found but ext4 init failed: {:?}", name, e);
+            vfs_ext4_pool_release(fs, false);
             DiskAttachOutcome::MountFailed
         }
     }
@@ -407,7 +407,7 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     let outcome = attach_root_once();
     if let DiskAttachOutcome::Mounted(info) = outcome {
         klog_info!(
-            "FS: ext2 initialized from the root disk ({}, verity {})",
+            "FS: ext4 initialized from the root disk ({}, verity {})",
             if info.read_only {
                 "read-only"
             } else {
@@ -440,11 +440,11 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
         let verified = matches!(
             outcome,
             DiskAttachOutcome::NoDisk
-                | DiskAttachOutcome::Mounted(slopos_fs::Ext2MountInfo {
+                | DiskAttachOutcome::Mounted(slopos_fs::Ext4MountInfo {
                     verity: VerityStatus::Verified { .. },
                     ..
                 })
-                | DiskAttachOutcome::Mounted(slopos_fs::Ext2MountInfo {
+                | DiskAttachOutcome::Mounted(slopos_fs::Ext4MountInfo {
                     verity: VerityStatus::VerifiedWritable { .. },
                     ..
                 })
@@ -459,31 +459,31 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
     }
 
     if ROOTFS_IS_RAMFS.load(Ordering::Relaxed) {
-        if let Some(fs) = root_ext2() {
-            let flags = ext2_mount_flags(fs);
+        if let Some(fs) = root_ext4() {
+            let flags = ext4_mount_flags(fs);
             match mount(b"/mnt", fs, flags) {
                 Ok(_) => klog_info!(
-                    "VFS: mounted ext2 at /mnt (secondary, {})",
+                    "VFS: mounted ext4 at /mnt (secondary, {})",
                     if flags & MOUNT_RDONLY != 0 {
                         "read-only"
                     } else {
                         "read-write"
                     },
                 ),
-                Err(e) => klog_info!("VFS: failed to mount ext2 at /mnt: {:?}", e),
+                Err(e) => klog_info!("VFS: failed to mount ext4 at /mnt: {:?}", e),
             }
         }
         return 0;
     }
 
-    let root = root_ext2().map_or(RootBacking::Ramfs, RootBacking::Ext2);
+    let root = root_ext4().map_or(RootBacking::Ramfs, RootBacking::Ext4);
     if vfs_init_builtin_filesystems_with(root).is_ok() {
-        if let Some(fs) = root_ext2() {
+        if let Some(fs) = root_ext4() {
             // The kernel-test phase may already have mounted RamFs at `/` and
             // tripped the one-shot init flag, so the call above returned without
-            // mounting ext2.
+            // mounting ext4.
             let _ = unmount(b"/");
-            let flags = ext2_mount_flags(fs);
+            let flags = ext4_mount_flags(fs);
             match mount(b"/", fs, flags) {
                 Ok(_) => {
                     if flags & MOUNT_RDONLY == 0 {
@@ -492,7 +492,7 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
                         );
                     }
                     klog_info!(
-                        "VFS: mounted / (ext2, {}), /tmp and /run (ramfs), /dev (devfs), /dev/shm (ramfs)",
+                        "VFS: mounted / (ext4, {}), /tmp and /run (ramfs), /dev (devfs), /dev/shm (ramfs)",
                         if flags & MOUNT_RDONLY != 0 {
                             "read-only"
                         } else {
@@ -504,7 +504,7 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
                     }
                 }
                 Err(e) => {
-                    klog_info!("VFS: failed to install ext2 root: {:?}", e);
+                    klog_info!("VFS: failed to install ext4 root: {:?}", e);
                     return -1;
                 }
             }
@@ -520,13 +520,12 @@ fn boot_step_fs_init(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
 }
 
 /// `mount=<source>:<path>`, repeatable and applied in cmdline order, so a later
-/// entry may mount inside an earlier one. Each is an ext2 mount through the
+/// entry may mount inside an earlier one. Each is an ext4 mount through the
 /// same path `mount(2)` takes; a failure is one line and the boot goes on, as
 /// an absent `root=` device does. The kept directories are held after them,
 /// so a `/var` of its own holds the store.
 fn boot_step_cmdline_mounts_fn(_ctx: &mut BootCtx<'_, BspInit>) {
-    let cmdline =
-        slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(crate::early_init::boot_get_cmdline());
+    let cmdline = crate::early_init::boot_get_cmdline();
     for token in cmdline.iter().flat_map(|c| c.split_ascii_whitespace()) {
         if let Some(spec) = token.strip_prefix("mount=") {
             apply_cmdline_mount(spec);
@@ -549,7 +548,7 @@ fn apply_cmdline_mount(spec: &str) {
         source.as_bytes(),
         path.as_bytes(),
         b"/",
-        b"ext2",
+        b"ext4",
         0,
         &slopos_fs::vfs::Subject::KERNEL,
     ) {
@@ -559,7 +558,7 @@ fn apply_cmdline_mount(spec: &str) {
                 .and_then(|canon| slopos_fs::vfs::mount_at(canon.as_bytes()))
                 .is_some_and(|m| m.read_only());
             klog_info!(
-                "MOUNT: {} at {} (ext2, {})",
+                "MOUNT: {} at {} (ext4, {})",
                 source,
                 path,
                 if read_only { "read-only" } else { "read-write" }
@@ -674,7 +673,7 @@ fn mount_payload() {
         );
         return;
     }
-    match slopos_fs::vfs::init::vfs_ext2_mount_readonly(layout::PAYLOAD_DIR.as_bytes(), device) {
+    match slopos_fs::vfs::init::vfs_ext4_mount_readonly(layout::PAYLOAD_DIR.as_bytes(), device) {
         Ok(_) => klog_info!(
             "INSTALL: the payload {} is at {} ({} bytes)",
             located.partition,
@@ -767,7 +766,6 @@ crate::boot_init!(
 );
 
 fn boot_step_mark_kernel_ready_fn(_ctx: &mut BootCtx<'_, BspInit>) {
-    boot_mark_initialized();
     klog_info!("Kernel core services initialized.");
 }
 

@@ -50,8 +50,6 @@ pub const MAX_SOCKETS: usize = 64;
 /// folding. Must equal `SlabSocketTable::MAX_CAPACITY`.
 pub const MAX_SOCKET_SLOTS: usize = 1024;
 
-pub const INVALID_SOCKET_IDX: u32 = u32::MAX;
-
 // No implicit padding in any struct below: every gap is a named `_padN`, so
 // `#[derive(Default)]` writes every byte of `size_of` and the copy-out to user
 // space has nothing uninitialised to disclose. A kernel-side producer must

@@ -1,22 +1,22 @@
 //! Path resolution: a working directory, symlink following and its budget,
 //! the 255-byte name limit, hard links and `set_times`.
 
-use slopos_abi::fs::UserFsEntry;
 use slopos_ostd::KVec;
 use slopos_testing::TestResult;
 
-use crate::ext2::Ext2Fs;
-use crate::ext2::ondisk::InodeTime;
+use crate::ext4::Ext4Fs;
+use crate::ext4::ondisk::InodeTime;
 use crate::vfs::Timestamp;
 use crate::vfs::{
     FileType, RESOLVE_FOLLOW, RESOLVE_NOFOLLOW_FINAL, VfsError, VfsResult, resolve_parent_at,
-    resolve_path, resolve_path_at, vfs_link, vfs_list, vfs_mkdir, vfs_open, vfs_open_flags_at,
-    vfs_stat, vfs_stat_at, vfs_symlink_at, vfs_unlink, vfs_utimens,
+    resolve_path, resolve_path_at, vfs_link, vfs_mkdir, vfs_open, vfs_open_flags_at, vfs_stat,
+    vfs_stat_at, vfs_symlink_at, vfs_unlink, vfs_utimens,
 };
 
-use super::{ensure_vfs_ready, phase3_image, with_mounted};
+use super::listing::list_dir;
+use super::{ensure_vfs_ready, with_mounted, writable_file_image};
 
-const EXT2_ROOT: u32 = 2;
+const ROOT_INODE: u32 = 2;
 
 /// `dir` then `/` then `name`, on the heap: these paths do not belong on a
 /// 2 KiB frame.
@@ -397,20 +397,11 @@ pub fn test_resolve_max_name_roundtrips() -> TestResult {
         return slopos_testing::fail!("a name at the limit did not re-open");
     }
 
-    let Ok(mut entries) = KVec::filled(UserFsEntry::new(), 8) else {
-        return TestResult::Fail;
-    };
-    let count = match vfs_list(dir.as_slice(), &mut entries) {
-        Ok(n) => n,
+    let entries = match list_dir(dir.as_slice()) {
+        Ok((_, entries)) => entries,
         Err(e) => return slopos_testing::fail!("listing the fixture failed: {:?}", e),
     };
-    let mut listed = false;
-    for entry in entries.iter().take(count) {
-        if entry.name_str().as_bytes() == name.as_slice() {
-            listed = true;
-        }
-    }
-    if !listed {
+    if !entries.iter().any(|entry| entry.name() == name.as_slice()) {
         return slopos_testing::fail!("a name at the limit listed truncated or not at all");
     }
 
@@ -546,8 +537,8 @@ pub fn test_vfs_link_refuses_cross_mount_and_directories() -> TestResult {
 
 /// A hard link is a second name for one inode, and the first `unlink` takes
 /// the name without taking the file.
-pub fn test_ext2_hard_link_shares_the_inode() -> TestResult {
-    let Some(device) = phase3_image(b"orig.txt", b"hardlinked") else {
+pub fn test_ext4_hard_link_shares_the_inode() -> TestResult {
+    let Some(device) = writable_file_image(b"orig.txt", b"hardlinked") else {
         return TestResult::Skipped;
     };
     match with_mounted(&device, hard_link_inner) {
@@ -557,11 +548,11 @@ pub fn test_ext2_hard_link_shares_the_inode() -> TestResult {
 }
 
 #[inline(never)]
-fn hard_link_inner(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn hard_link_inner(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let orig = fs
         .resolve_path(b"/orig.txt")
         .map_err(|_| "resolve source")?;
-    fs.link_entry(EXT2_ROOT, b"second.txt", orig)
+    fs.link_entry(ROOT_INODE, b"second.txt", orig)
         .map_err(|_| "link_entry refused a regular file")?;
 
     let second = fs
@@ -575,14 +566,14 @@ fn hard_link_inner(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     }
 
     // A directory is refused, and so is a name that already exists.
-    if fs.link_entry(EXT2_ROOT, b"dirlink", EXT2_ROOT).is_ok() {
+    if fs.link_entry(ROOT_INODE, b"dirlink", ROOT_INODE).is_ok() {
         return Err("a directory was hard-linked");
     }
-    if fs.link_entry(EXT2_ROOT, b"second.txt", orig).is_ok() {
+    if fs.link_entry(ROOT_INODE, b"second.txt", orig).is_ok() {
         return Err("a duplicate name was accepted");
     }
 
-    fs.unlink_entry(EXT2_ROOT, b"orig.txt")
+    fs.unlink_entry(ROOT_INODE, b"orig.txt")
         .map_err(|_| "unlink the first name")?;
     if fs.resolve_path(b"/orig.txt").is_ok() {
         return Err("the unlinked name still resolves");
@@ -600,7 +591,7 @@ fn hard_link_inner(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// `set_times` is observable through `stat`, on the RAM root and on ext2.
+/// `set_times` is observable through `stat`, on the RAM root and on ext4.
 pub fn test_set_times_is_observable_through_stat() -> TestResult {
     if !ensure_vfs_ready() {
         return TestResult::Fail;
@@ -673,10 +664,10 @@ pub fn test_set_times_is_observable_through_stat() -> TestResult {
     TestResult::Pass
 }
 
-/// The ext2 half, through the filesystem rather than the VFS, so the on-disk
+/// The ext4 half, through the filesystem rather than the VFS, so the on-disk
 /// inode fields are what is checked.
-pub fn test_ext2_set_times_roundtrips() -> TestResult {
-    let Some(device) = phase3_image(b"stamped.txt", b"times") else {
+pub fn test_ext4_set_times_roundtrips() -> TestResult {
+    let Some(device) = writable_file_image(b"stamped.txt", b"times") else {
         return TestResult::Skipped;
     };
     match with_mounted(&device, set_times_inner) {
@@ -686,7 +677,7 @@ pub fn test_ext2_set_times_roundtrips() -> TestResult {
 }
 
 #[inline(never)]
-fn set_times_inner(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn set_times_inner(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let ino = fs
         .resolve_path(b"/stamped.txt")
         .map_err(|_| "resolve the fixture")?;
@@ -716,7 +707,7 @@ fn set_times_inner(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 
 /// `(atime, mtime)` in seconds, as the record holds them.
 #[inline(never)]
-fn times_of(fs: &mut Ext2Fs<'_>, ino: u32) -> Result<(i64, i64), &'static str> {
+fn times_of(fs: &mut Ext4Fs<'_>, ino: u32) -> Result<(i64, i64), &'static str> {
     let inode = fs.read_inode(ino).map_err(|_| "read inode")?;
     Ok((inode.atime.secs(), inode.mtime.secs()))
 }
@@ -901,9 +892,9 @@ slopos_testing::stest!(
     name = test_vfs_link_refuses_cross_mount_and_directories,
     suite = fs
 );
-slopos_testing::stest!(name = test_ext2_hard_link_shares_the_inode, suite = fs);
+slopos_testing::stest!(name = test_ext4_hard_link_shares_the_inode, suite = fs);
 slopos_testing::stest!(name = test_set_times_is_observable_through_stat, suite = fs);
-slopos_testing::stest!(name = test_ext2_set_times_roundtrips, suite = fs);
+slopos_testing::stest!(name = test_ext4_set_times_roundtrips, suite = fs);
 slopos_testing::stest!(
     name = test_resolve_dotdot_is_taken_against_the_symlink_target,
     suite = fs

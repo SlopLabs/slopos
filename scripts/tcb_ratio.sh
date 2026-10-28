@@ -6,12 +6,11 @@
 # scripts/check_unsafe_outside_ostd.sh.
 #
 # Pass `--max <pct>` to make the ratio a hard gate — the script exits 1
-# if the measured ratio exceeds the threshold. Used in CI to assert the
-# Phase 1 OSTD-trust-base ratio obligation (≤ 1.5 %).
+# if the measured ratio exceeds the threshold. The gates hold it to 1.0 %.
 #
 # Usage:
 #   scripts/tcb_ratio.sh                # informational
-#   scripts/tcb_ratio.sh --max 1.0      # gate at 1.0 % (Phase 2 bound)
+#   scripts/tcb_ratio.sh --max 1.0      # gate at 1.0 %
 #
 # Definitions:
 #   - "unsafe tokens": lines under slopos-ostd/src/ and named TCB
@@ -28,8 +27,6 @@
 #     automatically because the kernel image does not link them.
 #   - "TCB annex LoC": non-blank, non-comment lines in the named annex
 #     source trees (ANNEX_DIRS), each pinned by scripts/check_vendor_pin.sh.
-#
-# Phase 1 target: ≤ 1.5 %.  Phase 2 target: ≤ 1.0 %.
 
 set -euo pipefail
 
@@ -184,7 +181,7 @@ for annex in "${ANNEX_DIRS[@]}"; do
     printf '  annex %-22s %d\n' "$annex:" "${annex_loc[$annex]}"
 done
 printf '  total:                       %d\n' "$loc"
-printf 'TCB ratio:                     %s %%  (target Phase 1: <= 1.5 %%, Phase 2: <= 1.0 %%)\n' "$ratio"
+printf 'TCB ratio:                     %s %%\n' "$ratio"
 
 if [ -n "$max_pct" ]; then
     over=$(awk -v r="$ratio" -v m="$max_pct" 'BEGIN { print (r+0 > m+0) ? 1 : 0 }')

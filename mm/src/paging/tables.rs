@@ -6,7 +6,6 @@
 //! load per level — no lock, no allocation, no reference into a
 //! page-table frame — so a read never becomes a synchronisation event.
 
-use core::ffi::c_int;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
@@ -76,8 +75,8 @@ pub fn init_paging() {
     klog_debug!("Paging system initialized successfully");
 }
 
-pub fn is_mapped(vaddr: VirtAddr) -> c_int {
-    (!virt_to_phys(vaddr).is_null()) as c_int
+pub fn is_mapped(vaddr: VirtAddr) -> bool {
+    !virt_to_phys(vaddr).is_null()
 }
 
 pub fn get_page_size(vaddr: VirtAddr) -> u64 {

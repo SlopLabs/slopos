@@ -4,8 +4,8 @@
 
 use slopos_ostd::{AllocError, KVec};
 
-// The vtable lives in OSTD so `hermetic_state!` and the legacy
-// `register_hermetic_state!` write one canonical type into the section.
+// The vtable lives in OSTD so `hermetic_state!` writes the same type into the
+// section that this walker reads.
 pub use slopos_ostd::test_support::hermetic::HermeticVTable;
 
 /// Iterate every registered `HermeticVTable` in linker order, which depends on
@@ -40,23 +40,12 @@ impl From<AllocError> for RegistryError {
 pub fn topo_order() -> Result<KVec<&'static HermeticVTable>, RegistryError> {
     let entries: KVec<&'static HermeticVTable> = registry_iter().collect();
     let n = entries.len();
-    let mut in_degree: KVec<usize> = (0..n).map(|_| 0usize).collect();
 
-    // TODO(tech-debt): `in_degree` is written but never read — drop the counter
-    // or drive the emit loop below from it.
-    for (i, vt) in entries.iter().enumerate() {
+    for vt in entries.iter() {
         for dep_name in vt.depends_on {
-            let mut found = false;
-            for other in entries.iter() {
-                if other.name == *dep_name {
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
+            if !entries.iter().any(|other| other.name == *dep_name) {
                 return Err(RegistryError::MissingDep);
             }
-            in_degree[i] += 1;
         }
     }
 

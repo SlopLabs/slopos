@@ -17,7 +17,7 @@
 //! instead: `set_current_runnable` cancels the committed block, and
 //! `yield_blocked_task` is state-aware and returns without switching.
 
-use crate::sync::lock_tracking::LockClassKey;
+use crate::sync::lock_graph::LockClassKey;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
@@ -164,10 +164,9 @@ pub unsafe trait WaitQueueBackend: Send + Sync + 'static {
     /// strip that stale presence so it is not double-dispatched.
     fn set_current_runnable(&self);
 
-    /// Wake a previously-blocked task, named by id. Returns 0 on success or a
-    /// negative errno-shaped value on failure — including the case where the
-    /// task is already gone, which is not an error the queue can act on.
-    fn unblock_task(&self, task: WaitTaskHandle) -> i32;
+    /// Wake a previously-blocked task, named by id. `false` when the task is
+    /// already gone, which is not an error the queue can act on.
+    fn unblock_task(&self, task: WaitTaskHandle) -> bool;
 
     /// Current monotonic time in milliseconds.
     fn get_time_ms(&self) -> u64;
@@ -235,8 +234,8 @@ unsafe impl WaitQueueBackend for UnregisteredBackend {
     fn yield_blocked_task(&self) {}
     fn yield_blocked_task_with_timeout(&self, _timeout_ms: u32) {}
     fn set_current_runnable(&self) {}
-    fn unblock_task(&self, _task: WaitTaskHandle) -> i32 {
-        0
+    fn unblock_task(&self, _task: WaitTaskHandle) -> bool {
+        true
     }
     fn get_time_ms(&self) -> u64 {
         0
@@ -276,7 +275,7 @@ pub struct WaitQueueOps {
     pub yield_blocked_task: fn(),
     pub yield_blocked_task_with_timeout: fn(u32),
     pub set_current_runnable: fn(),
-    pub unblock_task: fn(WaitTaskHandle) -> i32,
+    pub unblock_task: fn(WaitTaskHandle) -> bool,
     pub get_time_ms: fn() -> u64,
     pub swap_parked_queue: fn(*mut c_void) -> *mut c_void,
     pub current_task_is_killed: fn() -> bool,
@@ -320,7 +319,7 @@ unsafe impl WaitQueueBackend for OpsBackend {
     fn set_current_runnable(&self) {
         (self.0.set_current_runnable)()
     }
-    fn unblock_task(&self, task: WaitTaskHandle) -> i32 {
+    fn unblock_task(&self, task: WaitTaskHandle) -> bool {
         (self.0.unblock_task)(task)
     }
     fn get_time_ms(&self) -> u64 {
@@ -397,7 +396,7 @@ pub fn current_task_is_killed() -> bool {
 /// Crate-visible so the kill path can issue the wake half of a kill without a
 /// second registration point.
 #[inline]
-pub(crate) fn unblock_task_by_id(task: WaitTaskHandle) -> i32 {
+pub(crate) fn unblock_task_by_id(task: WaitTaskHandle) -> bool {
     backend().unblock_task(task)
 }
 

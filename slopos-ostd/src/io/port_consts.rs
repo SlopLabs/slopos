@@ -7,20 +7,7 @@ use super::raw_port::Port;
 
 pub const COM1: Port<u8> = Port::new(0x3F8);
 
-pub const PIT_CHANNEL0: Port<u8> = Port::new(0x40);
-pub const PIT_COMMAND: Port<u8> = Port::new(0x43);
-
-pub const PS2_DATA: Port<u8> = Port::new(0x60);
-pub const PS2_STATUS: Port<u8> = Port::new(0x64);
-pub const PS2_COMMAND: Port<u8> = Port::new(0x64);
-
 pub const QEMU_DEBUG_EXIT: Port<u8> = Port::new(0xF4);
-
-pub const IO_DELAY: Port<u8> = Port::new(0x80);
-
-pub const ACPI_PM1A_CNT: Port<u16> = Port::new(0x604);
-pub const ACPI_PM1A_CNT_BOCHS: Port<u16> = Port::new(0xB004);
-pub const ACPI_PM1A_CNT_VBOX: Port<u16> = Port::new(0x4004);
 
 pub const UART_REG_RBR: u16 = 0;
 pub const UART_REG_THR: u16 = 0;

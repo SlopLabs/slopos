@@ -340,3 +340,28 @@ pub fn test_tty_lock_order_is_declared() -> TestResult {
         }
     }
 }
+
+slopos_testing::stest!(
+    name = test_drain_echo_defers_write_lock,
+    suite = tty_test_echo_defer
+);
+slopos_testing::stest!(
+    name = test_drain_ixoff_defers_peer_write,
+    suite = tty_test_echo_defer
+);
+slopos_testing::stest!(
+    name = test_tcoflush_rearms_ixoff,
+    suite = tty_test_echo_defer
+);
+slopos_testing::stest!(
+    name = test_staged_echo_counts_as_pending_output,
+    suite = tty_test_echo_defer
+);
+slopos_testing::stest!(
+    name = test_echo_queue_ring_semantics,
+    suite = tty_test_echo_defer
+);
+slopos_testing::stest!(
+    name = test_tty_lock_order_is_declared,
+    suite = tty_test_echo_defer
+);

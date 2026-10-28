@@ -20,8 +20,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const PREFIX: &str = "/usr/local";
-/// What the host installed there: an `identity` line, then
-/// `<kind> <size or -> <path>`.
+/// What the host installed there: an `identity` line, an `at` line naming
+/// where, then `<kind> <size or -> <path>`.
 const MANIFEST: &str = "/var/lib/slopos/trees/usr_local";
 /// What the host seeds on the self-hosting root for the ladder: a bare
 /// repository of one crate, a sparse registry of one crate, and the guest's

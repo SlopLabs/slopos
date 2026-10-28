@@ -17,11 +17,11 @@ pub const FIRST_UID: u32 = *slopos_abi::fs::EXTENSION_UIDS.start();
 pub const LAST_UID: u32 = *slopos_abi::fs::EXTENSION_UIDS.end();
 
 /// Give `record`'s own name and each user its images are granted the lowest
-/// uid that neither it nor `others` holds; whether any was given.
+/// uid that neither it nor `others` holds.
 pub fn allocate<'a>(
     record: &mut Record,
     others: impl IntoIterator<Item = &'a Record>,
-) -> Result<bool, &'static str> {
+) -> Result<(), &'static str> {
     let mut held: Vec<u32> = others
         .into_iter()
         .flat_map(|r| r.uids.iter().map(|&(_, uid)| uid))
@@ -36,7 +36,6 @@ pub fn allocate<'a>(
                 .flat_map(|image| image.grant.users.iter().cloned()),
         )
         .collect();
-    let mut given = false;
     for user in wanted {
         if record.uid(&user).is_some() {
             continue;
@@ -46,9 +45,8 @@ pub fn allocate<'a>(
             .ok_or("every uid for extensions' users is taken")?;
         held.push(uid);
         record.uids.push((user, uid));
-        given = true;
     }
-    Ok(given)
+    Ok(())
 }
 
 /// Each installed extension's users, whose home is its state directory, as
@@ -100,18 +98,17 @@ mod tests {
     #[test]
     fn a_uid_is_the_lowest_free_and_is_kept() {
         let mut hello = installed("hello", &["hello", "hello-worker"]);
-        assert_eq!(allocate(&mut hello, []), Ok(true));
-        assert_eq!(
-            hello.uids,
-            vec![("hello".into(), 100), ("hello-worker".into(), 101)]
-        );
-        assert_eq!(allocate(&mut hello, []), Ok(false));
+        assert_eq!(allocate(&mut hello, []), Ok(()));
+        let given = vec![("hello".into(), 100), ("hello-worker".into(), 101)];
+        assert_eq!(hello.uids, given);
+        assert_eq!(allocate(&mut hello, []), Ok(()));
+        assert_eq!(hello.uids, given);
         let mut tool = installed("tool", &[]);
-        assert_eq!(allocate(&mut tool, [&hello]), Ok(true));
+        assert_eq!(allocate(&mut tool, [&hello]), Ok(()));
         assert_eq!(tool.uids, vec![("tool".into(), 102)]);
         hello.remove();
         let mut late = installed("late", &["late"]);
-        assert_eq!(allocate(&mut late, [&hello, &tool]), Ok(true));
+        assert_eq!(allocate(&mut late, [&hello, &tool]), Ok(()));
         assert_eq!(late.uid("late"), Some(103));
     }
 

@@ -1,12 +1,11 @@
-use core::ffi::c_int;
 use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use slopos_arch::cpu;
 use slopos_drivers::crash::PanicRecord;
 use slopos_drivers::ps2::keyboard::poll_wait_enter;
 use slopos_mm::memory_init::is_memory_system_initialized;
+use slopos_ostd::cpu::x86_64 as cpu;
 use slopos_ostd::panic_recovery;
 use slopos_ostd::stacktrace::{self, StacktraceEntry};
 use slopos_ostd::sync::StateFlag;
@@ -95,10 +94,10 @@ fn abort(msg: &'static str, record: bool) -> ! {
     // Published before the bypass below, which force-releases locks a peer
     // takes at once: Release/Acquire only, so this narrows the window in which
     // it still believes this CPU can answer rather than closing it.
-    let dying_cpu = slopos_arch::get_current_cpu();
+    let dying_cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     slopos_mm::tlb::force_ack_local_shootdowns(dying_cpu);
     slopos_mm::tlb::notify_cpu_offline();
-    slopos_arch::pcr::mark_cpu_offline(dying_cpu);
+    slopos_ostd::cpu::x86_64::pcr::mark_cpu_offline(dying_cpu);
     slopos_sched::per_cpu::abandon_dispatch_for_dying_cpu(dying_cpu);
     slopos_ostd::panic::mark_cpu_stopped();
     slopos_ostd::panic::mark_fatal_abort();
@@ -159,15 +158,8 @@ fn panic_capture_backtrace(out: &mut [u64]) -> usize {
         frame_pointer: 0,
         return_address: 0,
     }; PANIC_BACKTRACE_MAX];
-    let captured = stacktrace::stacktrace_capture_from(
-        rbp,
-        entries.as_mut_ptr(),
-        PANIC_BACKTRACE_MAX as c_int,
-    );
-    if captured <= 0 {
-        return 0;
-    }
-    let n = (captured as usize).min(out.len());
+    let captured = stacktrace::stacktrace_capture_from(rbp, &mut entries);
+    let n = captured.min(out.len());
     for (slot, entry) in out[..n].iter_mut().zip(entries.iter()) {
         *slot = entry.return_address;
     }
@@ -196,19 +188,14 @@ fn panic_dump_backtrace_from(rbp: u64, emit: &mut dyn FnMut(&str)) {
         return_address: 0,
     }; PANIC_BACKTRACE_MAX];
 
-    let captured = stacktrace::stacktrace_capture_from(
-        rbp,
-        entries.as_mut_ptr(),
-        PANIC_BACKTRACE_MAX as c_int,
-    );
-    if captured <= 0 {
+    let captured = stacktrace::stacktrace_capture_from(rbp, &mut entries);
+    if captured == 0 {
         emit("Backtrace: <empty>");
         return;
     }
 
     emit("Backtrace (most recent call first):");
-    for i in 0..captured as usize {
-        let entry = &entries[i];
+    for (i, entry) in entries[..captured].iter().enumerate() {
         let mut line = MessageBuffer::new();
         if let Some(sym) = slopos_ostd::ksym::lookup(entry.return_address) {
             let _ = write!(
@@ -329,7 +316,7 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
 
     // Single-owner election, first CAS wins. A losing peer self-stops so it
     // neither contends on the console nor holds a lock the owner needs.
-    let cpu_id = slopos_arch::get_current_cpu() as u32;
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id() as u32;
     if !slopos_ostd::panic::claim_panic_owner(cpu_id) {
         loop {
             cpu::disable_interrupts();
@@ -346,7 +333,7 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
 
     // NMI is the only delivery that pierces a wedged IF=0 spin, and stopping the
     // peers is also what dissolves a TLB-shootdown ack wedge.
-    slopos_arch::pcr::send_nmi_broadcast();
+    slopos_ostd::cpu::x86_64::pcr::send_nmi_broadcast();
     wait_for_peer_stop();
 
     // On the emergency stacks, so panic `core::fmt` has guaranteed headroom and
@@ -355,7 +342,7 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
 }
 
 fn wait_for_peer_stop() {
-    let expected = (slopos_arch::pcr::get_pcr_count() as u32).saturating_sub(1);
+    let expected = (slopos_ostd::cpu::x86_64::pcr::get_pcr_count() as u32).saturating_sub(1);
     if expected == 0 {
         return;
     }
@@ -533,7 +520,7 @@ extern "sysv64" fn emergency_report() -> ! {
         panic_serial_write("System halted.");
     }
 
-    if is_memory_system_initialized() != 0 {
+    if is_memory_system_initialized() {
         execute_kernel();
     } else {
         panic_serial_write("Memory system unavailable; skipping paint ritual");

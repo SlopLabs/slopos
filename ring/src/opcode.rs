@@ -1,8 +1,8 @@
-//! Opcode dispatch (SLOPRING § 12).
+//! Opcode dispatch.
 //!
 //! Each opcode is a thin adapter over the equivalent sync syscall's
-//! **non-blocking probe**, so observable results match it (R12 parity) and no
-//! opcode introduces a new blocking primitive.
+//! **non-blocking probe**, so observable results match it and no opcode
+//! introduces a new blocking primitive.
 
 use core::ffi::c_int;
 use slopos_fs::fileio::FdTable;
@@ -22,7 +22,7 @@ use slopos_fs::fileio::{
 };
 use slopos_fs::vfs::path::open_resolve_flags;
 use slopos_mm::user_io_buf::{UserReadBuf, UserWriteBuf};
-use slopos_mm::user_ptr::UserBytes;
+use slopos_ostd::user::ptr::UserBytes;
 
 use crate::buffers::{BufSel, BufferRegistry};
 use crate::ring_obj::InFlight;
@@ -114,7 +114,7 @@ pub fn probe(
         OP_READ => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_read(f, sqe))),
         OP_WRITE => reject_buf(sel).unwrap_or_else(|| with_file(file, |f| probe_write(f, sqe))),
         // Socket-typed: these route through the socket send/recvmsg paths, not
-        // the generic file write/read (SLOPRING § 12).
+        // the generic file write/read.
         OP_SEND => with_file(file, |f| match sel {
             None => crate::net_glue::send_nonblock(f, sqe.addr, sqe.len, sqe.op_flags),
             Some(BufSel::Fixed { index }) => {
@@ -180,7 +180,7 @@ fn reject_buf(sel: Option<BufSel>) -> Option<Outcome> {
 
 /// Re-probe an in-flight row at harvest time. Same dispatch as `probe`,
 /// reconstructed from the stored row (re-validating the user buffer via
-/// a fresh `UserReadBuf`/`UserWriteBuf` each time — SLOPRING § 9).
+/// a fresh `UserReadBuf`/`UserWriteBuf` each time).
 pub fn reprobe(
     table: FdTable,
     row: &InFlight,
@@ -232,8 +232,8 @@ fn probe_write(file: &FileRef, sqe: &Sqe) -> Outcome {
     }
 }
 
-/// `OP_OPENAT`: non-blocking file open (SLOPRING § 12) as `who`, a file it
-/// creates taking `create_mode`. SlopOS fs opens are immediate, so this always
+/// `OP_OPENAT`: non-blocking file open as `who`, a file it creates taking
+/// `create_mode`. SlopOS fs opens are immediate, so this always
 /// completes inline with the new fd (`>= 0`) or a negated errno, and is never
 /// reprobed. An ownership op (installs an fd), so the caller reserves a CQE
 /// slot first.
@@ -277,8 +277,8 @@ pub fn open(table: FdTable, sqe: &Sqe, who: &Subject, create_mode: u16) -> Outco
     ))
 }
 
-/// `OP_CLOSE`: close `fd` via the ring (SLOPRING § 12). Always inline; returns
-/// `0` or a negated errno.
+/// `OP_CLOSE`: close `fd` via the ring. Always inline; returns `0` or a
+/// negated errno.
 fn probe_close(table: FdTable, sqe: &Sqe) -> Outcome {
     if sqe.fd < 0 {
         return Outcome::Inline(Errno::EBADF.raw());
@@ -294,8 +294,8 @@ fn probe_accept(table: FdTable, file: &FileRef) -> Outcome {
     }
 }
 
-/// `OP_CONNECT`: async non-blocking connect (SLOPRING § 12). `addr` is the user
-/// VA of a `SockAddrIn`; [`crate::net_glue::connect_nonblock`] initiates the
+/// `OP_CONNECT`: async non-blocking connect. `addr` is the user VA of a
+/// `SockAddrIn`; [`crate::net_glue::connect_nonblock`] initiates the
 /// handshake once and polls it on each re-probe. Not an ownership op — it
 /// installs no fd and consumes no bytes, so no CQE slot is pre-reserved.
 fn probe_connect(file: &FileRef, sqe: &Sqe, who: &crate::Submitter<'_>) -> Outcome {
@@ -355,8 +355,8 @@ pub fn needs_file_ref(opcode: u8) -> bool {
     )
 }
 
-/// Does this opcode transfer ownership / consume bytes on success, so
-/// it must reserve a CQE slot *before* running (SLOPRING § 11)?
+/// Does this opcode transfer ownership / consume bytes on success, so it must
+/// reserve a CQE slot *before* running?
 pub fn is_ownership_op(opcode: u8) -> bool {
     // Dropping their CQE would orphan an installed fd or destroy bytes already
     // consumed out of a kernel buffer.
@@ -366,10 +366,10 @@ pub fn is_ownership_op(opcode: u8) -> bool {
     )
 }
 
-// Authority classification (SLOPRING § 12). The assert below is what licenses
-// the ring carrying no capability snapshot: no opcode reaches a gated
-// capability, and the one that resolves a path is checked as the task entering
-// the ring, which is always of the creator's process.
+// Authority classification. The assert below is what licenses the ring
+// carrying no capability snapshot: no opcode reaches a gated capability, and
+// the one that resolves a path is checked as the task entering the ring, which
+// is always of the creator's process.
 
 use slopos_ostd::authority::Capability;
 

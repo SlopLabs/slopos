@@ -1,14 +1,14 @@
 //! The lockup detector's wiring into live per-CPU state. The sample state
 //! machine itself is pinned host-side in `slopos-ostd/tests/watchdog.rs`.
 
-use slopos_arch::pcr;
 use slopos_drivers::{apic, hpet};
+use slopos_ostd::cpu::x86_64::pcr;
 use slopos_ostd::lock_class;
 use slopos_ostd::watchdog;
 use slopos_testing::{TestResult, assert_test};
 
 pub fn test_heartbeat_advances_on_timer_tick() -> TestResult {
-    let cpu = pcr::get_current_cpu();
+    let cpu = pcr::current_cpu_id();
     let before = pcr::heartbeat_for_cpu(cpu);
 
     // Three tick periods, timed by a clock the LAPIC does not drive.
@@ -24,12 +24,12 @@ pub fn test_heartbeat_advances_on_timer_tick() -> TestResult {
 
 /// The property the long bounded loops depend on: progress without a tick.
 pub fn test_touch_advances_heartbeat() -> TestResult {
-    let cpu = pcr::get_current_cpu();
-    let flags = slopos_arch::cpu::save_flags_cli();
+    let cpu = pcr::current_cpu_id();
+    let flags = slopos_ostd::cpu::x86_64::save_flags_cli();
     let before = pcr::heartbeat_for_cpu(cpu);
     watchdog::touch();
     let after = pcr::heartbeat_for_cpu(cpu);
-    slopos_arch::cpu::restore_flags(flags);
+    slopos_ostd::cpu::x86_64::restore_flags(flags);
 
     assert_test!(after != before, "touch did not move the heartbeat");
     TestResult::Pass
@@ -38,7 +38,7 @@ pub fn test_touch_advances_heartbeat() -> TestResult {
 /// Leaving a `Suppress` scope must also move the heartbeat, so the first sample
 /// after it is not stale by construction.
 pub fn test_suppress_scopes_eligibility() -> TestResult {
-    let cpu = pcr::get_current_cpu();
+    let cpu = pcr::current_cpu_id();
     assert_test!(
         !pcr::watchdog_is_suppressed(cpu),
         "CPU was already suppressed before the scope"
@@ -70,7 +70,7 @@ pub fn test_masked_timer_is_not_watchable() -> TestResult {
     if !apic::timer::is_calibrated() {
         return TestResult::Skipped;
     }
-    let cpu = pcr::get_current_cpu();
+    let cpu = pcr::current_cpu_id();
     assert_test!(
         pcr::timer_is_armed(cpu),
         "timer should be armed before masking it"
@@ -116,7 +116,7 @@ pub fn test_probe_admits_one_at_a_time() -> TestResult {
     use watchdog::NmiDisposition;
 
     // An index no machine this runs on has, so a real detection cannot collide.
-    const SPARE: usize = slopos_arch::MAX_CPUS - 1;
+    const SPARE: usize = slopos_ostd::cpu::x86_64::pcr::MAX_CPUS - 1;
     watchdog::release_probe(SPARE);
 
     assert_test!(
@@ -152,7 +152,7 @@ pub fn test_holder_is_named_only_while_held() -> TestResult {
 
     let lock: SpinLock<u32> =
         SpinLock::new(0, lock_class!("test.watchdog_holder", LOCK_LEVEL_UNORDERED));
-    let me = pcr::get_current_cpu();
+    let me = pcr::current_cpu_id();
 
     assert_test!(
         lock.holder_cpu_for_test().is_none(),
@@ -221,11 +221,11 @@ pub fn test_force_unlock_releases_exactly_one() -> TestResult {
 pub fn test_a_wedged_cpu_is_reported_and_survives() -> TestResult {
     const FUSE: u32 = 3;
 
-    if slopos_arch::pcr::get_online_cpu_count() < 2 {
+    if slopos_ostd::cpu::x86_64::pcr::get_online_cpu_count() < 2 {
         return TestResult::Skipped;
     }
 
-    let cpu = pcr::get_current_cpu();
+    let cpu = pcr::current_cpu_id();
 
     // Scoped to this CPU, or the injection reports whichever CPU stalled.
     let Some(_fuse) = watchdog::MissThresholdOverride::for_cpu(cpu, FUSE) else {
@@ -242,9 +242,9 @@ pub fn test_a_wedged_cpu_is_reported_and_survives() -> TestResult {
     };
 
     let oops_before = slopos_ostd::panic_recovery::oops_count();
-    let flags = slopos_arch::cpu::save_flags_cli();
+    let flags = slopos_ostd::cpu::x86_64::save_flags_cli();
     hpet::delay_ms(150);
-    slopos_arch::cpu::restore_flags(flags);
+    slopos_ostd::cpu::x86_64::restore_flags(flags);
 
     // What the watcher observed, not how many ticks it took: a descheduled
     // watcher bursts its ticks afterwards, satisfying any count over the window.

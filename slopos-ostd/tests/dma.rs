@@ -1,4 +1,4 @@
-//! Host-side integration tests for `DmaCoherent` / `DmaStream`.
+//! Host-side integration tests for `DmaCoherent`.
 //!
 //! A leaked page-aligned scratch arena stands in for "physical memory", a
 //! leaked `Vec<MetaSlot>` gives per-frame ref-count slots, a multi-page
@@ -15,11 +15,9 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use slopos_abi::addr::PhysAddr;
-use slopos_ostd::mm::dma::{
-    self, DmaCoherent, DmaDirection, DmaError, DmaStream, IommuMapper, register_iommu_mapper,
-};
+use slopos_ostd::mm::dma::{self, DmaCoherent, DmaError, IommuMapper, register_iommu_mapper};
 use slopos_ostd::mm::frame::{
-    FrameAlloc, FrameAllocOptions, MetaSlot, Paddr, SlotMetaKind, init_meta_slots, slot_snapshot,
+    FrameAlloc, FrameAllocOptions, MetaSlot, SlotMetaKind, init_meta_slots, slot_snapshot,
 };
 use slopos_ostd::mm::frame_alloc::{self, register_frame_allocator};
 use slopos_ostd::mm::phys::init_phys_window;
@@ -50,7 +48,7 @@ struct BumpAlloc {
 }
 
 impl FrameAlloc for BumpAlloc {
-    fn alloc(&self, opts: FrameAllocOptions) -> Option<Paddr> {
+    fn alloc(&self, opts: FrameAllocOptions) -> Option<PhysAddr> {
         let n = opts.size_pages as u64;
         if n == 0 {
             return None;
@@ -74,7 +72,7 @@ impl FrameAlloc for BumpAlloc {
         Some(paddr)
     }
 
-    fn dealloc(&self, paddr: Paddr, size_pages: usize) {
+    fn dealloc(&self, paddr: PhysAddr, size_pages: usize) {
         CALL_LOG.deallocs.lock().unwrap().push(DeallocCall {
             paddr: paddr.as_u64(),
             size_pages,
@@ -94,7 +92,6 @@ static BUMP_REF: &'static dyn FrameAlloc = &BUMP_ALLOC;
 struct MapCall {
     phys: u64,
     size: usize,
-    direction: DmaDirection,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -120,12 +117,11 @@ static CALL_LOG: CallLog = CallLog {
 struct RecordingMapper;
 
 impl IommuMapper for RecordingMapper {
-    fn map(&self, phys: PhysAddr, size: usize, direction: DmaDirection) -> Result<u64, DmaError> {
+    fn map(&self, phys: PhysAddr, size: usize) -> Result<u64, DmaError> {
         let iova = CALL_LOG.next_iova.fetch_add(size as u64, Ordering::Relaxed);
         CALL_LOG.maps.lock().unwrap().push(MapCall {
             phys: phys.as_u64(),
             size,
-            direction,
         });
         Ok(iova)
     }
@@ -147,12 +143,7 @@ static RECORDING_MAPPER_REF: &'static dyn IommuMapper = &RECORDING_MAPPER;
 struct RefusingMapper;
 
 impl IommuMapper for RefusingMapper {
-    fn map(
-        &self,
-        _phys: PhysAddr,
-        _size: usize,
-        _direction: DmaDirection,
-    ) -> Result<u64, DmaError> {
+    fn map(&self, _phys: PhysAddr, _size: usize) -> Result<u64, DmaError> {
         Err(DmaError::Forbidden)
     }
 
@@ -292,44 +283,6 @@ fn coherent_read_write_pod_round_trip() {
 }
 
 #[test]
-fn stream_alloc_records_direction() {
-    let _g = setup();
-    let s = DmaStream::alloc(1, DmaDirection::ToDevice).expect("alloc");
-    assert_eq!(s.direction(), DmaDirection::ToDevice);
-    let last_map = CALL_LOG
-        .maps
-        .lock()
-        .unwrap()
-        .last()
-        .copied()
-        .expect("map recorded");
-    assert_eq!(last_map.direction, DmaDirection::ToDevice);
-}
-
-#[test]
-fn stream_drop_calls_unmap() {
-    let _g = setup();
-    let before = snapshot_unmap_count();
-    let s = DmaStream::alloc(1, DmaDirection::FromDevice).expect("alloc");
-    let iova = s.iova();
-    let len = s.len_bytes();
-    drop(s);
-    let after = snapshot_unmap_count();
-    assert_eq!(after, before + 1);
-    let last = snapshot_last_unmap().expect("unmap recorded");
-    assert_eq!(last.iova, iova);
-    assert_eq!(last.size, len);
-}
-
-#[test]
-fn stream_sync_methods_are_noops() {
-    let _g = setup();
-    let s = DmaStream::alloc(1, DmaDirection::Bidirectional).expect("alloc");
-    s.sync_for_device();
-    s.sync_for_cpu();
-}
-
-#[test]
 fn coherent_alloc_zero_pages_returns_exhausted() {
     let _g = setup();
     let before = snapshot_dealloc_count();
@@ -340,9 +293,9 @@ fn coherent_alloc_zero_pages_returns_exhausted() {
     assert_eq!(snapshot_dealloc_count(), before);
 }
 
-// `DmaCoherentMeta` / `DmaStreamMeta` declare `returns_frame_on_last_drop() ==
-// false`, so nothing in the per-frame lifecycle returns these pages — the run's
-// own release does, and the head slot must read `Unused` at that moment for the
+// `DmaCoherentMeta` declares `returns_frame_on_last_drop() == false`, so
+// nothing in the per-frame lifecycle returns these pages — the run's own
+// release does, and the head slot must read `Unused` at that moment for the
 // next claimant's `from_unused`.
 
 /// The paddr `BumpAlloc` will hand out next, so a test can name the run an
@@ -371,46 +324,11 @@ fn coherent_drop_returns_pages_to_allocator() {
 }
 
 #[test]
-fn stream_drop_returns_pages_to_allocator() {
-    let _g = setup();
-    let before = snapshot_dealloc_count();
-    let s = DmaStream::alloc(2, DmaDirection::ToDevice).expect("alloc");
-    let head = s.phys_base().as_u64();
-    assert_eq!(
-        snapshot_dealloc_count(),
-        before,
-        "released while still held"
-    );
-    drop(s);
-    assert_eq!(snapshot_dealloc_count(), before + 1);
-    let last = snapshot_last_dealloc().expect("dealloc recorded");
-    assert_eq!(last.paddr, head);
-    assert_eq!(last.size_pages, 2);
-    assert_eq!(last.head_slot_kind, SlotMetaKind::Unused);
-}
-
-#[test]
 fn coherent_alloc_returns_pages_when_mapper_refuses() {
     let _g = setup();
     let before = snapshot_dealloc_count();
     let head = next_bump_paddr();
     let r = with_mapper(&REFUSING_MAPPER_REF, || DmaCoherent::alloc(2));
-    assert_eq!(r.unwrap_err(), DmaError::Forbidden);
-    assert_eq!(snapshot_dealloc_count(), before + 1);
-    let last = snapshot_last_dealloc().expect("dealloc recorded");
-    assert_eq!(last.paddr, head);
-    assert_eq!(last.size_pages, 2);
-    assert_eq!(last.head_slot_kind, SlotMetaKind::Unused);
-}
-
-#[test]
-fn stream_alloc_returns_pages_when_mapper_refuses() {
-    let _g = setup();
-    let before = snapshot_dealloc_count();
-    let head = next_bump_paddr();
-    let r = with_mapper(&REFUSING_MAPPER_REF, || {
-        DmaStream::alloc(2, DmaDirection::FromDevice)
-    });
     assert_eq!(r.unwrap_err(), DmaError::Forbidden);
     assert_eq!(snapshot_dealloc_count(), before + 1);
     let last = snapshot_last_dealloc().expect("dealloc recorded");
@@ -430,19 +348,6 @@ fn coherent_alloc_returns_pages_when_segment_build_fails() {
     assert_eq!(last.paddr, OUT_OF_SLOT_RANGE_PADDR);
     assert_eq!(last.size_pages, 2);
     // No slot was ever claimed for this run, so there is none to classify.
-    assert_eq!(last.head_slot_kind, SlotMetaKind::Unknown);
-}
-
-#[test]
-fn stream_alloc_returns_pages_when_segment_build_fails() {
-    let _g = setup();
-    let before = snapshot_dealloc_count();
-    let r = with_poisoned_allocator(|| DmaStream::alloc(2, DmaDirection::Bidirectional));
-    assert_eq!(r.unwrap_err(), DmaError::Exhausted);
-    assert_eq!(snapshot_dealloc_count(), before + 1);
-    let last = snapshot_last_dealloc().expect("dealloc recorded");
-    assert_eq!(last.paddr, OUT_OF_SLOT_RANGE_PADDR);
-    assert_eq!(last.size_pages, 2);
     assert_eq!(last.head_slot_kind, SlotMetaKind::Unknown);
 }
 

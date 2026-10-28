@@ -67,13 +67,6 @@ impl PlatformDeviceInfo {
     pub fn io_ports(&self) -> &[PlatformIoWindow] {
         &self.io[..self.io_count as usize]
     }
-
-    pub fn has_io_port(&self, port: u16) -> bool {
-        self.io_ports().iter().any(|w| {
-            let end = w.base as u32 + (w.len.max(1)) as u32;
-            (port as u32) >= w.base as u32 && (port as u32) < end
-        })
-    }
 }
 
 /// A declarative match rule: the device's `_HID` or `_CID` equals this id.
@@ -316,19 +309,6 @@ fn enumerate(tables: &AcpiTables, debug: bool) -> Result<KVec<PlatformDeviceInfo
     Ok(devices)
 }
 
-/// Whether the FADT advertises an i8042 controller (IAPC_BOOT_ARCH bit 1).
-pub fn acpi_has_8042(rsdp_phys: u64) -> bool {
-    let Some(tables) = AcpiTables::from_phys(rsdp_phys) else {
-        return false;
-    };
-    let Some(facp) = tables.find_table(b"FACP") else {
-        return false;
-    };
-    Fadt::parse(facp.raw())
-        .map(|f| f.has_8042())
-        .unwrap_or(false)
-}
-
 static CLAIMED_BY: SpinLock<ClaimTable<MAX_PLATFORM_DEVICES>> = SpinLock::new(
     ClaimTable::new(),
     lock_class!("platform.CLAIMED_BY", LOCK_LEVEL_RESOURCE),
@@ -343,11 +323,6 @@ impl ClaimSink for GlobalClaims {
     fn record(&self, dev_idx: usize, binding: Binding, devres: Devres) {
         CLAIMED_BY.lock().claim(dev_idx, binding, devres);
     }
-}
-
-/// The name of the driver that has claimed device `dev_idx`, if any.
-pub fn platform_device_owner(dev_idx: usize) -> Option<&'static str> {
-    CLAIMED_BY.lock().owner(dev_idx)
 }
 
 /// Runs once at boot on the BSP, after `pci_probe_drivers`.

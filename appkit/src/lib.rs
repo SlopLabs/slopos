@@ -43,6 +43,7 @@ pub use widgets::editor_tabs::{EditorTab, TabInput};
 pub use widgets::icon_button::ICON_BUTTON_SIDE;
 pub use widgets::line_edit::{LineEditInput, LineInput};
 pub use widgets::menu_bar::MenuBarInput;
+pub use widgets::picture::PictureInput;
 pub use widgets::slider::{SliderGrab, SliderInput};
 pub use widgets::tree_view::{TreeInput, TreeRow};
 
@@ -57,6 +58,7 @@ pub use paint::PaintContext;
 pub use style::StyleSheet;
 pub use traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId};
 
+pub use slopos_abi::draw::Color32;
 pub use slopos_theme_core as theme;
 pub use slopos_theme_core::{EdgeInsets, Icon, Surface, TextRole, Tone};
 

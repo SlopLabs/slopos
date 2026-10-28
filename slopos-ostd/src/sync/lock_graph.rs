@@ -14,7 +14,7 @@ use core::sync::atomic::{
 };
 
 use crate::cpu::x86_64::interrupts::{restore_flags, save_flags_cli};
-use crate::cpu::x86_64::pcr::{MAX_CPUS, get_current_cpu};
+use crate::cpu::x86_64::pcr::{MAX_CPUS, current_cpu_id};
 
 use super::cpu_local::CacheAligned;
 use crate::util::static_table::StaticTable;
@@ -312,9 +312,6 @@ struct LockClass {
     /// keeps the path reconstruction's parent array out of a `#[cold]` frame
     /// that also carries `format_args!`.
     bfs_parent: AtomicU16,
-    /// IRQ-context usage bits (reserved for future hardirq tracking).
-    #[allow(dead_code)]
-    usage_mask: AtomicU8,
 }
 
 impl LockClass {
@@ -329,7 +326,6 @@ impl LockClass {
             edges_after_head: AtomicU16::new(NONE_IDX),
             next_in_bucket: AtomicU16::new(NONE_IDX),
             bfs_parent: AtomicU16::new(NONE_IDX),
-            usage_mask: AtomicU8::new(0),
         }
     }
 
@@ -802,7 +798,7 @@ pub fn held_lock_count() -> u32 {
     if !TRACKING_ENABLED.load(Ordering::Relaxed) {
         return 0;
     }
-    let cpu = get_current_cpu();
+    let cpu = current_cpu_id();
     // SAFETY: reading the depth field is a benign race; the value is
     // advisory for debug assertions only.
     unsafe { (*HELD[cpu].0.0.get()).depth.load(Ordering::Relaxed) }
@@ -815,7 +811,7 @@ pub fn held_lock_addrs(out: &mut [u64]) -> usize {
     if !TRACKING_ENABLED.load(Ordering::Relaxed) {
         return 0;
     }
-    let cpu = get_current_cpu();
+    let cpu = current_cpu_id();
     // SAFETY: per-CPU slot; reads race only with this CPU's own
     // push/pop, and a torn snapshot is acceptable for diagnostics.
     let stack = unsafe { &*HELD[cpu].0.0.get() };
@@ -832,7 +828,7 @@ pub fn for_each_held_lock_name(mut visit: impl FnMut(&'static str)) {
     if !TRACKING_ENABLED.load(Ordering::Relaxed) {
         return;
     }
-    let cpu = get_current_cpu();
+    let cpu = current_cpu_id();
     // SAFETY: per-CPU slot; reads race only with this CPU's own push/pop, and a
     // torn snapshot is acceptable for diagnostics.
     let stack = unsafe { &*HELD[cpu].0.0.get() };
@@ -934,7 +930,7 @@ pub unsafe fn push_lock_ex(
     }
 
     let _irq = IrqOff::enter();
-    let cpu = get_current_cpu();
+    let cpu = current_cpu_id();
 
     if lockdep_mode_raw() == LockdepMode::Off as u8 || GRAPH_OVERFLOW.load(Ordering::Relaxed) {
         push_untracked(cpu, lock_addr, poison_fn);
@@ -1067,7 +1063,7 @@ pub unsafe fn pop_lock(lock_addr: *const ()) {
     }
 
     let _irq = IrqOff::enter();
-    let cpu = get_current_cpu();
+    let cpu = current_cpu_id();
     let stack = held(cpu);
 
     // SAFETY: per-CPU slot; `_irq` excludes the interrupt handler that is the
@@ -1140,7 +1136,7 @@ pub unsafe fn push_epoch(epoch_addr: *const (), class: &'static LockClassKey) {
         return;
     }
 
-    let cpu = get_current_cpu();
+    let cpu = current_cpu_id();
 
     if lockdep_mode_raw() == LockdepMode::Off as u8 || GRAPH_OVERFLOW.load(Ordering::Relaxed) {
         push_untracked(cpu, epoch_addr, noop_poison);
@@ -1211,7 +1207,7 @@ pub fn held_depth_mark() -> u32 {
     if !TRACKING_ENABLED.load(Ordering::Relaxed) {
         return 0;
     }
-    let cpu = get_current_cpu();
+    let cpu = current_cpu_id();
     // SAFETY: per-CPU slot; a torn read is impossible for a single u32
     // written only by this CPU.
     unsafe { (*HELD[cpu].0.0.get()).depth.load(Ordering::Relaxed) }
@@ -1231,7 +1227,7 @@ pub unsafe fn poison_unlock_held_above(mark: u32) {
         return;
     }
     let _irq = IrqOff::enter();
-    let cpu = get_current_cpu();
+    let cpu = current_cpu_id();
     // A report that panicked left this set so its own unwind logging could not
     // re-enter the reporter; that window is over.
     IN_REPORT[cpu].store(false, Ordering::Relaxed);
@@ -1524,7 +1520,7 @@ pub fn held_lock_snapshot() -> (u32, Option<(&'static str, &'static str, u64)>) 
         return (0, None);
     }
     let _irq = IrqOff::enter();
-    let stack = held(get_current_cpu());
+    let stack = held(current_cpu_id());
     // SAFETY: per-CPU slot; `_irq` excludes the interrupt handler that is the
     // only other party able to write it, and no reference is minted.
     unsafe {
@@ -1546,12 +1542,6 @@ pub fn held_lock_snapshot() -> (u32, Option<(&'static str, &'static str, u64)>) 
         }
         (depth, None)
     }
-}
-
-/// Name and instance of the innermost lock held on the calling CPU, for a
-/// diagnostic that would otherwise report only a count.
-pub fn innermost_held_lock() -> Option<(&'static str, &'static str, u64)> {
-    held_lock_snapshot().1
 }
 
 /// Releases whose address was not on the stack, summed across CPUs.
@@ -1665,7 +1655,7 @@ fn latch_overflow(reason: &str, addr: *const (), level: u8) {
     if OVERFLOW_REPORTED.swap(true, Ordering::Relaxed) {
         return;
     }
-    let _latch = ReportLatch::raise(get_current_cpu());
+    let _latch = ReportLatch::raise(current_cpu_id());
     crate::klog_warn!(
         "LOCKDEP: validator DISABLED — {} while handling lock @ {:#x} level {} \
          (classes {}/{} edges {}/{} chains {}/{}); every subsequent lock \
@@ -1848,7 +1838,7 @@ fn check_class_collision(idx: u16, incoming: &'static LockClassKey) {
     CLASS_COLLISIONS.fetch_add(1, Ordering::Relaxed);
     // As `latch_overflow`: reached mid-update, so the klog acquire below must
     // not reach back into the held stack.
-    let _latch = ReportLatch::raise(get_current_cpu());
+    let _latch = ReportLatch::raise(current_cpu_id());
     crate::klog_warn!(
         "LOCKDEP: class-id collision — {} ({}) and {} ({}) both hash to {:#x}; \
          they will be validated as ONE class. Rename one site to separate them.",
@@ -2440,7 +2430,7 @@ impl Drop for SelfTestGuard {
 /// report to get there.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn set_in_report_for_test(active: bool) {
-    IN_REPORT[get_current_cpu()].store(active, Ordering::Relaxed);
+    IN_REPORT[current_cpu_id()].store(active, Ordering::Relaxed);
 }
 
 /// Reset all global state. Test-only; production never resets.
@@ -2491,7 +2481,6 @@ pub fn reset_for_test() {
         c.edges_after_head.store(NONE_IDX, Relaxed);
         c.next_in_bucket.store(NONE_IDX, Relaxed);
         c.bfs_parent.store(NONE_IDX, Relaxed);
-        c.usage_mask.store(0, Relaxed);
     }
     for e in EDGES.iter().take(edges) {
         e.target.store(NONE_IDX, Relaxed);

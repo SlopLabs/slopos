@@ -15,12 +15,12 @@ use slopos_mm::user_copy::{
     copy_bytes_from_user, copy_bytes_to_user, copy_from_user, copy_to_user,
 };
 use slopos_mm::user_msghdr::{msg_iovec_buf, scm_rights_fds};
-use slopos_mm::user_ptr::{UserBytes as MmUserBytes, UserPtr as MmUserPtr};
 use slopos_net::types::{Ipv4Addr, Port, SockAddr};
 use slopos_net::unix_socket::SocketHandle;
 use slopos_net::{dns, socket, unix_socket, unix_socket_file_ops};
 use slopos_ostd::KVec;
 use slopos_ostd::process::{Identity, Program};
+use slopos_ostd::user::ptr::{UserBytes as OstdUserBytes, UserPtr as OstdUserPtr};
 
 use crate::syscall::args::{Fd, UserBytes, UserPtr};
 use crate::syscall::common::{errno_from_neg, errno_from_neg64};
@@ -218,7 +218,7 @@ define_syscall!(syscall_socketpair
     -> Result<(), Errno>
 {
     let flags = NewSocketFlags::parse(sock_type & !SOCK_TYPE_MASK)?;
-    let sv = MmUserPtr::<[i32; 2]>::try_new(sv_ptr).map_err(|_| Errno::EFAULT)?;
+    let sv = OstdUserPtr::<[i32; 2]>::try_new(sv_ptr).map_err(|_| Errno::EFAULT)?;
     // Before either endpoint exists, so an unwritable `sv` leaves nothing to
     // take back.
     copy_to_user(sv, &[-1, -1]).map_err(|_| Errno::EFAULT)?;
@@ -258,7 +258,7 @@ define_syscall!(syscall_bind
             if addr_len < 4 {
                 return Err(Errno::EINVAL);
             }
-            let user_addr = MmUserPtr::<SockAddrUn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
+            let user_addr = OstdUserPtr::<SockAddrUn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
             let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
             let path_len = (addr_len - 2).min(slopos_abi::unix::UNIX_PATH_MAX);
             let actual_len = sock_addr.path[..path_len]
@@ -277,7 +277,7 @@ define_syscall!(syscall_bind
             if addr_len < core::mem::size_of::<SockAddrIn>() {
                 return Err(Errno::EINVAL);
             }
-            let user_addr = MmUserPtr::<SockAddrIn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
+            let user_addr = OstdUserPtr::<SockAddrIn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
             let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
             let port = u16::from_be(sock_addr.port);
             rc_i32_to_unit(socket::socket_bind(sock_idx, sock_addr.addr, port))
@@ -420,7 +420,7 @@ define_syscall!(syscall_connect
             if addr_len < 4 {
                 return Err(Errno::EINVAL);
             }
-            let user_addr = MmUserPtr::<SockAddrUn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
+            let user_addr = OstdUserPtr::<SockAddrUn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
             let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
             let path_len = (addr_len - 2).min(slopos_abi::unix::UNIX_PATH_MAX);
             let actual_len = sock_addr.path[..path_len]
@@ -440,7 +440,7 @@ define_syscall!(syscall_connect
             if addr_len < core::mem::size_of::<SockAddrIn>() {
                 return Err(Errno::EINVAL);
             }
-            let user_addr = MmUserPtr::<SockAddrIn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
+            let user_addr = OstdUserPtr::<SockAddrIn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
             let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
             let port = u16::from_be(sock_addr.port);
             rc_i32_to_unit(socket::socket_connect(sock_idx, sock_addr.addr, port))
@@ -461,9 +461,9 @@ fn sigpipe_unless_nosignal(
     sent
 }
 
-// A null `addr` is `send(2)`: with the `send` slot retired that is the only
-// spelling left for it, so AF_UNIX takes it too. At most 4096 payload bytes
-// move per call; the short count is the caller's to loop on.
+// A null `addr` is `send(2)`, which Linux x86-64 spells as `sendto`, so AF_UNIX
+// takes it too. At most 4096 payload bytes move per call; the short count is
+// the caller's to loop on.
 define_syscall!(syscall_sendto
     (ctx, fd: Fd, buf: UserBytes, flags: u32, addr_ptr: u64, addr_len: u64)
     cap(NoneFd)
@@ -488,7 +488,7 @@ fn sendto_impl(
     let len = buf.len().min(4096);
     let mut scratch = slopos_ostd::KVec::<u8>::zeroed(4096).map_err(|_| Errno::ENOMEM)?;
     let copied = if len > 0 {
-        let user_data = MmUserBytes::try_new(buf.base_u64(), len).map_err(|_| Errno::EFAULT)?;
+        let user_data = OstdUserBytes::try_new(buf.base_u64(), len).map_err(|_| Errno::EFAULT)?;
         copy_bytes_from_user(user_data, &mut scratch[..len]).map_err(|_| Errno::EFAULT)?
     } else {
         0
@@ -509,7 +509,7 @@ fn sendto_impl(
                 return Err(Errno::EINVAL);
             }
             let user_addr =
-                MmUserPtr::<SockAddrIn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
+                OstdUserPtr::<SockAddrIn>::try_new(addr_ptr).map_err(|_| Errno::EFAULT)?;
             let sock_addr = copy_from_user(user_addr).map_err(|_| Errno::EFAULT)?;
             if sock_addr.family != AF_INET {
                 return Err(Errno::EAFNOSUPPORT);
@@ -577,7 +577,7 @@ define_syscall!(syscall_recvfrom
     };
 
     if copied > 0 {
-        let user_out = MmUserBytes::try_new(buf.base_u64(), copied).map_err(|_| Errno::EFAULT)?;
+        let user_out = OstdUserBytes::try_new(buf.base_u64(), copied).map_err(|_| Errno::EFAULT)?;
         copy_bytes_to_user(user_out, &scratch[..copied]).map_err(|_| Errno::EFAULT)?;
     }
 
@@ -619,7 +619,7 @@ define_syscall!(syscall_setsockopt
     let optlen = optval.len().min(64);
     let mut scratch = [0u8; 64];
     if optlen > 0 {
-        let user_data = MmUserBytes::try_new(optval.base_u64(), optlen).map_err(|_| Errno::EFAULT)?;
+        let user_data = OstdUserBytes::try_new(optval.base_u64(), optlen).map_err(|_| Errno::EFAULT)?;
         copy_bytes_from_user(user_data, &mut scratch[..optlen]).map_err(|_| Errno::EFAULT)?;
     }
 
@@ -643,7 +643,7 @@ define_syscall!(syscall_getsockopt
         return Err(Errno::EFAULT);
     }
 
-    let user_optlen = MmUserPtr::<u32>::try_new(optlen_ptr_raw).map_err(|_| Errno::EFAULT)?;
+    let user_optlen = OstdUserPtr::<u32>::try_new(optlen_ptr_raw).map_err(|_| Errno::EFAULT)?;
     let optlen = copy_from_user(user_optlen).map_err(|_| Errno::EFAULT)? as usize;
     let optlen = optlen.min(64);
 
@@ -655,7 +655,7 @@ define_syscall!(syscall_getsockopt
 
     let written = rc as usize;
     if written > 0 {
-        let user_data = MmUserBytes::try_new(optval_ptr, written).map_err(|_| Errno::EFAULT)?;
+        let user_data = OstdUserBytes::try_new(optval_ptr, written).map_err(|_| Errno::EFAULT)?;
         copy_bytes_to_user(user_data, &scratch[..written]).map_err(|_| Errno::EFAULT)?;
     }
 
@@ -679,7 +679,7 @@ fn unix_getsockopt(
     if level != SOL_SOCKET && level != SOL_SLOPOS {
         return Err(Errno::EOPNOTSUPP);
     }
-    let optlen = MmUserPtr::<u32>::try_new(optlen_ptr).map_err(|_| Errno::EFAULT)?;
+    let optlen = OstdUserPtr::<u32>::try_new(optlen_ptr).map_err(|_| Errno::EFAULT)?;
     let len = copy_from_user(optlen).map_err(|_| Errno::EFAULT)?;
     if (len as i32) < 0 {
         return Err(Errno::EINVAL);
@@ -732,7 +732,7 @@ fn whole_option(
     value: &[u8],
     len: usize,
     optval: u64,
-    optlen: MmUserPtr<u32>,
+    optlen: OstdUserPtr<u32>,
 ) -> Result<(), Errno> {
     if len < value.len() {
         copy_to_user(optlen, &(value.len() as u32)).map_err(|_| Errno::EFAULT)?;
@@ -765,11 +765,11 @@ fn write_option(
     value: &[u8],
     len: usize,
     optval: u64,
-    optlen: MmUserPtr<u32>,
+    optlen: OstdUserPtr<u32>,
 ) -> Result<(), Errno> {
     let n = len.min(value.len());
     if n > 0 {
-        let out = MmUserBytes::try_new(optval, n).map_err(|_| Errno::EFAULT)?;
+        let out = OstdUserBytes::try_new(optval, n).map_err(|_| Errno::EFAULT)?;
         copy_bytes_to_user(out, &value[..n]).map_err(|_| Errno::EFAULT)?;
     }
     copy_to_user(optlen, &(n as u32)).map_err(|_| Errno::EFAULT)
@@ -805,7 +805,7 @@ define_syscall!(syscall_resolve
     }
 
     let mut hostname_buf = [0u8; 253];
-    let user_hostname = MmUserBytes::try_new(hostname_ptr, hostname_len).map_err(|_| Errno::EFAULT)?;
+    let user_hostname = OstdUserBytes::try_new(hostname_ptr, hostname_len).map_err(|_| Errno::EFAULT)?;
     let copied = copy_bytes_from_user(user_hostname, &mut hostname_buf[..hostname_len])
         .map_err(|_| Errno::EFAULT)?;
     if copied != hostname_len {
@@ -827,7 +827,7 @@ define_syscall!(syscall_resolve
         Err(dns::DnsResolveError::Interrupted) => return Err(Errno::EINTR),
     };
 
-    let user_result = MmUserBytes::try_new(result_ptr, 4).map_err(|_| Errno::EFAULT)?;
+    let user_result = OstdUserBytes::try_new(result_ptr, 4).map_err(|_| Errno::EFAULT)?;
     copy_bytes_to_user(user_result, &result_addr).map_err(|_| Errno::EFAULT)?;
 
     Ok(())
@@ -959,7 +959,7 @@ define_syscall!(syscall_recvmsg
 /// Read an in/out `socklen_t*`. A negative length is `EINVAL`, as in Linux's
 /// `move_addr_to_user`.
 fn read_socklen(addrlen_ptr: u64) -> Result<usize, Errno> {
-    let user_len_ptr = MmUserPtr::<u32>::try_new(addrlen_ptr).map_err(|_| Errno::EFAULT)?;
+    let user_len_ptr = OstdUserPtr::<u32>::try_new(addrlen_ptr).map_err(|_| Errno::EFAULT)?;
     let caller_len = copy_from_user(user_len_ptr).map_err(|_| Errno::EFAULT)?;
     if (caller_len as i32) < 0 {
         return Err(Errno::EINVAL);
@@ -977,10 +977,10 @@ fn write_sockaddr(
 ) -> Result<(), Errno> {
     let copy_len = caller_len.min(addr.len());
     if copy_len > 0 {
-        let user_buf = MmUserBytes::try_new(addr_buf, copy_len).map_err(|_| Errno::EFAULT)?;
+        let user_buf = OstdUserBytes::try_new(addr_buf, copy_len).map_err(|_| Errno::EFAULT)?;
         copy_bytes_to_user(user_buf, &addr[..copy_len]).map_err(|_| Errno::EFAULT)?;
     }
-    let user_len_ptr = MmUserPtr::<u32>::try_new(addrlen_ptr).map_err(|_| Errno::EFAULT)?;
+    let user_len_ptr = OstdUserPtr::<u32>::try_new(addrlen_ptr).map_err(|_| Errno::EFAULT)?;
     let actual = addr.len() as u32;
     copy_to_user(user_len_ptr, &actual).map_err(|_| Errno::EFAULT)?;
     Ok(())

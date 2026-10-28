@@ -1,8 +1,8 @@
 //! `slopfut` production-runtime test: real wakers + multi-task scheduler.
 
 use slopos_abi::signal::{SIGCHLD, sig_bit};
+use slopos_rt::{Ring, slopfut};
 use slopos_userland as _;
-use slopos_userland::ring::{Ring, slopfut};
 use slopos_userland::syscall::{core as sys_core, process};
 
 fn test_spawn_join() -> bool {

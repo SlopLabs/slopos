@@ -21,7 +21,7 @@ use slopos_abi::syscall::BOOT_FLAG_EXTENSIONS_OFF;
 use slopos_abi::syscall::posix::{O_NOCTTY, O_NONBLOCK};
 use slopos_extension_core::admit::{self, Admitted, Authority, Bounds};
 use slopos_extension_core::grant::Grant;
-use slopos_extension_core::image::{Image, ImageError, archive_form};
+use slopos_extension_core::image::{Image, ImageError};
 use slopos_extension_core::keys::{Key, Keys, valid_comment};
 use slopos_extension_core::record::{Installed, Record, valid_fingerprint};
 use slopos_extension_core::{CEILING, LIBC, ceiling, hex, parse_digest, valid_name};
@@ -201,14 +201,15 @@ fn named(name: &str) -> Result<String, String> {
     match valid_name(name) {
         true => Ok(name.to_owned()),
         false if existing(name).is_ok() => Err(format!(
-            "the system took {name:?}; an extension under it can only be disabled or removed"
+            "the system takes {name:?}; an extension under it can only be disabled or removed"
         )),
         false => Err(format!("{name:?} is no extension's name")),
     }
 }
 
-/// The name of an extension already in the store, one taken by the system
-/// since it went in included, so its owner can still see, stop and remove it.
+/// The name of an extension the store may hold, one under a name the system
+/// takes ([`slopos_extension_core::TAKEN`]) included, so its owner can still
+/// see, stop and remove it.
 fn existing(name: &str) -> Result<String, String> {
     if slopos_abi::extension::valid_name(name.as_bytes()) {
         Ok(name.to_owned())
@@ -589,8 +590,6 @@ enum Prepared {
         name: String,
         voucher: Voucher,
         before: Option<Record>,
-        /// `before` as the install was judged against it.
-        judged: Option<Record>,
         installed: Installed,
     },
 }
@@ -619,11 +618,8 @@ fn prepare(store: &Store, path: &str, vouched: &Vouched) -> Result<Prepared, Str
         (Vouched::Signed { .. }, Some((sidecar, signature))) => {
             let (said, key) = admit::signer(sidecar, signature, &keys).map_err(refused)?;
             let before = store.record(&said.name)?;
-            let judged = before
-                .clone()
-                .map(|record| archive_floor(store, record, said.sha256));
             if let Some(Admitted::Current) =
-                admit::ahead(judged.as_ref(), &said, key).map_err(refused)?
+                admit::ahead(before.as_ref(), &said, key).map_err(refused)?
             {
                 return Ok(Prepared::Current {
                     name: said.name,
@@ -639,11 +635,8 @@ fn prepare(store: &Store, path: &str, vouched: &Vouched) -> Result<Prepared, Str
     let base = Base::read()?;
     let before = store.record(&name)?;
     let others = others(store, &name)?;
-    let judged = before
-        .clone()
-        .map(|record| archive_floor(store, record, image.digest));
     let admitted = admit::install(
-        judged.as_ref(),
+        before.as_ref(),
         &mut image,
         &voucher.authority(),
         &base.bounds(&keys),
@@ -660,24 +653,9 @@ fn prepare(store: &Store, path: &str, vouched: &Vouched) -> Result<Prepared, Str
             name,
             voucher,
             before,
-            judged,
             installed,
         },
     })
-}
-
-/// `record` as an install of `digest` is judged: a floor an archive-form
-/// image set, which no install takes now, holds its version and not its
-/// bytes.
-fn archive_floor(store: &Store, mut record: Record, digest: [u8; 32]) -> Record {
-    if let Some((version, floor)) = record.floor
-        && store
-            .image(&record.name, &floor)
-            .is_ok_and(|mut held| archive_form(&mut held))
-    {
-        record.floor = Some((version, digest));
-    }
-    record
 }
 
 /// Why `record` does not run, or `None` when it does.
@@ -695,13 +673,8 @@ fn idle(record: &Record) -> Option<String> {
 /// Put what `prepared` admitted in the store as its current image and run
 /// it. One that will not run leaves the store as it was.
 fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
-    let (image, name, voucher, before, judged, installed) = match prepared {
+    let (image, name, voucher, before, installed) = match prepared {
         Prepared::Current { name, before } => {
-            if let Some(mut record) = before.clone()
-                && give_uids(store, &mut record)?
-            {
-                store.edit(&name, |edit| edit.put_record(&record))?;
-            }
             let idle = before.as_ref().and_then(idle);
             return Ok(format!(
                 "{name} is installed already{}",
@@ -713,13 +686,12 @@ fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
             name,
             voucher,
             before,
-            judged,
             installed,
-        } => (image, name, voucher, before, judged, installed),
+        } => (image, name, voucher, before, installed),
     };
     let digest = image.digest;
     let version = installed.version;
-    let mut record = judged.unwrap_or_else(|| Record::new(&name));
+    let mut record = before.clone().unwrap_or_else(|| Record::new(&name));
     record.install(installed);
     give_uids(store, &mut record)?;
     store.edit(&name, |edit| {
@@ -850,7 +822,6 @@ fn enable(name: &str) -> Result<String, String> {
     let base = Base::read()?;
     record.enabled = true;
     record.why = None;
-    give_uids(&store, &mut record)?;
     let ran = bring_up(&store, &mut record, &keys, &base)?;
     store.edit(name, |edit| edit.put_record(&record))?;
     Ok(format!("{name} enabled; {ran}"))
@@ -891,7 +862,6 @@ fn rolled_back(store: &Store, name: &str) -> Result<(Record, Image<File>), Strin
     record.roll_back().map_err(|e| format!("{name}: {e}"))?;
     record.enabled = true;
     record.why = None;
-    give_uids(store, &mut record)?;
     if let Some(current) = &record.current {
         admit::clashes(name, &current.grant, &borrowed(&others(store, name)?))
             .map_err(|e| format!("{name}: {e}"))?;
@@ -996,14 +966,9 @@ fn activate_all() -> Result<String, String> {
     let mut said = Vec::new();
     for name in store.names()? {
         let ran = match store.record(&name) {
-            Ok(Some(mut record)) if record.enabled => give_uids(&store, &mut record)
-                .and_then(|given| {
-                    if given {
-                        store.edit(&name, |edit| edit.put_record(&record))?;
-                    }
-                    bring_up(&store, &mut record, &keys, &base)
-                })
-                .map(|ran| format!("{name}: {ran}")),
+            Ok(Some(mut record)) if record.enabled => {
+                bring_up(&store, &mut record, &keys, &base).map(|ran| format!("{name}: {ran}"))
+            }
             Ok(Some(_)) => deactivate(&name).map(|()| format!("{name}: disabled")),
             Ok(None) => continue,
             Err(why) => Err(why),

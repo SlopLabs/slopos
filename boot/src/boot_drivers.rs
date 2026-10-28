@@ -29,7 +29,7 @@ fn serial_note(msg: &str) {
 /// lifts it above every GPU instead, keeping the passive firmware framebuffer up
 /// without having to gate a single driver's `matches`.
 fn boot_firmware_priority() -> i32 {
-    if let Some(cmdline) = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline()) {
+    if let Some(cmdline) = boot_get_cmdline() {
         if cmdline.contains("video=framebuffer") {
             return scanout::PRIO_FIRMWARE_FB + scanout::PRIO_CMDLINE_HINT_BUMP;
         }
@@ -38,8 +38,7 @@ fn boot_firmware_priority() -> i32 {
 }
 
 fn apply_serial_mirror_cmdline() {
-    let Some(cmdline) = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline())
-    else {
+    let Some(cmdline) = boot_get_cmdline() else {
         return;
     };
     if cmdline
@@ -62,12 +61,6 @@ fn boot_step_idt_setup_fn(ctx: &mut BootCtx<'_, BspInit>) {
 
 fn boot_step_irq_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Configuring IRQ dispatcher...");
-    // `i8042.legacy` selects the hardcoded PS/2 bring-up over the platform-bus
-    // binding; must be set before `irq::init` so both paths see one value.
-    let legacy_i8042 = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline())
-        .map(|s| s.contains("i8042.legacy"))
-        .unwrap_or(false);
-    slopos_drivers::ps2::set_legacy_mode(legacy_i8042);
     slopos_drivers::irq::init();
     slopos_drivers::tty::init();
     apply_serial_mirror_cmdline();
@@ -116,7 +109,7 @@ fn boot_step_timer_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
 fn boot_step_apic_setup_fn(ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Detecting Local APIC...");
     if !apic::detect() {
-        panic!("SlopOS requires a Local APIC - legacy PIC is gone");
+        panic!("SlopOS requires a Local APIC; it drives no 8259 PIC");
     }
 
     let token = ctx.bsp_token();
@@ -152,15 +145,12 @@ fn boot_step_apic_setup_fn(ctx: &mut BootCtx<'_, BspInit>) {
     tlb::register_ipi_sender(apic::send_ipi_all_excluding_self);
     tlb::init();
 
-    klog_debug!("Local APIC initialized (legacy PIC path removed).");
+    klog_debug!("Local APIC initialized.");
 }
 
 fn boot_step_xsave_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Detecting XSAVE support...");
-    let rc = slopos_arch::cpu::xsave::init();
-    if rc != 0 {
-        panic!("XSAVE initialization failed");
-    }
+    slopos_ostd::cpu::x86_64::xsave::init();
     slopos_sched::task_struct::validate_fpu_state_size();
 }
 
@@ -177,7 +167,7 @@ fn boot_step_smp_setup_fn(ctx: &mut BootCtx<'_, BspInit>) {
 
 fn boot_step_ioapic_setup_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Discovering IOAPIC controllers via ACPI MADT...");
-    if ioapic::init() != 0 {
+    if !ioapic::init() {
         panic!("IOAPIC discovery failed - SlopOS cannot operate without it");
     }
     klog_debug!("IOAPIC: discovery complete, ready for redirection programming.");
@@ -234,7 +224,7 @@ fn boot_step_lapic_calibration_fn(_ctx: &mut BootCtx<'_, BspInit>) {
 const LAPIC_TIMER_PERIOD_MS: u32 = 10;
 
 fn boot_step_lapic_timer_start_fn(_ctx: &mut BootCtx<'_, BspInit>) {
-    use slopos_arch::arch::idt::LAPIC_TIMER_VECTOR;
+    use slopos_ostd::irq::idt::LAPIC_TIMER_VECTOR;
 
     if !apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, LAPIC_TIMER_PERIOD_MS) {
         panic!(
@@ -258,7 +248,7 @@ fn boot_step_lapic_timer_start_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     // APs boot before calibration, so they defer their own timer start until
     // this callback exists.
     fn ap_start_timer() -> bool {
-        use slopos_arch::arch::idt::LAPIC_TIMER_VECTOR;
+        use slopos_ostd::irq::idt::LAPIC_TIMER_VECTOR;
         apic::timer::set_periodic_ms(LAPIC_TIMER_VECTOR, LAPIC_TIMER_PERIOD_MS)
     }
     slopos_sched::runtime::register_ap_timer_start(ap_start_timer);
@@ -288,8 +278,7 @@ fn boot_step_register_spawner_fn(ctx: &mut BootCtx<'_, BspInit>) {
 }
 
 fn boot_step_identity_dma_fn(ctx: &mut BootCtx<'_, BspInit>) {
-    // Must precede any driver's DMA probe so `DmaCoherent`/`DmaStream` have a
-    // live mapper.
+    // Must precede any driver's DMA probe so `DmaCoherent` has a live mapper.
     slopos_ostd::mm::register_identity_dma_mapper(&ctx.bsp_token());
     klog_debug!("OSTD: identity DMA mapper registered (IOVA == phys)");
 }
@@ -297,9 +286,7 @@ fn boot_step_identity_dma_fn(ctx: &mut BootCtx<'_, BspInit>) {
 fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     // `tp.off` disables the LPSS I²C probe and touchpad bring-up; it has to be
     // honoured before driver probe runs.
-    let tp_off = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline())
-        .map(|s| s.contains("tp.off"))
-        .unwrap_or(false);
+    let tp_off = boot_get_cmdline().is_some_and(|s| s.contains("tp.off"));
     slopos_drivers::i2c::set_lpss_disabled(tp_off);
 
     // Before `pci_init()` probes any NIC, so loopback takes DevIndex(0) by
@@ -314,8 +301,7 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     klog_debug!("Enumerating PCI devices...");
     pci_init();
 
-    let cmdline =
-        slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline()).unwrap_or("");
+    let cmdline = boot_get_cmdline().unwrap_or("");
     slopos_drivers::xe::set_config(slopos_drivers::xe_logic::cmdline::parse(cmdline));
     slopos_drivers::usb::configure(cmdline);
 
@@ -326,9 +312,7 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     // at PNP0C50), after PCI so any controller dependencies are already claimed.
     let rsdp_phys = limine_protocol::get_rsdp_phys_address();
     if rsdp_phys != 0 {
-        let pdbg = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline())
-            .map(|s| s.contains("platform.debug"))
-            .unwrap_or(false);
+        let pdbg = boot_get_cmdline().is_some_and(|s| s.contains("platform.debug"));
         install_touchpad_config();
         slopos_drivers::platform_bus::probe_drivers(rsdp_phys, pdbg);
     }
@@ -339,7 +323,7 @@ fn boot_step_pci_init_fn(_ctx: &mut BootCtx<'_, BspInit>) {
 /// The touchpad probe cannot reach the cmdline, so the boot step hands it
 /// over before the platform bus binds it.
 fn install_touchpad_config() {
-    let cmdline = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline());
+    let cmdline = boot_get_cmdline();
     let debug = cmdline.map(|s| s.contains("tp.debug")).unwrap_or(false);
     let force_poll = cmdline.map(|s| s.contains("tp.poll")).unwrap_or(false);
     if debug {
@@ -356,7 +340,7 @@ fn install_touchpad_config() {
 use slopos_testing::config_from_cmdline;
 
 fn boot_step_run_tests_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
-    let cmdline_str = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline());
+    let cmdline_str = boot_get_cmdline();
     let test_config = config_from_cmdline(cmdline_str);
 
     if !test_config.enabled {
@@ -371,7 +355,7 @@ fn boot_step_run_tests_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
 
     klog_info!("TESTS: Running orchestrated harness");
 
-    if klog::is_enabled_level(KlogLevel::Debug) {
+    if klog::is_enabled(KlogLevel::Debug) {
         klog_info!("TESTS: Verbosity -> {}", test_config.verbosity);
         klog_info!("TESTS: Warn (ms) -> {}", test_config.warn_ms);
     }
@@ -408,7 +392,7 @@ fn boot_step_run_tests_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
 
     // Shutdown is always deferred to `SYSCALL_RUN_USERLAND_TESTS`, which merges
     // these counters, so that both phases run before QEMU exits.
-    kernel_phase_summary::store_kernel_phase(&summary, rc, &test_config);
+    kernel_phase_summary::store_kernel_phase(&summary, &test_config);
 
     if summary.failed > 0 {
         klog_info!("TESTS: Failures detected (kernel phase)");
@@ -476,8 +460,8 @@ crate::boot_init!(
     flags = boot_init_priority(56)
 );
 fn boot_step_csprng_seed_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
-    use slopos_arch::cpu::rdrand;
-    use slopos_arch::tsc;
+    use slopos_ostd::arch::x86_64::tsc;
+    use slopos_ostd::cpu::x86_64::rdrand;
 
     let mut seed = [0u8; 32];
     let mut source = "tsc";
@@ -576,7 +560,7 @@ crate::boot_init!(
 /// Under `tests=on` the report below and the kernel tests must see the same
 /// bus on every run, so the step fails the run when USB has not settled.
 fn boot_step_usb_settle_fn(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
-    let cmdline = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(boot_get_cmdline());
+    let cmdline = boot_get_cmdline();
     if !config_from_cmdline(cmdline).enabled {
         return 0;
     }

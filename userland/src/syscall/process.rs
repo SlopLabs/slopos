@@ -7,7 +7,7 @@ use slopos_abi::signal::{
 };
 use slopos_abi::spawn::{
     SPAWN_SET_GID, SPAWN_SET_GROUPS, SPAWN_SET_LOGIN, SPAWN_SET_UID, SpawnAttrs, SpawnFdAction,
-    SpawnFdActionKind, SpawnLoginAttrs,
+    SpawnFdActionKind,
 };
 use slopos_abi::task::TaskPriority;
 
@@ -60,10 +60,6 @@ pub fn clone_fd(src: i32, target: i32) -> SpawnFdAction {
         src_fd: src,
         target_fd: target,
         _pad: 0,
-        open_path_ptr: 0,
-        open_path_len: 0,
-        open_flags: 0,
-        _pad2: 0,
     }
 }
 
@@ -172,12 +168,8 @@ pub fn spawn_endowed(
         groups_ptr: groups.as_ptr() as u64,
         ngroups: groups.len() as u32,
         set,
-        ..SpawnAttrs::new(priority.as_u8(), flags)
-    };
-    let attrs = SpawnLoginAttrs {
-        attrs,
         login: endowment.login.unwrap_or_default(),
-        _pad: 0,
+        ..SpawnAttrs::new(priority.as_u8(), flags)
     };
     unsafe {
         syscall5(
@@ -186,7 +178,7 @@ pub fn spawn_endowed(
             path.len() as u64,
             argv.as_ptr() as u64,
             argv.len() as u64,
-            &attrs as *const SpawnLoginAttrs as u64,
+            &attrs as *const SpawnAttrs as u64,
         ) as i32
     }
 }
@@ -327,8 +319,7 @@ const PTMX_PATH: &[u8] = b"/dev/ptmx\0";
 /// slave via `/dev/pts/N` or `TIOCGPTPEER`. `Err` carries a negated errno.
 ///
 /// A freshly allocated slave is locked and answers `EIO` until `TIOCSPTLCK`
-/// clears it — Linux's `grantpt`, which the retired `openpty` syscall used to
-/// do on the caller's behalf.
+/// clears it — Linux's `unlockpt`, which this does on the caller's behalf.
 pub fn openpty() -> Result<(super::OwnedFd, u32), i64> {
     let master = Sys::open(PTMX_PATH.as_ptr(), slopos_abi::fs::O_RDWR as i32, 0)
         .map_err(|e| -(e.raw() as i64))?;

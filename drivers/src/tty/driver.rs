@@ -87,7 +87,7 @@ impl TtyDriverKind {
             Self::SerialConsole(d) => d.drain_input(out),
             Self::VConsole(d) => d.drain_input(out),
             Self::PtyMaster { .. } | Self::PtySlave { .. } => {
-                // PTY input arrives via push_input, not polling.
+                // PTY input arrives via push_input_batch, not polling.
                 0
             }
         }
@@ -166,7 +166,7 @@ impl TtyDriver for SerialConsoleDriver {
     }
 }
 
-/// Input arrives via interrupt (`tty::push_input`), so `drain_input` returns
+/// Input arrives via interrupt (`tty::push_input_batch`), so `drain_input` returns
 /// nothing beyond what a test has injected.
 pub struct VConsoleDriver;
 

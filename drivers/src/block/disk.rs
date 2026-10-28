@@ -116,7 +116,7 @@ impl EngineDisk {
             let whole = (buf.len() - pos) / bsize * bsize;
             let n = whole.min(max);
             let second = (whole - n).min(max);
-            let began = slopos_arch::tsc::rdtsc();
+            let began = slopos_ostd::arch::x86_64::tsc::rdtsc();
             if second >= bsize
                 && let Ok(first) = self.engine.submit_read(self.ns, at, n)
             {
@@ -232,7 +232,10 @@ impl EngineDisk {
 }
 
 fn note_read_cycles(began: u64) {
-    stats::note_request_cycles(false, slopos_arch::tsc::rdtsc().saturating_sub(began));
+    stats::note_request_cycles(
+        false,
+        slopos_ostd::arch::x86_64::tsc::rdtsc().saturating_sub(began),
+    );
 }
 
 impl BlockDevice for EngineDisk {
@@ -251,7 +254,7 @@ impl BlockDevice for EngineDisk {
     }
 
     fn submit_write(&self, offset: u64, segs: &[&[u8]]) -> Result<WriteTicket, BlockDeviceError> {
-        let began = slopos_arch::tsc::rdtsc();
+        let began = slopos_ostd::arch::x86_64::tsc::rdtsc();
         match self.submit_write_span(offset, segs)? {
             Some(idx) => Ok(WriteTicket::new(idx as u64, began)),
             None => Ok(WriteTicket::new(WriteTicket::DONE, began)),
@@ -265,7 +268,7 @@ impl BlockDevice for EngineDisk {
         self.engine.complete(ticket.tag() as usize, &mut [])?;
         stats::note_request_cycles(
             true,
-            slopos_arch::tsc::rdtsc().saturating_sub(ticket.began()),
+            slopos_ostd::arch::x86_64::tsc::rdtsc().saturating_sub(ticket.began()),
         );
         Ok(())
     }

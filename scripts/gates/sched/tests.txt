@@ -5,8 +5,10 @@
 # require-dispatch <phase> <b>  every online CPU must dispatch something
 # min-online       <n>          floor on the online CPU count
 #
-# A lag above 0 outside the boot phase is a bug, not a number to raise:
-# it means a CPU is dispatching work that no placement decision can see.
+# The lag is 1, the BSP alone, while it runs boot steps (the kernel tests
+# among them) on the bootstrap stub, before `enter_scheduler(0)` at the end
+# of boot init; 0 after. Any other lag is a bug, not a number to raise: a CPU
+# is dispatching work that no placement decision can see.
 # require-dispatch is zero-versus-non-zero, never a volume: how many
 # switches a CPU makes varies with the machine, so a floor above zero
 # fails on a runner that is merely faster or slower.

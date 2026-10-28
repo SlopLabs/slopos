@@ -1,4 +1,4 @@
-//! Bit operations on `&[u8]` slices for on-disk bitmap formats (ext2).
+//! Bit operations on `&[u8]` slices for on-disk bitmap formats (ext4).
 //!
 //! Bit 0 is the LSB of `data[0]` (little-endian bit order).
 //! These must not depend on host word size — the byte layout is an on-disk ABI.

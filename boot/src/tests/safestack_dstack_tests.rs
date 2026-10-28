@@ -13,7 +13,7 @@ use crate::ist_stacks::{exc_dstack_bounds_current_cpu, exc_dstack_top_current_cp
 /// Never zero: the naked resolver would hand a SafeStack prologue a slot
 /// pointing at address 0.
 pub fn test_exc_dstack_primed() -> TestResult {
-    let sp = slopos_arch::pcr::local_ist_unsafe_sp();
+    let sp = slopos_ostd::cpu::x86_64::pcr::local_ist_unsafe_sp();
     let (guard_start, usable_base, top) = exc_dstack_bounds_current_cpu();
 
     assert_test!(sp != 0, "ist_unsafe_sp is unprimed (zero)");

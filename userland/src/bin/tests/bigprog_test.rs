@@ -1,10 +1,7 @@
-//! A toolchain-sized process, in the dimensions that used to cap one.
-//!
-//! Every case here was a refusal before: the binary is 24x the 1 MiB the slab
-//! would hand out for the old whole-file `exec` buffer, the anonymous mapping
-//! 4x the old `Pages` quota, the file mapping reaches past a non-page-aligned
-//! EOF `mmap` refused outright, and the stack and the `fork` each pass a
-//! constant that used to be the whole of one.
+//! A toolchain-sized process: a binary 24x the slab's 1 MiB allocation
+//! ceiling, a gigabyte of anonymous memory, a file mapping past a
+//! non-page-aligned EOF, a stack past a megabyte and a `fork` of a large
+//! resident set.
 //!
 //! `BLOB` is what makes the ELF large, so its bytes are checked at both ends
 //! and every megabyte between: a streamer that mis-computed a file offset would
@@ -68,8 +65,8 @@ fn test_large_image_loaded_intact() -> bool {
     blob_at(BLOB_LEN - 1) == blob_expected(BLOB_LEN - 1)
 }
 
-/// 1 GiB of anonymous address space, touched sparsely. The old `Pages` quota
-/// refused past 256 MiB, and an eager `mmap` would have wanted every frame.
+/// 1 GiB of anonymous address space, touched sparsely: an eager `mmap` would
+/// want every frame.
 fn test_gigabyte_of_anonymous_memory() -> bool {
     const LEN: u64 = 1024 * 1024 * 1024;
     const STRIDE: u64 = 64 * 1024 * 1024;
@@ -151,7 +148,7 @@ fn test_file_mapping_past_a_ragged_eof() -> bool {
     ok
 }
 
-/// Recurse past the old fixed 1 MiB stack. Every slot is written volatile, or
+/// Recurse past a megabyte of stack. Every slot is written volatile, or
 /// SROA splits the array into scalars and the frame this case is about
 /// disappears into a 24-byte prologue.
 #[inline(never)]
@@ -166,7 +163,7 @@ fn burn_stack(depth: u32) -> u64 {
 
 fn test_stack_grows_past_a_megabyte() -> bool {
     // 512 u64s plus the call overhead is a little over 4 KiB per frame, so 768
-    // frames is ~3 MiB — past the 1 MiB that used to be the whole stack.
+    // frames is ~3 MiB.
     const DEPTH: u32 = 768;
     let mut want = 0u64;
     for d in 0..=DEPTH as u64 {
@@ -175,9 +172,9 @@ fn test_stack_grows_past_a_megabyte() -> bool {
     burn_stack(DEPTH) == want
 }
 
-/// `fork` of a large resident set used to panic: the parent's PTE snapshot was
-/// one `KVec` of 24-byte entries, so ~170 MiB in a single VMA passed the slab's
-/// 1 MiB ceiling and the `.expect()` took the machine down. `LEN` is past that.
+/// `fork` of a large resident set: as one `KVec` of 24-byte entries, the
+/// parent's PTE snapshot of ~170 MiB in a single VMA would pass the slab's
+/// 1 MiB ceiling. `LEN` is past that.
 fn test_fork_with_a_large_resident_set() -> bool {
     const LEN: u64 = 192 * 1024 * 1024;
 

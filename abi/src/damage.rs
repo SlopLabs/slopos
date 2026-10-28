@@ -72,6 +72,3 @@ impl DamageRect {
         x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1
     }
 }
-
-/// Maximum damage regions for internal/kernel tracking (higher resolution)
-pub const MAX_INTERNAL_DAMAGE_REGIONS: usize = 32;

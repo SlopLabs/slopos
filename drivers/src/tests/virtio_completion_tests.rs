@@ -1,8 +1,9 @@
 //! VirtIO completion primitive regression tests: `IrqEdgeEvent`, the sleeping
-//! `Mutex`, virtqueue descriptor free-list invariants and HPET `period_fs()`.
+//! `Mutex`, virtqueue descriptor free-list invariants and HPET
+//! `period_femtoseconds()`.
 
 use slopos_ostd::lock_class;
-use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
+use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, fail, pass};
 
@@ -180,23 +181,17 @@ pub fn test_virtqueue_unready_alloc_none() -> TestResult {
     pass!()
 }
 
-pub fn test_hpet_period_fs_nonzero() -> TestResult {
+pub fn test_hpet_period_is_within_the_spec() -> TestResult {
     assert_test!(hpet::is_available(), "HPET must be available for this test");
-    let period = hpet::period_fs();
-    assert_test!(period > 0, "period_fs should be > 0 when HPET is init'd");
+    let period = hpet::period_femtoseconds();
+    assert_test!(
+        period > 0,
+        "the HPET period should be > 0 when HPET is init'd"
+    );
     assert_test!(
         period <= 100_000_000,
-        "period_fs {} exceeds HPET spec max",
+        "the HPET period {} exceeds the spec max",
         period
-    );
-    pass!()
-}
-
-pub fn test_hpet_period_fs_matches_full_name() -> TestResult {
-    assert_eq_test!(
-        hpet::period_fs(),
-        hpet::period_femtoseconds(),
-        "period_fs and period_femtoseconds should return the same value"
     );
     pass!()
 }
@@ -250,10 +245,6 @@ slopos_testing::stest!(
     suite = virtio_completion
 );
 slopos_testing::stest!(
-    name = test_hpet_period_fs_nonzero,
-    suite = virtio_completion
-);
-slopos_testing::stest!(
-    name = test_hpet_period_fs_matches_full_name,
+    name = test_hpet_period_is_within_the_spec,
     suite = virtio_completion
 );

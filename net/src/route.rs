@@ -105,7 +105,7 @@ pub struct RouteTable {
 pub static ROUTE_TABLE: RouteTable = RouteTable::new();
 
 /// Shared by `new` and `init_with`, which build the same logical lock.
-const ROUTE_TABLE_CLASS: &slopos_ostd::sync::lock_tracking::LockClassKey =
+const ROUTE_TABLE_CLASS: &slopos_ostd::sync::LockClassKey =
     slopos_ostd::lock_class!("ROUTE_TABLE", LOCK_LEVEL_REGISTRY);
 
 impl RouteTable {

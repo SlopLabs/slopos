@@ -98,7 +98,6 @@ pub(super) fn tcp_client(config: &NcConfig) -> u8 {
     run_conn_loop(config, &conn)
 }
 
-/// The `connect` that produced `conn` stayed a regular syscall (SLOPRING § 12).
 fn run_conn_loop(config: &NcConfig, conn: &TcpConn) -> u8 {
     super::ring_io::Session::new(config, conn, false)
         .run()

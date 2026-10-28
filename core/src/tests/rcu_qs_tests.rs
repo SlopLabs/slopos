@@ -21,7 +21,7 @@ pub fn test_rcu_interrupt_qs_declines_inside_a_reader() -> TestResult {
     // Inside the mask, with the reads it indexes: a `cpu` read before the window can name a
     // slot the report never touched.
     let (reported, advance) = IrqDisabled::with(|_irq| {
-        let cpu = slopos_arch::pcr::get_current_cpu();
+        let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
         let guard = rcu_read_lock();
         let before = rcu_qs_counter(cpu);
         let reported = rcu_note_qs_from_interrupt();
@@ -48,7 +48,7 @@ pub fn test_rcu_interrupt_qs_declines_inside_a_reader() -> TestResult {
 /// for a context switch on every CPU.
 pub fn test_rcu_interrupt_qs_reports_outside_a_reader() -> TestResult {
     let (reported, advance) = IrqDisabled::with(|_irq| {
-        let cpu = slopos_arch::pcr::get_current_cpu();
+        let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
         let before = rcu_qs_counter(cpu);
         let reported = rcu_note_qs_from_interrupt();
         let after = rcu_qs_counter(cpu);
@@ -73,7 +73,7 @@ pub fn test_rcu_interrupt_qs_reports_outside_a_reader() -> TestResult {
 /// would not notice.
 pub fn test_rcu_interrupt_qs_recovers_after_the_reader_ends() -> TestResult {
     let (declined, reported, advance) = IrqDisabled::with(|_irq| {
-        let cpu = slopos_arch::pcr::get_current_cpu();
+        let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
         let guard = rcu_read_lock();
         let declined = rcu_note_qs_from_interrupt();
         drop(guard);

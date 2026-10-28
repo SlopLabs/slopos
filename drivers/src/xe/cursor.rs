@@ -12,10 +12,10 @@
 //! leaves the scanout front-end on a software cursor.
 
 use slopos_abi::DisplayInfo;
-use slopos_mm::mmio::MmioRegion;
 use slopos_mm::page_alloc::free_page_frame;
 use slopos_mm::paging_defs::PAGE_SIZE_4KB;
 use slopos_ostd::lock_class;
+use slopos_ostd::mm::IoMem;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::util::ptr_buf;
 
@@ -43,7 +43,7 @@ const CURSOR_PLACEMENT_RESERVE_BYTES: u64 =
     (DisplayInfo::MAX_DIMENSION as u64) * (DisplayInfo::MAX_DIMENSION as u64) * 4;
 
 struct CursorState {
-    mmio: MmioRegion,
+    mmio: IoMem,
     pipe: Pipe,
     /// Display IP major version; version 13 needs the cursor-arbitration
     /// workaround Wa_22012358565.
@@ -70,7 +70,7 @@ static CURSOR_STATE: SpinLock<Option<CursorState>> =
 /// Allocate the cursor surface and record the binding the cursor plane will
 /// drive. Writes no register; on failure it returns `false` having touched
 /// nothing, so the caller can fall back to a software cursor.
-pub fn init(mmio: &MmioRegion, pipe: Pipe, display_ip_version: u8) -> bool {
+pub fn init(mmio: &IoMem, pipe: Pipe, display_ip_version: u8) -> bool {
     let Some((surf_ggtt, surf_virt)) = allocate_surface(mmio, pipe) else {
         return false;
     };
@@ -200,7 +200,7 @@ pub fn available() -> bool {
 /// Returns its GGTT byte address and Write-Combining virtual address, or `None`
 /// after freeing any partial allocation. Reads the primary `PLANE_SURF` only to
 /// place above it — never writes the primary plane.
-fn allocate_surface(mmio: &MmioRegion, pipe: Pipe) -> Option<(u32, u64)> {
+fn allocate_surface(mmio: &IoMem, pipe: Pipe) -> Option<(u32, u64)> {
     let bank = mmio_map::ggtt_bank(mmio)?;
     let ggtt_total = (bank.size() as u64 / regs::GGTT_PTE_BYTES as u64) * PAGE_SIZE_4KB;
 

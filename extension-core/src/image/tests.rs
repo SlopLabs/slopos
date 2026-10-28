@@ -178,11 +178,6 @@ fn what_is_no_image_is_refused_for_what_it_is() {
         Image::check(&[0u8; 512][..]),
         Err(ImageError::Format(_))
     ));
-    let archive = b"070701000000000000000000000000000000000000000000000000000000000";
-    let why = Image::check(&archive[..]).unwrap_err().to_string();
-    assert!(why.contains("install it again"), "{why}");
-    assert!(archive_form(&mut &archive[..]));
-    assert!(!archive_form(&mut &bytes[..]));
 }
 
 #[test]

@@ -198,11 +198,3 @@ impl Default for ResolverConfig {
 pub fn primary() -> Option<Ipv4Addr> {
     RESOLVER.primary()
 }
-
-/// Deliberately **not** inlined: its caller `dns_resolve` sits 16 bytes under
-/// the build's measured frame cap, and folding this lookup's temporaries into
-/// that frame exceeds it.
-#[inline(never)]
-pub fn primary_octets() -> Option<[u8; 4]> {
-    RESOLVER.primary().map(|ip| ip.0)
-}

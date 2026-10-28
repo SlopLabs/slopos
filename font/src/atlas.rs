@@ -560,15 +560,6 @@ mod global_atlas {
         ATLAS_GENERATION.load(Ordering::Acquire)
     }
 
-    pub fn init_global(font_data: &[u8], size_px: u16) -> bool {
-        if let Some(atlas) = GlyphAtlas::new(font_data, size_px) {
-            replace_global(atlas);
-            true
-        } else {
-            false
-        }
-    }
-
     pub fn init_global_bitmap() -> bool {
         use crate::bitmap;
         match bitmap::bitmap_to_coverage(

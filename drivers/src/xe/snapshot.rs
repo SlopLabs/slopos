@@ -2,7 +2,7 @@
 //! [`restore`] can put the firmware framebuffer back when a repoint is declined
 //! or the watchdog rolls it back.
 
-use slopos_mm::mmio::MmioRegion;
+use slopos_ostd::mm::IoMem;
 
 use crate::xe_logic::regs::{self, Pipe};
 
@@ -22,7 +22,7 @@ pub struct DisplaySnapshot {
 }
 
 /// Capture the firmware's plane-group register state before any write.
-pub fn capture(mmio: &MmioRegion, pipe: Pipe) -> DisplaySnapshot {
+pub fn capture(mmio: &IoMem, pipe: Pipe) -> DisplaySnapshot {
     DisplaySnapshot {
         pipe,
         plane_ctl: mmio.read::<u32>(regs::plane_ctl(pipe)),
@@ -41,7 +41,7 @@ pub fn capture(mmio: &MmioRegion, pipe: Pipe) -> DisplaySnapshot {
 /// `PLANE_SURF` goes LAST, so the double-buffered plane group re-arms the
 /// firmware surface atomically. `PLANE_COLOR_CTL` and every
 /// pipe/transcoder/DDI/PLL/power-well register are left as found.
-pub fn restore(mmio: &MmioRegion, snap: &DisplaySnapshot) {
+pub fn restore(mmio: &IoMem, snap: &DisplaySnapshot) {
     let pipe = snap.pipe;
     mmio.write::<u32>(regs::plane_ctl(pipe), snap.plane_ctl);
     mmio.write::<u32>(regs::plane_stride(pipe), snap.plane_stride);

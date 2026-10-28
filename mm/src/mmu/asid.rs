@@ -9,13 +9,13 @@
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use slopos_abi::addr::PhysAddr;
-use slopos_arch::cpu::IrqDisabled;
-use slopos_arch::cpu::control_regs::{Cr4Flags, read_cr4, write_cr4};
-use slopos_arch::cpu::cpuid::{
+use slopos_ostd::arch::x86_64::cpuid::{
     CPUID_FEAT_ECX_PCID, CPUID_LEAF_FEATURES, CPUID_LEAF_STRUCTURED_EXT, CPUID_SEXT_EBX_INVPCID,
     cpuid, cpuid_count,
 };
-use slopos_arch::pcr::MAX_CPUS;
+use slopos_ostd::cpu::x86_64::IrqDisabled;
+use slopos_ostd::cpu::x86_64::control_regs::{Cr4Flags, read_cr4, write_cr4};
+use slopos_ostd::cpu::x86_64::pcr::MAX_CPUS;
 use slopos_ostd::sync::PerCpuSlot;
 use slopos_ostd::{klog_debug, klog_info};
 
@@ -25,9 +25,8 @@ use super::cr3::{Cr3Value, MmContextId, Pcid};
 /// SDM Vol 2A §3.2.
 const INVPCID_ALL_CONTEXT_NO_GLOBALS: u64 = 3;
 
-/// PCIDs in use on any one CPU are `0` (kernel) plus `1..=16` (user), which fits
-/// the 12-bit PCID space and leaves room for the KPTI bit-11 user/kernel pair
-/// (see `mmu::kpti`).
+/// PCIDs in use on any one CPU are `0` (kernel) plus `1..=16` (user), well
+/// inside the 12-bit PCID space.
 pub const DYN_ASIDS_PER_CPU: usize = 16;
 
 #[derive(Clone, Copy)]
@@ -138,10 +137,9 @@ pub fn init_bsp() -> bool {
     PCID_ENABLED.store(true, Ordering::Release);
 
     klog_info!(
-        "MMU: PCID enabled (INVPCID={}, slots/CPU={}, backend={})",
+        "MMU: PCID enabled (INVPCID={}, slots/CPU={})",
         invpcid,
-        DYN_ASIDS_PER_CPU,
-        super::rar::backend().name()
+        DYN_ASIDS_PER_CPU
     );
     true
 }
@@ -185,7 +183,7 @@ pub fn flush_pcid(pcid: u16) {
 /// CR3's tag space a single context.
 pub fn flush_local_all_contexts() {
     if !pcid_enabled() {
-        slopos_arch::cpu::flush_tlb_all();
+        slopos_ostd::cpu::x86_64::flush_tlb_all();
         return;
     }
     if invpcid_available() {
@@ -309,7 +307,7 @@ pub fn select_pcid_for_activate(ctx_id: MmContextId, tlb_gen: u64) -> Option<(u1
     if !pcid_enabled() {
         return None;
     }
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     if cpu_id >= MAX_CPUS {
         return None;
     }

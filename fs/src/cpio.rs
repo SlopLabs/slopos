@@ -38,9 +38,6 @@ impl From<newc::Error> for CpioError {
     }
 }
 
-/// One decoded archive entry. `path` and `data` borrow into the archive.
-pub use slopos_boot_core::newc::Entry as CpioEntry;
-
 /// The stored name is NUL-terminated within its `namesize` field.
 pub(crate) fn nul_terminated(bytes: &[u8]) -> &[u8] {
     match bytes.iter().position(|&b| b == 0) {
@@ -54,7 +51,7 @@ pub(crate) fn nul_terminated(bytes: &[u8]) -> &[u8] {
 /// entries visited.
 pub fn for_each_cpio_entry<'a, F>(archive: &'a [u8], mut f: F) -> Result<usize, CpioError>
 where
-    F: FnMut(&CpioEntry<'a>) -> Result<(), CpioError>,
+    F: FnMut(&newc::Entry<'a>) -> Result<(), CpioError>,
 {
     let mut count = 0usize;
     for entry in newc::entries(archive) {

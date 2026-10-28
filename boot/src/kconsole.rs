@@ -91,11 +91,11 @@ slopos_ostd::kcommand! {
 fn run_poweroff(kc: &mut KConsole<'_>) {
     kline!(kc, "kconsole: poweroff requested from the console");
     let cap = slopos_ostd::platform::power::kernel_authority();
-    slopos_ostd::platform::power::shutdown(&cap, c"kconsole poweroff".as_ptr())
+    slopos_ostd::platform::power::shutdown(&cap, "kconsole poweroff")
 }
 
 fn run_reboot(kc: &mut KConsole<'_>) {
     kline!(kc, "kconsole: reboot requested from the console");
     let cap = slopos_ostd::platform::power::kernel_authority();
-    slopos_ostd::platform::power::reboot(&cap, c"kconsole reboot".as_ptr())
+    slopos_ostd::platform::power::reboot(&cap, "kconsole reboot")
 }

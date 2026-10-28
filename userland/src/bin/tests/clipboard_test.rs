@@ -2,6 +2,9 @@
 
 use slopos_userland as _;
 
+use slopos_protocol::codec::tag::{
+    EVT_PASTE_READY, EVT_PASTE_RESULT, REQ_CLIPBOARD_COPY, REQ_CLIPBOARD_READ,
+};
 use slopos_protocol::connection::MAX_PENDING_FDS;
 use slopos_protocol::types::{Event, Request};
 use slopos_protocol::{Decode, Encode, FdFifo};
@@ -21,7 +24,7 @@ fn test_clipboard_copy_wire_is_tag_plus_len() -> bool {
         Err(_) => return false,
     };
     n == 9
-        && buf[0] == 13
+        && buf[0] == REQ_CLIPBOARD_COPY
         && u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) == 0x00AB_CDEF
         && u32::from_le_bytes([buf[5], buf[6], buf[7], buf[8]]) == 0x1234_5678
 }
@@ -38,7 +41,7 @@ fn test_clipboard_read_wire_is_tag_plus_len() -> bool {
         Err(_) => return false,
     };
     n == 9
-        && buf[0] == 17
+        && buf[0] == REQ_CLIPBOARD_READ
         && u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) == 1_048_576
         && u32::from_le_bytes([buf[5], buf[6], buf[7], buf[8]]) == 99
 }
@@ -50,7 +53,10 @@ fn test_paste_events_wire_is_tag_plus_len() -> bool {
         Ok(n) => n,
         Err(_) => return false,
     };
-    if n != 5 || buf[0] != 17 || u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) != 5000 {
+    if n != 5
+        || buf[0] != EVT_PASTE_READY
+        || u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) != 5000
+    {
         return false;
     }
     let result = Event::PasteResult { len: 5000 };
@@ -58,7 +64,9 @@ fn test_paste_events_wire_is_tag_plus_len() -> bool {
         Ok(n) => n,
         Err(_) => return false,
     };
-    n == 5 && buf[0] == 15 && u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) == 5000
+    n == 5
+        && buf[0] == EVT_PASTE_RESULT
+        && u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]) == 5000
 }
 
 fn test_clipboard_copy_decode_without_fd() -> bool {

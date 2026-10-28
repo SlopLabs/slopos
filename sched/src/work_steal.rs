@@ -11,7 +11,7 @@ use super::per_cpu::{
 };
 use super::task::TaskRef;
 use super::task_struct::Task;
-use slopos_arch::{get_cpu_count, get_current_cpu};
+use slopos_ostd::cpu::x86_64::pcr::{current_cpu_id, get_cpu_count};
 use slopos_ostd::{kdiag_timestamp, klog_info};
 
 /// Minimum load difference between victim and thief before a task is moved. At
@@ -31,17 +31,17 @@ const STEAL_COOLDOWN_TICKS: u64 = 3;
 /// Timer ticks between push-balance passes.
 const BALANCE_INTERVAL_TICKS: u64 = 8;
 
-static LAST_STEAL_TICK: [AtomicU64; slopos_arch::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; slopos_arch::MAX_CPUS];
+static LAST_STEAL_TICK: [AtomicU64; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS];
 
-static STEALS: [AtomicU64; slopos_arch::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; slopos_arch::MAX_CPUS];
-static PUSHES: [AtomicU64; slopos_arch::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; slopos_arch::MAX_CPUS];
+static STEALS: [AtomicU64; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS];
+static PUSHES: [AtomicU64; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS];
 
 /// Tasks `cpu_id` has pulled from a peer and pushed to one.
 pub fn migration_counts(cpu_id: usize) -> (u64, u64) {
-    if cpu_id >= slopos_arch::MAX_CPUS {
+    if cpu_id >= slopos_ostd::cpu::x86_64::pcr::MAX_CPUS {
         return (0, 0);
     }
     (
@@ -53,7 +53,7 @@ pub fn migration_counts(cpu_id: usize) -> (u64, u64) {
 /// Attempt to steal a task from another CPU's ready queue; `true` when one was
 /// stolen and enqueued locally.
 pub fn try_work_steal() -> bool {
-    let cpu_id = get_current_cpu();
+    let cpu_id = current_cpu_id();
     let cpu_count = get_cpu_count();
 
     if cpu_count <= 1 {
@@ -167,7 +167,7 @@ pub fn get_cpu_load(cpu_id: usize) -> u32 {
 /// Driven from the timer tick because `try_work_steal` runs only from the idle
 /// loop: with every CPU holding at least one task, nobody is there to pull.
 pub fn periodic_balance() -> bool {
-    let cpu_id = get_current_cpu();
+    let cpu_id = current_cpu_id();
     let cpu_count = get_cpu_count();
     if cpu_count <= 1 {
         return false;
@@ -246,40 +246,4 @@ pub fn find_least_loaded_cpu(exclude: usize) -> Option<usize> {
         }
     }
     best_cpu
-}
-
-pub fn find_most_loaded_cpu() -> Option<usize> {
-    let cpu_count = get_cpu_count();
-    let mut best_cpu = None;
-    let mut max_load = 0u32;
-
-    for cpu_id in 0..cpu_count {
-        let load = get_cpu_load(cpu_id);
-        if load > max_load {
-            max_load = load;
-            best_cpu = Some(cpu_id);
-        }
-    }
-    best_cpu
-}
-
-pub fn calculate_load_imbalance() -> (u32, u32, u32) {
-    let cpu_count = get_cpu_count();
-    if cpu_count == 0 {
-        return (0, 0, 0);
-    }
-
-    let mut total_load = 0u32;
-    let mut min_load = u32::MAX;
-    let mut max_load = 0u32;
-
-    for cpu_id in 0..cpu_count {
-        let load = get_cpu_load(cpu_id);
-        total_load += load;
-        min_load = min_load.min(load);
-        max_load = max_load.max(load);
-    }
-
-    let avg_load = total_load / cpu_count as u32;
-    (min_load, avg_load, max_load)
 }

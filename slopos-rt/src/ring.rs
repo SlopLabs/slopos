@@ -1,11 +1,7 @@
-//! `slibc-ring` — the userland SlopRing runtime. This is **userland**: async
-//! lives here, never in the kernel (AD-8/AD-9); the kernel side is the
-//! strictly-synchronous `ring/` crate driven by the two `ring_*` syscalls.
-//!
-//! The runtime reads/writes the shared region directly through its own
-//! mapping. Because the *kernel* reads this same memory volatilely
-//! (SLOPRING § 5.3), userland uses the matching acquire/release ordering
-//! on the head/tail indices so the SPSC contract (SLOPRING § 4.2) holds.
+//! The [`Ring`] SQ/CQ wrapper. It reads and writes the shared region directly
+//! through its own mapping; the *kernel* reads the same memory volatilely, so
+//! the head/tail indices take the matching acquire/release ordering for the
+//! SPSC contract to hold.
 
 use core::sync::atomic::{Ordering, fence};
 
@@ -192,7 +188,7 @@ impl Ring {
     /// Non-blocking harvest of one CQE. Returns `None` if the CQ is
     /// empty. Inline completions are visible here; deferred (was-blocking)
     /// completions require a blocking [`Ring::submit_and_wait`] /
-    /// [`Ring::wait_completion`] to progress (SLOPRING § 7.1).
+    /// [`Ring::wait_completion`] to progress.
     pub fn poll_completion(&mut self) -> Option<Cqe> {
         let tail = self.cq_tail();
         let head = self.cq_head();

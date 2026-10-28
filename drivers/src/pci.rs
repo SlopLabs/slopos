@@ -6,8 +6,9 @@ use slopos_acpi::mcfg::{Mcfg, McfgEntry};
 use slopos_acpi::tables::AcpiTables;
 use slopos_kernel_services::platform;
 use slopos_mm::hhdm;
-use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
+use slopos_mm::mmio;
 use slopos_ostd::dev::Devres;
+use slopos_ostd::mm::IoMem;
 use slopos_ostd::pci::{Bdf, EcamConfigSpace};
 use slopos_ostd::sync::{InitFlag, LOCK_LEVEL_REGISTRY, LOCK_LEVEL_RESOURCE, OnceLock, SpinLock};
 use slopos_ostd::{AllocError, KBTreeMap, KVec, Pod, klog_info, klog_warn};
@@ -656,14 +657,6 @@ pub fn pci_find_capability(bus: u8, device: u8, function: u8, cap_id: u8) -> Opt
         .map(|cap| cap.offset)
 }
 
-/// Config-space byte offset of the first extended capability header with
-/// `cap_id`. Requires ECAM MMIO to be active.
-pub fn pci_find_ext_capability(bus: u8, device: u8, function: u8, cap_id: u16) -> Option<u16> {
-    PciExtCapabilityIter::new(bus, device, function)
-        .find(|cap| cap.id == cap_id)
-        .map(|cap| cap.offset)
-}
-
 impl PciDeviceInfo {
     pub fn find_capability(&self, cap_id: u8) -> Option<u16> {
         pci_find_capability(self.bus, self.device, self.function, cap_id)
@@ -671,11 +664,6 @@ impl PciDeviceInfo {
 
     pub fn capabilities(&self) -> PciCapabilityIter {
         PciCapabilityIter::for_device(self)
-    }
-
-    /// `None` if ECAM is not active or the capability is absent.
-    pub fn find_ext_capability(&self, cap_id: u16) -> Option<u16> {
-        pci_find_ext_capability(self.bus, self.device, self.function, cap_id)
     }
 
     /// Yields no items if ECAM MMIO is not active.
@@ -1032,7 +1020,7 @@ fn pci_discover_mcfg() {
         );
 
         let phys = PhysAddr::new(entry.base_phys);
-        let region = MmioRegion::map(phys, region_size).unwrap_or_else(|| {
+        let region = mmio::map_uncached(phys, region_size).unwrap_or_else(|| {
             panic!(
                 "PCI: ECAM segment {} MMIO mapping failed ({}MB) — cannot continue",
                 entry.segment,
@@ -1119,7 +1107,7 @@ pub fn pci_ecam_find_entry(segment: u16, bus: u8) -> Option<McfgEntry> {
 }
 
 /// `None` if the index is out of range or the region was not mapped.
-pub fn pci_ecam_mapped_region(index: usize) -> Option<MmioRegion> {
+pub fn pci_ecam_mapped_region(index: usize) -> Option<IoMem> {
     ECAM.get()?
         .config_space(index)
         .map(|cs| cs.region().clone())
@@ -1183,11 +1171,6 @@ pub fn pci_get_device(index: usize) -> Option<PciDeviceInfo> {
     } else {
         None
     }
-}
-
-/// The name of the driver that has claimed device `dev_idx`, if any.
-pub fn pci_device_owner(dev_idx: usize) -> Option<&'static str> {
-    CLAIMED_BY.lock().owner(dev_idx)
 }
 
 const fn vd_key_of(dev: &PciDeviceInfo) -> u32 {
@@ -1340,18 +1323,4 @@ fn pci_probe_drivers_fallback() {
             }
         }
     }
-}
-
-pub fn pci_get_msi_capable_devices() -> ([PciDeviceInfo; PCI_MAX_DEVICES], usize) {
-    let state = ENUM_STATE.lock();
-    let mut result = [PciDeviceInfo::zeroed(); PCI_MAX_DEVICES];
-    let mut count = 0;
-    for i in 0..state.device_count {
-        let dev = &state.devices[i];
-        if dev.has_msi() || dev.has_msix() {
-            result[count] = *dev;
-            count += 1;
-        }
-    }
-    (result, count)
 }

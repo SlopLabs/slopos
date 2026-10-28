@@ -71,7 +71,7 @@ just boot-live      # spins the wheel, from RAM
 | `just boot` | Boot the development machine, wheel first: a persistent `/` carrying the toolchain and a clone of this checkout. Also needs clang, lld, cmake, ninja, util-linux (sfdisk), dosfstools and mtools |
 | `just boot-fast` | `just boot` without the Wheel of Fate (coward) |
 | `just boot-live` | Boot the live ISO from RAM in a window, as bare metal runs it; nothing persists. `ROULETTE=0` skips the wheel |
-| `just test` | Run the 2,500+ test suite under QEMU |
+| `just test` | Run the test suite — thousands of tests — under QEMU |
 | `just --list` | Everything else (there's a lot) |
 
 To build SlopOS inside SlopOS, cross-build the toolchain once (`just toolchain`,
@@ -144,7 +144,7 @@ tree, syntax highlighting and a command palette, file manager, image viewer,
 system monitor.
 
 **Plumbing** — our own libc (`slibc`) with an mmap-only malloc, an
-io_uring-style submission ring (SlopRing), a VFS with ext2, devfs, ramfs,
+io_uring-style submission ring (SlopRing), a VFS with ext4, devfs, ramfs,
 and an initramfs RAM root that boots with no disk attached at all.
 
 **The economy** — the Wheel of Fate gates every boot, and outcomes accrue
@@ -172,12 +172,12 @@ holding whole entries.
 
 The number worth defending is not the keyword count — folding `unsafe`
 behind a safe wrapper is the design, not a cheat. It is how much of OSTD's
-API you have to trust by reading rather than by type-checking: **54
-`pub unsafe fn`, 15 `pub unsafe trait`, and 16 safe functions that still
-carry a prose contract**, the last of which is ratcheted downward and
-cannot grow without CI noticing. `just tcb-ratio` reports the older
-unsafe-line-density figure (0.52 %) — useful as a trend, not comparable to
-other projects' TCB fractions, which are measured differently.
+API you have to trust by reading rather than by type-checking: **52
+`pub unsafe fn`, 15 `pub unsafe trait`, and no safe function that carries a
+prose contract** — a CI ratchet keeps that last number at zero. `just
+tcb-ratio` reports unsafe-line density (0.31 %, gated at 1 %) — useful as a
+trend, not comparable to other projects' TCB fractions, which are measured
+differently.
 
 The load-bearing invariants of that core are **machine-checked with
 [Verus](https://github.com/verus-lang/verus)**, an SMT-backed proof system
@@ -194,7 +194,7 @@ behaviour rather than a typed error:
   still read it.
 
 The proofs run in CI on every change and reproduce locally with
-`just verify`. For everything they don't cover: 2,500+ tests boot under
+`just verify`. For everything they don't cover: thousands of tests boot under
 QEMU on every change (`just test`), the trusted core runs under Miri
 (`just check-miri`), and when a bug only reproduces on Tuesdays, there's
 deterministic time-travel debugging (`just rr-record` / `just rr-replay`).
@@ -256,7 +256,7 @@ older idea that an invariant is a thing you *prove*;
 advertised above — which settled typestate vs. enum for our TCP sockets.
 
 **Standards and tools** — [Wayland](https://wayland.freedesktop.org) (the memfd
-+ `SCM_RIGHTS` buffer handoff is libwayland's trick), POSIX, VirtIO, the ext2
++ `SCM_RIGHTS` buffer handoff is libwayland's trick), POSIX, VirtIO, the ext4
 on-disk format, a couple dozen IETF RFCs, VT100/xterm escapes, ACPI, UEFI and
 the Intel SDM; built and checked with
 [Limine](https://github.com/limine-bootloader/limine),

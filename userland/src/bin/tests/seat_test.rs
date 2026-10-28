@@ -114,10 +114,6 @@ fn seat_fd_is_not_spawn_transferable() -> bool {
             src_fd: fd as i32,
             target_fd: 3,
             _pad: 0,
-            open_path_ptr: 0,
-            open_path_len: 0,
-            open_flags: 0,
-            _pad2: 0,
         };
         let attrs = SpawnAttrs {
             actions_ptr: &action as *const _ as u64,
@@ -155,7 +151,7 @@ fn seat_fd_is_not_spawn_transferable() -> bool {
 }
 
 /// `input_poll_batch` without the input seat is `EPERM`, not a silent zero:
-/// the whole point is that presenting a call no longer confers the sink.
+/// making the call confers no sink.
 fn input_poll_without_seat_is_denied() -> bool {
     let mut buf = [0u8; 64];
     let rc = unsafe { syscall2(SYSCALL_INPUT_POLL_BATCH, buf.as_mut_ptr() as u64, 1) as i64 };

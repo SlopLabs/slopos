@@ -13,9 +13,9 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use slopos_rt::slopfut::cross_core;
+use slopos_rt::{Ring, slopfut};
 use slopos_userland as _;
-use slopos_userland::ring::slopfut::cross_core;
-use slopos_userland::ring::{Ring, slopfut};
 use slopos_userland::syscall::core as sys_core;
 
 const TOTAL_ITEMS: usize = 200;

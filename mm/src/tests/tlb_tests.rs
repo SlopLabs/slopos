@@ -2,7 +2,7 @@
 
 use super::tests::resolve_pid;
 use slopos_abi::addr::VirtAddr;
-use slopos_arch::MAX_CPUS;
+use slopos_ostd::cpu::x86_64::pcr::MAX_CPUS;
 use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
 
@@ -198,7 +198,7 @@ pub fn test_get_active_cpu_count() -> TestResult {
 }
 
 pub fn test_bsp_apic_id_from_pcr() -> TestResult {
-    let bsp_id = slopos_arch::pcr::get_bsp_apic_id();
+    let bsp_id = slopos_ostd::cpu::x86_64::pcr::get_bsp_apic_id();
     if bsp_id == u32::MAX {
         klog_info!("TLB_TEST: BUG - BSP APIC ID not set in PCR");
         return TestResult::Fail;
@@ -392,8 +392,8 @@ pub fn test_cpumask_clear_all() -> TestResult {
 
 /// The flag is per-CPU and a context switch owns the same word, hence the mask.
 pub fn test_lazy_tlb_flag() -> TestResult {
-    slopos_arch::cpu::IrqDisabled::with(|_irq| {
-        let cpu = slopos_arch::pcr::get_current_cpu();
+    slopos_ostd::cpu::x86_64::IrqDisabled::with(|_irq| {
+        let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
         exit_lazy_tlb(cpu);
         if !should_flush_tlb(cpu) {
             return TestResult::Fail;
@@ -409,8 +409,8 @@ pub fn test_lazy_tlb_flag() -> TestResult {
 }
 
 pub fn test_should_flush_tlb_lazy_skips() -> TestResult {
-    slopos_arch::cpu::IrqDisabled::with(|_irq| {
-        let cpu = slopos_arch::pcr::get_current_cpu();
+    slopos_ostd::cpu::x86_64::IrqDisabled::with(|_irq| {
+        let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
         enter_lazy_tlb(cpu);
         let result = should_flush_tlb(cpu);
         exit_lazy_tlb(cpu);
@@ -464,8 +464,8 @@ pub fn test_destroy_clears_the_process_shootdown_mask() -> TestResult {
         return TestResult::Fail;
     };
 
-    notify_mm_switch(Some(key), pid, OFFLINE_CPU_A);
-    notify_mm_switch(Some(key), pid, OFFLINE_CPU_B);
+    notify_mm_switch(Some(key), OFFLINE_CPU_A);
+    notify_mm_switch(Some(key), OFFLINE_CPU_B);
     let masked = process_tlb_cpumask_count(key);
     if masked != 2 {
         klog_info!(
@@ -510,10 +510,10 @@ pub fn test_targeted_flush_covers_every_masked_cpu() -> TestResult {
         return TestResult::Fail;
     };
 
-    let live_cpu = slopos_arch::pcr::get_current_cpu();
-    notify_mm_switch(Some(key), pid, live_cpu);
-    notify_mm_switch(Some(key), pid, OFFLINE_CPU_A);
-    notify_mm_switch(Some(key), pid, OFFLINE_CPU_B);
+    let live_cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
+    notify_mm_switch(Some(key), live_cpu);
+    notify_mm_switch(Some(key), OFFLINE_CPU_A);
+    notify_mm_switch(Some(key), OFFLINE_CPU_B);
 
     let masked = process_tlb_cpumask_count(key);
     if masked != 3 {
@@ -522,7 +522,7 @@ pub fn test_targeted_flush_covers_every_masked_cpu() -> TestResult {
             pid,
             masked
         );
-        notify_mm_switch(None, INVALID_PROCESS_ID, live_cpu);
+        notify_mm_switch(None, live_cpu);
         release_offline_cpus();
         destroy_process_vm(resolve_pid(pid));
         return TestResult::Fail;
@@ -533,7 +533,7 @@ pub fn test_targeted_flush_covers_every_masked_cpu() -> TestResult {
     let after = process_tlb_cpumask_count(key);
     // Switch this CPU off the address space, as a real context switch would,
     // before the process goes away.
-    notify_mm_switch(None, INVALID_PROCESS_ID, live_cpu);
+    notify_mm_switch(None, live_cpu);
     release_offline_cpus();
     destroy_process_vm(resolve_pid(pid));
     if after != 3 {

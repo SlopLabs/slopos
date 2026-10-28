@@ -1,1481 +1,268 @@
 # SlopOS Vulnerability Audit and CVSS Scoring
 
-**No finding is open.**
+The ledger of open findings. A finding is removed once fixed, and an ID is
+never issued twice.
 
-Swept 2026-10-21: software trees — the ownership map and the owners record,
-init's lay-out and migration of a root, `root_layout::share` at the add that
-makes a second person and its mark, the walk that makes `/usr/local` uid 0's
-and the links it keeps, `/run/slopos-local` and `priv`'s trust of
-`/usr/local/bin`, `org.slopos.software.install` and `tree-install`'s staged
-copy, the loader's `$HOME/.local/lib`, `~/.local/bin` on a person's `PATH`,
-the image builders' record reads and `check_fs_image.sh --map`. Six review
-passes; nothing reached the bar. They found, before it landed, that the
-mechanism read the tree by path as uid 0, so a link swapped in published a
-file only uid 0 could read; that the walk followed into what another uid
-held, chmodded from a mode read before the `chown` so a `chmod` between left
-a file anyone could write, kept a link whose end was uid 0's though a link of
-the first person's led there, and kept one to a directory others fill; that a
-tree's own links could name a person's file outside it; that the copy went to
-guessable names in `/var/tmp`; that uid 0 believed manifests the first person
-wrote; that a record or accounts init could not read laid the root out as one
-person's, and the image builder took an unreadable record for an absent one;
-that `priv` trusted `/usr/local/bin` while a descriptor the first person
-opened before the hand-over could still write there; that the add recorded
-the second person before the hand-over, which no boot then finished alone;
-and that guessing a hand-over begun from a uid-0 top would hand over a
-volume mounted there. Now the copy is made through descriptors from `/`,
-following no link, of what everyone may read, with every link relative and
-staying in the tree, in `/var/lib/slopos/tree-install`, which only uid 0
-enters; the walk changes each directory before listing it, reads each mode
-again once uid 0 holds the entry, and keeps a link only where every name it
-follows is in a directory only uid 0 may change and a directory it ends at
-is within `/usr/local`; uid 0 believes only its own manifests; what cannot be
-read grants nothing; `priv` trusts `/usr/local/bin` only on a boot that began
-with it the system's; and the add shares first, marking the hand-over begun
-until its record is written, and adds nobody when that fails. Left below the
-bar: until the next boot, what a second person runs from `/usr/local` a
-descriptor the first person opened there before the hand-over can still
-change, which the add tells the administrator to restart for; uid 0 running
-`tree-install` itself reads the tree by path, without the copy; a tree through
-privd counts twice against the mechanism's `DiskBlocks` ceiling, so it is at
-most half of it; and once homes are 0700 a person installs for everyone only
-from a tree everyone may reach.
-
-Swept 2026-10-21: sessions — init's session table, `/run/sessions`, its
-re-execution's second version and the `/run/init` commands a person and a
-desktop's compositor may send; the login screen as `greeter`,
-`org.slopos.login`, `org.slopos.session.unlock` and `/bin/session`'s
-password checks and their waits; `/bin/login`'s relay; privd's reach, read
-from the table it hears, a console session's own password asked at its
-terminal, a link per graphical session and the descriptors an older privd
-finds; the compositor's lock screen, its switch and Ctrl+Alt+Delete;
-`seat_switch` and the seat arbiter; the clipboard per login tag; keys
-reaching the console only while nothing holds the input sink; the people's
-quota rows, every task's charge, which now lives on the task, and a zombie's
-on its person's row. Five review passes; nothing reached the bar. They
-found, before it landed, that the console's relay outlived its session and a
-re-execution hung every console login up; that a privd draining or handed no
-table kept judging by the last one it heard; that a compositor took the
-seats before init gave them, a session started behind came up unlocked, and
-one that never drew took the console's keys for good; that a re-execution
-into an image without the table looped; that wrong passwords at the lock
-screen cost nothing; that the person's other processes could fill their
-connections to init so the desktop's "locked" was lost, then restart it
-unlocked, that a lock retold could land after the unlock that followed it,
-and that a password the lock screen took as its desktop went behind unlocked
-it there; that an older privd asked on whichever screen held the first link;
-that `seat_switch` could hand the seats to a task already gone, and a
-departing holder's release clear its successor's; that a request still
-waiting on a screen that went behind could be answered there; that no fork
-or thread was charged a task and tasks whose ids differed by `MAX_TASKS`
-shared one charge, so a person's children left unreaped held nothing and
-filled the machine's task table; that a spawn refused its task leaked its
-process; that a person past the people's rows lost the zombie budget
-altogether; that init read the whole process table on every pass, whose
-freed buffer a base activation's pieces then took whole from the heap's
-large tier, which never splits a region, so each activation cost half again
-its size for good; and that a compositor whose frames ran long heard nothing
-init said, its executor taking completions only when idle, so a desktop init
-counted locked took the keys typed at its lock screen unlocked. Now the
-relay follows the session's entry, which a re-execution carries with its
-terminal; privd goes deaf when the table cannot be heard; init alone hands
-the seats, to a compositor once it says it is ready, and tells one started
-behind to lock first; the waits double from two seconds to a minute; a
-compositor is heard beside its person's connections and says "locked" until
-init hears it or it unlocks, init takes "unlocked" only from the desktop in
-front, and a restart anything else asks for comes back locked; an older
-privd is handed no link; a hand-over to a task gone is undone and a release
-clears only its own holder; a desktop going behind refuses what it was
-asked; every task holds its own charge from before it is registered, which a
-person's zombie keeps on their row until the reap; init reads the process
-table only for a request it judges; and a compositor reads what init said
-before each pass's input, its executor taking completions on every pass.
-Left below the bar: keys typed between one compositor's exit and the next
-one's hand-over reach the console, whose relay may be another person's
-shell; memory is the machine's, under one commit ceiling, so a person's
-processes can promise what another's then cannot; the sixteen people's rows
-are the boot's first sixteen to run anything, a seventeenth debiting the
-root; the first person's runtime directory lives for the boot; and ending a
-person's 256 processes still costs init a kill each, every one a walk of the
-task table, during which it answers nothing else. Seen while grading, and on
-the tree before this change too: under heavy host load an idle CPU's page
-zeroing can take `INVALID_PAGE_FRAME` from its per-CPU cache and fault on
-the physical address it names, which no path a user drives is known to
-reach. Fixed while grading, all older than this change: a client the
-compositor's frame loop refused stayed connected, its own task's armed poll
-holding the socket open; a live base's copy took nearly twice its bytes,
-each 64 KiB piece a 32-page block; init sent each process it ended a
-`SIGCONT` beside its `SIGTERM`, so ending those 256 held it seventeen
-seconds under TCG, and only a stopped one is now continued; and an open of a
-name a rename was replacing answered `ENOENT`, and on the RAM filesystem a
-file renamed over was reset under the descriptors that held it, so a reader
-of `/run/sessions` could find a running desktop missing: such an open walks
-again, and the displaced file lives until its last close.
-
-Swept 2026-10-20: `priv` — `slopos-priv-core`'s `uid requester` and
-`REQUESTER_CEILING`; `org.slopos.priv` and `org.slopos.priv.shell`; privd
-starting a mechanism as its requester, every kept answer's live parent, a
-mechanism's directory held to the one sent, and a draining privd starting
-nothing; `/bin/priv`'s search of directories only uid 0 can change, link by
-link, its environment and its terminal; `slopos_userland::held` and the
-shell's held mode, which the rescue shell now shares. Four review passes;
-nothing reached the bar. They found, before it landed, that a kept answer
-reached anything in the person's session, a shell included, so any program
-there could take `priv -s` unasked for five minutes, as it could by naming
-the shell or `priv` itself; that `Power` in the ceiling let what `priv` ran
-write the loader's variables behind bootctl's checks and fill the firmware's
-store; that a program found by a link was checked by its target and spawned
-by its link, a middle hop was not checked at all, and a path could name a
-uid-0 program outside the search directories; that the working directory
-sent could be swapped for a link to `/etc` while the person was asked; that
-a `priv` shell kept the old privd draining and the new one refusing every
-exclusive group; that Ctrl+Z stopped a lone command for good; and that a
-shell holding nothing refused `exec`. Now kept answers key on the requester's
-live parent and a shell is its own unkept action, by `-s` or by name, with
-`priv` never running `priv`; the ceiling holds no `Power`; the program is
-walked link by link within the search directories and its target spawned;
-privd refuses a directory that moved and a draining privd starts nothing,
-which the new one no longer waits on; a lone command's terminal takes no
-Ctrl+Z; and a shell hands its mask on only while it holds more than every
-program does. Left below the bar: a working directory is a path, so the
-person's processes can still move one from under what `priv` already runs;
-what the person's shell starts can repeat a kept command within five
-minutes with input of its own, as sudo's timestamp lets it run anything;
-`DacOverride` reads `/etc/shadow`'s hashes and every person's files, so an
-administrator who answers a standard user's `priv` hands them every person;
-what `priv` makes is the person's; and a signal sent to every process of a
-held program's job reaches the program twice.
-
-Swept 2026-10-20: principals and approval — `slopos-priv-core`'s `user` and
-`admin` levels, `Action::admits` and `keep`; the base policy as translated and
-the extensions' actions; the consent channel's second version, its password
-answers, `SHOWN` and the version a compositor names; the compositor's password
-field, its key releases and its quiet window; privd's people, kept answers,
-password checks through `/sbin/authcheck` and their delays, per-uid admission
-and the verdict taken again once a question is answered; `users`' manage
-action reached through an administrator's answer; and `test_key`. Three
-review passes; nothing reached the bar. They found, before it landed, that a
-task list privd could not read made every person look alone; that a kept
-answer outlived its requester's demotion and their session, and covered
-another activation of the extension; that authcheck inherited the
-descriptors privd's other threads held for their requesters; that the tail of
-a password reached a client once a question went from under someone typing;
-that one person raising questions held everyone's back, the queue's bound and
-the refusal window being global; that connections had no ceiling across uids;
-that every request listed every task before it was judged; that an
-administrator demoted while the dialog was up still answered; and that a
-wrong password's refusal named the administrator. Now the people are
-unknown, and every request reading them refused, when the tasks cannot be
-listed; a kept answer is keyed by session, activation and kind, and forgotten
-when privd reads the extensions again; authcheck gets three descriptors and is
-killed past two minutes; the dialog swallows keys for 1.5 s after a password
-question goes; a uid waits four questions at most and a refusal holds back
-only its own; privd admits 128 pooled connections in all; tasks are listed
-only for an action that names a person; and an answered
-request is judged again. Left below the bar: the dialog has no secure
-attention key, so a maximised client can draw a likeness of it (Phase 4 of
-`plans/users-and-login.md`), and `SHOWN` tells a requester when the card is
-drawn; an extension's `keep` needs no grant, since it only repeats a command
-the person allowed; the compositor's input ring and the kernel's pipe pages
-keep typed bytes until reused, readable by no other process.
-
-Swept 2026-10-19: the accounts — `tls-core`'s BLAKE2b and Argon2id;
-`slopos-accounts-core`'s record, PHC hashes and the database it renders;
-slibc's compiled-in rows, `getgrouplist` and `initgroups`; `/etc` and
-`/var/lib/slopos` kept against moves, mounts and unmounts; `userland::sealed`,
-`userland::accounts` and `userland::secret`; `/bin/users`, `/sbin/authcheck`,
-the two accounts actions and `PRIV_UID`; privd's terminal relay; init's boot
-sync and ownership migration; `extctl`'s person names and lock order; and the
-installer's first person. Seven review passes; nothing reached the bar.
-They found, before it landed, that a sealed record that could not be read made a root fall back to
-the passwordless one-person record and overwrite its people; that a
-`DacOverride` holder's chown between a generation's create and its seal hid
-the record the same way; that a `mount=` volume at `/var` could be detached
-to the same end; that a symlink, FIFO, socket, unreadable file or directory
-left at a writer's names stalled every accounts writer for good and kept
-`/etc/shadow`'s old hashes answering, as did an extension record `extctl`
-could not read; that a password was echoed when the requester's output was
-piped, and a reply typed ahead of a prompt when echo came back between
-prompts; that an extension could take a person's name, from a database
-behind its record; that the ownership migration would hand other people's
-homes to the session; that the desktop's person could be demoted, leaving
-nobody privd would ask; that a person at a prompt held the accounts lock, as
-`extctl` did across a whole image; that `getgrouplist` under-counted past 256
-groups; and that a password past 4 KiB was stored but never checkable. Now a
-writer holds what it sealed to its bytes, name, owner and mode, takes the
-older generations away only once it is so held, and goes past a leftover it
-cannot take away, and a reader errs on a writer's generation it cannot read
-and passes over anything else; `umount(2)` refuses what `mount(2)` refuses at a kept
-directory; a writer unlinks or moves aside what it finds at its names and
-writes `/etc/shadow` first from the record alone; a mechanism reading
-secrets gets a terminal of its own whenever standard input is one, echo off
-from before the first prompt; and the locks are held only while writing.
-
-Swept 2026-10-19: on-disk extension images — `slopos-verity-core`'s SHA-256,
-tree, verified read and `verify_all`; `extension-core`'s volume writer and
-strict reader, the image and symbol checks and the packer;
-`ext_activate(name, fd, digest)` and the retired archive slot; the verifying
-device over a file of the root, the activation pool, its index and reaper;
-`orphan::hold_ref`; the block ceiling `ExtensionUpdate` lifts; `extctl`'s
-reads, signed pre-judgment, store copies and archive floors; and
-`remote.py`'s root. Five review passes; nothing reached the bar. They found,
-before it landed, that a freed activation's unlinked image was never freed
-on a RAM root and kept the ext2 flusher from parking; that an instance whose
-volume would not detach was lost to the pool; that a directory whose
-extents all named one block, or 65 536 names sharing an FNV-1a hash, held
-the activation lock for hours; that the index took an empty name, a name
-holding `/` or NUL, a repeated `.`, an entry of another type or a reserved
-inode; that the inode an activation held open could be freed between the
-descriptor's snapshot and its reference; that the userland reader divided
-by zero on a descriptor size past 4 KiB, read past a directory block with
-checksums off, overflowed an inode table's end, disagreed with the kernel
-on a directory's or symlink's high size word and on the entry limit, and
-hashed a 16 TiB file of holes or directories of aliased blocks for hours,
-aborting or stalling the uid-0 mechanism, and took files whose extents named
-the descriptor tables, ran past the volume or were sealed under another
-generation, symlinks with a hole or a NUL and descriptors the kernel
-refuses, which the kernel would then not serve, let a file size near 2^64
-wrap past its size bound, read a directory's records whole before any
-limit, and named an unnamed manifest entry in quadratic time; that `install-signed` parsed a
-whole unsigned image unasked before its signature, and that a replay of a
-sidecar the store keeps made the mechanism read a whole image holding the
-store's lock and the `extensions` group; that a FIFO at the image path
-blocked the mechanism there; that a store copy was believed by its length
-and top block alone, a failed copy or a failed edit left one behind, and a
-requester appending to its file after the judgment had the copy fill the
-disk; that the symbol and whole-image checks held every ELF file and the
-whole tree in memory; that the symbol check copied a file's names
-unbounded and walked each program's libraries through linear searches
-rebuilt per program; that every activation took 2 MiB of cache frames and
-some 350 KiB of heap whatever its image's size, 64 MiB of frames for a full
-pool; that the per-process block ceiling refused a dense
-image past 256 MiB; and that an archive-form floor refused the same version
-rebuilt, or let a key replace its bytes again and again. Now the device
-drains what it frees; a stuck instance goes to the reaper; the index walk is
-bounded by the volume and sorted, and refuses those names and inodes; the
-reference is taken under the snapshot; the reader requires the writer's
-geometry, checksums, first inode and generation, bounds every header, path,
-directory, entry, file, descriptor and extent by the volume's own blocks in
-checked arithmetic, and matches the kernel's sizes and limit; a signed
-install is judged from its sidecar before its image is read; the image is
-opened without blocking or following a link; a copy takes exactly the
-judged length, is held whole and is taken away with whatever an edit leaves;
-files are read one at a time and the tree a level at a time; a
-file's names are kept once and bounded by its bytes, and its libraries
-are indexed, resolved once and bounded per file and per program; an
-activation's cache starts at 64 frames and its index and cache slots grow
-with the volume; an
-`ExtensionUpdate` holder has no block ceiling; and an archive floor binds
-its version once. Below the bar: an activation's index can hold up to
-65 536 names of 255 bytes, about 17 MB of kernel heap, and 32 activations
-about 570 MB, which only an `ExtensionUpdate` holder can make; image blocks
-are cached by both the root's filesystem and the activation's; each block
-that fails its tree logs a line, unthrottled; every boot's `activate-all`
-reads each extension's ELF files whole through the tree before privd
-starts; an interface-5 base on a newer kernel stops every extension until
-`extctl enable`; and the 2026-10-16 notes below on the activation budget
-describe the in-memory form this sweep's change replaced.
-
-Swept 2026-10-18: extensions' actions, commands, apps and configuration —
-privd's attested requester (`SO_PEEREXTENSION` before `SO_PEERPROGRAM`), the
-extension principal and `Action::for_privd`'s reading of `allow` lines, the
-actions it loads beside the base's (`slopos_userland::activation`) and
-re-reads on `SIGHUP`, the mechanisms it spawns as an extension's first user
-under its login tag with `SetId` and signals with `ProcSignal`; init's ending
-of a stopped extension's mechanisms, its tracking of what those actions were
-read from and its digest of what a service reads of `/etc/<name>`; `extctl`'s
-`/opt/bin` links, `config edit|install|apply`, the sealed `/etc/<name>` and
-the record's serial, and `--root`; the dock's extension shares; and
-`DEFAULT_PATH` and the session's `PATH`. Four review passes; nothing reached
-the bar. They found, before it landed, that the mechanism of `config install`
-read the requester's file by a path it opened as uid 0, so a session could
-have a file only uid 0 may read copied where everyone reads it; that a restart
-of privd for every change of an extension's actions left it off its socket
-longer than a requester waits and refused every exclusive action while the old
-instance lived; that privd never drained the pipe its `SIGHUP` handler woke it
-on and spun for the rest of the boot; that privd, uid 0, could not relay a
-requester's signals to a mechanism running as an extension's user, so a
-timeout's `SIGTERM` never reached it; that a service reading `/etc/<name>`
-without a trailing slash was never restarted by a change there, and a
-directory of more than 64 files gave a different digest each read; that
-`/etc/<name>` stayed unsealed until a first configuration went in, so a
-`DacOverride` holder could plant one that a service read and the first install
-sealed in; that an action allowing `paired` ran unasked for the broker yet was
-named in no grant line and held to no key's user ceiling; that privd ran a
-mechanism of an extension holding another's uid, which init refuses; that the
-mechanisms carried privd's login tag, so one an extension's action left
-running outlived the extension's removal holding its grant, and a privd
-started again refused every exclusive group while it ran, `extensions` among
-them, so the owner could not remove the extension; that a configuration file
-another process changed as it was written was left unsealed under its name,
-which a `DacOverride` holder could write and the service would read, and a
-write cut short stopped the extension at its next activation for good; that
-the temporary name a file was written under could be another configuration
-file's; that a `SIGHUP` reaching a privd started again before its handler
-ended it; that `--root` with a relative path held the running root's store
-path, not the mounted one's, to having no link; that an action granted
-`SchedHigh` installed but could never start; that init never told privd of
-actions it read only on a retry; that init ended the running mechanism of an
-extension it could not read in the instant an update holds its record and
-activation apart, and that one unreadable extension stopped it ending any
-other's; that a mechanism added to an ending already under way got no
-`SIGTERM` or was never ended, and that a re-enabled extension's new mechanism
-was ended by the batch that ended its old one; that a privd started again
-after its predecessor crashed took an extension's exclusive group while that
-group's mechanism ran; that a session could have the uid-0 mechanism read and
-check a whole stored image, unasked, with a sidecar any key signed; that
-`config edit` as uid 0 ran an editor found where the session writes, by name
-or by path; that one extension's app entry could replace another's, or show an
-app it never declared; that only the first 64 files of a directory a service
-reads were held, and a 65th signed file spent its serial though refused; that
-the first layout of `/etc/<name>` deleted files the owner had put there; and
-that a re-execution could leave privd reading actions it was never told had
-changed.
-
-Below the bar and left: privd checks an extension mechanism's program against
-the activation it read the action from and then spawns it by path, so an
-activation replaced between the two runs the new image's program with the old
-action's grant until privd reads the actions again (20: the replacement takes
-`ExtensionUpdate`, and the gap is init's for services too); an extension's
-action's `describe` is the extension's text, which privd shows with
-`(extension <name>)` after it and beside the program's `/opt/<name>` path
-(15); an extension installed before an action needed a user stops at its next
-activation (10); and a crash in the instant between a configuration file's
-rename and its seal leaves it unsealed, which the next activation refuses,
-stopping the extension until it is taken away by hand (10).
-
-Swept 2026-10-18: extensions' services and users — records' uids and the
-user database `extctl` writes sealed from them (`extension_core::accounts`,
-`replace_sealed`); slibc's readers of `/etc/passwd` and `/etc/group`; init's
-boot step, its supervision of every service (`init/extensions.rs`: tags,
-directories, listen sockets, loggers, restarts, session services, reloads)
-and its re-execution handing them on; the loader's search of an attested
-extension program's own `lib`; and the kernel's `SO_REUSEADDR` for TCP
-listeners and UDP addresses. Six review passes; nothing reached the bar.
-They found, before it landed, that every userland socket asking for
-`SOCK_CLOEXEC` got none, the flag truncated to 16 bits, so a re-executed init
-kept listening on every service's port with nobody accepting; that a TCP
-port a service had served stayed refused to a new listener while its
-connections sat in `TIME_WAIT`; that any socket setting `SO_REUSEADDR` took
-a bound UDP address over, and any socket bound to a specific address took a
-wildcard's datagrams for it, so a local process could steal those of a port
-init held for a service; that a UDP bind to port 0 registered port 0
-itself; that a service declared before its extension's `user` line ran as
-uid 1000; that a re-executed init started again what was meant to stay down
-or exited across the exec whatever its policy, adopted a service under what
-the records said after a base switch rather than what it ran, adopted a
-worker as a service's process and a logger that had died, closed only the
-descriptors it could parse from a pipe cut short, and left processes of a
-tag nothing claimed running with their capabilities; that a re-execution
-into an image of init from before services left every one running
-unsupervised with its grant, its sockets held in init; that more than about
-thirty services overflowed the pipe they were handed on in, so init could
-never re-execute, and about sixty spent init's descriptors, after which it
-could start nothing, privd included; that a service started under a tag, or
-waited for a port, that a stopping one still held, so the ending killed it
-or it spent its starts and stayed down holding its own sockets, and two
-services or extensions could claim one port; that init held a program to
-being on some basefs, which a `DacOverride` holder could meet with a link
-from a directory planted at `/opt/<name>` while no activation was shown
-there, and read the release, declaration and manifest by path, so an
-activation replaced between reads mixed two images; that a new base
-narrowing the ceiling left services holding what it took away, and an
-unreadable store stopped every service; that a service's own user could
-block another's logger with a FIFO or grow its log without bound, and the
-loggers carried init's own login tag, which the failed-resume path takes the
-tests' copy of init by; and that a FIFO at `/etc/passwd` blocked every user
-lookup. Now the socket wrapper carries the flags whole; the kernel lets an
-`SO_REUSEADDR` listener take a port only connections hold, refuses a second
-listener under the listeners' lock, shares a UDP address, or a wildcard and
-one beneath it, only among sockets that all set the option, and binds port 0
-to an ephemeral port at once; a declaration's default user is resolved once
-every line is read; a re-execution hands each service's state, its pid, a
-canonical digest and its descriptors on in as many pipes as they fill, only
-to an image that reads them, ending the services before one that does not,
-closes everything the first line names when the rest is short, adopts a
-live or unreaped child and only a live logger, and ends strays before their
-tags start again; a service waits for what a stopping one holds and gives
-its own sockets up with its starts, a port is one service's, and init gives
-its services at most half its descriptors; init opens `/opt/<name>` without
-following a link, reads the activation's files and holds the program to the
-generation they were read from, reloads on a new ceiling and keeps its
-services, reading again with backoff, when the store cannot be read; loggers
-carry a tag of their own and write only a regular file within its bound;
-and the database opens without blocking.
-
-Below the bar and left: init checks a service's program against the
-activation's generation and then spawns it by path, so an activation
-replaced between the two runs the new image's program with the old
-declaration's grant until the reload `extctl` sends ends it (20: the
-replacement takes `ExtensionUpdate`, and both images were granted); a
-session service runs as the person, uid 1000, holding what its extension
-declares, so the person's files are open to code holding more than the
-person (20, by design: the person approved the grant); a connector to a
-service's unix socket reads init's identity, recorded at `listen`, which
-privd and the compositor would take for init's own on a descriptor they did
-not get from init (15: documented, and both take the consent pair only from
-fd 4 as init starts them); a service whose port an extension init cannot
-read still holds spends its starts and gives up until that extension reads
-again (10); and a service's log and state are its extension's first user's,
-so one extension's users share them (10).
-
-Swept 2026-10-17: extensions going in — `extension-core`'s image, declaration,
-grant, sidecar, record, keys and ceiling grammars, its ELF reader and symbol
-check, and its install and activation verdicts; `tls-core`'s strict Ed25519
-and SSHSIG; `/bin/extctl` under privd's four `org.slopos.extension.*`
-actions with `ExtensionUpdate` and `Seal`, and its sealed store; the kernel
-keeping the store's directories (`KEPT_DIRS`) and refusing mounts over them;
-the seal made final against the page set; and the host's packer, signer and
-`remote.py install --extension`. Three review passes found, before it
-landed, that the mechanism re-read an install's image after the person
-approved a command line naming only its path, so neither the bytes nor the
-grant were what was shown; that a store edit cut off by a relayed signal or
-a power loss left a record unsealed, and an unsealed record read as none, so
-a signed install skipped the floor; that files were sealed by path once
-other processes could reach them, so a `DacOverride` holder could swap or
-hard-link what got sealed, and a later clean-up could unseal a sealed file
-through a planted second name; that any process could hold the store's lock
-for ever; that a key comment that did not read back broke the keys file;
-that `allow user alone` and `allow program` escaped the user ceiling; that a
-signed update re-enabled what the person disabled and put back what they
-removed; that two extensions could claim one user, and a rollback one
-command; that an image's symlinks could leave the image and a static PIE
-passed the symbol check; that two rollbacks left the running version
-refused; that a failed update stopped the version that ran, and a rollback
-to an image that no longer fitted left nothing running; that a program
-declared under the image's `lib/` escaped the interpreter check, and an
-action allowing `admin` with no level the user ceiling; that the person was
-asked about requests the mechanism would then refuse; and, in the
-kernel, that a `write(2)` through a descriptor opened before a seal, or a
-writable shared mapping, kept changing what readers of a sealed file saw,
-the first by racing the seal check too. Now the requester writes out the
-command line and the mechanism runs only that; records and keys are sealed
-generations, sealed through the descriptor that wrote them, read back and
-held to one name, and nothing is renamed; writers lock a 0600 file and
-ignore relayed signals; the comment is checked; every principal a person
-reaches unasked counts; the person's disable and removal hold; users and
-commands are checked at install and rollback; symlinks are relative without
-`..`, a declared program lives outside `lib/` and every ELF outside it is a
-program; a rollback stops refusing the version it returns to and checks the
-image fits before it commits; a failed update leaves the record and the
-running image; the requester holds every request to the store before privd
-asks; and the kernel refuses to seal a writably mapped file (`EBUSY`) and
-checks the seal under the stripe a seal is taken under. Below the bar: a
-`DacOverride` holder can still fill the store's directories with unsealed
-files and so fail an edit, and can open a store file before its seal and
-write it then, which the read-back after the seal catches but a power loss
-between the seal and the read-back would leave believed; the mechanism reads
-the files a request names as uid 0, so it learns whether a uid-0 file of
-mode 0600 exists and its size; two extensions' users are checked against
-each other only, not against users the base or a person made, which Phase 3's
-user database must do; a `key add` naming the whole base ceiling twice is
-past privd's 320-byte question, so the session cannot trust such a key,
-though root and the paired agent can; a file once writably mapped, or written
-through its page set, and still mapped read-only is refused a seal (`EBUSY`)
-until that mapping goes, which fails safe; and no mount may cover `/var`
-once boot has kept the store, so a separate `/var` is mounted by `mount=`
-alone.
-
-Swept 2026-10-16: extension activation and identity — `ext_activate` and
-`ext_deactivate` (`ExtensionUpdate`) staging an archive into an instance of a
-pool of 32 and showing it read-only and pinned at `/opt/<name>`, replaced or
-taken away under the mount table's lock; activation numbers and labels;
-`Program::Extension` and `Program::admits` at exec, `mmap` and `mprotect`; the
-64-bit program instance and `Identity::now` behind `SO_PEERPROGRAM` and the
-new `SO_PEEREXTENSION`; init's re-execution keeping its instance;
-`extensions=off` and `ext.memory=`; privd's `root` and `/run/init`'s uid-0
-commands requiring a base program, read again per request; and `/opt` in the
-ownership map. Reviews found, before it landed, that privd refused a
-requester whose identity had lapsed only after judging it, by the wrong rule;
-that a test's reap pass and the reaper thread could interleave, one undoing
-the other's mark; that the new mount helpers canonicalised a path, an
-allocation, under the mount table's write lock; that an init re-execution
-failing once its old image was gone, or whose reset failed partway, left its
-program and instance standing; that an activation staged a whole archive
-before finding the pool full; that three kernel frames passed the 2 KiB
-gate once the identity grew; and that a peer could still read an exited
-process's program after its parent had reaped it, the program lapsing only
-once the last task's cleanup ran. Now privd refuses a lapsed requester
-before its verdict; one reap pass runs at a time; paths are canonical before
-the lock; a failed re-execution forfeits; the pool is checked first; the
-frames are split; and a leader's exit forfeits before its status is set. Below the bar: uid-0 code outside the base can start a base
-program as uid 0 and ask as root through it, which only no extension running
-as uid 0 (Phase 3) closes; a process holding a file of a replaced activation
-keeps that copy against the shared pool and budget, so it can hold off that
-extension's updates; a script is reopened by path, so across a replacement
-it reads the next activation's bytes, and after a deactivation whatever an
-`ExtensionUpdate` or `DacOverride` holder left on the root there, under the
-first's identity; a `Mount` holder can still mount over `/opt` itself,
-covering `/opt/bin` though not an activation; an activation's index is
-outside `ext.memory`, and a staged archive may briefly take up to the budget
-beside the resident copies; a private mapping of an admitted file made
-writable once executable keeps the identity, which takes the program's own
-cooperation; and a descriptor a uid-0 base connector hands on speaks as root
-while the connector runs.
-
-Swept 2026-10-16: rescue — `BOOT_FLAG_MEDIUM`, set only once the `install
-medium` boot step serves the medium Limine loaded; the policy's `medium` line
-and `org.slopos.rescue`, which privd and every other reader drop off the
-medium; `elevate`'s `Input::Terminal`, a pseudo-terminal the requester opens
-and relays for the mechanism; `shell --rescue` and the forked process that
-spawns each program holding the shell's whole mask; `SLOPOS_RESCUE`;
-coreutils `mount` and `umount`; `bootctl --boot` reading another disk's
-loader; and the PTY master paths under them. Reviews found, before it landed,
-that the rescue shell's terminal was the session's, which opened its master,
-so any session process could open its slave by path during the consent
-dialog, read what the person typed to the root shell and claim it first;
-that the process waiting on a program set its signal handling only after
-spawning it, so an interrupt in that window killed it alone and left the
-program, holding every capability, running outside the job, and that its
-forwarder would have signalled its whole group before the program existed;
-that a master write the slave's high-water mark cut short reported the whole
-batch written, dropping the rest; that what followed a signal character in
-one master write was discarded; that a master polled writable while its
-slave refused input; and that a hangup left the slave throttled, so a master
-write after it spun in the kernel. Now the slave is locked again once the
-requester holds it and fed nothing before the shell starts; the waiter
-ignores interrupts and holds hangup and termination until the program's pid
-is known; a short master write says what the slave took; what follows a
-signal character is input; a master is writable only while its slave takes
-input, its blocked writers waiting on its own event; and a hangup lifts the
-throttle. Below the bar: in the instant between `openpty`'s unlock and the
-relock a session process may still claim the slave, which costs only the
-rescue shell, whose reads and writes another session's terminal refuses;
-`TIOCSWINSZ`, `TIOCSETD`, `TCFLSH` and `TCXONC` on a held slave check no
-session, as before; a terminal whose foreground group has died answers any
-session until the shell takes it back; a paired host can still ask as the
-session through a shell started without its privd connection, which the
-person answers as for the installer; the dialog does not say which terminal
-asked; a forged `SLOPOS_RESCUE` prints the rescue banner holding nothing;
-queued input is relayed ahead of a later interrupt; and serial and console
-input still drops what follows a signal character in one burst.
-
-Swept 2026-10-16: live activation — `base_activate` (`BaseUpdate`, which
-privd's base actions hold) staging an archive from the caller's memory into a
-generation the kernel owns, indexing it, checking its interface and moving
-the six base mounts under the mount table's lock; base generations, their
-numbers in every inode, and the reaper that frees one nothing holds by
-scanning open files, page sets and processes' programs; `SO_PEERPROGRAM`
-naming a program in its own generation; `base_monitor`, unprivileged; exec
-holding the base files it reads; bootctl activating what it installs or rolls
-back; privd and remoted draining on `SIGTERM` and init starting their
-successors; init restarting what a switch changed and re-executing; and
-`remote.py install` running a base without a reboot. Reviews found, before
-it landed, that freeing the booted generation turned the identity of init's
-consent pair into no program, after which every privd and compositor refused
-the pair and nothing could ask the person for the rest of the boot; that a
-drained privd exited only its main thread, so its consent thread lived on and
-every later privd counted it as a predecessor's mechanism and refused
-exclusive actions; that a drain waited on every request it took, so one
-waiting on its terminal held every privileged request; that a session
-rollback, consent-free while it waited for a boot, now swapped the running
-base at once and could be looped; that a switch to another pairing left the
-old broker's commands running and a draining remoted still took requests,
-which then reached the new privd as the paired agent; that an interface-1
-base switched to live re-executed init into one that cannot resume; that
-`base_monitor` kept its state in 64 slots every process shared, so a session
-program holding them all left init deaf to switches after its next
-re-execution, and that its descriptor survived exec; that four generation
-slots filled in ordinary use; that an archive could imply millions of
-directories within its byte limit; and that an open or a directory
-descriptor whose walk began before a switch failed rather than keeping its
-generation, and an exec straddling one could lose the image it was loading.
-Now the booted generation stays for the boot; a drained privd exits whole,
-lets go of the consent pair at once and is left to finish beside its
-successor after five seconds; a session rollback asks the person; a pairing
-change ends what remoted ran, `SIGKILL` after five seconds and the new
-remoted only then, and a draining remoted refuses what arrives and spawns
-nothing;
-only a base of interface 3 or newer runs live; monitors are charged to their
-opener's account and are close-on-exec; generations share a quarter of
-memory across sixteen slots; a staged generation holds at most twice a
-base's records in nodes; a base open or directory descriptor keeps working
-while its generation is resident; and exec holds the base files it reads.
-Below the bar: a process may pin old generations by holding a base file open,
-which costs at most the quarter of memory every copy shares and makes the
-next activation `EBUSY`, after which the boot takes the base; generations are
-charged to no account; a request privd reads in the instant its drain begins
-can see its connection close rather than the "ask again" denial, and that
-denial is not retried; a process of the old broker forking faster than init
-signals can outlast a pairing change, as a session's end; a switch
-landing during init's re-execution is not acted on; an old-generation process
-is judged by the current policy for its path until it exits, and an exec
-straddling a switch may attest the image of one generation while its
-interpreter comes from the next; and every base lookup takes the generation
-table's lock.
-
-Swept 2026-10-15: init as a service manager — the login tag a `SetId`
-holder sets at spawn under `SPAWN_SET_LOGIN` and `process_list` reports;
-init's exec of the base's `/sbin/init` keeping its capabilities; `/run/init`,
-mode 0666, judged by `SO_PEERCRED`; the session ended by its tag; init
-re-executing with the descriptors it keeps across the exec; privd started
-again after a crash; and the consent pair init keeps across restarts of either
-side. Reviews found, before it landed, that a privd started again did not know
-the exclusive groups its predecessor's mechanisms held, so two could write one
-boot partition; that a flood of connections to `/run/init` could hold init
-accepting or crowd uid 0's requests out; that the session could start again a
-session uid 0 had ended; that a session forking in a loop outlived its end
-while the requester was told it had ended; that an image unable to read its
-state started a second privd and left the descriptors it was handed open;
-that the compositor's multishot poll could miss a consent frame, after which
-no question reached the person until the compositor restarted; and that
-`recvmsg` could drop the descriptors a concurrent send had just queued, so a
-request reached privd without them. Now a privd started again takes no
-exclusive group while what its predecessor started still runs; init takes
-sixteen connections a pass, four waiting per uid, and never refuses uid 0's
-for the queue; uid 0's end holds until uid 0 restarts the session; the end
-signals each pass and answers with how many processes outlived it; an image
-that cannot resume closes what the state named and keeps the privd that
-listens; the compositor re-arms a oneshot poll; and a read that finds no
-bytes takes only descriptors sent without any, reading again when bytes
-arrive under it. Below the bar: only init holds `SetId`, so only init tags a
-process, and a tag cannot be shed, so a session program cannot leave its
-session's end, though one forking faster than init signals outlasts it and is
-reported; the session may restart itself as often as it likes, which ends only
-its own processes; a mechanism an earlier privd started that never ends keeps
-the boot slots' actions refused until a reboot, which takes no exclusive
-group; the compositor's protocol client tasks still stream a multishot
-poll and can stall the same way the consent task did; and a `recvmsg` drains
-every queued descriptor, dropping those past `SCM_MAX_FDS` and handing one
-whose bytes arrive during the read to the bytes that read took, which costs a
-sender only its own messages.
-
-Swept 2026-10-15: the bases beside the slots — the kernel choosing between
-the `initramfs` and `initramfs-previous` modules by the interface each names
-against the range its ELF note serves, and giving the other's pages to the
-allocator before memory is laid out; `boot-core`'s newc reader, base check
-and note reader, on images and kernels nothing has vouched for;
-`bootctl install` writing a kernel alone, and `bootctl base install` and
-`rollback` (privd's `org.slopos.base.*`, `RawBlock` and `Power`, an install
-asking the session's consent, a rollback asking none); and the installer
-writing both bases. Reviews found, before it landed, that a base install could
-leave the default slot's kernel serving neither base, so the fallback from a
-failed try would boot nothing, and `set-default` could make such a slot the
-default; that a cut between a rollback's or an install's two writes could
-leave only the image the default kernel cannot boot; that the check passed
-shapes the kernel's index, mounts or unpack refuse once the other base is
-freed — a name not canonical, a file where a base directory goes, a record in
-devfs, an empty symlink; that a manifest naming no mode let two bases
-differing only in modes count as one running base, and a boot partition named
-by another spelling of its node let none count; that a signal privd relays
-could stop `bootctl` between its writes; that the image named was read
-whatever its kind and size, as uid 0; and that `remote.py install` staged its
-kernel and base under `/var/tmp/slopos-remote`, where a session program could
-replace either before the paired agent installed it, which for the base now
-meant every slot's next boot with no consent asked. A base install now refuses
-what leaves the default, the running or the armed slot's kernel serving
-neither base,
-`set-default` takes only a slot whose kernel serves a base on the partition,
-both writes go first over the image the default does not need, the check
-holds every record to what the kernel takes and to a manifest naming each
-record's mode and digest in archive order, the running base is found by the
-boot partition's node rather than its name, `bootctl` ignores the termination
-signals once it writes the bases, an image is a regular file opened without
-following a link or blocking, a base within half the machine's memory with
-the base kept beside it, and `bootctl install` and `base install` take the
-SHA-256 `remote.py` pushed and install only those bytes, saying of another
-file only that it is not that image. Below the
-bar: a rollback takes no consent, as `oneshot` takes none, so the session may
-put back the base that last ran; a base install takes effect for every slot
-with no trial boot, so a base that checks out and fails in userland stays
-current until a reinstall that keeps the root writes the medium's, or the
-medium's rescue shell rolls it back; a power cut between
-two base writes leaves one image twice, which the default kernel still boots;
-the person's consent to a base install names a path, whose contents the
-session may change before `bootctl` reads them, as with `boot.install`; and
-the unused base's pages reach the allocator holding the base's bytes, which
-every program may read.
-
-Swept 2026-10-14: the apps outside the base — the loader's `/usr/local/lib`
-rule (searched only for a process neither `AT_SECURE` nor of effective uid 0,
-exec marking mixed ids `AT_SECURE`, so no process holding more than the
-session finds a library the session put there), the app entries and icons the
-compositor reads from what the session writes (regular files only, opened
-without following a link, non-blocking and without a controlling terminal,
-bounded in size, at most 64 per share, the icon decoded under a pixel cap),
-the dock spawning an entry's program with nothing delegated, the
-`memfd_create` export (its flags still validated by the kernel), and the tree
-installs: `tree-install` holding nothing and refusing a manifest another uid
-keeps, init installing a live boot's apps before any session process exists,
-and the installer writing a kept root inside a directory only uid 0 may
-search. Reviews found, before it landed, that the installer read the session's
-manifest of a tree, the toolchain's included, so a forged entry would have had
-the apps' reinstall remove a toolchain file the skipped toolchain then never
-put back; and that a manifest keyed by name applied its removals wherever an
-install named. The installer now reads no manifest uid 0 did not write, an
-install skips a tree only with every recorded entry of its recorded kind and
-size, and a manifest names its destination. Below the bar: everything a tree
-install removes or replaces stays under the destination the installer chose,
-which on every root is the session's, and a symlink on the way is refused; a
-skip checks no content, so a reinstall keeping the root leaves what the
-session changed in place inside its own trees, which it may change again at
-any time; an entry in the person's own share may name any program, which the
-dock runs as the session with nothing the session lacks.
-
-Swept 2026-10-14: the raise deleted — a spawn whose child's mask and
-`AT_SECURE` come from `Endowment::check` alone, exec keeping `caps &
-universal` on every thread of the process, `mount(2)` refusing only what is
-pinned, the retired capability bit, the shell's privd hand-off moved
-from a spawn to its fork and exec, the dock spawning at the normal tier, and
-the seal's restated purpose. Re-examined: no scoring note names a launcher
-any more, and the residual phase 4's sweep left — `bootctl collect` taking
-`DacOverride` from a grant row init's `Launch` raised — went with the row in
-phase 5 and the raise here. One **pre-existing** defect, fixed here: the
-shell handed its connection to a mechanism whose environment named another
-descriptor — `unset PRIVD_FD` or `PRIVD_FD=9` before it — so the mechanism
-kept nothing back from what it started, and `cpufreq run -- prog` passed the
-paired or root connection to a program from outside the base; the shell now
-hands it over only where the environment names it, and only to a program
-the policy names, on the path the child then execs. Reviews also found, before
-it landed, that the shell's fallback for a file the kernel refuses as
-`ENOEXEC` would have run `/bin/sh` holding the connection — unreachable, every
-mechanism being a static base program — and a hand-off no longer falls back.
-Below the bar: remoted,
-the terminal and the shells they start held `Launch` from grant rows, which
-kept every session program from signalling them and the OOM killer from
-taking them for a session writer; holding the universal set alone, they are
-any session program's to stop or kill, and init does not restart remoted —
-though the session may power the machine off without consent, which ends the
-remote control as surely. A
-registry program the shell forks inherits every descriptor the shell holds
-without close-on-exec, where its spawn passed stdio alone — what any program
-the shell runs inherits, and never the privd connection but where it is
-handed over; `/bin/roulette` started from a shell holds no seat and prints its
-fate rather than drawing it; and `nmap` and `ping` run at the normal tier.
-
-Swept 2026-10-13: privd and consent — the action policy's grammar and
-matcher, the request and consent codecs, privd's account of who asks (the
-recorded identity, the pidfd, the paired base program) and its spawn of a
-mechanism (capabilities, uid, environment, directory, descriptors), the
-consent channel's origin, the question queue, the compositor's dialog (focus,
-arming, escaping, the command and directory shown whole), every mechanism's
-`elevate`, the connections remoted, the shell and the compositor hand on, and
-the grant rows this removed. Reviews found defects before it landed: keys
-someone typing elsewhere presses (Space, the vertical arrows, Enter straight
-after Tab) could answer a question; a long command was cut short in the
-dialog, and the directory suffix could be imitated by arguments; replies on a
-connection several processes inherited carried no request id, and a
-withdrawal read together with its request was lost; privd and the compositor
-adopted any socket handed to them at fd 4 as the consent channel; remoted's
-paired connection reached code from outside the base through base programs
-that exec (`env`, `xargs`, `find -exec`, `cpufreq run`) and through a
-concurrent spawn before remoted closed its copy, and the shell passed the
-connection it inherited into everything it execs — a connection now reaches
-only the shell and the mechanisms the policy names, each of which keeps it
-from what it starts; privd waited forever on a requester that left a reply
-unread or on a consent agent that stopped reading, and session code could fill
-every connection slot root and the paired agent needed; a subshell,
-pipeline stage or stopped job of a shell holding a connection shared it with
-the next requester, which could take its replies and leave it waiting for
-good, a redirection the shell undid restored the connection without its
-close-on-exec flag, and one could copy it to another number, so what the
-shell ran next took it to code outside the base; a
-withdrawal of a request waiting behind another was lost, and a request that
-needed no consent was not checked for one before its mechanism started, so a
-`reboot` interrupted at once still rebooted; a descriptor too many on one
-request became the next requester's stdin; a requester forwarding input could
-block on a full pipe while the mechanism blocked on its output, and one
-signalled before its handlers were set died without withdrawing; a remote
-command's timeout killed the requester but left the mechanism it had asked
-for running; and a test
-spawned `dumpe2fs` holding `RawBlock` with no stdout, where its output could
-land on the disk it opened. Below the bar: a session requester that never reads a
-mechanism's output keeps that mechanism, and its exclusive group, until the
-machine restarts — no more than the restart or power-off the session may ask
-for without consent; the installer's consent covers the disk its requester
-then chooses, which its dialog now says; session code can fill the connection
-pool the rest of the session shares; two requests sent on one connection
-before privd reads the first are both refused, since one `recvmsg` takes
-every descriptor waiting; privd and the
-compositor are not restarted: once privd exits nothing is run for anyone, and
-once the compositor exits nothing that needs consent is, until the next boot;
-a script the session can edit, run through `just remote sh`, asks as the
-paired agent, as anything the operator runs does; and `just remote-install`
-stages the kernel and base under `/var/tmp` as uid 1000, remoted's own uid, so
-session code can replace them between their checked transfer and the paired
-`bootctl install` — as it could before privd, remoted being the session; and
-a mechanism that ignores `SIGTERM` keeps a remote command open past its
-timeout, since `SIGKILL` reaches only its requester.
-
-Swept 2026-10-13: delegation at spawn — `SpawnAttrs`' capabilities, ids and
-groups under the subset bound and `SetId`, the `SchedHigh` tier and negative
-nice, `AT_SECURE` for a delegated or re-identified child, init's bootstrap
-table starting the session as uid 1000, the utest declarations, and the three
-gaps phase 3 left for this one, now closed: a pty slave is its opener's,
-0620; an `AF_UNIX` name is a socket inode under the parent's and its own mode
-bits; a sticky world-writable directory follows a link only for its owner or
-the directory's. Also the ownership map's builders and init's one-time
-migration, and the ext4 reserve, which now admits uid 0 alone. Three reviews
-found defects before it landed: a `/dev/pts/N` open checked the owner of the
-slot and then opened the slot again, so a master closed and reallocated to
-another opener in between handed over that opener's terminal — the open is
-now judged on the slave it takes; a socket was matched by an inode number
-nothing held, so on ext4, whose numbers carry no generation, a listener whose
-name was unlinked and whose inode was reused could take a connect to a name
-the connector never had to reach, and a bound socket did not keep its volume
-mounted — a bound socket and a connect in progress now hold the inode open; a
-zeroed `SpawnAttrs` asked for uid 0, groups included, rather than for nothing
-— each id now counts only under its `SPAWN_SET_*` bit; `keymap`, now holding
-`DacOverride` for the session, took a layout name with `/` in it and so read
-any `*.layout` file, and it and `bootctl` left the system state they created
-the session's — names are refused, and new state takes its directory's owner
-or uid 0; a ring's `OP_CONNECT` resolved a relative name against `/`, where
-`connect(2)` uses the caller's directory, and now refuses one; and an exec of
-a socket node answered `EIO`, which aborts a `PATH` search, where Linux
-answers `EACCES`. Below the bar: `st_dev` is zero for every file, so the
-migration cannot tell a writable volume mounted below a session tree from the
-root, and hands one named by `mount=` to the session on the first boot of an
-old root; `SpawnAttrs` carries no size, so a binary built against the 64-byte
-layout passes 32 bytes of its stack as the new fields — still bounded by its
-mask and `SetId`, with an undefined `set` bit refused; init's `bootctl
-collect` asks for `RawBlock` and `Power` and gets `DacOverride` too from its
-grant row, which init's `Launch` raises, until phase 6 removes the raise; and
-a ring's connect checks the name's bits against its submitter as `ring_enter`
-found it, while it attests the identity as of each try.
-
-Swept 2026-10-13: peer identity — `socketpair`, `SO_PEERCRED`, `SO_PEERPIDFD`
-and `SO_PEERPROGRAM` on `AF_UNIX`, the identity `listen`, `connect`, a ring's
-`OP_CONNECT` and `socketpair` capture, `pidfd_open` on any leader, the program
-identity spawn, exec and fork set and an executable mapping forfeits, and
-`Process` built in place. Reviews found defects before it landed: an
-`mprotect` tested whether it made code outside the lock that applied it, so a
-sibling thread could make the page writable in between and keep `Base` over
-bytes it wrote; a script was attested by the path exec found while its
-interpreter opened the caller's spelling again, so a link the caller owned, or
-a working directory a `CLONE_FS` process shared, could be pointed elsewhere in
-between — a script is now attested only when named by its absolute path, and
-through an interpreter named by one; fork copied the program before the
-address space, so a sibling's forfeit could miss a child that got its code; an
-exec that failed once the old image was gone kept the old program over
-whatever the new one had mapped; a ring's `OP_CONNECT` that waited for room in
-a backlog connected with the identity its `ring_enter` began with, after a
-sibling thread had changed ids, mapped foreign code or exec'd, and now asks at
-each try; and `peer_test` blocked forever on a child that never connected. Two
-weaknesses of the design itself, closed here because phase 5 will trust the
-attestation: a session process could start a dynamically linked base program
-with `LD_LIBRARY_PATH` naming its own library, which now forfeits it; and exec
-does not stop sibling threads, so one could patch the new image before it ran,
-where an exec that begins beside another thread now attests nothing. One
-**pre-existing** deviation, fixed here: a pidfd survived exec, where Linux
-makes every pidfd close-on-exec. Below the bar: an identity is captured when a
-socket connects or listens, so a base program that later maps foreign code
-keeps `Base` on connections it already made and towards every client of a
-socket it already listens on — its own choice, as handing its connection to a
-child is; a pidfd turns readable when its process's leader thread exits, so a
-process whose leader leaves before its other threads reads as gone while they
-run, as it did before any process could ask; a library with no executable
-segment that the loader takes from `LD_LIBRARY_PATH` forfeits nothing yet can
-interpose symbols, so a `program` principal must name a static program until
-the loader refuses such objects (every program phase 5 names is static);
-`pidfd_open` now tells anyone when any process exits, which `process_list`
-already does; and `socketpair` and `SO_PEERPIDFD`, like `accept`, install a
-descriptor before writing its number out and close it by number if that fails,
-which a sibling thread racing `dup2` onto the number could see.
-
-Swept 2026-10-12: credentials and DAC — the `Cred` on every process and the id
-calls' rules, `SetId` and `DacOverride`, the `Subject` every VFS entry now
-takes and each check it runs (search on the walk, open, create, link, symlink,
-unlink, rename and the sticky bit, a directory moved between parents,
-truncate, chdir, chmod, chown and the set-ID bits, times, inode flags,
-`faccessat2`), owners on ext4, ramfs and basefs, ring opcodes checking as
-their submitter, the ext4 reserve moving from init's task id to the
-superblock's uid and group, the signal rule's uid half and same-session
-`SIGCONT`, a universal `process_list`, and `AT_SECURE` for mixed ids. Reviews
-found defects before it landed: a new file was created at the filesystem's
-default mode and narrowed by a second call, so an `O_CREAT|O_EXCL` 0600 file
-was readable by any uid in between and stayed 0644 if the second call failed
-(now one step); `FS_IOC_SETFLAGS` took no owner check; exec and spawn kept the
-saved ids, so a new image could return to an id its caller had set aside; and
-a spawn whose parent had vanished, or a task whose process had, would have
-resolved as the kernel or as uid 0. One **pre-existing** defect DAC exposed:
-userland's `open_path` created files 0000, which nothing noticed while mode
-bits were unenforced. Below the bar: a permission check and the operation it
-guards look the name up separately with no directory lock across both, so a
-racing rename can swap what a check saw — the one check it can evade is write
-on a directory moved between parents, which only guards that directory's `..`,
-and every sticky-bit check survives it, since only a name the attacker could
-already remove can be swapped in; a thread that survives exec runs in the new
-image for the moment before its ids are saved, the window Phase 1's narrowing
-of capabilities already has; and three gaps that phase 4 must close before the
-session leaves uid 0, each harmless while every process is uid 0: pty slaves
-are 0666, `AF_UNIX` names bypass the filesystem's checks, and a symlink in
-sticky `/tmp` is followed for anyone. The ext4 reserve now admits its
-superblock's uid, which the whole session is until phase 4, so a runaway build
-can now spend what init's writes kept.
-
-Swept 2026-10-12: the authority model's move off `task.flags` — the spawn
-boundary and its retired flag bits, the grant table now naming capabilities,
-exec's narrowing, `caps_drop` and the process record a racing clone is
-narrowed by, signal dominance on masks (`kill`, `tgkill`, the sigqueue calls,
-the group and `-1` fan-outs, `setpriority`, the OOM killer's shield),
-`process_list`, `kconsole(2)`, `prof_ctl` and `net_query` under their new
-classes, the four network-control calls under `NetAdmin`, and block nodes,
-`BLKRRPART`, crash records and the `DiskBlocks` ceiling under `RawBlock`.
-Before it, the flag word survived exec, so anything init or a utest started
-by fork and exec kept `SYSTEM`'s raw-device right, the ext2 reserve and
-signal protection; every gate now reads the mask exec narrows. Three reviews
-found defects before it landed: a dropped universal capability came back on
-every child the dropper spawned, so it could no longer signal them; and exec
-narrowed only the calling thread, leaving a sibling running the new image
-with the old program's mask. Two **pre-existing** defects, fixed here:
-`vhangup` sent `SIGHUP` to every process of the caller's session with no
-capability or relation checked, so any program on a terminal could end a
-granted job its `kill` was refused (now `ConsoleConfig`, as Linux's
-`CAP_SYS_TTY_CONFIG`; `test_vhangup_needs_console_config`); and the signal
-check named init by thread id rather than by process. Below the bar:
-`kill(pid, 0)`, `getpriority` and `/dev/kmsg` reveal tasks `process_list`
-hides from a caller that does not dominate them, which phase 2 of
-`plans/access-model.md` makes moot by listing every task; and the shell's `fg`
-cannot resume a job holding a capability the shell lacks, which phase 2's
-same-session `SIGCONT` exemption resolves.
-
-Swept 2026-10-08: the install medium on a stick — the payload volume
-`build_install_medium.sh` builds and `build_iso.sh` appends as a GPT partition,
-`boot-core`'s GPT reader staging xorriso's 176-entry table (`MAX_ENTRIES`
-248, the accepted-slot mask a bitset), `bootdisk medium` holding every built
-medium to it, the install-medium boot step finding the payload by the
-module's disk GUID and mounting it read-only and pinned under a read claim,
-and the installer copying the toolchain and clone from it. New input reaches
-the kernel: on a live boot, the ext4 metadata of a payload partition on the
-disk carrying the medium's GUID goes to the kernel's ext4 driver, with no
-`Mount` holder asking, as a `root=` or `mount=` volume's does; the volume is
-mounted read-only, every write refused by the claim and the `read-only`
-feature, and nothing unmounts, covers or writes it (`installer_test`). Three
-reviews found defects before it landed: the kernel took the first disk
-carrying the GUID before USB had settled, so an internal disk carrying it hid
-the stick instead of making the choice ambiguous; and the installer trusted
-any read-only ext4 at `/media/payload`, a directory of a read-only root
-included, where it now takes only a volume's root. One **pre-existing**
-latent defect, removed: `build_iso.sh` ran `limine bios-install`, which
-replaces an ISO's GPT, and with it the disk GUID that names the medium, by an
-MBR; it never ran, since nothing built the tool. Below the bar: the disk GUID
-is no secret, so whoever can write a disk in the machine can give it the
-medium's GUID and a payload partition, which a live system booted from a CD
-would mount and install from; that takes the raw-device right or the disk in
-hand, which already reaches the installed system.
-
-Swept 2026-10-08: USB mass storage — what a stick sends (Bulk-Only
-wrappers, sense, INQUIRY, capacity and mode data) through `usb-core`'s
-storage parsers, the transport's recovery driving Reset, Stop and Configure
-Endpoint and EP0 requests (`CLEAR_TT_BUFFER` to the hub above a full-speed
-stick), `usb-storage` registering a stick's LUNs as `sd` disks and taking them
-out when it leaves, block claims keyed by a disk's generation, write
-protection reaching `BLKROGET` and ext4, `root=auto` passing over USB disks,
-boot waiting for a named device, the shutdown flush, and the installer
-passing over its own medium by its GPT disk GUID. Every parser of device
-input is host-tested with mutation loops and bounded by the buffer posted; a
-descriptor on a departed `sda` fails rather than reaching the next disk of
-that name, since node inodes are never reused and a claim releases only its
-own generation; mounting a stick takes `Mount`, and the kernel mounts only
-what `root=` or a `mount=` names. Four reviews found defects in the change
-before it landed, none in code that had shipped: a stick's transport was not
-served while its LUNs were probed, so one that stalled held the shared
-`usb-bind` thread, and with it every USB bind and removal, for minutes; a
-READ a device failed with RECOVERED ERROR having moved nothing completed as
-success, handing back the previous request's bytes from the slot's staging
-page; REQUEST SENSE data overwrote a probe command's own data; a recovery
-step refused for want of room escalated to a port reset; a probe command no
-waiter held a completion slot from then on; and every escalation spent one
-of the port's three tries for good. Two **pre-existing** defects, fixed here:
-every MMIO mapping took one of the 64 dynamic MMIO registry's slots even when
-an entry already covered it, so re-probes and tests exhausted it and a later
-device's probe failed (`dynamic_range_inside_an_entry_takes_no_slot`); and
-the release-tests kernel failed its stack gate on a 2280-byte net test frame,
-which kept `just test-installer` and every other release-tests lane from
-building. Below the bar: a disk carrying the medium's GPT disk GUID is never
-offered, so whoever can write a disk's table can hide it from an install,
-which already takes the raw-device right or the disk in hand.
-
-Swept 2026-10-02: the installer and its medium — `/bin/installer` writing a
-table, formats and a root onto a disk another system shares, the `install`
-module served at `/media/install`, e2fsprogs run from the base with a
-delegated `RawBlock`, the block ceiling `RawBlock` lifts, slibc's additions for
-e2fsprogs, `tree-core` installing over a root a guest wrote, and the GPT
-writer and `fat-core`'s long names and format. Four reviews found defects in
-the change before it landed, none in code that had shipped: a partition named
-as the disk got a table written inside it; a disk with an MBR or an
-unreadable GPT was erased without `--mode erase`; e2fsprogs held the
-raw-device right (then `Mount`) by identity, so any script the shell ran could
-format a disk (it now keeps `RawBlock` only as far as a spawner that names it
-directly holds it); a link a
-kept root held redirected the installer's manifest and seal writes off the
-root, and a planted `e2fsck.conf` its log; and a reinstall would overwrite
-another system's loader at `\EFI\BOOT\` on an ESP SlopOS had once made. Two
-**pre-existing** defects, fixed here: `open(2)` dropped `O_NOFOLLOW` beside
-`O_DIRECTORY`, so a directory walk that relies on the pair, Rust's
-`remove_dir_all` among them, followed a link swapped in under it
-(`test_open_directory_nofollow_refuses_a_link_to_a_directory`); and an ext4
-block cache full of pinned entries answered as device damage and remounted
-the volume read-only, which memory pressure alone could cause. Below the bar:
-any process can see the new root's mount point while an install runs, and
-the installer walks it without following links.
-
-Swept 2026-10-01: the crash record — the panic path's polled writes to the
-crash partition and the store's claim on it, `/dev/crash`'s listing, reads and
-unlinks, `bootctl collect` writing what a record says into `/var/log/crash`
-and `/var/lib/slopos/slots`, init running it with `RawBlock` and `Power` on every
-boot, and the boot step that finds the partition by the GUID the loader
-reports. A record is read or erased only with `RawBlock`; the store
-holds the partition's write claim, so no other writer reaches it and no table
-re-read or whole-disk write moves the window the panic path writes, and every
-write lands inside that window. Nothing a record holds names a file: the
-collector takes the slot through `valid_slot` and the time as a number. Five
-reviews found defects in the change before it landed, none in code that had
-shipped: the collector could erase a record it had only copied to a RAM root;
-a sequence number could repeat while the newest record was being erased,
-leaving two records one name; one unreadable slot disabled the whole store;
-the bare-metal hold could wait forever on a framebuffer lock a stopped CPU
-held, so `panic=reboot` never reset; and an abort on an exhausted data stack
-would have faulted again writing its record. Below the bar: any task can list
-`/dev/crash` and so learn how many records it holds; a record carries kernel
-addresses and the kernel log, which `/dev/kmsg` already gives every task.
-
-Swept 2026-10-01: the boot chain — UEFI variables from user space and the
-`BootEntry` capability, the boot manager variables' write checks, `bootctl`
-and `install_test` reading every block node's GPT and writing the boot
-partition, the kernel's GPT probe moved onto `boot-core`, load options and
-device paths read off the firmware, and the host's disk builder. `Power`
-reaches nothing it did not; `BootEntry`, which only init, the utests and the
-installer hold, reaches `Boot####`, `BootOrder` and
-`BootNext` and reads `BootCurrent`, and every write there is held to its
-format on the kernel's own copy before the firmware sees it. Four reviews and
-fuzzing of every `boot-core` parser found defects in the change before it
-landed, none in code that had shipped: a new firmware entry could take a
-number `BootOrder` still listed and boot first unasked; `bootctl`'s refusal to
-overwrite the default slot failed open when `LoaderEntryDefault` named a menu
-path rather than an entry; an entry stored with the disk's full device path
-went unrecognised, so each install would add another; one unreadable firmware
-entry aborted registration; and userland accepted a GPT entry overlapping an
-earlier partition that the kernel skips. One **pre-existing** defect, fixed
-here and below the bar, since only whoever writes a disk can craft it: the
-kernel's probe accepted a header whose usable range reached LBA 0 or the other
-copy's array, so a partition there could cover the table and a mount of it
-overwrite it. Below the bar: `LoaderEntryDefault` is
-machine-wide, so another loader that writes it moves SlopOS to slot a, or to
-no install until `bootctl set-default`; a firmware entry outside `BootOrder`
-past the first free number is not found.
-
-Swept 2026-10-01: ext4 — `ext4-core`'s codecs, extent trees and jbd2
-replay over crafted images, the kernel's journal, extents and checksums,
-`FS_IOC_GETFLAGS`/`FS_IOC_SETFLAGS` and the `Seal` capability, the mount
-aliases, and the host's in-place conversion of a preserved root. Four
-reviews found defects in the change before it landed, none in code that had
-shipped: a `pwrite` at the last file block any process could make latched
-the root read-only; an extent tree whose index entries share one node made
-the mount's walk exponential; a commit block the medium damaged ended replay
-silently, dropping the transactions committed after it; a checkpointed
-journal could be reused before its emptied superblock was durable, which a
-crash then replayed over newer homes; and the conversion removed a
-`/.journal` the guest wrote on an ext4 root. One **pre-existing** defect,
-below the bar: an operation that failed after unlinking the orphan list's
-head left the head unrestored on the medium until the next commit, leaking
-the inode until `e2fsck` if none came. Below the bar: the host's e2fsprogs
-read and repair metadata the guest wrote, as they do any image they are
-given, and a crafted root can at most fail its own build.
-
-Swept 2026-10-01: the block layer and NVMe — raw reads, writes and flushes of
-`/dev` block nodes, `BLKRRPART` and the size ioctls, the claims a mount and a
-raw write take, `/dev/disk/by-*` and the `PARTUUID=`/`UUID=`/`LABEL=`
-resolver, partition tables and filesystem superblocks read off removable
-media, and an NVMe controller left running by firmware. A raw read, a raw
-write and a re-read need `RawBlock`, a write
-or a re-read is refused while anything holds the disk, and a claim is held to
-the node its source resolved to. Four reviews found defects in the change
-before it landed, none in code that had shipped: two partition entries could
-share a window and each be mounted writable; a kill after the device held a
-write left ext2 writable over a journal write of unknown fate; and the probe
-let a controller master the bus before resetting it. Below the bar: any task
-can read a disk's size, block size and volume labels and UUIDs, as Linux
-exposes `/dev/disk/by-*` to every user.
-
-Swept 2026-09-30: the tools the root now carries and what they reached —
-`socket(2)`'s type flags and argument checks, `accept4(2)`, a new socket
-description's blocking mode, libcurl on Mbed TLS, the recipe licence
-closure, the default search path, and the host's installer of trees onto the
-guest's disk (`scripts/fs_tree.py`, `build_fs_image.sh`'s floor and log,
-`gen_verity.py`'s taint). One **pre-existing** defect, below the bar:
-`socket` truncated its type argument to 16 bits, so `SOCK_CLOEXEC` was
-dropped and a descriptor a C program asked to be close-on-exec reached every
-program it executed. The process that created it chose what to run, and the
-Rust standard library sets the flag with `fcntl`, so no privilege boundary
-was crossed. Fixed with the flags, along with slibc's `accept4`, whose
-`accept`-then-`fcntl` left the same window open under a concurrent `exec`.
-The installer reads a disk a guest can write behind its filesystem's back,
-since the guest builds and boots kernels of its own, so it puts nothing it
-read from the image into a request, binds each directory listing to the
-inode its parent names, and refuses a listing it cannot read; and the seal
-measures what the guest wrote against the host's own record of what it
-attested, never against the trailer on the disk. The holes four reviews found
-in both were closed before they landed. Residual, below the bar:
-whenever the guest leaves the root under its floor, the host runs `e2fsck
--fy` and `resize2fs` over metadata the guest wrote, as it already did for a
-larger `PERSIST_IMAGE_SIZE`.
-
-Fixed 2026-09-27, both **pre-existing**, reachable by any user and availability
-defects at most, so neither is an entry. A dead task's post-switch teardown
-runs preemptible in its successor, and a switch that landed inside it resumed
-the successor there, where it tore down the next corpse on top of the first:
-under a spawn-and-exit storm the teardowns nested until the 32 KiB kernel stack
-overflowed into a double fault. A resume inside a teardown now queues its corpse
-for the one already running (`test_corpse_is_queued_inside_a_running_cleanup`).
-With that, `exit_stress_test` ran to its end and found the second: an account
-release re-pointed a child's parent edge under a refund walk in flight, and the
-child's pages reached the root both through that walk and inside the released
-balance — an underflow that panics the tests kernel and silently skews the
-ledger in a release one. A release now waits out the walks in flight.
-
-Swept 2026-09-28: the POSIX surface ports expect and the memory policy
-behind a cheap fork — `rt_sigqueueinfo`/`rt_tgsigqueueinfo` and their
-forgery rule, the per-process shared signal set, `rt_sigtimedwait`,
-signalfd, process-shared futex keys, `#!` dispatch and grant narrowing on
-spawn, FIFOs, `fchdir`, lazy fork charging and the OOM killer, and the
-recipe driver as supply chain. One guaranteed defect (confidence 83,
-`AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H`, 5.5): the OOM killer weighed
-processes by present pages and exempted only init, so an unprivileged
-process could size unmapped memfds, fault a forked copy past the ceiling
-and have the kernel SIGKILL the compositor, which `kill` refuses it. The
-killer now weighs what each process's own account holds of the kind that
-ran short and never takes a process the writer may not signal, except on
-init's own write. Fixed inside the same unreleased change, so not an
-entry. Two pre-existing holes surfaced with it and are closed: a process
-nested past `MAX_ACCOUNT_DEPTH` got no ledger row and escaped every quota
-and the commit ceiling, and a memfd whose sizer exited kept its frames
-while its charge was credited out of every ancestor
-(`test_oom_an_orphaned_memfd_stays_charged_to_nobody`). Below the bar and
-fixed: a `kill` past a realtime queue delivered as `SI_KERNEL`, a
-signalfd serving its creator rather than its reader, FIFO end counts that
-saturated at 65 535, and recipe fetches that followed non-https
-redirects. Process-shared futex waiters on a file any process can map are
-reachable by every process, as on Linux; SlopOS has no file permissions to
-narrow it.
-
-Swept 2026-09-16: the editor — `editor-core`'s buffer, lexer, search and tree
-model, the new `appkit` surfaces, the fd-based clipboard transfer in
-`windowing`, and the editor's own filesystem boundary, every one of which reads
-input the user did not write. Nothing reached the confidence bar. The editor
-holds the user's own authority, so a file it opens or writes crosses no
-boundary; what the sweep found instead were robustness and data-integrity gaps,
-all closed inside the same unreleased change and so never entries.
-
-Swept 2026-09-14: the utilities becoming executables — a multicall binary whose
-archive extractor, patch applier, regex engine, inflater and digest all read
-attacker-supplied input, plus the `/bin` symlink install and the `execve`
-thread-pointer reset. Three guaranteed defects and six below the confidence bar,
-all fixed inside the same unreleased change, so none is an entry.
-
-> **Pre-alpha ledger policy.** SlopOS is pre-alpha with no
-> backwards-compatibility or audit-trail obligations, so this file tracks **open
-> findings only**. A resolved finding is **removed**, never kept as a `fixed`
-> record, and a defect fixed inside the change that introduced it never becomes
-> one. IDs stay stable while a finding is open and are never reused, so gaps are
-> expected. The git history is the audit trail: `git log -p -- CVSS.md` recovers
-> any entry that was here, and a fix's own test is the durable record of it.
-
-Swept 2026-09-19: the dynamic loader — the kernel's `PT_INTERP` path and the
-userland linker behind it, both of which parse attacker-chosen ELF. Twenty-two
-defects across three reviewers, every one fixed inside the same unreleased
-change and so not an entry. The sweep also proved a **pre-existing** defect the
-interpreter work made visible by contrast, which is the entry below: the
-executable's own segments have never been covered by a VMA.
-
-Swept 2026-09-19: the C++ runtime — the cross-built `libc++`/`libc++abi`, the
-libc surface it needed (`<math.h>`, `<ctype.h>`, the `strto*` family,
-`pthread_once`, the `__cxa_*` trio), the Level-1 unwinder now in every image's
-`libc.so`, and the `.init_array` walk a static program needs. Three reviewers.
-One memory-safety defect, found by the third: `atexit(3)` registers a null
-`__dso_handle` — slibc has one shared `atexit` where glibc links a per-object
-copy from `libc_nonshared.a` — so `finalize_range` never reclaimed an `atexit`
-made from inside a `dlopen`ed object, and `exit` then called it through an
-unmapped address. It is also a slot leak: a `dlopen`/`dlclose` loop consumes
-the 256-entry table permanently. Fixed inside this change by testing the
-handler and argument addresses against the unloaded span as well as the
-handle, so not an entry. No privilege boundary is crossed either way — a
-process can only do this to itself, and `dlopen` already runs code of the
-caller's choosing. The rest of what the reviewers found was correctness
-(`std::stod("0e1")` throwing on a spurious `ERANGE`, a missing sentinel guard,
-a nonsense load-bias fallback), all closed in the same unreleased change.
-
-Swept 2026-09-21: the commit ledger and the build-loop plumbing — every
-charge point (`mmap`, `brk`, `mprotect`, `fork`, `exec`, `memfd` sizing, the
-demand and stack-growth faults), every refund road including the unmap error
-arms, `F_DUPFD_CLOEXEC`, the pipe `fstat`, the file map's admission change,
-slibc's `posix_spawn` over the spawn primitive with its parent-side descriptor
-plan, and the process exit path. Three reviewers, twenty-odd findings, all
-closed inside the same unreleased change and so none an entry: an `exec`
-refused after the point of no return (now sized and charged beside the old
-image), `MAP_NORESERVE` lost across a `PROT_NONE` reservation, refunds missing
-on the `munmap` and `MAP_FIXED` error roads and on a failed stack reset, and a
-`posix_spawn` that answered `E2BIG` where it should have fallen back to
-`fork`. The sweep also proved a **pre-existing** defect the ledger made
-visible by measuring it: since the task-to-task switch, a process that ended
-itself never had its address space destroyed or its registry entry retired —
-the first exit-cleanup pass consumed the "last task left" latch the second
-pass needed — so every self-exiting process leaked its frames, page tables and
-one of the 1024 process slots until shutdown. Any user reaches the exhaustion
-by exiting 1024 processes, but no boundary is crossed and nothing is read or
-written that should not be, so it would have been an availability entry at
-most; it is fixed here (`TASK_EXIT_LAST_IN_PROCESS`) with the build-loop
-test's "commit comes back when a process exits" as its durable record, and is
-therefore not an entry. Fixing it reached a second pre-existing defect:
-an account row named its parent by a bare arena slot, and a released slot is
-reissued under a new generation at once, so a process whose parent exited and
-was replaced before its own deferred teardown ran credited its outstanding
-charges to the stranger now in that slot — a row underflow that panics the
-tests kernel and silently corrupts the ledger in a release one. Any user
-reaches it with a fork-and-exit ordering (`exit_stress_test` finds it in
-seconds), so it is an availability defect at most; the parent edge carries
-the parent's generation now and a released row hands its children to the
-grandparent, so it is fixed here and not an entry. The stress test then
-reached a third, in the tests kernel only: the per-CPU klog capture ring took
-a bare spin flag with interrupts on, so a writer switched out mid-append left
-its CPU's next writer spinning forever, and a spinner holding an
-interrupt-masking lock stopped acking TLB shootdowns and wedged every CPU
-behind it. The shipped kernel registers no capture backend and so never
-takes that lock; the ring masks interrupts while held, acks shootdowns while
-it waits, and drops an append nested from an NMI, so it is fixed here and
-not an entry. Run on a host without KVM it then found two waits whose only
-releaser was the waiting CPU, both pre-existing: a dispatcher that dequeued
-the current task after a raced wake spun on that task's own `on_cpu` flag
-with every other CPU idle, and a user copy switched out mid-copy pinned a
-reference to the address space that an exclusive syscall on a sibling
-thread spun for under the process-VM lock, while dispatching the copier
-took that same lock; the spin's budget broke the cycle by failing the
-syscall, so a four-thread process lost a thread's guard-page `mprotect` as
-`EPERM`. Any user reaches both with threads that block and wake under
-load, an availability defect at most; the claim hands the current task
-back and the copy holds off preemption while it holds the reference, so
-they are fixed here and not entries.
-
-Swept 2026-09-23: the network path a self-hosted build fetches through — the
-TCP stack's chunked rings, window scaling, persist, retransmission and
-keepalive timers and the way a connection's end reaches its socket; the
-concurrent resolver; `tls-core`, whose record layer, handshake and certificate
-path read what a server chooses; `curl`, `nc` and `getaddrinfo`; and the dev
-disk's export, which reads a volume the guest wrote. Five review passes, each
-by fresh reviewers. What the change introduced was closed inside it, so none
-is an entry, and it fixed one **pre-existing** defect that would have reached
-the bar. The resolver's cache was keyed on a 32-bit FNV-1a hash of the name
-and compared nothing else, so two names whose hashes collide answered each
-other — `glbvs.example` and `yacxa.example` do — and anyone who could make the
-machine resolve a name of their choosing (a local process, or a server whose
-redirect `curl` follows) could plant an address under any other name for its
-TTL, the collision found offline in seconds. Plaintext protocols follow a
-planted address; TLS refuses it at the certificate. The cache now compares
-whole names, with `dns_tests`' collision case as the record, and a reply must
-also echo its question where the ID and port alone were taken before. The rest
-were availability defects, most of them a peer's to trigger: a `DataState`
-allocation `.expect` that a handshake's last segment under memory pressure
-turned into a kernel panic, a FIN sent ahead of queued bytes that the send
-map's accounting caught as a panic, a late retransmission timer that left two
-running, a shut window nothing probed, a lost FIN never resent, lost bytes
-that only a timeout would resend, a retransmission overlapping bytes already
-taken dropped whole, FIN_WAIT_1 held for good by a peer that only sent data,
-and TIME_WAIT, LAST_ACK and keepalive each ending connections a reader or an
-answering peer still needed; each has a test in `slopos_net::tests`. Below the
-bar (confidence about 60): the CSPRNG is seeded from four TSC reads on a CPU
-without RDRAND, so a ClientHello's random lets an observer
-search the seed and with it the key share. Every x86-64 CPU of the last decade
-and QEMU's `-cpu max` have RDRAND, and the plan records it as a limit.
-
-Swept 2026-09-24: the toolchain running in the guest and building the kernel
-— the user-mode trap stack, `wait4`'s usage report, the executable's segment
-VMAs, zero-length user ranges, user copies that read a file-backed page in,
-the buddy allocator's free lists, and the KTAP subtest path. Three review
-passes, each by a fresh reviewer; the third found nothing above a nit.
-What the change introduced was closed inside it, and it fixed four
-**pre-existing** defects. A trap from user mode pushed from `TSS.RSP0`, which
-sat a fixed 12 KiB above the frames of the round trip that entered user mode,
-so a chain deeper than that wrote over those frames and the kernel took a
-general protection fault returning through them; `devdisk_test` reached it as
-it started, on the unoptimized tests kernel. That is kernel stack corruption
-from user mode, fixed here by
-starting every trap at the round trip's own RSP, with
-`test_deep_user_trap_spares_the_round_trip` as the record. SLOPOS-2026-0056,
-the executable's segments mapped with no VMA, is fixed by giving them the
-per-segment VMAs the interpreter already had
-(`test_a_large_image_owns_its_segments_and_the_heap_clears_it`); its adjacent
-half, the paths that drop `NO_EXECUTE`, is carried forward as
-SLOPOS-2026-0057. The buddy allocator walked a free list to take a buddy off
-it, so freeing a large address space held its interrupt-masking lock for a
-time proportional to the list and stalled every CPU behind it; any process
-reaches it by exiting after a large allocation, an availability defect at
-most, and the lists are doubly linked now. The worst was `fork`: the clone
-recorded the parent's frames under the parent's lock but took the child's
-references to them only after dropping it, so a sibling thread's `munmap` in
-that window freed a frame the child then mapped — and, reallocated in time, a
-frame of another process. Any multithreaded process that forks while another
-of its threads unmaps reaches it; cargo does on every build, which is how the
-guest found it, where the frame's metadata had already been released and the
-fork failed. A read or write of another process's memory would have put it
-above the bar; the snapshot now holds a reference on every frame it records
-(`test_cow_clone_survives_a_sibling_unmap`), so it is fixed here and not an
-entry.
-
-Swept 2026-09-26: copy-on-write and the file-backed fault path, which the
-guest's kernel build changed to map a page set's frame into a `MAP_PRIVATE`
-mapping until the first store. The change leans on the COW marker, and reading
-what the marker was trusted with found two **pre-existing** defects, fixed here
-with a test each rather than entered. `mprotect` wrote `WRITABLE` onto every
-present leaf, COW-marked or not, so a process that forked and then re-applied
-`PROT_READ | PROT_WRITE` to its own range stored straight into frames its child
-still mapped — one process writing another's memory, confidence 90, which
-would have scored above the bar
-(`test_mprotect_keeps_a_forked_page_copy_on_write`); the fork also left the
-parent's read-only private pages unmarked, which the same `mprotect` reached.
-And a write fault on a COW leaf was resolved without asking the region, so a
-forked child stored to its `PROT_READ` pages
-(`test_cow_write_to_a_read_only_region_is_fatal`). SLOPOS-2026-0057 is fixed
-with them: the COW copy, the ring and the shared `memfd` mapping now take their
-leaf flags from the region they map (`test_cow_copy_keeps_the_region_no_execute`).
-
-Swept 2026-09-26, second pass: the install path — raw writes to
-`/dev/vd*` nodes, UEFI variables from user space, `bootctl`, and `fat-core`
-parsing an ESP it did not write. Two reviewers. Raw writes are held to a
-`RawBlock` holder and to the device's exclusive claim, so a mounted
-device refuses them. The one widening found was closed before it landed:
-`efivar_set` passed any vendor GUID through, which would have let a `Power`
-holder — a capability that exists to reboot — rewrite `BootOrder` or enrol
-Secure Boot keys; it now takes only the Boot Loader Interface's GUID and
-SlopOS's own. Also closed in the change: an answer a killed caller left on
-the firmware thread could be handed to the next caller. `fat-core` bounds
-every chain walk, so a hostile ESP yields an error rather than a hang.
-
-Swept 2026-10-03: wired networking — the RTL8168 receive ring, which reads
-lengths and status a device writes; `nic::publish`, ARP and IPv4 ingress, now
-facing a physical LAN; slibc's `res_query` and `dn_expand`, which parse replies
-from the network; and the host's `sshd -i` fixture the guest reaches at
-10.0.2.4:22. Three review passes. Nothing reached the bar, and what came
-closest was fixed in the change rather than entered. The driver had opened the
-chip's receive filter to 16 KiB over 2 KiB buffers, the precondition of
-CVE-2009-1389 (confidence 55); RxMaxSize is now the length a descriptor
-names. IPv4 ingress delivered 127/8 and foreign destinations arriving on a
-physical NIC, so a LAN host reached a socket bound to 127.0.0.1 (confidence
-75); `ipv4::admits` now drops them, admitting only DHCP's unfragmented
-datagrams to port 68 on a device that holds no address yet. A connected UDP
-socket's `poll` counted datagrams its `recv` discarded, which could hang
-`res_query` (confidence 45), and `res_query` kept an id a failed `getrandom`
-left zero and asked from the allocator's next port (confidence 30); both are
-fixed. The fixture's sshd takes one client key, forces a command that serves
-the checkout read-only and the run's scratch repository, and forwards
-nothing. Pre-existing and left as designed: a UDP bind with `SO_REUSEADDR`
-takes over an identical binding whatever its holder set
-(`test_so_reuseaddr`).
-
-Swept 2026-10-07: USB host controllers — `usb-core`'s register,
-extended-capability, TRB and ring codecs and the handoff, reset, configure,
-run and drain sequences, over registers and event TRBs a controller writes;
-the `xhci` probe taking each controller from the firmware's SMM; the pages it
-hands the controller, across a failed probe, a dead controller and shutdown;
-the `usb` thread and the interrupt drain; `set_power_d0`'s BAR restore and
-BAR sizing with decode off; the `usb=` knob; and the host's QMP socket. Three
-review passes, a security pass and a fuzz run. Nothing reached the bar, and
-nothing in the change is reachable from user space: no device node, ioctl,
-syscall or kconsole command. Every register set the capability registers
-place is held inside BAR0 before it is touched, the extended-capability walk
-is bounded and checked entry by entry, a Port Status Change names a port
-only within MaxPorts, and a completion retires only a TRB still in flight; a
-million random and shaped register files and event pages, driven through
-every sequence over a bus that panics as `IoMem` does, panicked nowhere. A
-page goes back to the allocator only once the controller is off the bus, and
-a dead or shut-down one keeps its pages. What came closest was fixed in the
-change: probe mapped BAR0 before checking for room, so a device with many
-xHCI functions could spend the dynamic MMIO ranges a later driver, the root
-disk's included, needed (confidence 45); it now declines without touching
-the function unless a range for BAR0, and two for an MSI-X table when it has
-no MSI, are free, though one declined on its capabilities keeps its BAR0
-range. Below the bar and left: an unresponsive controller holds boot for up
-to about a minute (35); a device that toggles its connection floods
-the kernel log (30); and the test's QMP socket gives the user's QEMU to
-whoever can connect to it, which the umask limits to the user (30). By
-design: taking a controller ends the firmware's emulation of a USB keyboard,
-which `usb=report` and `usb=off` leave in place. Pre-existing and left: `QEMU_DEBUG=1`
-puts its monitor socket in `/tmp`, where another user can create the path
-first and keep QEMU from starting.
-
-Swept 2026-10-07: USB enumeration and the device model — `usb-core`'s
-standard requests, descriptor walker, hub descriptors and status, transfer
-rings and the enumeration tree, over every byte a device, a hub or the
-controller sends; the kernel's per-device slot memory, rings, store and
-pipes; `UsbBus`, its claim release and the bind thread; removal across a
-controller that dies; the `usb settle` boot step; the kconsole listing; and
-the host's QMP-driven test. Six review passes and a fuzz run of 30 000
-enumerations of mutated devices behind mutated hubs, each pulled after a
-random time, which panicked nowhere and left no slot. Nothing reached the
-bar, and nothing in the change is reachable from user space: no device node,
-ioctl or syscall, and the listing is informational. Everything a device
-controls needs physical access to a port. What came closest was fixed in the
-change. A hub could keep its ports, and with them the controller's one
-default-state turn, frozen by failing requests in the right order, or loop
-forever on a change bit it stalled every clear of, and in a dev or tests
-kernel overflow its error counter into a panic after about an hour of
-failures (confidence 70); a hub that fails eight requests between two port
-statuses is now removed and its port given its three tries. A driver's
-abandoned transfer stayed on the ring, so the next write could send its
-bytes twice or a read take another's (55); the ring now stops until the
-USB thread moves it past. A command that never completed held every later
-one and left removal waiting forever (50); it now kills the controller. A
-4 KiB configuration was walked quadratically with interrupts masked (40), a
-port whose change bits never cleared could hold the USB thread in one pass
-(40), and a configuration value of 0 unconfigured the device it was set on
-(30); each is fixed.
-
-Three more were found in endpoint-halt recovery, and are fixed. A device
-that stalled every `CLEAR_FEATURE(ENDPOINT_HALT)` kept its endpoint in a
-clear-and-recover loop forever (45). A Set TR Dequeue Pointer refused after
-Reset Endpoint reopened the ring while the device's endpoint was still
-halted and the two data toggles disagreed (40). An endpoint left halted
-kept EP0 from ever being recovered again (40).
-
-Below the bar and left: a device that toggles its connection still floods
-the kernel log (30), as Phase 1 recorded, and the laptop half — a low-speed
-device, a high-speed hub's transaction translator, a USB 3 hub — is graded
-only by the simulated controller until the laptop run.
-
-Swept 2026-10-08: USB keyboards and pointers — `hid-core`'s report
-descriptor parser and its keyboard, pointer, boot and LED decoders over every
-byte a device sends; `usb-hid`'s binding, the report endpoints the xHCI drain
-serves and the EP0 requests the `usb` thread posts; the keyboard state the
-i8042 and every USB keyboard share, with its locks, layout and SysRq trigger;
-the i8042's LED exchange; the one cursor and its sources; and the host's
-QMP-driven test. Four review passes, one of which drove random structured
-descriptors and reports through the parser and decoders with overflow checks
-on, and `hid-core`'s own mutation loops over every one of them, which
-panicked nowhere and read nothing past their input. Nothing reached the
-bar. Everything a device controls needs a port, and nothing in the
-change is reachable from user space: the layout syscalls only moved. A USB
-keyboard reaching the SysRq trigger is the physical console by design, as on
-Linux, and destructive commands still need the `kconsole=` mask. What came
-closest was fixed in the change. A report endpoint that halted once was
-recovered with no report posted, leaving its keyboard dead until it was
-pulled (35); one that halted on every report would have been recovered
-forever, and now stops after four halts in a row, each within a second of
-the last. An empty report released every key a
-keyboard held (30). An abandoned posted request's data page could be freed
-while the controller might still read it, up to 64 bytes of reused memory
-going to the device (25); the page now lives as long as the device. The
-first LED design masked the i8042's IOAPIC lines and polled port 0x60, where
-a byte arriving during the mask lost its edge and could wedge the keyboard
-(30), and an LED byte the keyboard asked for again was never resent, leaving
-it waiting for its option byte with scanning stopped (30); the exchange is now
-carried by the i8042's own interrupt with a bounded retransmit. A descriptor
-could make decoding one report walk any number of elements where the ring is
-drained (30); input and output elements are now capped. A held SysRq command
-key's repeats reached the focused application (15), and the boot log's Esc
-toggled on every repeat (10).
-
-Below the bar and left: any USB device can type and point, as on every
-system that accepts HID; key events are not merged across keyboards, so a
-pulled keyboard's Shift release is delivered while another keyboard still
-holds Shift, which consumers that read the modifier state ignore (15); and on
-a machine with no xHCI controller an LED byte the i8042 leaves unanswered is
-resent only at its next byte or lock change (15).
-
-The highest ID issued so far is **SLOPOS-2026-0057**. The next finding is
-`SLOPOS-2026-0058`.
+The highest ID issued so far is **SLOPOS-2026-0085**. The next finding is
+`SLOPOS-2026-0086`.
 
 ## Open findings
 
-None.
+Every finding below is under the bar (confidence < 80) and carries no CVSS
+vector; each is kept because an attacker reaches its trigger. "Raised by"
+names the evidence that would lift it.
+
+### SLOPOS-2026-0058
+- Title: Without RDRAND the CSPRNG is keyed from four TSC reads and never takes entropy again
+- Status: `open`
+- Confidence: 60 — evidence 35 (the seed step and the rekey are direct code), exploitability 10 (needs a CPU model without RDRAND and an observer of one output, a ClientHello random or a DNS id), reproducibility 15 (deterministic on such a model; no seed search run). Raised by: a search that recovers the seed from a captured ClientHello under `-cpu qemu64,-rdrand`.
+- Impact: every `getrandom` value of the boot — TLS key shares, Argon2id salts, DNS ids and ports — follows from a seed an observer can search.
+- Evidence: `boot/src/boot_drivers.rs:487-498` (the fallback seed: four `rdtsc` values times constants); `boot/src/boot_drivers.rs:472-476` (an RDRAND chunk that fails stays zero); `drivers/src/random.rs:121-138` (a rekey derives the next key from the current one alone); `drivers/src/random.rs:168-194` (the early seed, same fallback).
+- Repro: boot with `-cpu qemu64,-rdrand`; the log says `CSPRNG seeded from tsc`. The unknown is the TSC at the `csprng seed` step plus the small deltas between four consecutive reads.
+- Remediation: a pool fed by interrupt and timer jitter that reseeds the generator, and no TLS or password hashing until it holds enough on a CPU without RDRAND.
+
+### SLOPOS-2026-0059
+- Title: The commit ceiling and the OOM killer are one pool for every person, and the killer consults no uid
+- Status: `open`
+- Confidence: 60 — evidence 35 (the people's rows limit tasks and processes only; `choose_victim` shields by capabilities alone while `kill` also needs the uid rule), exploitability 15 (two people running at once; the attacker spreads its promises so each of its processes holds less than the victim's heaviest, within its 256 processes), reproducibility 10 (not run). Raised by: a utest that fills the ceiling as uid 1000 and sees uid 1001's process killed.
+- Impact: one person's processes refuse another person's `mmap` and `brk` (`ENOMEM`), and a forked copy's write has the kernel `SIGKILL` another person's process — their terminal, an app with unsaved work — which `kill` refuses the writer. A process holding a gated capability, as the compositor does, stays shielded.
+- Evidence: `mm/src/commit.rs:38-40` (one `CommitPages` limit, the root's); `slopos-ostd/src/process/quota/persons.rs:85-91` (a person's row limits processes and tasks alone); `mm/src/oom.rs:322-345` (the victim is the heaviest killable process); `core/src/oom.rs:39-67` (killable is `signal_dominates` alone); `core/src/syscall/signal.rs:132-154` (`kill` also needs `uid_permits`); `mm/src/oom.rs:21-24` (states that only a process the writer could `kill` is taken).
+- Repro: `users add bob`; bob runs one process holding 256 MiB of touched anonymous memory. As uid 1000, start processes that each `mmap` and touch 200 MiB until `sys_info` shows the commit headroom near zero, then `fork` in one and write the child's copy of a private page: the log reads `OOM: killed pid <bob's process>`.
+- Remediation: take only a process the writer may `kill` (the uid rule beside dominance), and give each person a share of the commit ceiling.
+
+### SLOPOS-2026-0060
+- Title: A client can draw a likeness of privd's question, and no key a client cannot see proves the real one
+- Status: `open`
+- Confidence: 45 — evidence 25 (the secure attention key locks the screen and nothing else; a client's surface holds any pixels), exploitability 15 (the person must type a password into a dialog a client drew; `ASKING` tells a requester the moment a real question shows, so a lookalike can follow one), reproducibility 5 (no lookalike built). Raised by: a client that captures a password typed into a drawn card under `just ui-shots`.
+- Impact: session code collects the person's password, or an administrator's, by drawing the question's card. A real question names the asking program and pid but not the terminal or window, so a request background code raises right after the person's own reads as theirs; an extension's action is described in the extension's own words, shown under its name.
+- Evidence: `userland/src/apps/compositor/gate.rs:187-200` (Ctrl+Alt+Delete locks); `userland/src/apps/compositor/mod.rs:390-431` (a question takes keys only while it is up; no key summons or confirms it); `userland/src/apps/privd/mod.rs:791-797` (`ASKING` on `SHOWN`); `userland/src/apps/privd/mod.rs:920-928` (an extension's `describe` in the headline).
+- Repro: a client maps a window over the area between the menu bar and the dock, draws the card for `org.slopos.priv` with a password field, and reads the keys typed into it as ordinary input.
+- Remediation: a trusted path — the question shows only after the secure attention key, or carries what no client can draw (a mark in the menu bar, an image the person chose) — and it names the requester's terminal or window.
+
+### SLOPOS-2026-0061
+- Title: A requester keeps its mechanism, and the exclusive group the mechanism holds, for as long as it keeps the mechanism blocked
+- Status: `open`
+- Confidence: 45 — evidence 30 (privd waits on a mechanism with no bound and releases its group only at the reap; the mechanism writes to descriptors the requester supplied; `users passwd` reads its secret with no timeout), exploitability 10 (an administrator's session asks `boot.oneshot` and `boot.commit` unasked; a standard user needs one click on `accounts.password`), reproducibility 5. Raised by: a utest that holds `boot-slots` for a minute this way.
+- Impact: an administrator's session code, unasked, holds `boot-slots` — every kernel and base install, commit and one-shot, the paired agent's included — or after one click `accounts`, every account change, until that process exits; a privd started again takes no exclusive group while the mechanism runs.
+- Evidence: `assets/privd/actions:108-118` and `:132-142` (`allow admin`, `exclusive boot-slots`); `assets/privd/actions:265-274` (`allow user confirm`, `exclusive accounts`); `userland/src/apps/privd/mod.rs:720-735` (the claim ends at the reap); `userland/src/apps/privd/mod.rs:1308-1340` (an unbounded wait; a requester that leaves does not end it); `userland/src/apps/privd/mod.rs:741` (a predecessor's mechanism keeps the group); `userland/src/secret.rs:76-90` (a blocking `read_line`).
+- Repro: as an administrator, fill a pipe, send privd `org.slopos.boot.oneshot` with the pipe's write end as stdout and stderr, and keep the read end unread; `remote.py install` and root's `bootctl install` are refused while that process lives.
+- Remediation: privd owns a mechanism's output pipes and relays them, so no requester's descriptor blocks a mechanism, and a mechanism in an exclusive group runs under a deadline.
+
+### SLOPOS-2026-0062
+- Title: Extension users, the greeter and a seventeenth person debit the root, bounded by no person's share
+- Status: `open`
+- Confidence: 45 — evidence 35 (a spawn takes a person's row only for a uid in `PERSON_UIDS`, and the rows are the first sixteen claimed), exploitability 5 (an extension's service, or sixteen other people in one boot), reproducibility 5. Raised by: an extension service fork loop that fills the task table in a utest.
+- Impact: an extension's service (uids 100-999) or a seventeenth person forks without the quarter of `MAX_PROCESSES` and `MAX_TASKS` a person's row allows, so its fork bomb or unreaped children fill the machine's task table, which the rows exist to prevent.
+- Evidence: `core/src/exec/mod.rs:384-394` (`account_for`); `slopos-ostd/src/process/quota/persons.rs:31-46` (the root once sixteen rows are taken); `slopos-ostd/src/process/quota/persons.rs:85-91` (the rows' limits).
+- Repro: an extension whose service forks in a loop; once the table is full, every person's spawn fails.
+- Remediation: a row per extension, keyed by its record's number, and a shared row bounded as one person's for every uid past the sixteenth.
+
+### SLOPOS-2026-0063
+- Title: `QEMU_DEBUG=1` opens a GDB stub on every interface and a monitor socket at a fixed `/tmp` path
+- Status: `open`
+- Confidence: 40 — evidence 30 (`-s` is QEMU's `-gdb tcp::1234`, which binds every address; the monitor path is fixed and removed with `rm -f` first), exploitability 5 (only while a developer debugs), reproducibility 5 (not run). Raised by: a connection from another host during a debug boot.
+- Impact: any host that reaches the developer's machine on TCP 1234 reads and writes the guest's memory and registers, and with them its root and the workspace clone; another local user who creates `/tmp/slopos-monitor.sock` first keeps QEMU from starting.
+- Evidence: `scripts/qemu_run.sh:569-576`.
+- Repro: `QEMU_DEBUG=1 just boot-log`; from another host, `gdb -ex 'target remote <host>:1234'`.
+- Remediation: `-gdb tcp:127.0.0.1:1234` and a monitor socket under `builddir/`.
+
+### SLOPOS-2026-0064
+- Title: A mechanism reaches by path what the person allowed: its working directory and the files its command line names
+- Status: `open`
+- Confidence: 35 — evidence 25 (a working directory is a path; privd's check before the spawn compares `(st_dev, st_ino)` and `st_dev` is 0 for every file; `bootctl` installs whatever a path holds when no digest follows it, and `selfhost.sh` names none), exploitability 5 (session code of the same person must move a directory or replace a file between the answer and the read), reproducibility 5. Raised by: a test that swaps a base under `bootctl base install` after the answer.
+- Impact: a `priv` command allowed in one directory runs, holding `DacOverride` and `Mount`, against relative paths session code re-pointed by renaming directories; a base or kernel allowed by its path is replaced before `bootctl` reads it, and a base runs at once.
+- Evidence: `slopos-ostd/src/task/fs_context.rs:20` (`CwdPath`); `userland/src/apps/privd/mod.rs:960` and `:1202-1207` (`still_at`); `fs/src/vfs/traits.rs:126` (`st_dev = 0`); `assets/privd/actions:59`, `:86`, `:385-386` (`cwd`); `userland/src/apps/bootctl.rs:463-484` (the digest is optional) and `:1072`; `scripts/selfhost.sh:89` and `:100`.
+- Repro: as an administrator run `scripts/selfhost.sh install`; while the question shows, replace the base it names with another that passes `boot_core::base::check`, then allow; `bootctl status` names the other build tag.
+- Remediation: the requester opens the directory and files and privd hands the mechanism descriptors, or each image travels with the SHA-256 the question shows; `stat` reports a real `st_dev`.
+
+### SLOPOS-2026-0065
+- Title: What `priv` makes is the requester's, so their later session code rewrites what they placed in shared directories
+- Status: `open`
+- Confidence: 35 — evidence 25 (`org.slopos.priv` runs as the requester, so a file it makes in a uid-0 directory is theirs), exploitability 5 (an administrator must first make the file with `priv`), reproducibility 5. Raised by: a utest on a two-person root that rewrites a file `priv` made in `/usr/local/bin`.
+- Impact: once an administrator makes a file in `/usr/local/bin` or `/etc` with `priv`, any code of their session rewrites it unasked, and other people run or read it.
+- Evidence: `assets/privd/actions:381-392` (`uid requester`); `userland/src/apps/privd/mod.rs:1216-1240` (the requester's ids); `userland/src/apps/priv.rs:264-274` (`priv` itself trusts only what uid 0 alone changes, which such a file is not).
+- Repro: with a second person added, `priv cp tool /usr/local/bin/tool`; `ls -l` names the administrator; their shell rewrites the file without a question, and the second person's `tool` runs the new bytes.
+- Remediation: a file `priv` makes in a directory only uid 0 may change is uid 0's.
+
+### SLOPOS-2026-0066
+- Title: A uid's session code can take every privd connection its person's requests need
+- Status: `open`
+- Confidence: 30 — evidence 25 (32 connections per uid and eight per uid and program, an idle connection kept for good, every program outside the base one key), exploitability 5 (a base requester whose stdout or stderr is a full pipe blocks with its connection open, so three base programs and one outside the base fill a uid's 32), reproducibility 0. Raised by: a utest that fills uid 1000's connections and sees its next request refused.
+- Impact: the person's own requests — questions, password changes, installs — are refused as crowded until those processes exit; root, the paired agent and other people are unaffected.
+- Evidence: `userland/src/apps/privd/mod.rs:74-80` (the limits); `userland/src/apps/privd/mod.rs:285-307` (`Admitted::take` keyed on uid and program path); `userland/src/apps/privd/mod.rs:428-433` (`Other` has no path, one key); `userland/src/apps/privd/mod.rs:688-718` (a connection lives until its requester closes it).
+- Repro: as uid 1000, hold eight idle connections from a program outside the base, then start `bootctl status`, `keymap` and `users passwd` eight times each with stdout and stderr a full pipe; the person's next `priv` is refused as crowded.
+- Remediation: count only connections with a request in flight and close idle ones after a bound, or keep a share for the programs the person's desktop starts.
+
+### SLOPOS-2026-0067
+- Title: Until the next boot, a descriptor the first person opened in `/usr/local` before the hand-over still writes what later people run
+- Status: `open`
+- Confidence: 35 — evidence 25 (the hand-over changes owners in place; only `priv` waits for a settled boot; `users add` only advises a restart), exploitability 5, reproducibility 5. Raised by: a utest that keeps a writable descriptor across `users add` and changes what the new person runs.
+- Impact: code of the first person's that opened `/usr/local/bin/tool` for writing before `users add` keeps changing it while the second person runs it, until a restart.
+- Evidence: `userland/src/root_layout.rs:15-22` (`settled`); `userland/src/apps/users.rs:340-346` (the advice); `userland/src/apps/priv.rs:268-269`.
+- Repro: as the first person, open `/usr/local/bin/tool` for writing and keep it; `users add bob`; write through the descriptor; bob's `tool` runs the new bytes.
+- Remediation: revoke writable descriptors under `/usr/local` at the hand-over, or keep the new person off `/usr/local` until a settled boot.
+
+### SLOPOS-2026-0068
+- Title: A rename's permission checks and the rename look the names up separately, with no lock across both
+- Status: `open`
+- Confidence: 30 — evidence 25 (`check_rename` and `rename_resolved` each look up both names; the seal check is a third walk), exploitability 5 (the one check a racing rename evades is write on a directory moved between parents, which guards only its `..`; the sticky checks hold, since only a name the caller could already remove can be swapped in), reproducibility 0. Raised by: a race loop that moves another uid's directory between parents.
+- Impact: a process with write on two parents moves a directory it may not write to another parent, changing its `..`.
+- Evidence: `fs/src/vfs/ops.rs:737-743`; `fs/src/vfs/ops.rs:775-802`; `fs/src/vfs/ops.rs:807-850`.
+- Repro: one thread loops `rename(p/a, q/a)`, `a` a directory the caller may write; another swaps `p/a` with a directory of another uid's in `p`.
+- Remediation: hold the parents' rename lock across the checks and the rename, checking the inodes the rename acts on.
+
+### SLOPOS-2026-0069
+- Title: A kept answer reruns the same command with whatever input its requester gives, and an extension sets its own `keep`
+- Status: `open`
+- Confidence: 30 — evidence 25 (a kept answer keys the command line, directory, session and live parent, never the input; an extension's declaration takes `keep` up to 900 that no grant names), exploitability 5, reproducibility 0. Raised by: a utest that reruns a kept `priv tee` with other input, unasked.
+- Impact: within 300 s of a person allowing `priv tee /etc/x` from a shell, code that shell starts reruns it unasked with its own standard input; an extension's action asked once stays answered for up to fifteen minutes.
+- Evidence: `userland/src/apps/privd/answers.rs:19-35` and `:49-62`; `assets/privd/actions:387`; `extension-core/src/declare.rs:736`; `priv-core/src/policy.rs:719-723`.
+- Repro: allow `priv tee /etc/motd` from a shell; within five minutes a script started from it runs `echo X | priv tee /etc/motd` and is not asked.
+- Remediation: no kept answer for a command fed by the requester's input, and an extension's `keep` held to its key's ceiling.
+
+### SLOPOS-2026-0070
+- Title: A mechanism's own terminal is open to session code in the unlock window, and then not held to its session
+- Status: `open`
+- Confidence: 30 — evidence 25 (`openpty` unlocks the slave before privd's requester takes it by `TIOCGPTPEER` and locks it again; terminal ioctls check no session; a terminal whose foreground group has died serves any session), exploitability 5, reproducibility 0. Raised by: a utest that opens the slave in the window and turns echo on during `users passwd`.
+- Impact: a process of the requester's uid that opens `/dev/pts/N` in the window keeps a descriptor on the terminal the installer, an accounts mechanism or the rescue shell reads: it turns echo back on while a password is typed, flushes the input or stops the output, and between a rescue shell's programs reads what is typed.
+- Evidence: `userland/src/syscall/process.rs:323-338`; `userland/src/privd.rs:491-512`; `core/src/syscall/fs/poll_ioctl_handlers.rs:927-934`; `drivers/src/tty/session.rs:69`, `:82-91`, `:110-116`.
+- Repro: as uid 1000 loop opening the next `/dev/pts/N` while another process runs `users passwd`; once open, `TCSETS` with `ECHO` set as the prompt shows.
+- Remediation: never unlock a mechanism's slave (take it by `TIOCGPTPEER` alone); hold state-changing terminal ioctls to the terminal's session; treat a dead foreground group as no access from another session.
+
+### SLOPOS-2026-0071
+- Title: An extension's program keeps its extension's label with a library from `LD_LIBRARY_PATH` that maps nothing executable
+- Status: `open`
+- Confidence: 30 — evidence 25 (privd checks only base `program` principals for static linking; the loader honours `LD_LIBRARY_PATH` for a process that is not `AT_SECURE`; only an executable mapping forfeits the program), exploitability 5 (the interposed data must steer the program), reproducibility 0. Raised by: a utest in which an extension program under such a library asks privd and is admitted.
+- Impact: session code runs an extension's program with a data-only library interposing its data symbols, and the program still asks privd as that extension's `program` principal, reaching the actions its declaration lets the program ask unasked, with arguments the program would not send.
+- Evidence: `userland/src/apps/privd/mod.rs:346-347` and `:375-385`; `slibc/src/ld_so/mod.rs:644-655`; `core/src/syscall/memory_handlers.rs:64-71`; `mm/src/process_vm.rs:2924-2946`.
+- Repro: build a shared object whose only `PT_LOAD` is writable data defining a symbol the program imports; run the program with `LD_LIBRARY_PATH` naming it; `SO_PEEREXTENSION` on its privd connection still names the activation.
+- Remediation: forfeit the program when the loader maps any object from outside the base and the activation, or ignore `LD_LIBRARY_PATH` for an extension's program.
+
+### SLOPOS-2026-0072
+- Title: Init ends a login tag's processes one `kill` at a time from a listing, so a process that forks fast outlives the end and many stall init
+- Status: `open`
+- Confidence: 30 — evidence 25, exploitability 5, reproducibility 0. Raised by: a utest whose fork loop outlives `end-session`.
+- Impact: a person's process forking in a loop survives their logout (the request is answered with how many did), and the old broker's survive a pairing change; ending a person's 256 processes costs init a task-table walk per `kill`, while it answers no other session.
+- Evidence: `userland/src/apps/init/session.rs:26-27`, `:839`, `:869-897`; `userland/src/apps/init/mod.rs:741-772` (one `SIGKILL` pass, then the new remoted).
+- Repro: a session process whose children each fork again in a loop; `end-session` answers with a count above zero and `process_list` still shows the tag.
+- Remediation: one kernel call that freezes and kills every process of a login tag, as `cgroup.kill` does.
+
+### SLOPOS-2026-0073
+- Title: privd and init check an extension program's activation, then spawn it by path
+- Status: `open`
+- Confidence: 25 — evidence 20 (the check opens the file and drops it; the spawn walks the path again), exploitability 5 (the replacement takes `ExtensionUpdate`: an owner's update, a session's `install-signed` of a key's newer image, or a deactivation over a file a `DacOverride` holder left under the mount point), reproducibility 0. Raised by: a test hook in the window that shows the replacement image running with the old grant.
+- Impact: an activation replaced or taken away between the check and the spawn runs the new image's program, or a file on the root under `/opt/<name>`, with the old declaration's grant until the reload ends it.
+- Evidence: `userland/src/apps/privd/mod.rs:944-947`, `:963-971`, `:1281-1282`; `userland/src/activation.rs:71-81`; `userland/src/apps/init/extensions.rs:1036-1039`, `:1118-1131`, `:1197-1200`.
+- Repro: nearest deterministic: a test hook between `activation::holds` and the spawn that deactivates the extension; the mechanism starts from the root's file.
+- Remediation: spawn from the descriptor the check opened, or have the kernel refuse a spawn whose program is not of the named activation.
+
+### SLOPOS-2026-0074
+- Title: Keys typed between one compositor's exit and the next one taking the input sink reach the console and its relay
+- Status: `open`
+- Confidence: 25 — evidence 20, exploitability 5 (the typist and a console session must coincide with a compositor's exit), reproducibility 0. Raised by: a utest that types after a compositor exits and reads the keys from a console session.
+- Impact: what a person types into their desktop as its compositor exits, a password among it, lands at the console, which `/bin/login` relays to the console session running, another person's shell included.
+- Evidence: `drivers/src/input_event.rs:556-566`; `drivers/src/keyboard.rs:258`; `userland/src/apps/login.rs:89-91`.
+- Repro: with bob logged in at the console, kill uid 1000's compositor while typing; bob's shell reads the keys.
+- Remediation: while a graphical session is in front, keys reach no console until init hands the sink on.
+
+### SLOPOS-2026-0075
+- Title: An extension's session service runs as the first person, uid 1000, holding the extension's grant, whoever installed it
+- Status: `open`
+- Confidence: 25 — evidence 20, exploitability 5, reproducibility 0. Raised by: a utest showing the session service as uid 1000 after uid 1001 installed it.
+- Impact: an extension an administrator other than the first person installs runs code as the first person, in their home, holding capabilities the first person lacks.
+- Evidence: `userland/src/apps/init/extensions.rs:1449-1456`.
+- Repro: as uid 1001, an administrator, install an extension declaring a session service; `process_list` shows it as uid 1000.
+- Remediation: run a session service as the person whose desktop is in front, for one who allowed the grant, and name that person in the install question.
+
+### SLOPOS-2026-0076
+- Title: Any process pins a retired base generation or extension activation by holding one of its files, and their slots are few
+- Status: `open`
+- Confidence: 25 — evidence 20, exploitability 5 (the owner must switch or update repeatedly), reproducibility 0. Raised by: a utest that pins sixteen generations and sees `base_activate` answer `EBUSY`.
+- Impact: session code that holds a file of each generation and activation keeps them resident: past sixteen generations, or a quarter of memory, a live base switch answers `EBUSY` until a reboot, and past 32 activations no extension activates, updates or enables; neither is charged to the holder.
+- Evidence: `fs/src/basefs/mod.rs:48`; `fs/src/basefs/reap.rs:1-10`; `abi/src/extension.rs:20`; `fs/src/extension/mod.rs:50` and `:294`.
+- Repro: as uid 1000, after each `bootctl base install` open a file of `/bin` and keep it; the seventeenth live switch is refused.
+- Remediation: after a grace, revoke a retired generation's descriptors and mappings, or charge it to its holders.
+
+### SLOPOS-2026-0077
+- Title: The install medium is known by a GPT disk GUID any disk can carry
+- Status: `open`
+- Confidence: 20 — evidence 20, exploitability 0 (the disk is written by a `RawBlock` holder or by hand), reproducibility 0. Raised by: a boot from a CD that mounts a planted stick's payload.
+- Impact: a disk copying the medium's GUID with a payload partition is mounted as the payload on a live boot from a CD, whose own disk the kernel cannot read, and the installer installs its toolchain and `/src`; beside the stick it makes the payload and the crash store ambiguous, and any disk carrying it is never offered.
+- Evidence: `boot/src/boot_services.rs:637`; `drivers/src/block/mod.rs:530-553`; `drivers/src/crash.rs:163`; `userland/src/apps/installer/disk.rs:56-61`.
+- Repro: give a stick the ISO's `boot/disk-guid` and a payload-type ext4 partition; boot the ISO from a CD with it plugged in.
+- Remediation: authenticate the payload against a digest the `install` module carries.
+
+### SLOPOS-2026-0078
+- Title: uid 0 running `tree-install` itself reads the tree by path, without the copy privd's runs make
+- Status: `open`
+- Confidence: 20 — evidence 20, exploitability 0 (uid 0 must install a tree another uid can change), reproducibility 0. Raised by: a utest that swaps a link into a tree root installs.
+- Impact: when a rescue shell or another uid-0 caller installs such a tree, its owner swaps a file for a link mid-copy and a file only uid 0 may read lands in `/usr/local`.
+- Evidence: `userland/src/apps/tree_install.rs:54-65`.
+- Repro: as root, `tree-install apps /home/user/tree /usr/local` while uid 1000 loops replacing a file in the tree with a link to `/etc/shadow`.
+- Remediation: stage the copy whenever the caller is uid 0.
+
+### SLOPOS-2026-0079
+- Title: extctl's mechanism opens the paths a request names as uid 0
+- Status: `open`
+- Confidence: 15 — evidence 15, exploitability 0, reproducibility 0. Raised by: a utest that tells two refusals apart for paths only uid 0 searches.
+- Impact: an administrator's session code, unasked through `install-signed`, learns from the refusal whether a path under a directory only uid 0 searches exists and is a regular file.
+- Evidence: `userland/src/apps/extctl/mod.rs:71-81` and `:633`; `assets/privd/actions:182-191`.
+- Repro: ask `org.slopos.extension.install-signed` naming `/root/a`, then a file that exists there; the refusals differ.
+- Remediation: the requester opens what it names and hands the descriptors over, as `config install` does with standard input.
+
+### SLOPOS-2026-0080
+- Title: A script's identity comes from one file while its interpreter opens the path again, which a base switch or an activation replacement re-points
+- Status: `open`
+- Confidence: 15 — evidence 15, exploitability 0 (the switch takes `BaseUpdate` or `ExtensionUpdate`), reproducibility 0. Raised by: a test that deactivates an extension between a script's exec and its interpreter's open.
+- Impact: across a switch a script runs the next generation's or activation's bytes, and after a deactivation whatever lies on the root under `/opt/<name>`, while `SO_PEERPROGRAM` and `SO_PEEREXTENSION` name the first; an old-generation process is judged by the current policy for its path.
+- Evidence: `core/src/exec/script.rs:21-34`.
+- Repro: nearest deterministic: exec an extension's script and deactivate the extension before the interpreter opens it.
+- Remediation: hand the interpreter the script by descriptor (`/dev/fd/N`).
+
+### SLOPOS-2026-0081
+- Title: Every service of an extension logs and keeps state as the extension's first user
+- Status: `open`
+- Confidence: 15 — evidence 15, exploitability 0, reproducibility 0. Raised by: a utest in which one service user of an extension writes another's state.
+- Impact: a compromised service running as one of an extension's users reads and rewrites another service's logs, state and runtime directory, undoing the separation the extension declared users for.
+- Evidence: `extension-core/src/declare.rs:370-373`; `userland/src/apps/init/extensions.rs:1162`, `:1263`, `:1450`.
+- Repro: an extension with two users and a service each; one writes the other's `/var/lib/<name>`.
+- Remediation: a directory and logger per service user.
+
+### SLOPOS-2026-0082
+- Title: Any task lists `/dev/crash` and reads every disk's size, block size and identities
+- Status: `open`
+- Confidence: 15 — evidence 15, exploitability 0, reproducibility 0. Raised by: a shown use of what the listing and the size ioctls reveal.
+- Impact: unprivileged code learns how many crash records the machine holds and their sizes, and each disk's geometry and labels, as Linux's `/dev/disk/by-*` tells every user.
+- Evidence: `fs/src/devfs/crash.rs:101-108`; `fs/src/devfs/block.rs:776-786`.
+- Repro: as uid 1000, `ls -l /dev/crash`; `BLKGETSIZE64` on `/dev/nvme0n1`.
+- Remediation: list `/dev/crash` and answer the size ioctls to a `RawBlock` holder only.
+
+### SLOPOS-2026-0083
+- Title: The host runs `e2fsck -fy` and `resize2fs` over metadata the guest wrote
+- Status: `open`
+- Confidence: 15 — evidence 15, exploitability 0 (needs a defect in the host's e2fsprogs), reproducibility 0. Raised by: an e2fsprogs defect reachable from a crafted image.
+- Impact: a guest that writes crafted metadata into its persistent root reaches any parsing defect of the host's e2fsprogs, as the developer's user, the next time a build grows the image.
+- Evidence: `scripts/build_fs_image.sh:262-300`.
+- Repro: none safely; nearest: fuzz a preserved image through the build's grow path.
+- Remediation: grow the image in a sandbox without the developer's files, or from inside the guest.
+
+### SLOPOS-2026-0084
+- Title: A `DacOverride` holder can write a store file between its creation and its seal
+- Status: `open`
+- Confidence: 10 — evidence 10, exploitability 0 (a power loss must fall between the seal and the read-back), reproducibility 0. Raised by: a test hook that writes between the write and the seal and survives a cut before the read-back.
+- Impact: a write in that window fails the edit, a writable mapping refuses the seal (`EBUSY`) so such a holder fails every edit it races, and a power loss between the seal and the read-back leaves its bytes sealed and believed as the newest generation.
+- Evidence: `userland/src/sealed.rs:122-143`; `userland/src/apps/extctl/store.rs:243-260`.
+- Repro: nearest deterministic: a test hook between `create_sealed`'s write and its seal that writes the file through a second descriptor.
+- Remediation: write the generation where no other process can name it and link it in once sealed.
+
+### SLOPOS-2026-0085
+- Title: A command line run through `remote.py sh` holds the paired agent's privd connection
+- Status: `open`
+- Confidence: 10 — evidence 10, exploitability 0 (the operator must source a file the session can edit), reproducibility 0. Raised by: an operator workflow that sources a session-writable file through `sh`.
+- Impact: session code that edits a script the operator sources through `remote.py sh` asks privd as the paired agent: kernels, bases, one-shot boots, power.
+- Evidence: `scripts/remote.py:996-997`; `userland/src/apps/remoted/serve.rs:226`.
+- Repro: the session writes `bootctl oneshot slopos-b` into `~/env.sh`; the operator runs `just remote sh '. ~/env.sh'`.
+- Remediation: `sh` runs without the connection unless the operator asks for it.
 
 ## Cadence
 

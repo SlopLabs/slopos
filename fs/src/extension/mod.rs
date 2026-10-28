@@ -19,7 +19,7 @@ use slopos_abi::extension::{DIGEST_LEN, Label, MAX_ACTIVATIONS, NAME_MAX};
 use slopos_abi::fs::EXTENSION_MAGIC;
 use slopos_ext4_core::superblock::{self as sbk, incompat, off as soff, ro_compat};
 use slopos_ostd::process::Program;
-use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
+use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::sync::{InitFlag, LockClassKey, Mutex, SpinLock, register_class_eagerly};
 use slopos_ostd::{KArc, KBox, klog_info, lock_class};
 use slopos_verity_core::BLOCK;
@@ -30,7 +30,7 @@ use self::index::Index;
 pub use self::index::IndexError;
 use crate::basefs::{generation_of, reap};
 use crate::blockdev::{BlockDevice, BlockDeviceError};
-use crate::ext2_vfs::Ext2Mount;
+use crate::ext4_vfs::Ext4Mount;
 use crate::vfs::mount::{MOUNT_PINNED, MOUNT_RDONLY, mount_replacing, unmount_where};
 use crate::vfs::traits::{FsStats, Owner, same_filesystem};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
@@ -94,7 +94,7 @@ struct State {
 
 /// One activation: its volume, and the number its inodes carry.
 pub struct Activation {
-    volume: Ext2Mount,
+    volume: Ext4Mount,
     /// The activation this instance serves, 0 while it serves none.
     number: AtomicU32,
     /// Calls into the volume in flight, which a reap pass waits out.
@@ -132,7 +132,7 @@ fn inner(inode: InodeId) -> InodeId {
 impl Activation {
     const fn new() -> Self {
         Self {
-            volume: Ext2Mount::new_for_checked_image(CLASS),
+            volume: Ext4Mount::new_for_checked_image(CLASS),
             number: AtomicU32::new(0),
             users: AtomicUsize::new(0),
             retired: AtomicBool::new(false),
@@ -447,7 +447,7 @@ pub fn path_of(number: u32, inode: InodeId, buf: &mut [u8]) -> VfsResult<usize> 
 }
 
 /// Run `f` over every volume an activation reads, for the reclaimer.
-pub(crate) fn for_each_volume(f: &mut dyn FnMut(&'static Ext2Mount)) {
+pub(crate) fn for_each_volume(f: &mut dyn FnMut(&'static Ext4Mount)) {
     for activation in POOL.iter() {
         if activation.volume.is_initialized() {
             f(&activation.volume);

@@ -6,7 +6,7 @@
 #
 # POSIX sh, run on the host and in the guest alike; the packing is
 # tools/initramfs, built for whichever machine runs this. Its argv matches
-# build_fs_image.sh's, so the RAM root and the ext2 disk image are populated
+# build_fs_image.sh's, so the RAM root and the ext4 disk image are populated
 # from the same binary list.
 #
 # Environment:

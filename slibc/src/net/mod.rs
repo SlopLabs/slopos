@@ -6,9 +6,6 @@ pub mod ifaddrs;
 pub mod ifreq;
 pub mod netdb;
 pub mod resolv;
-#[allow(dead_code)]
-pub(crate) mod shim;
-pub mod tests;
 pub mod text;
 
 use crate::errno::errno_set;

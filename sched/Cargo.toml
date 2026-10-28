@@ -23,7 +23,6 @@ test-hooks = ["slopos-ostd/test-helpers"]
 
 [dependencies]
 slopos-abi = { workspace = true }
-slopos-arch = { workspace = true }
 slopos-ostd = { workspace = true }
 slopos-cpufreq-core = { workspace = true }
 slopos-kernel-services = { workspace = true }

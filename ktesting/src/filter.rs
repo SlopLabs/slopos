@@ -30,7 +30,3 @@ pub fn glob_match(pat: &[u8], name: &[u8]) -> bool {
 
     pi == pat.len()
 }
-
-pub fn matches_any(pats: &[&[u8]], name: &[u8]) -> bool {
-    pats.iter().any(|p| glob_match(p, name))
-}

@@ -1,16 +1,17 @@
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::mm::KArc;
-use slopos_ostd::mm::frame::{AnonymousMeta, Paddr, reference_count_at};
+use slopos_ostd::mm::frame::{AnonymousMeta, reference_count_at};
+use slopos_ostd::mm::page_property::PageProperty;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::vm_space::{MapError, VmSpace};
 
 use crate::error::MmError;
 use crate::hhdm::PhysAddrHhdm;
 use crate::page_alloc::{alloc_kernel_page, free_page_frame};
-use crate::paging_defs::{PAGE_SIZE_4KB, PageFlags};
+use crate::paging_defs::PAGE_SIZE_4KB;
 use crate::tlb;
 use crate::user_mappings::{
-    ostd_get_pte_flags_4kb, ostd_replace_4kb_user, ostd_resolve_cow_4kb, ostd_virt_to_phys_4kb,
+    SOFTWARE_COW, is_cow, leaf_property_4kb, replace_4kb_user, resolve_cow_4kb, virt_to_phys_4kb,
     wait_vm_space_exclusive,
 };
 use crate::vma_region::{Commit, VmaMap, VmaRegion};
@@ -22,22 +23,21 @@ fn copy_full_page(src: VirtAddr, dst: VirtAddr) {
     let _ = slopos_ostd::mm::hhdm_bytes::copy_page(src, dst);
 }
 
-/// Break COW at `fault_addr`. `flags` is what the covering region publishes a
-/// writable leaf with, so a copy keeps the region's `NO_EXECUTE`.
+/// Break COW at `fault_addr`. `prop` is what the covering region publishes a
+/// leaf with, so a copy keeps the region's execute permission.
 pub fn handle_cow_fault(
     vm_space: &mut KArc<VmSpace>,
     fault_addr: u64,
-    flags: PageFlags,
+    prop: PageProperty,
 ) -> Result<(), MmError> {
     let vaddr = VirtAddr::new(fault_addr);
     let aligned_vaddr = VirtAddr::new(fault_addr & !(PAGE_SIZE_4KB - 1));
 
-    match ostd_get_pte_flags_4kb(vm_space, vaddr) {
-        Some(f) if f.contains(PageFlags::COW) => {}
-        _ => return Err(MmError::NotCowPage),
+    if !leaf_property_4kb(vm_space, vaddr).is_some_and(|leaf| is_cow(&leaf)) {
+        return Err(MmError::NotCowPage);
     }
 
-    let old_phys = ostd_virt_to_phys_4kb(vm_space, aligned_vaddr);
+    let old_phys = virt_to_phys_4kb(vm_space, aligned_vaddr);
     if old_phys.is_null() {
         return Err(MmError::InvalidAddress);
     }
@@ -46,13 +46,17 @@ pub fn handle_cow_fault(
         return Err(MmError::Retry);
     }
 
-    let ref_count = reference_count_at(Paddr::new(old_phys.as_u64() & !(PAGE_SIZE_4KB - 1)));
+    let ref_count = reference_count_at(PhysAddr::new(old_phys.as_u64() & !(PAGE_SIZE_4KB - 1)));
 
     if ref_count <= 1 {
         return resolve_single_ref(vm_space, aligned_vaddr);
     }
 
-    let writable = flags.difference(PageFlags::COW).union(PageFlags::WRITABLE);
+    let writable = PageProperty {
+        write: true,
+        software: prop.software & !SOFTWARE_COW,
+        ..prop
+    };
     resolve_multi_ref(vm_space, aligned_vaddr, old_phys, writable)
 }
 
@@ -69,7 +73,7 @@ pub fn break_cow_in(
     if owed && map.charge_frames(1).is_err() {
         return Err(MmError::CommitRefused);
     }
-    let broken = handle_cow_fault(vm_space, fault_addr, region.to_page_flags());
+    let broken = handle_cow_fault(vm_space, fault_addr, region.page_property());
     if owed && broken.is_err() {
         map.refund_frames(1);
     }
@@ -80,7 +84,7 @@ fn resolve_single_ref(
     vm_space: &mut KArc<VmSpace>,
     aligned_vaddr: VirtAddr,
 ) -> Result<(), MmError> {
-    match ostd_resolve_cow_4kb(vm_space, aligned_vaddr) {
+    match resolve_cow_4kb(vm_space, aligned_vaddr) {
         Ok(true) => Ok(()),
         Ok(false) => Err(MmError::MappingFailed),
         Err(MapError::WouldBlock) => Err(MmError::Retry),
@@ -92,7 +96,7 @@ fn resolve_multi_ref(
     vm_space: &mut KArc<VmSpace>,
     aligned_vaddr: VirtAddr,
     old_phys: PhysAddr,
-    flags: PageFlags,
+    prop: PageProperty,
 ) -> Result<(), MmError> {
     let new_phys = alloc_kernel_page();
     if new_phys.is_null() {
@@ -109,7 +113,7 @@ fn resolve_multi_ref(
 
     copy_full_page(old_virt, new_virt);
 
-    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(Paddr::new(new_phys.as_u64())) {
+    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(new_phys) {
         Ok(f) => f,
         Err(e) => {
             free_page_frame(new_phys);
@@ -120,7 +124,7 @@ fn resolve_multi_ref(
 
     // A refusal returns the copy, whose drop frees it, and leaves the original
     // leaf in place, so the fault retries against an unmodified address space.
-    let displaced = match ostd_replace_4kb_user(vm_space, aligned_vaddr, frame, flags.bits()) {
+    let displaced = match replace_4kb_user(vm_space, aligned_vaddr, frame, prop) {
         Ok(displaced) => displaced,
         Err((_, err)) => {
             if err == MapError::WouldBlock {
@@ -146,6 +150,5 @@ pub fn is_cow_fault(error_code: u64, vm_space: &KArc<VmSpace>, fault_addr: u64) 
         return false;
     }
 
-    ostd_get_pte_flags_4kb(vm_space, VirtAddr::new(fault_addr))
-        .map_or(false, |f| f.contains(PageFlags::COW))
+    leaf_property_4kb(vm_space, VirtAddr::new(fault_addr)).is_some_and(|leaf| is_cow(&leaf))
 }

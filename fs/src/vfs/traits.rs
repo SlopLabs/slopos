@@ -53,23 +53,6 @@ impl FileType {
         }
     }
 
-    /// The listing ABI's own type byte. Not `self as u8`: the two numberings
-    /// disagree.
-    pub const fn to_fs_type(self) -> u8 {
-        use slopos_abi::fs::{
-            FS_TYPE_BLOCKDEV, FS_TYPE_CHARDEV, FS_TYPE_DIRECTORY, FS_TYPE_FILE, FS_TYPE_SYMLINK,
-            FS_TYPE_UNKNOWN,
-        };
-        match self {
-            Self::Regular => FS_TYPE_FILE,
-            Self::Directory => FS_TYPE_DIRECTORY,
-            Self::CharDevice => FS_TYPE_CHARDEV,
-            Self::BlockDevice => FS_TYPE_BLOCKDEV,
-            Self::Symlink => FS_TYPE_SYMLINK,
-            Self::Pipe | Self::Socket => FS_TYPE_UNKNOWN,
-        }
-    }
-
     /// `getdents64`'s `d_type`.
     pub const fn to_dt(self) -> u8 {
         use slopos_abi::fs::{DT_BLK, DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG, DT_SOCK};
@@ -127,8 +110,9 @@ pub struct FileStat {
 }
 
 impl FileStat {
-    /// The single producer of a [`UserFsStat`] from a [`FileStat`]: a second
-    /// mapping of the type bits once reported a regular file as a directory.
+    /// The single producer of a [`UserFsStat`] from a [`FileStat`]: one
+    /// mapping of the type bits is what keeps a regular file from reporting as
+    /// a directory.
     ///
     /// [`UserFsStat`]: slopos_abi::fs::UserFsStat
     pub fn fill_user_stat(&self, out: &mut slopos_abi::fs::UserFsStat) {
@@ -483,7 +467,7 @@ pub trait FileSystem: Send + Sync {
     /// A cookie of 0 starts at the beginning.
     ///
     /// This is what a directory larger than one listing buffer is paged over.
-    /// The value is the filesystem's own — ext2 uses a byte offset into the
+    /// The value is the filesystem's own — ext4 uses a byte offset into the
     /// directory's data, which an unrelated create or unlink does not shift,
     /// where an ordinal would.
     ///
@@ -492,7 +476,7 @@ pub trait FileSystem: Send + Sync {
     /// invokes the callback for every index it advances past. One that skips
     /// an entry silently leaves this cookie lagging its own index, so the next
     /// page repeats a name; such a filesystem must override this. It is also
-    /// O(n²) over a paged walk, which is the other reason ext2 overrides it.
+    /// O(n²) over a paged walk, which is the other reason ext4 overrides it.
     fn readdir_cookie(
         &self,
         inode: InodeId,
@@ -596,13 +580,14 @@ pub trait FileSystem: Send + Sync {
         Err(VfsError::NotSupported)
     }
 
-    /// The initramfs loader uses this to restore the executable bit `create`
-    /// dropped (it defaults regular files to `0o644`).
+    /// Set an inode's permission bits: `chmod(2)`, and the initramfs loader
+    /// restoring the executable bit `create` dropped (it defaults regular
+    /// files to `0o644`).
     ///
     /// Defaults to a refusal rather than a no-op, for the reason
-    /// [`Self::set_sealed`] gives: `chmod` is now a syscall, and a filesystem
-    /// with no mutable mode bits reporting success would tell userland it had
-    /// tightened permissions it never touched.
+    /// [`Self::set_sealed`] gives: a filesystem with no mutable mode bits
+    /// reporting success would tell userland it had tightened permissions it
+    /// never touched.
     fn set_mode(&self, inode: InodeId, mode: u16) -> VfsResult<()> {
         let _ = (inode, mode);
         Err(VfsError::NotSupported)

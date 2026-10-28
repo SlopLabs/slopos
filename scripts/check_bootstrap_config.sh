@@ -18,11 +18,12 @@ set -euo pipefail
 #     and a stage2 rustc does not depend on it — so a config that stops
 #     naming it still builds a compiler, and the root arrives with no cargo
 #     on it hours later.
-#   * `toolchain/compiler/0003-bootstrap-cmake-system-name.patch` goes away.
-#     bootstrap maps a cross target's triple to a `CMAKE_SYSTEM_NAME` by
-#     hand; an unrecognised one prints a note, sets `Generic`, and exits 0 —
-#     and `Generic` is the value that loses `LLVM_ON_UNIX` and with it every
-#     `Unix/*.inc` file the LLVM port patches.
+#   * `toolchain/compiler/0002-bootstrap-cmake-system-name.patch` stops
+#     applying. bootstrap maps a cross target's triple to a
+#     `CMAKE_SYSTEM_NAME` by hand; an unrecognised one prints a note, sets
+#     `Generic`, and exits 0 — and `Generic` is the value that loses
+#     `LLVM_ON_UNIX` and with it every `Unix/*.inc` file the LLVM port
+#     patches.
 #   * The wrapper stops producing SlopOS binaries. It names two triples on
 #     purpose — SlopOS to compile, Linux to link — and either half silently
 #     regressing gives a host-shaped object or a `gcc`-driven link.

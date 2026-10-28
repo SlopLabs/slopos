@@ -3,8 +3,8 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering, fence};
 
-use slopos_mm::mmio::MmioRegion;
 use slopos_mm::page_alloc::OwnedPageFrame;
+use slopos_ostd::mm::IoMem;
 use slopos_usb_core::xhci::memory::PAGE_SIZE;
 use slopos_usb_core::xhci::{DmaPage, RegisterBus};
 
@@ -12,7 +12,7 @@ use crate::pci::{disable_bus_master, enable_bus_master};
 use crate::pci_defs::PciDeviceInfo;
 
 pub(super) struct Bus<'a> {
-    pub regs: &'a MmioRegion,
+    pub regs: &'a IoMem,
     pub info: &'a PciDeviceInfo,
 }
 

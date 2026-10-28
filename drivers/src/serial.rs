@@ -3,7 +3,7 @@
 
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use slopos_arch::cpu;
+use slopos_ostd::cpu::x86_64 as cpu;
 use slopos_ostd::io::UartRegs;
 use slopos_ostd::io::port_consts::{
     COM1, UART_FCR_14_BYTE_THRESHOLD as FCR_14_BYTE_THRESHOLD, UART_FCR_CLEAR_RX as FCR_CLEAR_RX,
@@ -167,20 +167,6 @@ pub fn serial_locked_write_bytes(bytes: &[u8]) {
     });
 }
 
-pub fn init_port(base: u16) -> Result<UartCapabilities, ()> {
-    if base == COM1.address() {
-        let mut port = SERIAL.lock();
-        port.init();
-        Ok(port.capabilities())
-    } else {
-        Err(())
-    }
-}
-
-pub fn get_capabilities() -> UartCapabilities {
-    SERIAL.lock().capabilities()
-}
-
 pub fn write_str(s: &str) {
     let _ = SERIAL.lock().write_str(s);
 }
@@ -193,10 +179,6 @@ pub fn write_line(s: &str) {
 
 pub fn serial_putc_com1(ch: u8) {
     SERIAL.lock().write_byte(ch);
-}
-
-pub fn print_args(args: fmt::Arguments<'_>) {
-    let _ = SERIAL.lock().write_fmt(args);
 }
 
 /// What the reader should do with one received byte.
@@ -269,24 +251,6 @@ pub fn serial_poll_receive(base: u16) {
             // per-TTY lock is held across on one of its two call paths.
             SerialAction::Command(key) => slopos_ostd::kconsole::request(key),
         }
-    }
-}
-
-pub fn serial_buffer_pending(port: u16) -> i32 {
-    serial_poll_receive(port);
-    let buf = INPUT_BUFFER.lock();
-    (!buf.is_empty()) as i32
-}
-
-pub fn serial_buffer_read(port: u16, out: *mut u8) -> i32 {
-    serial_poll_receive(port);
-    let mut buf = INPUT_BUFFER.lock();
-    match buf.try_pop() {
-        Some(b) => {
-            slopos_ostd::util::ptr_buf::write_if_non_null(out, b);
-            0
-        }
-        None => -1,
     }
 }
 

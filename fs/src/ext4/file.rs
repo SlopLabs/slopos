@@ -1,0 +1,522 @@
+use super::Ext4Error;
+use super::blockmap;
+use super::cache::{BlockCache, BlockOwner};
+use super::geometry::Ext4Geometry;
+use super::ondisk::{Inode, Superblock};
+use super::types::{BlockNum, FileBlock};
+use crate::blockdev::BlockDevice;
+use core::cmp;
+
+/// Blocks a read may take off the device in one request, rather than a block
+/// per cache miss; what it read is kept in the cache afterwards.
+const DIRECT_RUN_MAX: u32 = 64;
+
+/// The shortest run worth one request. Below it the blocks go through the
+/// cache's own misses.
+const DIRECT_RUN_MIN: u32 = 4;
+
+/// Read from `offset` into `segs` back to back, as one buffer: the whole read
+/// under the caller's one hold of the mount, straight from the block cache and
+/// the device into the destination. Answers the bytes written, counted from the
+/// start of `segs[0]`.
+pub fn read_file(
+    inode: &Inode,
+    offset: u64,
+    segs: &mut [&mut [u8]],
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    geom: &Ext4Geometry,
+    block_size: u32,
+    owner: BlockOwner,
+) -> Result<usize, Ext4Error> {
+    if !inode.is_regular_file() {
+        return Err(Ext4Error::NotFile);
+    }
+    let file_size = inode.size;
+    let room: usize = segs.iter().map(|s| s.len()).sum();
+    if offset >= file_size || room == 0 {
+        return Ok(0);
+    }
+    let max_len = cmp::min(room as u64, file_size - offset) as usize;
+    let mut out = Scatter {
+        segs,
+        seg: 0,
+        at: 0,
+    };
+    let mut read_total = 0usize;
+    let mut file_offset = offset;
+
+    while read_total < max_len {
+        let fb = FileBlock(file_block_index(file_offset, block_size)?);
+        let block_off = (file_offset % block_size as u64) as usize;
+        let to_copy = cmp::min(max_len - read_total, block_size as usize - block_off);
+
+        let phys = blockmap::map_block(inode, fb, geom, cache, device, owner)?;
+        if phys.is_valid() && block_off == 0 {
+            let whole = ((max_len - read_total) / block_size as usize) as u32;
+            let run = direct_run(inode, fb, phys, whole, cache, device, geom, owner)?;
+            if run > 0 {
+                let len = run as usize * block_size as usize;
+                let at = phys.to_disk_offset(block_size).raw();
+                let span = out.contiguous();
+                if span.len() >= len {
+                    let span = &mut span[..len];
+                    device.read_at(at, span).map_err(Ext4Error::from)?;
+                    cache.install_clean_run(phys, span, owner);
+                    out.advance(len);
+                } else {
+                    read_run_scattered(at, len, phys, &mut out, cache, device, owner)?;
+                }
+                read_total += len;
+                file_offset += len as u64;
+                continue;
+            }
+        }
+        if phys.is_valid() {
+            let blk = cache.get_data(phys, device, owner)?;
+            out.put(&blk.data()[block_off..block_off + to_copy]);
+        } else {
+            out.zero(to_copy);
+        }
+
+        read_total += to_copy;
+        file_offset += to_copy as u64;
+    }
+    Ok(read_total)
+}
+
+/// A run the destination holds in more than one piece — a window of page
+/// frames — still goes to the device as one request: staged, cached, then
+/// scattered, which a request per piece would cost a device round trip each.
+#[inline(never)]
+fn read_run_scattered(
+    at: u64,
+    len: usize,
+    phys: BlockNum,
+    out: &mut Scatter<'_, '_>,
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    owner: BlockOwner,
+) -> Result<(), Ext4Error> {
+    let mut staged = slopos_ostd::KVec::<u8>::zeroed(len).map_err(|_| Ext4Error::OutOfMemory)?;
+    device
+        .read_at(at, staged.as_mut_slice())
+        .map_err(Ext4Error::from)?;
+    cache.install_clean_run(phys, staged.as_slice(), owner);
+    out.put(staged.as_slice());
+    Ok(())
+}
+
+/// The destination of a [`read_file`]: `segs` back to back, written in order.
+struct Scatter<'a, 'b> {
+    segs: &'a mut [&'b mut [u8]],
+    seg: usize,
+    at: usize,
+}
+
+impl Scatter<'_, '_> {
+    /// What is left of the current piece, skipping any already full.
+    fn contiguous(&mut self) -> &mut [u8] {
+        while self.seg < self.segs.len() && self.at == self.segs[self.seg].len() {
+            self.seg += 1;
+            self.at = 0;
+        }
+        match self.segs.get_mut(self.seg) {
+            Some(seg) => &mut seg[self.at..],
+            None => &mut [],
+        }
+    }
+
+    fn advance(&mut self, mut n: usize) {
+        while n > 0 {
+            let step = cmp::min(n, self.contiguous().len());
+            if step == 0 {
+                return;
+            }
+            self.at += step;
+            n -= step;
+        }
+    }
+
+    fn put(&mut self, mut src: &[u8]) {
+        while !src.is_empty() {
+            let dst = self.contiguous();
+            let step = cmp::min(src.len(), dst.len());
+            if step == 0 {
+                return;
+            }
+            dst[..step].copy_from_slice(&src[..step]);
+            self.at += step;
+            src = &src[step..];
+        }
+    }
+
+    fn zero(&mut self, mut n: usize) {
+        while n > 0 {
+            let dst = self.contiguous();
+            let step = cmp::min(n, dst.len());
+            if step == 0 {
+                return;
+            }
+            dst[..step].fill(0);
+            self.at += step;
+            n -= step;
+        }
+    }
+}
+
+/// How many whole blocks from `first` a read may take off the device in one
+/// request: consecutive on the device, none cached, none newer in the log.
+/// Zero when the run would be shorter than [`DIRECT_RUN_MIN`].
+#[allow(clippy::too_many_arguments)]
+fn direct_run(
+    inode: &Inode,
+    first: FileBlock,
+    phys: BlockNum,
+    whole: u32,
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    geom: &Ext4Geometry,
+    owner: BlockOwner,
+) -> Result<u32, Ext4Error> {
+    let limit = whole.min(DIRECT_RUN_MAX);
+    if limit < DIRECT_RUN_MIN || !cache.home_is_current(phys) {
+        return Ok(0);
+    }
+    let mut run = 1u32;
+    while run < limit {
+        let Some(index) = first.0.checked_add(run) else {
+            break;
+        };
+        let next = blockmap::map_block(inode, FileBlock(index), geom, cache, device, owner)?;
+        if phys.raw().checked_add(run) != Some(next.raw()) || !cache.home_is_current(next) {
+            break;
+        }
+        run += 1;
+    }
+    Ok(if run >= DIRECT_RUN_MIN { run } else { 0 })
+}
+
+pub fn write_file(
+    inode: &mut Inode,
+    offset: u64,
+    buffer: &[u8],
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    geom: &Ext4Geometry,
+    block_size: u32,
+    superblock: &mut Superblock,
+    owner: BlockOwner,
+) -> Result<usize, Ext4Error> {
+    if !inode.is_regular_file() {
+        return Err(Ext4Error::NotFile);
+    }
+    if buffer.is_empty() {
+        return Ok(0);
+    }
+    let mut written = 0usize;
+    let mut file_offset = offset;
+    let mut failure = None;
+    let limit = blockmap::max_file_size(inode, geom);
+
+    while written < buffer.len() {
+        if file_offset >= limit {
+            failure = Some(Ext4Error::InvalidRange);
+            break;
+        }
+        let fb = match file_block_index(file_offset, block_size) {
+            Ok(fb) => FileBlock(fb),
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        };
+        let block_off = (file_offset % block_size as u64) as usize;
+        let to_copy = cmp::min(buffer.len() - written, block_size as usize - block_off);
+
+        let phys =
+            match blockmap::ensure_data_block(inode, fb, cache, device, geom, superblock, owner) {
+                Ok(v) => v,
+                Err(e) => {
+                    failure = Some(e);
+                    break;
+                }
+            };
+
+        match cache.get_data(phys, device, owner) {
+            Ok(mut blk) => {
+                blk.data_mut()[block_off..block_off + to_copy]
+                    .copy_from_slice(&buffer[written..written + to_copy]);
+            }
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        }
+
+        written += to_copy;
+        file_offset += to_copy as u64;
+    }
+
+    // The size covers what was written *before* the failure, so the blocks
+    // allocated on earlier iterations are reachable rather than leaked, and
+    // the caller sees a short count instead of a silent loss.
+    let new_end = offset + written as u64;
+    if new_end > inode.size {
+        inode.size = new_end;
+    }
+    if written == 0
+        && let Some(e) = failure
+    {
+        return Err(e);
+    }
+    Ok(written)
+}
+
+/// A file offset's block index, refused rather than truncated past the 32-bit
+/// block number ext4 addresses with.
+fn file_block_index(offset: u64, block_size: u32) -> Result<u32, Ext4Error> {
+    u32::try_from(offset / block_size as u64).map_err(|_| Ext4Error::InvalidRange)
+}
+
+/// Shrink or extend a file to `new_size`.
+///
+/// An extension is sparse: no block is allocated and the hole reads as zero.
+/// A shrink frees every block past the new end, including the partial tails
+/// of the indirect trees.
+#[allow(clippy::too_many_arguments)]
+pub fn truncate(
+    inode: &mut Inode,
+    new_size: u64,
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    geom: &Ext4Geometry,
+    block_size: u32,
+    owner: BlockOwner,
+    free_fn: &mut dyn FnMut(BlockNum) -> Result<(), Ext4Error>,
+) -> Result<(), Ext4Error> {
+    let old_size = inode.size;
+    if new_size >= old_size {
+        inode.size = new_size;
+        return Ok(());
+    }
+
+    let bs = block_size as u64;
+    let first_free = new_size.div_ceil(bs);
+    let mut freed = 0u64;
+    let mut count_free = |blk: BlockNum| -> Result<(), Ext4Error> {
+        freed += 1;
+        free_fn(blk)
+    };
+
+    for i in 0..12u64 {
+        if i < first_free {
+            continue;
+        }
+        let blk = blockmap::checked_ptr(geom, inode.block[i as usize])?;
+        if blk.is_valid() {
+            count_free(blk)?;
+            cache.invalidate(blk);
+            inode.block[i as usize] = BlockNum::ZERO;
+        }
+    }
+
+    let ppb = geom.ptrs_per_block() as u64;
+    let mut subtree_start = 12u64;
+    for (slot, depth) in [(12usize, 1u32), (13, 2), (14, 3)] {
+        let span = ppb.checked_pow(depth).ok_or(Ext4Error::InvalidBlock)?;
+        let root = blockmap::checked_ptr(geom, inode.block[slot])?;
+        if root.is_valid() {
+            let from = first_free.saturating_sub(subtree_start);
+            if from < span {
+                let emptied = truncate_indirect(
+                    root,
+                    depth,
+                    from,
+                    cache,
+                    device,
+                    geom,
+                    owner,
+                    &mut count_free,
+                )?;
+                if emptied {
+                    count_free(root)?;
+                    cache.invalidate(root);
+                    inode.block[slot] = BlockNum::ZERO;
+                }
+            }
+        }
+        subtree_start += span;
+    }
+
+    zero_tail(inode, new_size, cache, device, geom, block_size, owner)?;
+    inode.size = new_size;
+    let sectors_per_block = (block_size / 512) as u64;
+    inode.blocks = inode
+        .blocks
+        .saturating_sub(freed.saturating_mul(sectors_per_block));
+
+    Ok(())
+}
+
+/// Zero the bytes between a new end of file and the end of its block: they
+/// are still on disk, and extending the file again would surface them.
+pub fn zero_tail(
+    inode: &Inode,
+    new_size: u64,
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    geom: &Ext4Geometry,
+    block_size: u32,
+    owner: BlockOwner,
+) -> Result<(), Ext4Error> {
+    let tail = (new_size % u64::from(block_size)) as usize;
+    if tail == 0 {
+        return Ok(());
+    }
+    let fb = FileBlock(file_block_index(new_size, block_size)?);
+    let phys = blockmap::map_block(inode, fb, geom, cache, device, owner)?;
+    if phys.is_valid() {
+        let mut blk = cache.get_data(phys, device, owner)?;
+        blk.data_mut()[tail..].fill(0);
+    }
+    Ok(())
+}
+
+/// Free every block at or after relative file-block index `from` inside the
+/// subtree rooted at `block`, clearing the pointers as it goes. Answers
+/// whether the subtree is now empty, which is what tells the caller it may
+/// free the root as well.
+#[allow(clippy::too_many_arguments)]
+fn truncate_indirect(
+    block: BlockNum,
+    depth: u32,
+    from: u64,
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    geom: &Ext4Geometry,
+    owner: BlockOwner,
+    free_fn: &mut dyn FnMut(BlockNum) -> Result<(), Ext4Error>,
+) -> Result<bool, Ext4Error> {
+    let block = blockmap::checked_ptr(geom, block)?;
+    if depth == 0 || !block.is_valid() {
+        return Ok(false);
+    }
+    let ptrs_per_block = geom.ptrs_per_block();
+    let count = cmp::min(ptrs_per_block as usize, 1024);
+    let child_span = (ptrs_per_block as u64)
+        .checked_pow(depth - 1)
+        .ok_or(Ext4Error::InvalidBlock)?;
+
+    // Heap-held, for the reason given on `free_indirect`.
+    let mut ptrs =
+        slopos_ostd::KVec::<BlockNum>::zeroed(count).map_err(|_| Ext4Error::OutOfMemory)?;
+    {
+        let blk = cache.get_owned(block, device, owner)?;
+        let data = blk.data();
+        for (i, slot) in ptrs.as_mut_slice().iter_mut().enumerate() {
+            let off = i * 4;
+            *slot = BlockNum(u32::from_le_bytes([
+                data[off],
+                data[off + 1],
+                data[off + 2],
+                data[off + 3],
+            ]));
+        }
+    }
+
+    let mut cleared = false;
+    for i in 0..count {
+        let child = blockmap::checked_ptr(geom, ptrs[i])?;
+        if !child.is_valid() {
+            continue;
+        }
+        let child_start = (i as u64) * child_span;
+        if child_start + child_span <= from {
+            continue;
+        }
+        let child_from = from.saturating_sub(child_start);
+        let release = if depth > 1 {
+            truncate_indirect(
+                child,
+                depth - 1,
+                child_from,
+                cache,
+                device,
+                geom,
+                owner,
+                free_fn,
+            )?
+        } else {
+            true
+        };
+        if !release {
+            continue;
+        }
+        free_fn(child)?;
+        cache.invalidate(child);
+        ptrs[i] = BlockNum::ZERO;
+        cleared = true;
+    }
+
+    if cleared {
+        let mut blk = cache.get_owned(block, device, owner)?;
+        let data = blk.data_mut();
+        for (i, ptr) in ptrs.as_slice().iter().enumerate() {
+            data[i * 4..i * 4 + 4].copy_from_slice(&ptr.raw().to_le_bytes());
+        }
+    }
+
+    Ok(ptrs.iter().all(|p| !p.is_valid()))
+}
+
+/// Free every block reachable through an indirect block at `depth`, leaving
+/// the indirect block itself to the caller.
+///
+/// The pointer buffer is heap-allocated: at depth 3 an inline `[BlockNum;
+/// 1024]` per frame would put 12 KiB across the recursion, well past the
+/// kernel's bounded-stack budget.
+pub(crate) fn free_indirect(
+    block: BlockNum,
+    depth: u32,
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    geom: &Ext4Geometry,
+    owner: BlockOwner,
+    free_fn: &mut dyn FnMut(BlockNum) -> Result<(), Ext4Error>,
+) -> Result<(), Ext4Error> {
+    let block = blockmap::checked_ptr(geom, block)?;
+    if depth == 0 || !block.is_valid() {
+        return Ok(());
+    }
+
+    let count = cmp::min(geom.ptrs_per_block() as usize, 1024);
+    let mut ptrs =
+        slopos_ostd::KVec::<BlockNum>::zeroed(count).map_err(|_| Ext4Error::OutOfMemory)?;
+    {
+        let blk = cache.get_owned(block, device, owner)?;
+        let data = blk.data();
+        for i in 0..count {
+            let off = i * 4;
+            ptrs[i] = BlockNum(u32::from_le_bytes([
+                data[off],
+                data[off + 1],
+                data[off + 2],
+                data[off + 3],
+            ]));
+        }
+    }
+
+    for i in 0..count {
+        let child = blockmap::checked_ptr(geom, ptrs[i])?;
+        if child.is_valid() {
+            if depth > 1 {
+                free_indirect(child, depth - 1, cache, device, geom, owner, free_fn)?;
+            }
+            free_fn(child)?;
+            cache.invalidate(child);
+        }
+    }
+
+    Ok(())
+}

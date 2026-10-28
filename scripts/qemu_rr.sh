@@ -90,6 +90,8 @@ COMMON=(
     -drive "file=$ISO,if=none,format=raw,media=cdrom,readonly=on,id=cd-raw"
     -drive "driver=blkreplay,if=none,image=cd-raw,id=cd-rr,read-only=on"
     -device "ide-cd,bus=ahci0.0,drive=cd-rr,bootindex=0"
+    # The root on virtio-blk (vda), not NVMe as qemu_run.sh attaches it:
+    # QEMU's nvme device cannot be migrated, so rrsnapshot refuses it.
     -drive "file=$RRDISK,if=none,format=qcow2,id=disk-raw"
     -drive "driver=blkreplay,if=none,image=disk-raw,id=disk-rr"
     -device "virtio-blk-pci,drive=disk-rr,disable-legacy=on"

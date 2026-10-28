@@ -1,7 +1,7 @@
 use slopos_ostd::task::TaskAddr;
 
 use super::Task;
-use super::task_table::{try_with_task_manager, with_task_manager};
+use super::task_table::with_task_manager;
 
 /// Task-manager lifetime counters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,10 +48,6 @@ pub fn task_record_yield(task: &Task) {
         mgr.total_yields += 1;
     });
     task.inc_yield_count();
-}
-
-pub fn task_get_total_yields() -> u64 {
-    try_with_task_manager(|mgr| mgr.total_yields).unwrap_or(0)
 }
 
 pub(super) fn record_task_created() {

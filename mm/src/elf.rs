@@ -68,8 +68,7 @@ pub const MAX_TOTAL_MAPPED_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 ///
 /// Load-bearing because the loader is eager: without it a one-page ELF
 /// declaring a 2 GiB `PT_LOAD` would have an unprivileged `exec` memset half a
-/// million frames under the per-process lock. Set to what the whole-image
-/// ceiling used to permit, so that amplification is unchanged.
+/// million frames under the per-process lock.
 pub const MAX_TOTAL_ZERO_FILL_SIZE: u64 = 256 * 1024 * 1024;
 
 /// Bytes of the file the validator needs in hand: the ELF header plus the
@@ -346,18 +345,6 @@ impl Elf64Phdr {
 
     pub fn is_load(&self) -> bool {
         self.p_type == PT_LOAD
-    }
-
-    pub fn is_readable(&self) -> bool {
-        (self.p_flags & PF_R) != 0
-    }
-
-    pub fn is_writable(&self) -> bool {
-        (self.p_flags & PF_W) != 0
-    }
-
-    pub fn is_executable(&self) -> bool {
-        (self.p_flags & PF_X) != 0
     }
 
     pub fn end_address(&self) -> ElfResult<u64> {
@@ -719,11 +706,6 @@ impl<'a> ElfValidator<'a> {
             phdr.p_memsz,
             phdr.p_align,
         )))
-    }
-
-    /// Find PT_TLS and return file offset for the .tdata template.
-    pub fn find_tls_offset(&self) -> ElfResult<Option<u64>> {
-        Ok(self.find_tls_program_header()?.map(|phdr| phdr.p_offset))
     }
 
     fn find_tls_program_header(&self) -> ElfResult<Option<Elf64Phdr>> {

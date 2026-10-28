@@ -2,16 +2,16 @@
 //!
 //! `mount(2)` cannot conjure a `&'static dyn FileSystem`, so the mountable
 //! set is closed: a pooled ramfs instance, the devfs singleton, or a pooled
-//! ext2 instance over a block device named directly or by `LABEL=<volume
+//! ext4 instance over a block device named directly or by `LABEL=<volume
 //! label>`. Anything else is `ENODEV`, and since no member of that set reads
 //! mount options, a non-null `data` is `EINVAL`.
 
 use slopos_abi::Errno;
 use slopos_abi::fs::{MNT_DETACH, MOUNT_FSTYPE_MAX, MS_RDONLY};
-use slopos_fs::ext2_vfs::Ext2Mount;
+use slopos_fs::ext4_vfs::Ext4Mount;
 use slopos_fs::vfs::canon::canonicalise_at;
 use slopos_fs::vfs::init::{
-    vfs_devfs_instance, vfs_ext2_mount_named, vfs_ext2_mounted_instance, vfs_ext2_pool_release,
+    vfs_devfs_instance, vfs_ext4_mount_named, vfs_ext4_mounted_instance, vfs_ext4_pool_release,
     vfs_ramfs_pool_claim, vfs_ramfs_pool_release,
 };
 use slopos_fs::vfs::mount::{
@@ -123,7 +123,7 @@ pub fn mount_apply_at(
             // placed at a second path. A named one gets an instance of its
             // own over that device.
             if source.is_empty() {
-                let fs: &'static Ext2Mount = vfs_ext2_mounted_instance().ok_or(Errno::ENODEV)?;
+                let fs: &'static Ext4Mount = vfs_ext4_mounted_instance().ok_or(Errno::ENODEV)?;
                 let flags = if fs.is_read_only() {
                     mount_flags | MOUNT_RDONLY
                 } else {
@@ -131,7 +131,7 @@ pub fn mount_apply_at(
                 };
                 return mount(target, fs, flags).map_err(vfs_errno);
             }
-            vfs_ext2_mount_named(source, target, read_only)
+            vfs_ext4_mount_named(source, target, read_only)
                 .map(|_| ())
                 .map_err(vfs_errno)
         }
@@ -177,7 +177,7 @@ pub(crate) fn umount_path_at(
         return Err(Errno::EPERM);
     }
 
-    // Asked of the *mount*, not of the instance: devfs and the ext2 singleton
+    // Asked of the *mount*, not of the instance: devfs and an ext4 instance
     // can sit at several paths, and tearing an instance's records down while
     // another mount survives drops that mount's deferred frees and reports
     // `EBUSY` for a descriptor unrelated to the name being removed.
@@ -195,7 +195,7 @@ pub(crate) fn umount_path_at(
     if last_mount {
         let _ = mounted.fs.sync();
         // Before `forget_filesystem`: records left behind keep
-        // `releasable_count()` nonzero, which keeps ext2's flusher awake for
+        // `releasable_count()` nonzero, which keeps ext4's flusher awake for
         // an obligation nobody will ever run.
         drain_releasable(mounted.fs);
         if !busy {
@@ -209,9 +209,9 @@ pub(crate) fn umount_path_at(
     // release gated on that stale answer never runs and the instance keeps
     // its device and its exclusive write claim for the rest of the boot.
     if mounts_of(mounted.fs) == 0 && !vfs_ramfs_pool_release(mounted.fs, busy) {
-        // The ext2 release is also what drops the device and gives its
+        // The ext4 release is also what drops the device and gives its
         // exclusive write claim back, so the same disk can be mounted again.
-        vfs_ext2_pool_release(mounted.fs, busy);
+        vfs_ext4_pool_release(mounted.fs, busy);
     }
     Ok(())
 }

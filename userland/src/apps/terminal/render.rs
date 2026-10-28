@@ -4,12 +4,13 @@
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::Color32;
 
+use slopos_windowing::{RenderSurface, Window};
+
 use crate::gfx::DrawBuffer;
 use crate::gfx::font;
 
 use super::grid::{BG_COLOR, Cell, TerminalGrid};
 use super::input::{Selection, cell_in_selection};
-use super::surface;
 
 use slopos_terminal_core::damage::CellDamage;
 
@@ -72,6 +73,7 @@ fn damage_bounds(damage: &CellDamage) -> Option<DamageRect> {
 /// A repaint that is dropped rather than presented leaves the compositor
 /// showing stale cells forever, since the grid has forgotten they changed.
 pub fn render_damage(
+    win: &mut Window,
     grid: &TerminalGrid,
     selection: &Selection,
     cursor_on: bool,
@@ -81,19 +83,21 @@ pub fn render_damage(
         return;
     };
 
-    surface::draw(|buf| {
+    if let Some(mut buf) = win.renderer_mut().frame() {
         // A glyph's atlas cell need not be the grid's, and could overhang.
         buf.set_scissor(Some(bounds));
         for row in 0..damage.rows() {
             let Some(span) = damage.span(row) else {
                 continue;
             };
-            draw_row_span(buf, grid, selection, cursor_on, row, span.first, span.last);
+            draw_row_span(
+                &mut buf, grid, selection, cursor_on, row, span.first, span.last,
+            );
         }
         buf.set_scissor(None);
-    });
+    }
 
-    surface::present_region(
+    win.renderer_mut().present_region(
         bounds.x0,
         bounds.y0,
         bounds.x1 - bounds.x0 + 1,
@@ -101,22 +105,30 @@ pub fn render_damage(
     );
 }
 
-pub fn render_full(grid: &TerminalGrid, selection: &Selection, cursor_on: bool) {
+pub fn render_full(win: &mut Window, grid: &TerminalGrid, selection: &Selection, cursor_on: bool) {
     let rows = grid.rows as usize;
     let cols = grid.cols as usize;
 
-    surface::draw(|buf| {
+    if let Some(mut buf) = win.renderer_mut().frame() {
         let w = buf.width() as i32;
         let h = buf.height() as i32;
-        crate::gfx::fill_rect(buf, 0, 0, w, h, WINDOW_BG);
+        crate::gfx::fill_rect(&mut buf, 0, 0, w, h, WINDOW_BG);
 
         if cols > 0 {
             for row in 0..rows {
-                draw_row_span(buf, grid, selection, cursor_on, row, 0, cols as u16 - 1);
+                draw_row_span(
+                    &mut buf,
+                    grid,
+                    selection,
+                    cursor_on,
+                    row,
+                    0,
+                    cols as u16 - 1,
+                );
             }
         }
-    });
-    surface::present();
+    }
+    win.renderer_mut().present();
 }
 
 fn draw_row_span(

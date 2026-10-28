@@ -2296,8 +2296,8 @@ mod tests {
         assert!(g.take_replies().is_empty());
     }
 
-    /// Before the private marker was tracked the `>` aborted the sequence and
-    /// the `c` landed in the grid as text.
+    /// A `>` private marker keeps the sequence whole: its `c` never reaches
+    /// the grid as text.
     #[test]
     fn a_secondary_da_query_prints_nothing() {
         let mut g = TerminalGrid::new(3, 10);

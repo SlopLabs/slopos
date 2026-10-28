@@ -1,9 +1,6 @@
 //! Limine bootloader handoff layer.
 
-use core::{
-    ffi::{c_char, c_void},
-    ptr,
-};
+use core::{ffi::c_void, ptr};
 
 use limine::{
     BaseRevision, RequestsEndMarker, RequestsStartMarker,
@@ -19,13 +16,10 @@ use limine::{
 
 use slopos_abi::DisplayInfo;
 use slopos_boot_core::{Guid, layout};
-use slopos_ostd::sync::{InitInPlace, KernelSync, OnceLock};
+use slopos_ostd::sync::{InitInPlace, OnceLock};
 use slopos_ostd::{klog_debug, klog_info};
 
-pub use slopos_ostd::boot_info::{
-    BootFramebuffer, BootInfo, LimineMemmapEntry, LimineMemmapResponse, MemoryRegion,
-    MemoryRegionKind,
-};
+pub use slopos_ostd::boot_info::{BootFramebuffer, BootInfo, MemoryRegion, MemoryRegionKind};
 
 slopos_ostd::limine_request! {
     start_marker,
@@ -102,82 +96,46 @@ fn convert_entry_type(entry_type: u64) -> MemoryRegionKind {
     }
 }
 
-fn entry_type_to_u64(entry_type: u64) -> u64 {
-    match entry_type {
-        memmap::MEMMAP_USABLE => 0,
-        memmap::MEMMAP_RESERVED => 1,
-        memmap::MEMMAP_ACPI_RECLAIMABLE => 2,
-        memmap::MEMMAP_ACPI_NVS => 3,
-        memmap::MEMMAP_BAD_MEMORY => 4,
-        memmap::MEMMAP_BOOTLOADER_RECLAIMABLE => 5,
-        memmap::MEMMAP_EXECUTABLE_AND_MODULES => 6,
-        memmap::MEMMAP_FRAMEBUFFER => 7,
-        _ => 1,
-    }
-}
-
 fn limine_entry_to_region(entry: &memmap::Entry) -> MemoryRegion {
     MemoryRegion::new(entry.base, entry.length, convert_entry_type(entry.type_))
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct MemmapEntry {
-    pub base: u64,
-    pub length: u64,
-    pub typ: u64,
-}
-
 #[derive(Clone, Copy)]
 struct SystemFlags {
-    framebuffer_available: bool,
     memmap_available: bool,
     hhdm_available: bool,
     rsdp_available: bool,
-    kernel_cmdline_available: bool,
 }
 
 impl SystemFlags {
     const fn new() -> Self {
         Self {
-            framebuffer_available: false,
             memmap_available: false,
             hhdm_available: false,
             rsdp_available: false,
-            kernel_cmdline_available: false,
         }
     }
 }
 
 struct SystemInfo {
-    total_memory: u64,
-    available_memory: u64,
     framebuffer: Option<BootFramebuffer>,
     hhdm_offset: u64,
     kernel_phys_base: u64,
     kernel_virt_base: u64,
     rsdp_phys_addr: u64,
-    rsdp_virt_addr: u64,
-    memmap_entry_count: u64,
     cmdline: Option<&'static str>,
-    /// Bootloader-published NUL-terminated cmdline; read-only for the kernel's lifetime.
-    cmdline_ptr: KernelSync<*const c_char>,
     flags: SystemFlags,
 }
 
 impl SystemInfo {
     const fn new() -> Self {
         Self {
-            total_memory: 0,
-            available_memory: 0,
             framebuffer: None,
             hhdm_offset: 0,
             kernel_phys_base: 0,
             kernel_virt_base: 0,
             rsdp_phys_addr: 0,
-            rsdp_virt_addr: 0,
-            memmap_entry_count: 0,
             cmdline: None,
-            cmdline_ptr: KernelSync::new(ptr::null()),
             flags: SystemFlags::new(),
         }
     }
@@ -189,12 +147,6 @@ fn sysinfo() -> &'static SystemInfo {
     SYSTEM_INFO
         .get()
         .expect("init_limine_protocol must run before sysinfo")
-}
-
-pub fn ensure_base_revision() {
-    if !BASE_REVISION.is_supported() {
-        panic!("Limine base revision not supported");
-    }
 }
 
 pub fn mp_response() -> Option<&'static MpResponse> {
@@ -217,21 +169,20 @@ const BUILTIN_CMDLINE: Option<&str> = option_env!("SLOPOS_BUILTIN_CMDLINE");
 
 const CMDLINE_MAX: usize = 1024;
 
-/// The merged line, NUL-terminated for `boot_get_cmdline`'s C-string readers;
-/// assembled where it lies, since a buffer this size would not fit a frame.
+/// The merged line, NUL-padded; assembled where it lies, since a buffer this
+/// size would not fit a frame.
 static MERGED_CMDLINE: InitInPlace<[u8; CMDLINE_MAX]> = InitInPlace::new([0; CMDLINE_MAX]);
 
-/// The loader's command line with [`BUILTIN_CMDLINE`] after it, as a string
-/// and its NUL-terminated pointer; the loader's alone when there is no
-/// built-in one or the two do not fit together.
-fn merged_cmdline(loader: &'static str) -> (&'static str, *const c_char) {
+/// The loader's command line with [`BUILTIN_CMDLINE`] after it; the loader's
+/// alone when there is no built-in one or the two do not fit together.
+fn merged_cmdline(loader: &'static str) -> &'static str {
     let builtin = BUILTIN_CMDLINE.map_or("", str::trim);
     let fits = loader.len() + 1 + builtin.len() < CMDLINE_MAX;
     if builtin.is_empty() || !fits {
         if !builtin.is_empty() {
             klog_info!("BOOT: built-in command line dropped: it does not fit beside the loader's");
         }
-        return (loader, loader.as_ptr() as *const c_char);
+        return loader;
     }
     MERGED_CMDLINE.init_once(|bytes| {
         let mut len = 0;
@@ -247,12 +198,15 @@ fn merged_cmdline(loader: &'static str) -> (&'static str, *const c_char) {
             len += part.len();
         }
     });
-    let ptr = MERGED_CMDLINE.as_ptr() as *const c_char;
-    let Some(text) = slopos_ostd::util::cstr::cstr_from_kernel_ptr_str(ptr) else {
-        return (loader, loader.as_ptr() as *const c_char);
+    let Some(bytes) = MERGED_CMDLINE.get() else {
+        return loader;
+    };
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(CMDLINE_MAX);
+    let Ok(text) = core::str::from_utf8(&bytes[..len]) else {
+        return loader;
     };
     klog_info!("BOOT: built-in command line appended: {}", builtin);
-    (text, ptr)
+    text
 }
 
 fn build_system_info() -> SystemInfo {
@@ -283,7 +237,6 @@ fn build_system_info() -> SystemInfo {
     if let Some(rsdp) = RSDP_REQUEST.response() {
         let rsdp_ptr = rsdp.address as u64;
         info.rsdp_phys_addr = rsdp_ptr;
-        info.rsdp_virt_addr = rsdp_ptr;
         info.flags.rsdp_available = rsdp_ptr != 0;
 
         if rsdp_ptr != 0 {
@@ -301,11 +254,9 @@ fn build_system_info() -> SystemInfo {
             kernel_file.data().len(),
             slopos_core::syscall::core_handlers::BUILD_TAG.unwrap_or("-")
         );
-        let (cmdline_str, cmdline_ptr) = merged_cmdline(kernel_file.cmdline());
+        let cmdline_str = merged_cmdline(kernel_file.cmdline());
         if !cmdline_str.is_empty() {
-            info.cmdline_ptr = KernelSync::new(cmdline_ptr);
             info.cmdline = Some(cmdline_str);
-            info.flags.kernel_cmdline_available = true;
 
             klog_debug!("Kernel cmdline: {}", cmdline_str);
         } else {
@@ -327,9 +278,6 @@ fn build_system_info() -> SystemInfo {
             }
         }
 
-        info.total_memory = total;
-        info.available_memory = available;
-        info.memmap_entry_count = entries.len() as u64;
         info.flags.memmap_available = true;
 
         klog_debug!(
@@ -347,7 +295,6 @@ fn build_system_info() -> SystemInfo {
         if let Some(fb) = framebuffers.first() {
             let display_info = DisplayInfo::from_raw(fb.width, fb.height, fb.pitch, fb.bpp);
             info.framebuffer = Some(BootFramebuffer::new(fb.address() as *mut u8, display_info));
-            info.flags.framebuffer_available = true;
 
             klog_debug!("Framebuffer: {}x{} @ {} bpp", fb.width, fb.height, fb.bpp);
             klog_debug!(
@@ -357,24 +304,23 @@ fn build_system_info() -> SystemInfo {
             );
         } else {
             klog_info!("WARNING: No framebuffer provided by Limine");
-            info.flags.framebuffer_available = false;
         }
     } else {
         klog_info!("WARNING: No framebuffer response from Limine");
-        info.flags.framebuffer_available = false;
     }
 
     info
 }
 
-pub fn init_limine_protocol() -> i32 {
+/// Whether the loader speaks the base revision this kernel asks for.
+pub fn init_limine_protocol() -> bool {
     if !BASE_REVISION.is_supported() {
         klog_info!("ERROR: Limine base revision not supported!");
-        return -1;
+        return false;
     }
 
     SYSTEM_INFO.call_once(build_system_info);
-    0
+    true
 }
 
 pub fn boot_info() -> slopos_ostd::boot_info::BootInfo {
@@ -469,48 +415,24 @@ pub fn kernel_file() -> Option<&'static [u8]> {
     Some(KERNEL_FILE_REQUEST.response()?.executable_file().data())
 }
 
-pub fn is_framebuffer_available() -> i32 {
-    sysinfo().flags.framebuffer_available as i32
-}
-
-pub fn get_total_memory() -> u64 {
-    sysinfo().total_memory
-}
-
-pub fn get_available_memory() -> u64 {
-    sysinfo().available_memory
-}
-
-pub fn is_memory_map_available() -> i32 {
-    sysinfo().flags.memmap_available as i32
+pub fn is_memory_map_available() -> bool {
+    sysinfo().flags.memmap_available
 }
 
 pub fn get_hhdm_offset() -> u64 {
     sysinfo().hhdm_offset
 }
 
-pub fn is_hhdm_available() -> i32 {
-    sysinfo().flags.hhdm_available as i32
-}
-
-pub fn get_kernel_phys_base() -> u64 {
-    sysinfo().kernel_phys_base
-}
-
-pub fn get_kernel_virt_base() -> u64 {
-    sysinfo().kernel_virt_base
-}
-
-pub fn get_kernel_cmdline() -> *const c_char {
-    *sysinfo().cmdline_ptr
+pub fn is_hhdm_available() -> bool {
+    sysinfo().flags.hhdm_available
 }
 
 pub fn kernel_cmdline_str() -> Option<&'static str> {
     sysinfo().cmdline
 }
 
-pub fn is_rsdp_available() -> i32 {
-    sysinfo().flags.rsdp_available as i32
+pub fn is_rsdp_available() -> bool {
+    sysinfo().flags.rsdp_available
 }
 
 pub fn get_rsdp_phys_address() -> u64 {
@@ -564,86 +486,10 @@ pub fn get_rsdp_address() -> *const c_void {
     }
 }
 
-pub fn get_memmap_entry(index: usize) -> Option<MemmapEntry> {
-    let memmap = MEMMAP_REQUEST.response()?;
-    let entries = memmap.entries();
-    let entry = entries.get(index)?;
-    Some(MemmapEntry {
-        base: entry.base,
-        length: entry.length,
-        typ: entry_type_to_u64(entry.type_),
-    })
-}
-
-pub fn memmap_entry_count() -> usize {
-    MEMMAP_REQUEST
-        .response()
-        .map(|r| r.entries().len())
-        .unwrap_or(0)
-}
-
-pub fn memory_regions() -> impl Iterator<Item = MemoryRegion> {
+pub fn memory_regions() -> impl Iterator<Item = MemoryRegion> + Clone {
     MEMMAP_REQUEST
         .response()
         .into_iter()
         .flat_map(|r| r.entries().iter())
         .map(|e| limine_entry_to_region(e))
-}
-
-/// Backing cell for the C-ABI legacy memmap shim. Self-referential —
-/// `ptrs[i]` points into `entries[i]` and `response.entries` into `ptrs.0` —
-/// so it must be initialised in place at its final static address.
-struct LegacyMemmap {
-    entries: [LimineMemmapEntry; 256],
-    ptrs: SyncMemmapPtrArray,
-    response: LimineMemmapResponse,
-}
-
-/// Pointers into `LEGACY_MEMMAP.entries`, written exactly once by
-/// `init_legacy_memmap` and stable for the kernel's lifetime.
-#[repr(transparent)]
-struct SyncMemmapPtrArray(KernelSync<[*const LimineMemmapEntry; 256]>);
-
-static LEGACY_MEMMAP: InitInPlace<LegacyMemmap> = InitInPlace::new(LegacyMemmap {
-    entries: [LimineMemmapEntry {
-        base: 0,
-        length: 0,
-        typ: 0,
-    }; 256],
-    ptrs: SyncMemmapPtrArray(KernelSync::new([ptr::null(); 256])),
-    response: LimineMemmapResponse {
-        revision: 0,
-        entry_count: 0,
-        entries: KernelSync::new(ptr::null()),
-    },
-});
-
-fn init_legacy_memmap() {
-    LEGACY_MEMMAP.init_once(|cell| {
-        let Some(memmap) = MEMMAP_REQUEST.response() else {
-            return;
-        };
-
-        let entries = memmap.entries();
-        let count = entries.len().min(256);
-
-        for (i, entry) in entries.iter().take(count).enumerate() {
-            cell.entries[i] = LimineMemmapEntry {
-                base: entry.base,
-                length: entry.length,
-                typ: entry_type_to_u64(entry.type_),
-            };
-            cell.ptrs.0[i] = &cell.entries[i];
-        }
-
-        cell.response.entry_count = count as u64;
-        cell.response.entries = KernelSync::new(cell.ptrs.0.as_ptr());
-    });
-}
-
-pub fn limine_get_memmap_response() -> *const LimineMemmapResponse {
-    init_legacy_memmap();
-    let base = LEGACY_MEMMAP.as_ptr();
-    let offset = core::mem::offset_of!(LegacyMemmap, response);
-    (base as *const u8).wrapping_add(offset) as *const LimineMemmapResponse
 }

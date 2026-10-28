@@ -10,6 +10,7 @@ use slopos_abi::caps::{DISPLAY_SEAT, INPUT_SEAT};
 use slopos_abi::net::{AF_UNIX, SOCK_STREAM};
 use slopos_abi::signal::SIGKILL;
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
+use slopos_protocol::codec::tag::{EVT_END, REQ_END};
 use slopos_protocol::connection::MAX_PENDING_FDS;
 use slopos_protocol::{
     Client, Connection, Decode, Encode, Event, FdFifo, PROTOCOL_VERSION, ProtocolError, Request,
@@ -76,7 +77,7 @@ fn stop_compositor() {
 
 fn try_connect() -> Option<Connection> {
     let fd = net::socket(AF_UNIX, SOCK_STREAM, 0).ok()?;
-    let path = slopos_protocol::socket_path(process::geteuid());
+    let path = slopos_protocol::socket_path();
     net::connect_unix(fd.raw(), &path).ok()?;
     Some(Connection::new(fd.into_raw()))
 }
@@ -91,8 +92,8 @@ fn connect() -> Option<Connection> {
 
 fn greeted(conn: &mut Connection) -> bool {
     match conn.wait_recv::<Event>(TIMEOUT_MS) {
-        Ok(Event::Hello { version, .. }) if version == PROTOCOL_VERSION => true,
-        Ok(Event::Hello { version, .. }) => {
+        Ok(Event::Hello { version }) if version == PROTOCOL_VERSION => true,
+        Ok(Event::Hello { version }) => {
             eprintln!("protocol_test: compositor greeted with {version}, want {PROTOCOL_VERSION}");
             false
         }
@@ -210,7 +211,7 @@ fn a_client_of_the_version_draws() -> bool {
 }
 
 fn the_client_connects() -> bool {
-    let path = slopos_protocol::socket_path(process::geteuid());
+    let path = slopos_protocol::socket_path();
     match Client::connect(&path).and_then(|mut client| client.ensure_output_info()) {
         Ok(()) => true,
         Err(err) => {
@@ -235,6 +236,58 @@ fn an_older_version_is_refused() -> bool {
 
 fn a_newer_version_is_refused() -> bool {
     refuses_version(PROTOCOL_VERSION + 1)
+}
+
+/// Version 1's tags and Hellos; a change to any of them is a new version.
+fn the_wire_is_this_versions() -> bool {
+    use slopos_protocol::codec::tag::*;
+    let requests = [
+        REQ_HELLO,
+        REQ_CREATE_SURFACE,
+        REQ_SURFACE_ATTACH,
+        REQ_SURFACE_DAMAGE,
+        REQ_SURFACE_COMMIT,
+        REQ_SURFACE_FRAME,
+        REQ_SURFACE_DESTROY,
+        REQ_GET_TOPLEVEL,
+        REQ_TOPLEVEL_SET_TITLE,
+        REQ_TOPLEVEL_SET_APP_ID,
+        REQ_TOPLEVEL_DESTROY,
+        REQ_SET_CURSOR_SHAPE,
+        REQ_CLIPBOARD_COPY,
+        REQ_CLIPBOARD_PASTE,
+        REQ_CLIPBOARD_READ,
+        REQ_TOPLEVEL_SET_SIZE_LIMITS,
+        REQ_END,
+    ];
+    let events = [
+        EVT_HELLO,
+        EVT_OUTPUT_INFO,
+        EVT_FRAME_DONE,
+        EVT_BUFFER_RELEASE,
+        EVT_CONFIGURE,
+        EVT_CLOSE,
+        EVT_POINTER_ENTER,
+        EVT_POINTER_LEAVE,
+        EVT_POINTER_MOTION,
+        EVT_POINTER_BUTTON,
+        EVT_POINTER_AXIS,
+        EVT_KEY,
+        EVT_MODIFIERS,
+        EVT_PASTE_READY,
+        EVT_PASTE_RESULT,
+        EVT_ERROR,
+        EVT_END,
+    ];
+    let mut request = [0u8; 8];
+    let mut event = [0u8; 8];
+    PROTOCOL_VERSION == 1
+        && requests.iter().copied().eq(0..=16)
+        && events.iter().copied().eq(0..=16)
+        && Request::Hello { version: 1 }.encode(&mut request) == Ok(5)
+        && Event::Hello { version: 1 }.encode(&mut event) == Ok(5)
+        && request[..5] == [0, 1, 0, 0, 0]
+        && event[..5] == [0, 1, 0, 0, 0]
 }
 
 fn request_before_hello_is_refused() -> bool {
@@ -292,8 +345,8 @@ impl Encode for Raw<'_> {
     }
 }
 
-fn a_retired_request_is_refused() -> bool {
-    [11u8, 15, 16].into_iter().all(|tag| {
+fn an_unknown_request_is_refused() -> bool {
+    [REQ_END, 0xff].into_iter().all(|tag| {
         let Some(conn) = served() else {
             return false;
         };
@@ -306,8 +359,8 @@ fn a_retired_request_is_refused() -> bool {
     })
 }
 
-fn a_retired_event_is_refused() -> bool {
-    [1u8, 11, 12].into_iter().all(|tag| {
+fn an_unknown_event_is_refused() -> bool {
+    [EVT_END, 0xff].into_iter().all(|tag| {
         let mut fds = [-1i32; MAX_PENDING_FDS];
         let mut count = 0u8;
         let mut fifo = FdFifo::new(&mut fds, &mut count);
@@ -357,14 +410,18 @@ fn main() {
         ),
         ("the_client_connects", the_client_connects),
         ("an_older_version_is_refused", an_older_version_is_refused),
+        ("the_wire_is_this_versions", the_wire_is_this_versions),
         ("a_newer_version_is_refused", a_newer_version_is_refused),
         (
             "request_before_hello_is_refused",
             request_before_hello_is_refused,
         ),
         ("reused_surface_id_is_refused", reused_surface_id_is_refused),
-        ("a_retired_request_is_refused", a_retired_request_is_refused),
-        ("a_retired_event_is_refused", a_retired_event_is_refused),
+        (
+            "an_unknown_request_is_refused",
+            an_unknown_request_is_refused,
+        ),
+        ("an_unknown_event_is_refused", an_unknown_event_is_refused),
         (
             "seat_is_free_once_the_compositor_is_gone",
             seat_is_free_once_the_compositor_is_gone,

@@ -10,8 +10,8 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use slopos_abi::task::BlockReason;
-use slopos_arch::MAX_CPUS;
-use slopos_arch::tsc::rdtsc;
+use slopos_ostd::arch::x86_64::tsc::rdtsc;
+use slopos_ostd::cpu::x86_64::pcr::MAX_CPUS;
 use slopos_ostd::klog_info;
 use slopos_ostd::stacktrace::{StacktraceEntry, stacktrace_capture_from};
 use slopos_ostd::string::bytes_as_str;
@@ -40,7 +40,7 @@ pub fn enable() {
     STOPPED_TSC.store(0, Ordering::Relaxed);
     note_freq(&FREQ_BASE);
     ENABLED.store(true, Ordering::Release);
-    slopos_fs::ext2_vfs::lock_profile::enable();
+    slopos_fs::ext4_vfs::lock_profile::enable();
     slopos_mm::process_vm::lock_profile::enable();
 }
 
@@ -48,7 +48,7 @@ pub fn enable() {
 pub fn start() {
     ENABLED.store(false, Ordering::Release);
     reset_tables();
-    slopos_fs::ext2_vfs::lock_profile::reset();
+    slopos_fs::ext4_vfs::lock_profile::reset();
     slopos_mm::process_vm::lock_profile::reset();
     CLOCK_MS.store(0, Ordering::Relaxed);
     anchor_clock(crate::sleep::sleep_queue_now_ms());
@@ -61,7 +61,7 @@ pub fn stop() {
         STOPPED_TSC.store(rdtsc(), Ordering::Relaxed);
         note_freq(&FREQ_END);
     }
-    slopos_fs::ext2_vfs::lock_profile::disable();
+    slopos_fs::ext4_vfs::lock_profile::disable();
     slopos_mm::process_vm::lock_profile::disable();
 }
 
@@ -289,7 +289,8 @@ static SAMPLES: AtomicU64 = AtomicU64::new(0);
 /// User tasks seen Ready but not on a CPU, summed over samples: a queue that
 /// stays long while a CPU idles is a placement problem, not a wait.
 static READY_WAITING: AtomicU64 = AtomicU64::new(0);
-static BLOCKED_BY_REASON: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
+static BLOCKED_BY_REASON: [AtomicU64; BlockReason::ALL.len()] =
+    [const { AtomicU64::new(0) }; BlockReason::ALL.len()];
 
 /// Syscall numbers accounted individually; the private range starts at 1024.
 const SYSCALLS: usize = 2048;
@@ -367,7 +368,7 @@ pub fn note_tick(rip: u64, cs: u64) {
     if !enabled() {
         return;
     }
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let Some(time) = CPUS.get(cpu) else {
         return;
     };
@@ -515,8 +516,7 @@ fn record_chain(rbp: u64, rip: u64) {
     let captured = if rbp == 0 {
         0
     } else {
-        stacktrace_capture_from(rbp, entries.as_mut_ptr(), CHAIN_DEPTH as core::ffi::c_int).max(0)
-            as usize
+        stacktrace_capture_from(rbp, &mut entries)
     };
     let mut frames = [0u64; CHAIN_DEPTH];
     frames[0] = rip;
@@ -601,7 +601,7 @@ fn report_cpus(phase: &str) {
         .max(1);
     let per_ms = cycles_per_ms();
     klog_info!("PROF[{}]: span_ms={}", phase, elapsed / per_ms.max(1));
-    let cpus = slopos_arch::pcr::get_cpu_count().min(MAX_CPUS);
+    let cpus = slopos_ostd::cpu::x86_64::pcr::get_cpu_count().min(MAX_CPUS);
     for (cpu, time) in CPUS.iter().enumerate().take(cpus) {
         let halted = time.halted_cycles.load(Ordering::Relaxed);
         klog_info!(
@@ -660,11 +660,11 @@ fn cycles_per_ms() -> u64 {
 }
 
 #[inline(never)]
-fn report_ext2_lock(phase: &str, per_ms: u64) {
-    let (acquires, wait, hold, max_wait, max_hold) = slopos_fs::ext2_vfs::lock_profile::totals();
-    let writeback = slopos_fs::ext2_vfs::lock_profile::writeback_hold();
+fn report_ext4_lock(phase: &str, per_ms: u64) {
+    let (acquires, wait, hold, max_wait, max_hold) = slopos_fs::ext4_vfs::lock_profile::totals();
+    let writeback = slopos_fs::ext4_vfs::lock_profile::writeback_hold();
     klog_info!(
-        "PROF[{}]: ext2 lock acquires={} wait_ms={} hold_ms={} writeback_hold_ms={} max_wait_us={} max_hold_us={}",
+        "PROF[{}]: ext4 lock acquires={} wait_ms={} hold_ms={} writeback_hold_ms={} max_wait_us={} max_hold_us={}",
         phase,
         acquires,
         wait / per_ms,
@@ -673,12 +673,12 @@ fn report_ext2_lock(phase: &str, per_ms: u64) {
         max_wait * 1000 / per_ms,
         max_hold * 1000 / per_ms,
     );
-    slopos_fs::ext2_vfs::lock_profile::for_each_site(|location, acquires, wait, hold| {
+    slopos_fs::ext4_vfs::lock_profile::for_each_site(|location, acquires, wait, hold| {
         if (wait + hold) / per_ms == 0 && acquires < 10_000 {
             return;
         }
         klog_info!(
-            "PROF[{}]: ext2 lock site={}:{} acquires={} wait_ms={} hold_ms={}",
+            "PROF[{}]: ext4 lock site={}:{} acquires={} wait_ms={} hold_ms={}",
             phase,
             location.file(),
             location.line(),
@@ -740,7 +740,7 @@ fn report_calls(phase: &str) {
             cycles * 1000 / per_ms / calls.max(1),
         );
     }
-    report_ext2_lock(phase, per_ms);
+    report_ext4_lock(phase, per_ms);
     report_vm_lock(phase, per_ms);
     report_block_io(phase, per_ms);
     let switches = SWITCH_CALLS.load(Ordering::Relaxed);
@@ -850,7 +850,7 @@ fn report_parks(phase: &str) {
         BLOCKED_BY_REASON[reason.as_u8() as usize].load(Ordering::Relaxed) * 100 / samples
     };
     klog_info!(
-        "PROF[{}]: park samples={} ready-waiting/sample={}.{:02} blocked/sample sleep={} io={} mutex={} ipc={} generic={} futex={} (x100)",
+        "PROF[{}]: park samples={} ready-waiting/sample={}.{:02} blocked/sample sleep={} io={} mutex={} generic={} futex={} (x100)",
         phase,
         samples,
         waiting / samples,
@@ -858,7 +858,6 @@ fn report_parks(phase: &str) {
         per(BlockReason::Sleep),
         per(BlockReason::IoWait),
         per(BlockReason::MutexWait),
-        per(BlockReason::IpcWait),
         per(BlockReason::Generic),
         per(BlockReason::FutexWait),
     );

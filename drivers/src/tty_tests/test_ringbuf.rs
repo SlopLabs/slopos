@@ -2,7 +2,7 @@ use super::*;
 
 pub fn test_ringbuf_new_is_empty() -> TestResult {
     let rb = RingBuffer::<u8, 8>::new_zeroed();
-    if !rb.is_empty() || rb.count() != 0 {
+    if !rb.is_empty() || rb.len() != 0 {
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -39,7 +39,7 @@ pub fn test_ringbuf_peek_does_not_consume() -> TestResult {
     let mut rb = RingBuffer::<u8, 8>::new_zeroed();
     rb.try_push(b'x');
     rb.try_push(b'y');
-    if rb.peek().copied() != Some(b'x') || rb.count() != 2 {
+    if rb.peek().copied() != Some(b'x') || rb.len() != 2 {
         return TestResult::Fail;
     }
     if rb.try_pop() != Some(b'x') || rb.try_pop() != Some(b'y') {
@@ -86,7 +86,7 @@ pub fn test_ringbuf_read_partial() -> TestResult {
     if n != 3 || &out != b"hel" {
         return TestResult::Fail;
     }
-    if rb.count() != 2 || rb.peek().copied() != Some(b'l') {
+    if rb.len() != 2 || rb.peek().copied() != Some(b'l') {
         return TestResult::Fail;
     }
     TestResult::Pass
@@ -97,8 +97,8 @@ pub fn test_ringbuf_flush_resets() -> TestResult {
     for b in b"abcd" {
         rb.try_push(*b);
     }
-    rb.flush();
-    if !rb.is_empty() || rb.count() != 0 || rb.peek().copied().is_some() {
+    rb.reset();
+    if !rb.is_empty() || rb.len() != 0 || rb.peek().copied().is_some() {
         return TestResult::Fail;
     }
     if !rb.try_push(b'z') || rb.try_pop() != Some(b'z') {
@@ -128,13 +128,33 @@ pub fn test_ringbuf_wraparound() -> TestResult {
 
 pub fn test_ringbuf_capacity_and_free() -> TestResult {
     let mut rb = RingBuffer::<u8, 8>::new_zeroed();
-    if rb.capacity() != 8 || rb.free() != 8 {
+    if rb.capacity() != 8 || rb.free_space() != 8 {
         return TestResult::Fail;
     }
     rb.try_push(b'a');
     rb.try_push(b'b');
-    if rb.count() != 2 || rb.free() != 6 {
+    if rb.len() != 2 || rb.free_space() != 6 {
         return TestResult::Fail;
     }
     TestResult::Pass
 }
+
+slopos_testing::stest!(name = test_ringbuf_new_is_empty, suite = tty_test_ringbuf);
+slopos_testing::stest!(name = test_ringbuf_push_pop, suite = tty_test_ringbuf);
+slopos_testing::stest!(
+    name = test_ringbuf_full_returns_false,
+    suite = tty_test_ringbuf
+);
+slopos_testing::stest!(
+    name = test_ringbuf_peek_does_not_consume,
+    suite = tty_test_ringbuf
+);
+slopos_testing::stest!(name = test_ringbuf_peek_at_offset, suite = tty_test_ringbuf);
+slopos_testing::stest!(name = test_ringbuf_read_bulk, suite = tty_test_ringbuf);
+slopos_testing::stest!(name = test_ringbuf_read_partial, suite = tty_test_ringbuf);
+slopos_testing::stest!(name = test_ringbuf_flush_resets, suite = tty_test_ringbuf);
+slopos_testing::stest!(name = test_ringbuf_wraparound, suite = tty_test_ringbuf);
+slopos_testing::stest!(
+    name = test_ringbuf_capacity_and_free,
+    suite = tty_test_ringbuf
+);

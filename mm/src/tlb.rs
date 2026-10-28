@@ -6,9 +6,8 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use slopos_ostd::lock_class;
 
 use slopos_abi::addr::VirtAddr;
-use slopos_abi::task::INVALID_PROCESS_ID;
-use slopos_arch::cpu;
-use slopos_arch::pcr::MAX_CPUS;
+use slopos_ostd::cpu::x86_64 as cpu;
+use slopos_ostd::cpu::x86_64::pcr::MAX_CPUS;
 use slopos_ostd::sync::{LOCK_LEVEL_UNORDERED, SpinLock};
 use slopos_ostd::{klog_debug, klog_info, klog_warn};
 
@@ -29,7 +28,7 @@ pub fn register_ipi_sender(sender: SendIpiFn) {
 /// Above this many pages, a full flush (CR3 reload) beats per-page invlpg.
 const INVLPG_THRESHOLD: usize = 32;
 
-pub use slopos_arch::arch::idt::TLB_SHOOTDOWN_VECTOR;
+pub use slopos_ostd::irq::idt::TLB_SHOOTDOWN_VECTOR;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TlbShootdownTimeout {
@@ -39,8 +38,9 @@ pub struct TlbShootdownTimeout {
 
 type TlbResult = Result<(), TlbShootdownTimeout>;
 
-use slopos_arch::cpu::cpuid::{
+use slopos_ostd::arch::x86_64::cpuid::{
     CPUID_FEAT_ECX_PCID, CPUID_LEAF_FEATURES, CPUID_LEAF_STRUCTURED_EXT, CPUID_SEXT_EBX_INVPCID,
+    cpuid,
 };
 
 struct TlbFeatures {
@@ -60,12 +60,12 @@ fn detect_features() {
         return;
     }
 
-    let (_, _, ecx, _) = cpu::cpuid(CPUID_LEAF_FEATURES);
+    let (_, _, ecx, _) = cpuid(CPUID_LEAF_FEATURES);
     let pcid_supported = (ecx & CPUID_FEAT_ECX_PCID) != 0;
 
-    let (max_leaf, _, _, _) = cpu::cpuid(0);
+    let (max_leaf, _, _, _) = cpuid(0);
     let invpcid_supported = if max_leaf >= CPUID_LEAF_STRUCTURED_EXT {
-        let (_, ebx, _, _) = cpu::cpuid(CPUID_LEAF_STRUCTURED_EXT);
+        let (_, ebx, _, _) = cpuid(CPUID_LEAF_STRUCTURED_EXT);
         (ebx & CPUID_SEXT_EBX_INVPCID) != 0
     } else {
         false
@@ -168,8 +168,6 @@ struct PerCpuTlbState {
     ack: AtomicBool,
     /// True while this CPU runs a kernel/idle task and can skip user flushes.
     is_lazy: AtomicBool,
-    /// Process loaded on this CPU, or `INVALID_PROCESS_ID`.
-    current_process_id: AtomicU32,
     /// Shootdown key of the address space loaded on this CPU, as `slot + 1`;
     /// 0 means none.
     current_process_key: AtomicU32,
@@ -185,7 +183,6 @@ impl PerCpuTlbState {
             // Initial `true`: a wait issued before any push must not block.
             ack: AtomicBool::new(true),
             is_lazy: AtomicBool::new(false),
-            current_process_id: AtomicU32::new(INVALID_PROCESS_ID),
             current_process_key: AtomicU32::new(0),
         }
     }
@@ -369,7 +366,7 @@ pub fn process_tlb_cpumask_count(key: TlbProcessKey) -> u32 {
 
 /// Record that `cpu_id` is switching into `new_key`'s address space, or out of
 /// any address space when `new_key` is `None`.
-pub fn notify_mm_switch(new_key: Option<TlbProcessKey>, new_process_id: u32, cpu_id: usize) {
+pub fn notify_mm_switch(new_key: Option<TlbProcessKey>, cpu_id: usize) {
     if cpu_id >= MAX_CPUS {
         return;
     }
@@ -383,9 +380,6 @@ pub fn notify_mm_switch(new_key: Option<TlbProcessKey>, new_process_id: u32, cpu
     }
 
     state.store_process_key(new_key);
-    state
-        .current_process_id
-        .store(new_process_id, Ordering::Release);
 }
 
 /// `TlbProcessKey` carries no generation, so `notify_mm_switch(None, ..)` would
@@ -395,20 +389,7 @@ pub fn forget_cpu_process_key(cpu_id: usize) {
     if cpu_id >= MAX_CPUS {
         return;
     }
-    let state = &TLB_STATE.cpu_state[cpu_id];
-    state.store_process_key(None);
-    state
-        .current_process_id
-        .store(INVALID_PROCESS_ID, Ordering::Release);
-}
-
-pub fn current_process_on_cpu(cpu: usize) -> u32 {
-    if cpu >= MAX_CPUS {
-        return INVALID_PROCESS_ID;
-    }
-    TLB_STATE.cpu_state[cpu]
-        .current_process_id
-        .load(Ordering::Relaxed)
+    TLB_STATE.cpu_state[cpu_id].store_process_key(None);
 }
 
 #[repr(u32)]
@@ -509,20 +490,16 @@ pub fn notify_cpu_online_id(cpu: usize) {
     TLB_STATE.online_cpus.set(cpu);
 }
 
-pub fn notify_cpu_online() {
-    notify_cpu_online_id(slopos_arch::pcr::get_current_cpu());
-}
-
 pub fn notify_cpu_offline() {
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     TLB_STATE.online_cpus.clear(cpu);
 }
 
 fn send_shootdown_ipi_to_cpu(cpu_idx: usize) {
-    let Some(apic_id) = slopos_arch::pcr::apic_id_from_cpu_index(cpu_idx) else {
+    let Some(apic_id) = slopos_ostd::cpu::x86_64::pcr::apic_id_from_cpu_index(cpu_idx) else {
         return;
     };
-    slopos_arch::pcr::send_ipi_to_cpu(apic_id, TLB_SHOOTDOWN_VECTOR);
+    slopos_ostd::cpu::x86_64::pcr::send_ipi_to_cpu(apic_id, TLB_SHOOTDOWN_VECTOR);
 }
 
 /// Per-target sends, never a broadcast: each LAPIC queues its own IRR entry, so
@@ -637,9 +614,9 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
                         cpu_idx,
                         slopos_ostd::watchdog::NmiDisposition::TlbLadder,
                     ) {
-                        match slopos_arch::pcr::apic_id_from_cpu_index(cpu_idx) {
+                        match slopos_ostd::cpu::x86_64::pcr::apic_id_from_cpu_index(cpu_idx) {
                             Some(apic_id) => {
-                                slopos_arch::pcr::send_nmi_to_cpu(apic_id);
+                                slopos_ostd::cpu::x86_64::pcr::send_nmi_to_cpu(apic_id);
                                 wait_for_probe_answer(cpu_idx);
                             }
                             None => slopos_ostd::watchdog::release_probe(cpu_idx),
@@ -671,7 +648,7 @@ fn wait_for_acks(targets: impl IntoIterator<Item = usize>, initiator_cpu: usize)
 /// CPU busy-waiting on any SpinLock still acks — which is what makes a remote
 /// flush safe to issue while holding an IRQ-disabling lock.
 pub fn service_local_shootdown_queue() {
-    let cpu_idx = slopos_arch::pcr::get_current_cpu();
+    let cpu_idx = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     if cpu_idx >= MAX_CPUS {
         return;
     }
@@ -811,7 +788,7 @@ fn targeted_flush_request(
     let info = process_tlb_info(key);
 
     let flush_type = promote_remote_flush_type(flush_type, start, end);
-    let initiator = slopos_arch::pcr::get_current_cpu();
+    let initiator = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     if should_flush_tlb_for_process(initiator, key) {
         match flush_type {
@@ -832,7 +809,7 @@ fn targeted_flush_request(
         if cpu_idx == initiator {
             continue;
         }
-        if !slopos_arch::pcr::is_cpu_online(cpu_idx) || !should_flush_tlb(cpu_idx) {
+        if !slopos_ostd::cpu::x86_64::pcr::is_cpu_online(cpu_idx) || !should_flush_tlb(cpu_idx) {
             continue;
         }
 
@@ -880,7 +857,7 @@ fn handle_tlb_result(result: TlbResult, context: &str) {
 
 pub fn try_flush_page(vaddr: VirtAddr) -> TlbResult {
     if is_smp_active() {
-        let initiator = slopos_arch::pcr::get_current_cpu();
+        let initiator = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::SinglePage, vaddr.as_u64(), 0, 0);
         send_shootdown_ipi_per_target(online_cpus(initiator));
@@ -911,7 +888,7 @@ pub fn flush_page_for_process(key: TlbProcessKey, vaddr: VirtAddr) {
 
 pub fn try_flush_range(start: VirtAddr, end: VirtAddr) -> TlbResult {
     if is_smp_active() {
-        let initiator = slopos_arch::pcr::get_current_cpu();
+        let initiator = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Range, start.as_u64(), end.as_u64(), 0);
         send_shootdown_ipi_per_target(online_cpus(initiator));
@@ -944,7 +921,7 @@ pub fn flush_range_for_process(key: TlbProcessKey, start: VirtAddr, end: VirtAdd
 
 pub fn try_flush_all() -> TlbResult {
     if is_smp_active() {
-        let initiator = slopos_arch::pcr::get_current_cpu();
+        let initiator = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Full, 0, 0, 0);
         send_shootdown_ipi_per_target(online_cpus(initiator));
@@ -974,7 +951,7 @@ pub fn try_flush_asid(asid: u64) -> TlbResult {
     let local_needs_flush = (current_cr3 & !0xFFF) == (asid & !0xFFF);
 
     if is_smp_active() {
-        let initiator = slopos_arch::pcr::get_current_cpu();
+        let initiator = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
         TLB_STATE.sequence.fetch_add(1, Ordering::SeqCst);
         broadcast_flush_request(FlushType::Full, 0, 0, asid);
         send_shootdown_ipi_per_target(online_cpus(initiator));

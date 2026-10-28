@@ -1,17 +1,14 @@
-//! A refused map must leave the page in exactly one owner's hands.
+//! A refused map must leave the page in exactly one owner's hands: a refusal
+//! hands the frame back rather than freeing it under a caller that frees it
+//! again.
 //!
-//! The defect these cover freed the page twice: `ostd_map_4kb_user` took a
-//! `PhysAddr`, minted the owning `UFrame` internally, and had no way to give it
-//! back, so a refusal after the mint dropped it — freeing the page — while the
-//! caller's error path freed the same paddr again.
-//!
-//! Neither free was observable from the caller: `free_phys` returns 0 both for
-//! a real release and for a page whose descriptor is already `PCP`/`FREE`/
-//! `QUIESCE`, which is what a second free finds. So these assert against the
-//! `MetaSlot` refcount and the buddy's own accounting instead.
+//! A second free is not observable from the caller: `free_phys` answers `true`
+//! both for a real release and for a page whose descriptor is already `PCP`/
+//! `FREE`/`QUIESCE`, which is what a second free finds. So these assert against
+//! the `MetaSlot` refcount and the buddy's own accounting instead.
 
 use slopos_abi::addr::VirtAddr;
-use slopos_ostd::mm::frame::{AnonymousMeta, Paddr, reference_count_at};
+use slopos_ostd::mm::frame::{AnonymousMeta, reference_count_at};
 use slopos_ostd::mm::page_table::fail_next_intermediate_allocs;
 use slopos_ostd::mm::uframe::UFrame;
 use slopos_ostd::mm::vm_space::MapError;
@@ -19,10 +16,10 @@ use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail, pass};
 
 use crate::page_alloc::{FrameAccounting, alloc_kernel_page, frame_accounting, free_page_frame};
-use crate::paging_defs::PageFlags;
 use crate::process_vm::process_vm_with_vm_space;
 use crate::tests::test_fixtures::ProcessVmGuard;
-use crate::user_mappings::{ostd_map_4kb_user, ostd_map_4kb_user_shared};
+use crate::user_mappings::{map_4kb_user, map_4kb_user_shared};
+use slopos_ostd::mm::page_property::PageProperty;
 
 /// A VA in a fresh address space whose PDPT/PD/PT are all absent, so the
 /// Create-mode walk must allocate an intermediate to reach the leaf — the
@@ -40,7 +37,7 @@ pub fn test_refused_map_returns_the_frame_once() -> TestResult {
     if pa.is_null() {
         return fail!("alloc page");
     }
-    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(Paddr::new(pa.as_u64())) {
+    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(pa) {
         Ok(f) => f,
         Err(e) => {
             free_page_frame(pa);
@@ -52,11 +49,11 @@ pub fn test_refused_map_returns_the_frame_once() -> TestResult {
     // Every level below the PML4 is missing here, so the walk allocates.
     fail_next_intermediate_allocs(1);
     let outcome = process_vm_with_vm_space(vm.process, |vs| {
-        ostd_map_4kb_user(
+        map_4kb_user(
             vs,
             VirtAddr::new(UNPOPULATED_VA),
             frame,
-            PageFlags::USER_RW.bits(),
+            PageProperty::USER_RW,
         )
     });
     fail_next_intermediate_allocs(0);
@@ -113,7 +110,7 @@ pub fn test_refused_map_installs_no_leaf() -> TestResult {
     if pa.is_null() {
         return fail!("alloc page");
     }
-    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(Paddr::new(pa.as_u64())) {
+    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(pa) {
         Ok(f) => f,
         Err(e) => {
             free_page_frame(pa);
@@ -123,7 +120,7 @@ pub fn test_refused_map_installs_no_leaf() -> TestResult {
 
     fail_next_intermediate_allocs(1);
     let outcome = process_vm_with_vm_space(vm.process, |vs| {
-        ostd_map_4kb_user(vs, VirtAddr::new(va), frame, PageFlags::USER_RW.bits())
+        map_4kb_user(vs, VirtAddr::new(va), frame, PageProperty::USER_RW)
     });
     fail_next_intermediate_allocs(0);
 
@@ -152,7 +149,7 @@ pub fn test_refused_shared_map_leaves_the_origin_holding() -> TestResult {
     let Some(vm) = ProcessVmGuard::new() else {
         return fail!("create VM");
     };
-    let Some(origin) = vm.map_test_page(0x9000, PageFlags::USER_RW.bits()) else {
+    let Some(origin) = vm.map_test_page(0x9000, PageProperty::USER_RW) else {
         return fail!("map the origin page");
     };
     let held_before = reference_count_at(origin);
@@ -165,7 +162,7 @@ pub fn test_refused_shared_map_leaves_the_origin_holding() -> TestResult {
     let va = UNPOPULATED_VA + 0x2000;
     fail_next_intermediate_allocs(1);
     let outcome = process_vm_with_vm_space(vm.process, |vs| {
-        ostd_map_4kb_user_shared(vs, VirtAddr::new(va), origin, PageFlags::USER_RW.bits())
+        map_4kb_user_shared(vs, VirtAddr::new(va), origin, PageProperty::USER_RW)
     });
     fail_next_intermediate_allocs(0);
 
@@ -203,7 +200,7 @@ pub fn test_intermediate_alloc_injector_fires_once() -> TestResult {
     if pa.is_null() {
         return fail!("alloc page");
     }
-    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(Paddr::new(pa.as_u64())) {
+    let frame = match UFrame::<AnonymousMeta>::claim_user_paddr(pa) {
         Ok(f) => f,
         Err(e) => {
             free_page_frame(pa);
@@ -213,7 +210,7 @@ pub fn test_intermediate_alloc_injector_fires_once() -> TestResult {
 
     fail_next_intermediate_allocs(1);
     let first = process_vm_with_vm_space(vm.process, |vs| {
-        ostd_map_4kb_user(vs, VirtAddr::new(va), frame, PageFlags::USER_RW.bits())
+        map_4kb_user(vs, VirtAddr::new(va), frame, PageProperty::USER_RW)
     });
     let Some(Err((frame, _))) = first else {
         return fail!("the injector did not fire on the first attempt");
@@ -221,7 +218,7 @@ pub fn test_intermediate_alloc_injector_fires_once() -> TestResult {
 
     // The count is spent, so the retry walks and maps for real.
     let second = process_vm_with_vm_space(vm.process, |vs| {
-        ostd_map_4kb_user(vs, VirtAddr::new(va), frame, PageFlags::USER_RW.bits())
+        map_4kb_user(vs, VirtAddr::new(va), frame, PageProperty::USER_RW)
     });
     assert_test!(
         matches!(second, Some(Ok(()))),

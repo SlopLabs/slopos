@@ -535,16 +535,17 @@ fn alloc_decimal(value: u32) -> Vec<u8> {
 
 /// `read` must consume its line and not one byte more, or a loop reading a
 /// file would lose every other line. `.` runs a file in this shell, so what it
-/// defines survives.
+/// defines survives. An operand of `set` holding `=` is a positional parameter
+/// like any other.
 fn scripting_builtins() -> bool {
     expect_output(
         "scripting_builtins",
-        b"set -- a b c\nshift\necho $1 $#\nshift 2\necho $#\n\
+        b"set a=b c\necho $1 $#\nset -- a b c\nshift\necho $1 $#\nshift 2\necho $#\n\
           cmd='echo evaluated'\neval $cmd\n\
           while read a b; do echo \"[$a][$b]\"; done <<END\n1 2 3\nx y\nEND\n\
           cat > /tmp/sourced.sh <<'END'\nSOURCED=yes\nhelper() { echo helped; }\nEND\n\
           . /tmp/sourced.sh\necho $SOURCED\nhelper\n",
-        b"b 2\n0\nevaluated\n[1][2 3]\n[x][y]\nyes\nhelped\n",
+        b"a=b 2\nb 2\n0\nevaluated\n[1][2 3]\n[x][y]\nyes\nhelped\n",
     )
 }
 

@@ -104,8 +104,8 @@ impl SynRecvState {
         };
 
         // RFC 5961 §3.2: an in-window RST that is not an exact `rcv_nxt` match
-        // gets a challenge ACK, not a teardown. A simultaneous open now lives
-        // here for tens of seconds, which is that long a blind-reset window.
+        // gets a challenge ACK, not a teardown. A simultaneous open lives here
+        // for tens of seconds, which is that long a blind-reset window.
         if hdr.is_rst() {
             let effective_wnd = s.rcv_wnd as u32;
             match challenge_ack::classify_rst(hdr.seq_num, s.rcv_nxt.raw(), effective_wnd) {

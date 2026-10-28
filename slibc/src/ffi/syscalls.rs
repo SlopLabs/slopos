@@ -1,6 +1,4 @@
-//! File, metadata, vectored-I/O and memory-mapping entry points, plus the
-//! handful of calls that are SlopOS's own and keep a `slopos_` prefix because
-//! no C name describes them.
+//! File, metadata, vectored-I/O and memory-mapping entry points.
 //!
 //! Every C entry point here follows the C convention: `-1`/`MAP_FAILED`/`NULL`
 //! with `errno` set, never a negated errno as a return value.
@@ -8,19 +6,13 @@
 use core::ffi::{c_char, c_int, c_uint, c_void};
 
 use crate::errno::{EINVAL, ENOSYS, errno_set};
-use crate::pal::{FutexScope, Pal, Sys};
+use crate::pal::{Pal, Sys};
 use crate::string::u_strlen;
 use crate::types::{
     MAP_FAILED, dev_t, gid_t, iovec as Iovec, mode_t, off_t, pid_t, stat as Stat, statfs as Statfs,
     statvfs as Statvfs, timespec as Timespec, uid_t, utsname as Utsname,
 };
 use slopos_abi::fs::{AT_FDCWD, AT_SYMLINK_NOFOLLOW};
-use slopos_abi::spawn::SpawnAttrs;
-
-/// The kernel's `struct stat`, which is already Linux's, so `stat` and friends
-/// are pass-throughs. Re-exported under its historical name because in-repo
-/// callers and the test module name it.
-pub use slopos_abi::fs::UserFsStat as SloposStat;
 
 #[inline]
 fn fail<T>(e: crate::errno::Errno, sentinel: T) -> T {
@@ -1005,94 +997,6 @@ pub unsafe extern "C" fn getrandom(buf: *mut c_void, buflen: usize, flags: c_uin
 #[unsafe(no_mangle)]
 pub extern "C" fn gettid() -> pid_t {
     Sys::gettid()
-}
-
-// ---------------------------------------------------------------------------
-// SlopOS-specific calls. No C name describes these, so they keep the prefix.
-// ---------------------------------------------------------------------------
-
-/// Packed `UserDirent64` records; 0 means the directory is exhausted. The
-/// records are the kernel's shape, not `struct dirent`'s — `readdir` is the
-/// call that translates.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn slopos_getdents64(fd: i32, buf: *mut u8, buf_len: usize) -> isize {
-    match Sys::getdents64(fd, buf, buf_len) {
-        Ok(n) => n as isize,
-        Err(e) => fail(e, -1),
-    }
-}
-
-/// `timeout_ns` of `u64::MAX` blocks indefinitely. A nanosecond timeout is
-/// what a futex needs and what `SYS_futex`'s `timespec` cannot express without
-/// a second object, so this is the shape the SlopOS call keeps.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn slopos_futex_wait(
-    addr: *const u32,
-    expected: u32,
-    timeout_ns: u64,
-) -> i32 {
-    let ts;
-    let timeout = if timeout_ns == u64::MAX {
-        core::ptr::null()
-    } else {
-        ts = crate::time::timespec_from_nanos(timeout_ns);
-        &raw const ts
-    };
-    match Sys::futex_wait(addr, expected, timeout, FutexScope::Private) {
-        Ok(()) => 0,
-        Err(e) => fail(e, -1),
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn slopos_futex_wake(addr: *const u32, count: u32) -> i32 {
-    match Sys::futex_wake(addr, count, FutexScope::Private) {
-        Ok(n) => n,
-        Err(e) => fail(e, -1),
-    }
-}
-
-/// CPUs this task may run on. `sysconf(_SC_NPROCESSORS_ONLN)` answers from
-/// here; the raw call exists because affinity, not the machine's CPU count, is
-/// what bounds a thread pool.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn slopos_get_cpu_count() -> i32 {
-    match Sys::get_cpu_count() {
-        Ok(n) => n as i32,
-        Err(e) => fail(e, -1),
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn slopos_get_current_cpu() -> i32 {
-    match Sys::get_current_cpu() {
-        Ok(n) => n as i32,
-        Err(e) => fail(e, -1),
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn slopos_set_cpu_affinity(target: u32, affinity: u32) -> i32 {
-    match Sys::set_cpu_affinity(target, affinity) {
-        Ok(()) => 0,
-        Err(e) => fail(e, -1),
-    }
-}
-
-/// Nothing runs in the child between fork and exec, so a lock held by a
-/// sibling of the spawning thread cannot deadlock it.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn slopos_spawn_path(
-    path: *const u8,
-    path_len: usize,
-    argv: *const *const u8,
-    argc: u32,
-    attrs: *const SpawnAttrs,
-) -> i32 {
-    match Sys::spawn_path(path, path_len, argv, argc, attrs) {
-        Ok(pid) => pid,
-        Err(e) => fail(e, -1),
-    }
 }
 
 // `off_t` and the kernel's file sizes are both 64-bit, so the only guard any

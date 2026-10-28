@@ -10,7 +10,8 @@
 //! to polling.
 
 use slopos_abi::addr::PhysAddr;
-use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
+use slopos_mm::mmio;
+use slopos_ostd::mm::IoMem;
 use slopos_ostd::sync::OnceLock;
 
 /// Offset from the community base to the pad-config register block.
@@ -112,7 +113,7 @@ fn resolve_pad(pin: u16) -> Option<PadLoc> {
 }
 
 struct Pinctrl {
-    mmio: MmioRegion,
+    mmio: IoMem,
     padcfg0_off: usize,
     is_off: usize,
     ie_off: usize,
@@ -131,7 +132,7 @@ pub fn init_for_pad(crs_gpio_line: u16, edge: bool, active_low: bool) -> Option<
     let pad = resolve_pad(pin)?;
 
     let base = SBREG_BAR + COMMUNITY1_OFFSET;
-    let mmio = MmioRegion::map(PhysAddr::new(base as u64), COMMUNITY_LEN)?;
+    let mmio = mmio::map_uncached(PhysAddr::new(base as u64), COMMUNITY_LEN)?;
 
     // A real GPIO community has a small in-window PADBAR and a configured,
     // non-floating PADCFG0; a wrong base reads back 0xffffffff or garbage.

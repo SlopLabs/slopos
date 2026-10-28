@@ -2,8 +2,9 @@
 //! checksum, the `prefix`/`name` split for long paths, and two zero blocks to
 //! end the archive.
 
-use std::fs::{self, File};
+use std::fs::{self, File, Permissions};
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
 
 use slopos_slibc_core::calendar;
 
@@ -669,13 +670,15 @@ fn extract_member(ctx: &mut Ctx, reader: &mut Reader, member: &Member, verbose: 
         b'0' | 0 | b'7' => extract_file(ctx, reader, member, path),
         b'5' => {
             let outcome = match fs::create_dir_all(path) {
-                Ok(()) => match fsutil::chmod(path, member.mode & 0o7777) {
-                    Ok(()) => Outcome::Done,
-                    Err(error) => {
-                        ctx.warn_io(member.name.as_slice(), &error);
-                        Outcome::Failed
+                Ok(()) => {
+                    match fs::set_permissions(path, Permissions::from_mode(member.mode & 0o7777)) {
+                        Ok(()) => Outcome::Done,
+                        Err(error) => {
+                            ctx.warn_io(member.name.as_slice(), &error);
+                            Outcome::Failed
+                        }
                     }
-                },
+                }
                 Err(error) => {
                     ctx.warn_io(member.name.as_slice(), &error);
                     Outcome::Failed
@@ -689,7 +692,7 @@ fn extract_member(ctx: &mut Ctx, reader: &mut Reader, member: &Member, verbose: 
         }
         b'1' => {
             let outcome = match core::str::from_utf8(&member.link) {
-                Ok(target) => match fsutil::hard_link(target, path) {
+                Ok(target) => match fs::hard_link(target, path) {
                     Ok(()) => Outcome::Done,
                     Err(error) => {
                         ctx.warn_io(member.name.as_slice(), &error);
@@ -736,7 +739,9 @@ fn extract_file(ctx: &mut Ctx, reader: &mut Reader, member: &Member, path: &str)
     };
     match drain_body(reader, member.size, Some(&mut file)) {
         Ok(None) => {
-            if let Err(error) = fsutil::chmod(path, member.mode & 0o7777) {
+            if let Err(error) =
+                fs::set_permissions(path, Permissions::from_mode(member.mode & 0o7777))
+            {
                 ctx.warn_io(member.name.as_slice(), &error);
                 return Outcome::Failed;
             }

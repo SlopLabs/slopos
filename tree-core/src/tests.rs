@@ -52,7 +52,7 @@ impl Root for Fake {
 fn manifest(identity: char, items: &[(Kind, &str)]) -> Manifest {
     Manifest {
         identity: core::iter::repeat_n(identity, 64).collect(),
-        at: None,
+        at: Some("/usr/local".to_string()),
         items: items
             .iter()
             .map(|&(kind, rel)| Item {
@@ -91,7 +91,7 @@ fn a_manifest_reads_back_as_written() {
 #[test]
 fn what_fs_tree_writes_parses() {
     let text = format!(
-        "identity {}\nd - bin\nf 4 bin/tool\nl - bin/alias\n",
+        "identity {}\nat /usr/local\nd - bin\nf 4 bin/tool\nl - bin/alias\n",
         "0123456789abcdef".repeat(4)
     );
     let m = Manifest::parse(&text).unwrap();
@@ -123,14 +123,6 @@ fn a_manifest_says_where_its_tree_went() {
     assert!(first.done.installs(&m.identity, "/usr/local"));
     assert!(!first.done.installs(&m.identity, "/home/user"));
     assert!(!first.during.installs(&m.identity, "/usr/local"));
-    let older = Manifest {
-        at: None,
-        ..m.clone()
-    };
-    assert!(
-        older.installs(&m.identity, "/home/user"),
-        "an older manifest names no place"
-    );
 }
 
 #[test]
@@ -138,19 +130,35 @@ fn a_damaged_manifest_says_where() {
     for (text, line) in [
         ("", 1),
         ("identity xyz\n", 1),
-        (&*format!("identity {}\nq - x\n", "a".repeat(64)), 2),
-        (&*format!("identity {}\nd 3 x\n", "a".repeat(64)), 2),
-        (&*format!("identity {}\nd - ../x\n", "a".repeat(64)), 2),
-        (&*format!("identity {}\nd - a//b\n", "a".repeat(64)), 2),
-        (&*format!("identity {}\nd - a\tb\n", "a".repeat(64)), 2),
+        (&*format!("identity {}\nd - x\n", "a".repeat(64)), 2),
+        (
+            &*format!("identity {}\nat /usr\nq - x\n", "a".repeat(64)),
+            3,
+        ),
+        (
+            &*format!("identity {}\nat /usr\nd 3 x\n", "a".repeat(64)),
+            3,
+        ),
+        (
+            &*format!("identity {}\nat /usr\nd - ../x\n", "a".repeat(64)),
+            3,
+        ),
+        (
+            &*format!("identity {}\nat /usr\nd - a//b\n", "a".repeat(64)),
+            3,
+        ),
+        (
+            &*format!("identity {}\nat /usr\nd - a\tb\n", "a".repeat(64)),
+            3,
+        ),
         (&*format!("identity {}\nat usr/local\n", "a".repeat(64)), 2),
         (
             &*format!("identity {}\nat /usr/../etc\n", "a".repeat(64)),
             2,
         ),
         (
-            &*format!("identity {}\nd - x\nat /usr\n", "a".repeat(64)),
-            3,
+            &*format!("identity {}\nat /usr\nd - x\nat /usr\n", "a".repeat(64)),
+            4,
         ),
     ] {
         assert_eq!(Manifest::parse(text), Err(ParseError { line }), "{text:?}");

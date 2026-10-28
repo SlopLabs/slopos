@@ -4,38 +4,22 @@
 //! through `slopos_ostd::irq::dispatch`; the IDT half checks the gate type,
 //! DPL and selector `IdtBuilder::install_default_handlers` left behind.
 
-use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use slopos_kernel_services::platform::idt_get_gate;
 use slopos_ostd::irq::{
-    IDT_GATE_INTERRUPT, IDT_GATE_TRAP, IRQ_BASE_VECTOR, IdtEntry, IrqAllocator, IrqContext,
-    IrqError, MSI_VECTOR_BASE, MSI_VECTOR_END, SYSCALL_VECTOR, dispatch,
+    IDT_GATE_INTERRUPT, IRQ_BASE_VECTOR, IdtEntry, IrqAllocator, IrqContext, IrqError,
+    MSI_VECTOR_BASE, MSI_VECTOR_END, dispatch,
 };
-use slopos_ostd::klog_info;
 use slopos_testing::TestResult;
-use slopos_testing::{assert_eq_test, assert_ne_test, assert_test};
+use slopos_testing::{assert_eq_test, assert_test};
 
-const MSI_SAMPLE_VECTORS: [u8; 5] = [48, 100, 150, 200, 223];
+const MSI_SAMPLE_VECTORS: [u8; 6] = [48, 100, 128, 150, 200, 223];
 
 fn idt_handler_address(entry: &IdtEntry) -> u64 {
     u64::from(entry.offset_low)
         | (u64::from(entry.offset_mid) << 16)
         | (u64::from(entry.offset_high) << 32)
-}
-
-fn load_idt_entry(vector: u8) -> Result<IdtEntry, TestResult> {
-    let mut entry = IdtEntry::zero();
-    let rc = idt_get_gate(vector, (&mut entry as *mut IdtEntry).cast::<c_void>());
-    if rc != 0 {
-        klog_info!(
-            "MSI_TEST: idt_get_gate failed for vector {} with rc={}",
-            vector,
-            rc
-        );
-        return Err(TestResult::Fail);
-    }
-    Ok(entry)
 }
 
 pub fn test_msi_alloc_returns_valid_range() -> TestResult {
@@ -212,13 +196,7 @@ pub fn test_msi_dispatch_unregistered_vector_noop() -> TestResult {
 
 pub fn test_msi_idt_entries_present() -> TestResult {
     for &v in &MSI_SAMPLE_VECTORS {
-        if v == SYSCALL_VECTOR {
-            continue;
-        }
-        let entry = match load_idt_entry(v) {
-            Ok(e) => e,
-            Err(r) => return r,
-        };
+        let entry = idt_get_gate(v);
         let attr = entry.type_attr;
         assert_test!(
             attr != 0,
@@ -231,13 +209,7 @@ pub fn test_msi_idt_entries_present() -> TestResult {
 
 pub fn test_msi_idt_entries_are_interrupt_gates() -> TestResult {
     for &v in &MSI_SAMPLE_VECTORS {
-        if v == SYSCALL_VECTOR {
-            continue;
-        }
-        let entry = match load_idt_entry(v) {
-            Ok(e) => e,
-            Err(r) => return r,
-        };
+        let entry = idt_get_gate(v);
         let attr = entry.type_attr;
         assert_test!(
             attr & 0x0F == IDT_GATE_INTERRUPT & 0x0F,
@@ -253,30 +225,22 @@ pub fn test_msi_idt_entries_are_interrupt_gates() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_msi_idt_entries_dpl_zero() -> TestResult {
-    for &v in &MSI_SAMPLE_VECTORS {
-        if v == SYSCALL_VECTOR {
-            continue;
-        }
-        let entry = match load_idt_entry(v) {
-            Ok(e) => e,
-            Err(r) => return r,
-        };
-        let attr = entry.type_attr;
-        assert_test!((attr >> 5) & 0x3 == 0, "vector 0x{:02x} not DPL=0", v);
+/// No vector is reachable by a user-mode `int n`.
+pub fn test_every_idt_gate_is_dpl_zero() -> TestResult {
+    for v in 0..=u8::MAX {
+        let attr = idt_get_gate(v).type_attr;
+        assert_test!(
+            attr & 0x80 == 0 || (attr >> 5) & 0x3 == 0,
+            "vector 0x{:02x} not DPL=0",
+            v
+        );
     }
     TestResult::Pass
 }
 
 pub fn test_msi_idt_entries_have_handlers() -> TestResult {
     for &v in &MSI_SAMPLE_VECTORS {
-        if v == SYSCALL_VECTOR {
-            continue;
-        }
-        let entry = match load_idt_entry(v) {
-            Ok(e) => e,
-            Err(r) => return r,
-        };
+        let entry = idt_get_gate(v);
         let h = idt_handler_address(&entry);
         assert_test!(h != 0, "vector 0x{:02x} handler address is null", v);
     }
@@ -285,51 +249,17 @@ pub fn test_msi_idt_entries_have_handlers() -> TestResult {
 
 pub fn test_msi_idt_entries_use_kernel_cs() -> TestResult {
     for &v in &MSI_SAMPLE_VECTORS {
-        if v == SYSCALL_VECTOR {
-            continue;
-        }
-        let entry = match load_idt_entry(v) {
-            Ok(e) => e,
-            Err(r) => return r,
-        };
+        let entry = idt_get_gate(v);
         let sel = entry.selector;
         assert_test!(sel == 0x08, "vector 0x{:02x} selector not KERNEL_CS", v);
     }
     TestResult::Pass
 }
 
-pub fn test_syscall_vector_is_trap_gate_dpl3() -> TestResult {
-    let entry = match load_idt_entry(SYSCALL_VECTOR) {
-        Ok(e) => e,
-        Err(r) => return r,
-    };
-    let attr = entry.type_attr;
-    assert_eq_test!(
-        attr & 0x0F,
-        IDT_GATE_TRAP & 0x0F,
-        "SYSCALL_VECTOR not a trap gate"
-    );
-    assert_eq_test!((attr >> 5) & 0x3, 3, "SYSCALL_VECTOR DPL must be 3");
-    TestResult::Pass
-}
-
-pub fn test_syscall_vector_handler_nonzero() -> TestResult {
-    let entry = match load_idt_entry(SYSCALL_VECTOR) {
-        Ok(e) => e,
-        Err(r) => return r,
-    };
-    let h = idt_handler_address(&entry);
-    assert_ne_test!(h, 0, "SYSCALL_VECTOR handler address is null");
-    TestResult::Pass
-}
-
 pub fn test_legacy_irq_vectors_intact() -> TestResult {
     for irq in 0u8..16 {
         let v = IRQ_BASE_VECTOR + irq;
-        let entry = match load_idt_entry(v) {
-            Ok(e) => e,
-            Err(r) => return r,
-        };
+        let entry = idt_get_gate(v);
         let attr = entry.type_attr;
         assert_test!(
             attr & 0x80 != 0,
@@ -348,10 +278,7 @@ pub fn test_exception_vectors_intact() -> TestResult {
         if v == 9 || v == 15 {
             continue;
         }
-        let entry = match load_idt_entry(v) {
-            Ok(e) => e,
-            Err(r) => return r,
-        };
+        let entry = idt_get_gate(v);
         let attr = entry.type_attr;
         assert_test!(attr & 0x80 != 0, "Exception vector {} not present", v);
         let h = idt_handler_address(&entry);
@@ -368,10 +295,7 @@ pub fn test_ipi_vectors_intact() -> TestResult {
     // interrupts-off CPU can only poll for the one the spin-relax hook
     // services.
     for &v in &[0xECu8, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF] {
-        let entry = match load_idt_entry(v) {
-            Ok(e) => e,
-            Err(r) => return r,
-        };
+        let entry = idt_get_gate(v);
         let attr = entry.type_attr;
         assert_test!(attr & 0x80 != 0, "IPI vector 0x{:02x} not present", v);
         let h = idt_handler_address(&entry);
@@ -436,14 +360,9 @@ slopos_testing::stest!(
     name = test_msi_idt_entries_are_interrupt_gates,
     suite = msi_idt
 );
-slopos_testing::stest!(name = test_msi_idt_entries_dpl_zero, suite = msi_idt);
+slopos_testing::stest!(name = test_every_idt_gate_is_dpl_zero, suite = msi_idt);
 slopos_testing::stest!(name = test_msi_idt_entries_have_handlers, suite = msi_idt);
 slopos_testing::stest!(name = test_msi_idt_entries_use_kernel_cs, suite = msi_idt);
-slopos_testing::stest!(
-    name = test_syscall_vector_is_trap_gate_dpl3,
-    suite = msi_idt
-);
-slopos_testing::stest!(name = test_syscall_vector_handler_nonzero, suite = msi_idt);
 slopos_testing::stest!(name = test_legacy_irq_vectors_intact, suite = msi_idt);
 slopos_testing::stest!(name = test_exception_vectors_intact, suite = msi_idt);
 slopos_testing::stest!(name = test_ipi_vectors_intact, suite = msi_idt);

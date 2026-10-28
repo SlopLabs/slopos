@@ -1,15 +1,15 @@
 //! The shipped verified image, mounted from the device the test harness
 //! attaches it on.
 //!
-//! `fs/assets/ext2.img` is the only image that carries a write-protecting
-//! verity trailer: the tests image on the root disk is built `VERITY=off` so
-//! the suite can write to it. Without this test no `just test` run would exercise
-//! `fs/src/verity.rs` against a trailer a real block device reports — which is
-//! exactly how SLOPOS-2026-0053 stayed invisible.
+//! `fs/assets/ext4.img` is the only image that carries a protected verity
+//! trailer: the tests image on the root disk is built `VERITY=off` so the
+//! suite can write to it. This is the one test that exercises
+//! `fs/src/verity.rs` against a trailer a real block device reports, whose
+//! capacity counts whole sectors.
 
 use slopos_fs::blockdev::BlockDevice;
-use slopos_fs::ext2::cache::{BlockCache, CACHE_ENTRIES_MIN};
-use slopos_fs::ext2::{Ext2Error, Ext2Fs};
+use slopos_fs::ext4::cache::{BlockCache, CACHE_ENTRIES_MIN};
+use slopos_fs::ext4::{Ext4Error, Ext4Fs};
 use slopos_fs::verity::{FsExtent, VerityStatus, build_verified};
 use slopos_ostd::KBox;
 use slopos_testing::TestResult;
@@ -22,7 +22,7 @@ use crate::block;
 const VERIFIED: &[u8] = b"vda";
 
 fn extent_of(device: &dyn BlockDevice) -> Result<FsExtent, TestResult> {
-    match Ext2Fs::mount_params(device) {
+    match Ext4Fs::mount_params(device) {
         Ok((sb, geom)) => Ok(FsExtent {
             block_size: geom.block_size(),
             blocks: sb.blocks_count as u64,
@@ -35,15 +35,14 @@ fn claim_verified() -> Result<KBox<dyn BlockDevice + Send + Sync>, TestResult> {
     match block::claim(VERIFIED) {
         Ok(device) => Ok(device),
         Err(block::ClaimError::NoDevice) => Err(fail!(
-            "verified image not attached — is fs/assets/ext2.img built?"
+            "verified image not attached — is fs/assets/ext4.img built?"
         )),
         Err(e) => Err(fail!("could not claim the verified image: {:?}", e)),
     }
 }
 
 /// The artifact's trailer must be *reachable* through a sector-granular
-/// capacity — the whole point of SLOPOS-2026-0053 — and the wrapped device
-/// must refuse writes.
+/// capacity, and the wrapped device must refuse writes.
 pub fn test_verity_artifact_trailer_reachable() -> TestResult {
     let device = match claim_verified() {
         Ok(d) => d,
@@ -85,7 +84,7 @@ pub fn test_verity_artifact_trailer_reachable() -> TestResult {
 
 #[inline(never)]
 fn mount_and_probe(device: &(dyn BlockDevice + Send + Sync)) -> TestResult {
-    let (sb, geom) = match Ext2Fs::mount_params(device) {
+    let (sb, geom) = match Ext4Fs::mount_params(device) {
         Ok(v) => v,
         Err(e) => return fail!("mount_params: {:?}", e),
     };
@@ -93,16 +92,16 @@ fn mount_and_probe(device: &(dyn BlockDevice + Send + Sync)) -> TestResult {
         Ok(c) => c,
         Err(e) => return fail!("BlockCache::new: {:?}", e),
     };
-    let mut fs = Ext2Fs::new(device, &mut cache, sb, geom);
+    let mut fs = Ext4Fs::new(device, &mut cache, sb, geom);
     if !fs.is_read_only() {
-        return fail!("ext2 over a verified device must come up read-only");
+        return fail!("ext4 over a verified device must come up read-only");
     }
     match fs.resolve_path(b"/sbin/init") {
         Ok(_) => {}
         Err(e) => return fail!("/sbin/init unreadable through verity: {:?}", e),
     }
     match fs.create_file(2, b"verity_probe") {
-        Err(Ext2Error::ReadOnly) => {}
+        Err(Ext4Error::ReadOnly) => {}
         other => return fail!("want ReadOnly, got {:?}", other.map(|_| ())),
     }
     if fs.dirty_count() != 0 {

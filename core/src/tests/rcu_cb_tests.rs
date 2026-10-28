@@ -23,7 +23,7 @@ const POLL_INTERVAL_MS: u32 = 10;
 
 /// Drives the drain itself rather than `rcu_barrier`, which a stalled grace period never leaves.
 pub fn drain_until(done: impl Fn() -> bool) -> bool {
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let reports_before = slopos_ostd::sync::rcu_qs_counter(cpu);
     let mut waited = 0;
     loop {
@@ -56,7 +56,7 @@ impl Drop for DropCounted {
 /// `RcuArcSlot::store` defers the displaced reference through `call_rcu`, so
 /// the payload's `Drop` runs only if the callback does.
 pub fn test_rcu_callbacks_are_invoked_without_a_manual_drain() -> TestResult {
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let before = DROPPED.load(Ordering::Acquire);
     let reports_before = slopos_ostd::sync::rcu_qs_counter(cpu);
 
@@ -104,9 +104,9 @@ pub fn test_rcu_callbacks_are_invoked_without_a_manual_drain() -> TestResult {
 pub fn test_synchronize_rcu_allocates_nothing() -> TestResult {
     let _scope = KernelTestScope::enter();
 
-    let before = slopos_mm::slab::get_heap_stats_owned();
+    let before = slopos_mm::slab::stats::snapshot();
     slopos_ostd::sync::synchronize_rcu();
-    let after = slopos_mm::slab::get_heap_stats_owned();
+    let after = slopos_mm::slab::stats::snapshot();
 
     if after.allocation_count != before.allocation_count {
         return fail!(
@@ -151,7 +151,7 @@ pub fn test_rcu_drain_never_waits_for_a_grace_period() -> TestResult {
     // window can name a slot the reports never touched.
     let (sync_before, sync_after, qs_before, qs_after, polls_before, polls_after) =
         slopos_ostd::cpu::x86_64::interrupts::IrqDisabled::with(|_irq| {
-            let cpu = slopos_arch::pcr::get_current_cpu();
+            let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
             let sync_before = slopos_ostd::sync::rcu_sync_entry_count(cpu);
             let qs_before = slopos_ostd::sync::rcu_qs_counter(cpu);
             let polls_before = slopos_ostd::sync::rcu_gp_poll_count(cpu);

@@ -1,7 +1,6 @@
 //! The kernel-I/O service threads must outlive a test scope: nothing respawns
 //! one, and every path that could take one is silent about it.
 
-use core::ffi::c_char;
 use core::ptr;
 
 use slopos_abi::task::{INVALID_TASK_ID, TASK_FLAG_KERNEL_MODE, TaskPriority, TaskStatus};
@@ -27,7 +26,7 @@ use super::test_fixture::{KernelTestScope, dummy_task_entry};
 
 fn make_ready_task(name: &[u8]) -> Option<(u32, TaskRef)> {
     let id = task_create(
-        name.as_ptr() as *const c_char,
+        name,
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -36,7 +35,7 @@ fn make_ready_task(name: &[u8]) -> Option<(u32, TaskRef)> {
     if id == INVALID_TASK_ID {
         return None;
     }
-    if !clear_nascent_for_test(id) || task_set_state(id, TaskStatus::Ready) != 0 {
+    if !clear_nascent_for_test(id) || !task_set_state(id, TaskStatus::Ready) {
         let _ = task_terminate(id);
         return None;
     }
@@ -116,7 +115,7 @@ pub fn test_registry_reset_spares_kernel_io() -> TestResult {
     let freeze = freeze_kernel_io_all();
     let rc = task_registry_reset(&freeze);
     drop(freeze);
-    if rc != 0 {
+    if !rc {
         return fail!("task_registry_reset failed");
     }
 
@@ -128,7 +127,7 @@ pub fn test_infrastructure_is_keyed_on_the_stop_registry() -> TestResult {
     let kernel_io = kernel_io_task_ids();
 
     let ordinary = task_create(
-        b"NotInfra\0".as_ptr() as *const c_char,
+        b"NotInfra",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::Normal.as_u8(),
@@ -138,7 +137,7 @@ pub fn test_infrastructure_is_keyed_on_the_stop_registry() -> TestResult {
         return fail!("task creation failed");
     }
     let bare_kernel_io = task_create(
-        b"BareKernelIo\0".as_ptr() as *const c_char,
+        b"BareKernelIo",
         dummy_task_entry,
         ptr::null_mut(),
         TaskPriority::KernelIo.as_u8(),
@@ -289,7 +288,7 @@ pub fn test_scope_quiescence_does_not_depend_on_the_freeze_outcome() -> TestResu
 
 pub fn test_a_held_task_is_not_published_to_a_runqueue() -> TestResult {
     let _scope = KernelTestScope::enter();
-    let Some((id, task)) = make_ready_task(b"HeldPublish\0") else {
+    let Some((id, task)) = make_ready_task(b"HeldPublish") else {
         return fail!("task creation failed");
     };
 
@@ -305,7 +304,7 @@ pub fn test_a_held_task_is_not_published_to_a_runqueue() -> TestResult {
     let _ = body.sched_placement_compare_exchange(SchedPlacement::Held, SchedPlacement::None);
     let _ = task_terminate(id);
 
-    assert_test!(rc == 0, "publishing a held task reported failure");
+    assert_test!(rc, "publishing a held task reported failure");
     assert_test!(
         placement == SchedPlacement::Held,
         "the publish gate did not claim the task"
@@ -320,7 +319,7 @@ pub fn test_a_held_task_is_not_published_to_a_runqueue() -> TestResult {
 
 pub fn test_releasing_the_hold_republishes_a_held_task() -> TestResult {
     let _scope = KernelTestScope::enter();
-    let Some((id, task)) = make_ready_task(b"HeldRelease\0") else {
+    let Some((id, task)) = make_ready_task(b"HeldRelease") else {
         return fail!("task creation failed");
     };
 
@@ -351,11 +350,11 @@ pub fn test_releasing_the_hold_republishes_a_held_task() -> TestResult {
 
 pub fn test_the_sweep_takes_a_queued_task_off_the_queue() -> TestResult {
     let _scope = KernelTestScope::enter();
-    let Some((id, task)) = make_ready_task(b"SweptQueued\0") else {
+    let Some((id, task)) = make_ready_task(b"SweptQueued") else {
         return fail!("task creation failed");
     };
     // Enqueued locally rather than published, so the node lands on this CPU's queue.
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let queued = with_cpu_scheduler(cpu_id, |sched| sched.enqueue_local(&task)) == Some(0);
     if !queued || !task.ready_link.is_linked() {
         let _ = task_terminate(id);
@@ -401,11 +400,11 @@ pub fn test_the_sweep_takes_a_queued_task_off_the_queue() -> TestResult {
 
 pub fn test_the_inbox_drain_hands_a_held_task_to_the_hold() -> TestResult {
     let _scope = KernelTestScope::enter();
-    let Some((id, task)) = make_ready_task(b"HeldInbox\0") else {
+    let Some((id, task)) = make_ready_task(b"HeldInbox") else {
         return fail!("task creation failed");
     };
     let node = task.node();
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let strong_base = task_placement_strong_count(node);
 
     // Pushed before arming, so the entry really is in the inbox for the drain to claim.
@@ -441,11 +440,11 @@ pub fn test_the_inbox_drain_hands_a_held_task_to_the_hold() -> TestResult {
 
 pub fn test_a_push_under_the_hold_never_reaches_the_inbox() -> TestResult {
     let _scope = KernelTestScope::enter();
-    let Some((id, task)) = make_ready_task(b"HeldPush\0") else {
+    let Some((id, task)) = make_ready_task(b"HeldPush") else {
         return fail!("task creation failed");
     };
     let node = task.node();
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     let strong_base = task_placement_strong_count(node);
 
     let displaced = arm_kernel_io_hold_over_for_test(&[id]);
@@ -477,11 +476,11 @@ pub fn test_a_push_under_the_hold_never_reaches_the_inbox() -> TestResult {
 /// I2/I7: the hold parks no reference of its own.
 pub fn test_holding_and_releasing_a_held_task_is_refcount_neutral() -> TestResult {
     let _scope = KernelTestScope::enter();
-    let Some((id, task)) = make_ready_task(b"HeldRefcount\0") else {
+    let Some((id, task)) = make_ready_task(b"HeldRefcount") else {
         return fail!("task creation failed");
     };
     let node = task.node();
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     let base = task_placement_strong_count(node);
     let queued = with_cpu_scheduler(cpu_id, |sched| sched.enqueue_local(&task)) == Some(0);

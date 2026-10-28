@@ -642,3 +642,103 @@ pub fn test_get_glyph_for_codepoint_ascii() -> TestResult {
     }
     TestResult::Pass
 }
+
+slopos_testing::stest!(
+    name = test_utf8_2byte_renders_codepoint,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(
+    name = test_utf8_3byte_renders_codepoint,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(
+    name = test_utf8_4byte_renders_codepoint,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(
+    name = test_utf8_invalid_byte_emits_replacement,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(
+    name = test_utf8_truncated_sequence_emits_replacement,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(
+    name = test_utf8_overlong_rejected,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(name = test_ascii_still_works, suite = tty_test_vconsole);
+slopos_testing::stest!(name = test_sgr_256_foreground, suite = tty_test_vconsole);
+slopos_testing::stest!(name = test_sgr_256_background, suite = tty_test_vconsole);
+slopos_testing::stest!(
+    name = test_sgr_truecolor_foreground,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(
+    name = test_sgr_truecolor_background,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(
+    name = test_vconsole_256_color_sets_fg,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(
+    name = test_vconsole_truecolor_sets_fg,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(
+    name = test_bracketed_paste_enable_disable,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(name = test_decawm_default_on, suite = tty_test_vconsole);
+slopos_testing::stest!(name = test_decawm_toggle, suite = tty_test_vconsole);
+slopos_testing::stest!(name = test_decckm_toggle, suite = tty_test_vconsole);
+slopos_testing::stest!(name = test_decom_toggle, suite = tty_test_vconsole);
+slopos_testing::stest!(name = test_dectcem_still_works, suite = tty_test_vconsole);
+slopos_testing::stest!(
+    name = test_alt_screen_still_works,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(name = test_cell_model_u32, suite = tty_test_vconsole);
+slopos_testing::stest!(
+    name = test_vconsole_utf8_hello_renders,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(name = test_double_width_cjk, suite = tty_test_vconsole);
+slopos_testing::stest!(
+    name = test_invalid_utf8_in_vconsole,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(
+    name = test_mixed_ascii_utf8_escapes,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(name = test_256color_cube_mapping, suite = tty_test_vconsole);
+slopos_testing::stest!(
+    name = test_256color_grayscale_mapping,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(
+    name = test_is_double_width_ranges,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(
+    name = test_sgr_standard_colors_unaffected,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(
+    name = test_parser_fuzz_utf8_no_panic,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(
+    name = test_vtparser_fuzz_no_panic,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(
+    name = test_replacement_glyph_exists,
+    suite = tty_test_vconsole
+);
+slopos_testing::stest!(
+    name = test_get_glyph_for_codepoint_ascii,
+    suite = tty_test_vconsole
+);

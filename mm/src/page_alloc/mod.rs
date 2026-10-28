@@ -12,10 +12,8 @@
 pub mod buddy;
 mod pcp;
 
-use core::ffi::c_int;
-
 use slopos_abi::addr::PhysAddr;
-use slopos_arch::pcr::MAX_CPUS;
+use slopos_ostd::cpu::x86_64::pcr::MAX_CPUS;
 use slopos_ostd::mm::frame::FrameAlloc;
 
 #[cfg(feature = "test-hooks")]
@@ -57,13 +55,6 @@ pub fn __alloc_page_frames_raw(count: u32, flags: u32) -> PhysAddr {
 /// scrub them; for an idle CPU. See [`BuddyAllocator::prezero_idle`].
 pub fn prezero_idle(budget: usize) -> usize {
     BUDDY_ALLOCATOR.prezero_idle(budget)
-}
-
-/// Raw single-page buddy entry point. See [`__alloc_page_frames_raw`]
-/// for the audit-point rationale.
-#[doc(hidden)]
-pub fn __alloc_page_frame_raw(flags: u32) -> PhysAddr {
-    BUDDY_ALLOCATOR.alloc_raw(1, flags)
 }
 
 /// Typestate-checked single-page kernel allocation, zeroed.
@@ -121,9 +112,10 @@ pub fn alloc_page_frames_pcp_batch(out: &mut [PhysAddr]) -> usize {
     BUDDY_ALLOCATOR.alloc_pcp_batch(out)
 }
 
-/// Free a single allocation (single page or multi-page block) back
-/// to the buddy. The buddy recovers the order from the descriptor.
-pub fn free_page_frame(phys_addr: PhysAddr) -> c_int {
+/// Free a single allocation (single page or multi-page block) back to the
+/// buddy, which recovers the order from the descriptor. `false` when
+/// `phys_addr` names no frame the allocator tracks.
+pub fn free_page_frame(phys_addr: PhysAddr) -> bool {
     BUDDY_ALLOCATOR.free_phys(phys_addr)
 }
 
@@ -162,10 +154,6 @@ pub fn quarantine_frames() -> u32 {
 
 pub fn page_allocator_descriptor_size() -> usize {
     core::mem::size_of::<buddy::PageFrame>()
-}
-
-pub fn page_allocator_max_supported_frames() -> u32 {
-    BUDDY_ALLOCATOR.max_supported_frames()
 }
 
 /// Frame counts across the whole buddy allocator.
@@ -217,8 +205,8 @@ pub fn rotate_spliced_pages() -> u32 {
     BUDDY_ALLOCATOR.rotate_spliced_pages()
 }
 
-pub fn page_frame_is_tracked(phys_addr: PhysAddr) -> c_int {
-    BUDDY_ALLOCATOR.frame_is_tracked(phys_addr) as c_int
+pub fn page_frame_is_tracked(phys_addr: PhysAddr) -> bool {
+    BUDDY_ALLOCATOR.frame_is_tracked(phys_addr)
 }
 
 pub fn page_allocator_paint_all(value: u8) {
@@ -230,8 +218,6 @@ pub fn page_allocator_paint_all(value: u8) {
 /// The final [`slopos_ostd::mm::frame::Frame`] drop routes back into
 /// [`free_page_frame`] via OSTD's `KernelMeta::on_drop`.
 pub type OwnedPageFrame = slopos_ostd::mm::frame::Frame<crate::kernel_meta::KernelMeta>;
-
-pub use OwnedPageFrame as KernelFrame;
 
 /// The TLB quarantine as a reclaim source.
 ///

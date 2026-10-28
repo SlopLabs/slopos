@@ -2,7 +2,7 @@
 
 /// The one version the compositor and its clients speak. A change to the wire
 /// takes the next.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[repr(transparent)]
@@ -36,7 +36,7 @@ impl ToplevelId {
 pub mod toplevel_state {
     pub const ACTIVATED: u32 = 1 << 0;
     pub const MAXIMIZED: u32 = 1 << 1;
-    pub const RESIZING: u32 = 1 << 3;
+    pub const RESIZING: u32 = 1 << 2;
 }
 
 /// Move-only file descriptor wrapper. Closes on drop unless consumed via
@@ -89,7 +89,23 @@ pub struct OutputInfo {
     pub scale: u32,
 }
 
-pub use slopos_abi::window::WINDOW_STRING_MAX;
+/// The longest window title or app id.
+pub const WINDOW_STRING_MAX: usize = 128;
+
+/// [`Request::SetCursorShape`]'s `shape`.
+pub const CURSOR_SHAPE_DEFAULT: u8 = 0;
+pub const CURSOR_SHAPE_TEXT: u8 = 1;
+pub const CURSOR_SHAPE_POINTER: u8 = 2;
+pub const CURSOR_SHAPE_N_RESIZE: u8 = 3;
+pub const CURSOR_SHAPE_S_RESIZE: u8 = 4;
+pub const CURSOR_SHAPE_W_RESIZE: u8 = 5;
+pub const CURSOR_SHAPE_E_RESIZE: u8 = 6;
+pub const CURSOR_SHAPE_NW_RESIZE: u8 = 7;
+pub const CURSOR_SHAPE_NE_RESIZE: u8 = 8;
+pub const CURSOR_SHAPE_SW_RESIZE: u8 = 9;
+pub const CURSOR_SHAPE_SE_RESIZE: u8 = 10;
+pub const CURSOR_SHAPE_GRAB: u8 = 11;
+pub const CURSOR_SHAPE_GRABBING: u8 = 12;
 
 /// Client-to-server request.
 pub enum Request {
@@ -209,8 +225,6 @@ pub enum Event {
     /// other.
     Hello {
         version: u32,
-        /// Always 0, there only because the encoding never changes.
-        capabilities: u64,
     },
 
     OutputInfo {

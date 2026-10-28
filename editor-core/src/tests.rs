@@ -633,8 +633,8 @@ fn test_redo_restores_where_a_compound_edit_left_the_caret() -> bool {
 }
 
 fn test_a_lone_carriage_return_is_content_not_an_ending() -> bool {
-    // A one-byte file whose byte is `\r` used to load as empty and save as
-    // empty — a plain Ctrl+S with no edit at all destroying the file.
+    // Read as an ending, a lone `\r` would load as empty and a Ctrl+S with
+    // no edit would empty the file.
     let b = TextBuffer::from_str("\r").expect("load");
     assert_eq!(b.to_text(), "\r");
     // And a stray CR inside an LF file is text the file had.
@@ -880,14 +880,14 @@ fn test_overlapping_matches_are_not_double_counted() -> bool {
 
 fn test_fuzzy_filter_prefers_segment_starts() -> bool {
     let candidates = ["/src/mm/lib.rs", "/documents/malformed.txt"];
-    let ranked = fuzzy_filter(&candidates, "mml");
-    assert_eq!(ranked.first().map(|(p, _)| *p), Some("/src/mm/lib.rs"));
+    let ranked = fuzzy_filter(candidates, "mml", |p| p);
+    assert_eq!(ranked.first().copied(), Some("/src/mm/lib.rs"));
     true
 }
 
 fn test_fuzzy_filter_drops_non_subsequences() -> bool {
     let candidates = ["/a/b.rs"];
-    assert!(fuzzy_filter(&candidates, "zzz").is_empty());
+    assert!(fuzzy_filter(candidates, "zzz", |p| p).is_empty());
     true
 }
 

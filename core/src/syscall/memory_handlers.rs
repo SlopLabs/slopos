@@ -9,7 +9,6 @@ use slopos_fs::vfs::FileType;
 use slopos_ostd::process::ProcessId;
 
 use crate::syscall::args::{Fd, RawFd, UserCStr};
-use crate::syscall::result::SyscallResult;
 
 const PAGE_SIZE: u64 = 4096;
 
@@ -231,12 +230,7 @@ define_syscall!(syscall_munmap
 {
     // No shootdown here: pages are invalidated locally as they go, and freed
     // frames cannot be reallocated until every CPU has quiesced.
-    let rc = slopos_mm::process_vm::process_vm_munmap(process_id.process().ok_or(Errno::ESRCH)?, addr, length);
-    if rc < 0 {
-        Err(Errno::from_raw(rc).unwrap_or(Errno::EINVAL))
-    } else {
-        Ok(())
-    }
+    slopos_mm::process_vm::process_vm_munmap(process_id.process().ok_or(Errno::ESRCH)?, addr, length)
 });
 
 define_syscall!(syscall_mprotect
@@ -245,12 +239,12 @@ define_syscall!(syscall_mprotect
     requires(let process_id: process_id)
     -> Result<(), Errno>
 {
-    let rc = slopos_mm::process_vm::process_vm_mprotect(process_id.process().ok_or(Errno::ESRCH)?, addr, length, prot);
-    if rc < 0 {
-        Err(Errno::from_raw(rc).unwrap_or(Errno::EINVAL))
-    } else {
-        Ok(())
-    }
+    slopos_mm::process_vm::process_vm_mprotect(
+        process_id.process().ok_or(Errno::ESRCH)?,
+        addr,
+        length,
+        prot,
+    )
 });
 
 define_syscall!(syscall_memfd_create
@@ -263,7 +257,7 @@ define_syscall!(syscall_memfd_create
         return Err(Errno::EINVAL);
     }
     let (handle, ops, backing) =
-        slopos_mm::memfd::memfd_create(flags, process_id.account()).ok_or(Errno::ENFILE)?;
+        slopos_mm::memfd::memfd_create(process_id.account()).ok_or(Errno::ENFILE)?;
     let fd = slopos_fs::fileio::fileio_open_fd_with_ops(
         process_id,
         ops,
@@ -291,12 +285,11 @@ define_syscall!(syscall_ftruncate
         .ok_or(Errno::EBADF)?;
     // A memfd's length is an allocation size, rounded to a page; a regular
     // file's is a file size, exact, and goes down `truncate(2)`'s path.
-    let rc = if kind == slopos_abi::file_ops::FileKind::Memfd {
+    if kind == slopos_abi::file_ops::FileKind::Memfd {
         let account = process_id.process().ok_or(Errno::ESRCH)?.account();
-        slopos_mm::memfd::memfd_ftruncate(handle, size as usize, account)
-    } else {
-        slopos_fs::fileio::file_ftruncate_fd(process_id, fd.raw(), size)
-    };
+        return slopos_mm::memfd::memfd_ftruncate(handle, size as usize, account);
+    }
+    let rc = slopos_fs::fileio::file_ftruncate_fd(process_id, fd.raw(), size);
     if rc < 0 {
         Err(Errno::from_raw(rc).unwrap_or(Errno::EINVAL))
     } else {
@@ -312,6 +305,3 @@ define_syscall!(syscall_msync
 {
     msync_range(pid.process().ok_or(Errno::ESRCH)?, addr, length, flags)
 });
-
-#[allow(dead_code)]
-type _Unused = SyscallResult;

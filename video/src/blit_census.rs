@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use slopos_arch::MAX_CPUS;
+use slopos_ostd::cpu::x86_64::pcr::MAX_CPUS;
 
 struct CpuBlit {
     cycles: AtomicU64,
@@ -34,7 +34,7 @@ static BLIT: [CpuBlit; MAX_CPUS] = [EMPTY; MAX_CPUS];
 /// fraction of the span being measured. Cross-CPU TSC skew does not matter:
 /// each slot is only ever read as a rate against itself.
 pub fn record(start_tsc: u64, end_tsc: u64, bytes: usize) {
-    let cpu = slopos_arch::pcr::get_current_cpu();
+    let cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     if cpu >= MAX_CPUS {
         return;
     }

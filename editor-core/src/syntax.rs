@@ -239,24 +239,6 @@ const PYTHON: LangSpec = LangSpec {
     lifetimes: false,
 };
 
-/// Every language answers `line()` before reaching the lexer except these, so
-/// the empty spec exists to keep the table total rather than to be run.
-#[allow(dead_code)]
-const PLAIN: LangSpec = LangSpec {
-    keywords: &[],
-    types: &[],
-    constants: &[],
-    line_comment: &[],
-    block_comment: None,
-    quotes: &[],
-    raw_strings: false,
-    attributes: false,
-    call_syntax: false,
-    capitalized_types: false,
-    triple_quotes: false,
-    lifetimes: false,
-};
-
 pub struct Highlighter {
     language: Language,
 }

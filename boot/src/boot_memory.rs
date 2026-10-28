@@ -3,11 +3,11 @@ use slopos_ostd::klog::{self, KlogLevel};
 use slopos_ostd::lock_class;
 use slopos_ostd::{klog_debug, klog_info};
 
-use crate::early_init::{boot_get_hhdm_offset, boot_get_memmap, boot_init_priority};
+use crate::early_init::{boot_get_hhdm_offset, boot_init_priority};
 
-use slopos_arch::cpu::security::{SupervisorFeatures, enable_supervisor_features};
 use slopos_mm::memory_init::{init_memory_system_post_typestate, init_memory_system_pre_typestate};
 use slopos_mm::memory_layout_defs::KERNEL_VIRTUAL_BASE;
+use slopos_ostd::cpu::x86_64::security::{SupervisorFeatures, enable_supervisor_features};
 
 fn boot_step_supervisor_features_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     let SupervisorFeatures { pge, smep, smap } = enable_supervisor_features();
@@ -54,7 +54,7 @@ fn boot_step_install_kernel_vm_space_fn(ctx: &mut BootCtx<'_, BspInit>) {
     use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 
     let bsp = ctx.bsp_token();
-    let cr3 = slopos_arch::cpu::control_regs::read_cr3();
+    let cr3 = slopos_ostd::cpu::x86_64::control_regs::read_cr3();
     let pml4_phys = slopos_abi::addr::PhysAddr::new(cr3 & 0x000F_FFFF_FFFF_F000);
     assert!(
         !KERNEL_VM_SPACE.is_completed(),
@@ -126,7 +126,7 @@ fn boot_step_register_luf_hook_fn(ctx: &mut BootCtx<'_, BspInit>) {
 fn boot_step_register_reclaimers_fn(ctx: &mut BootCtx<'_, BspInit>) {
     let token = ctx.bsp_token();
     slopos_mm::page_alloc::register_reclaim(&token);
-    slopos_fs::ext2_vfs::register_reclaim(&token);
+    slopos_fs::ext4_vfs::register_reclaim(&token);
     slopos_fs::filemap::register_reclaim(&token);
     klog_info!(
         "OSTD: reclaim tier armed ({} pages currently reclaimable)",
@@ -163,15 +163,9 @@ fn boot_step_tcp_buffer_limits_fn(_ctx: &mut BootCtx<'_, BspInit>) {
     );
 }
 
-fn boot_step_memory_pre_typestate(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
-    let memmap = boot_get_memmap();
-    if memmap.is_null() {
-        klog_info!("ERROR: Memory map not available");
-        return -1;
-    }
-
+fn boot_step_memory_pre_typestate(_ctx: &mut BootCtx<'_, BspInit>) {
     let hhdm = boot_get_hhdm_offset();
-    let hhdm_available = crate::limine_protocol::is_hhdm_available() != 0;
+    let hhdm_available = crate::limine_protocol::is_hhdm_available();
     let boot_info = crate::limine_protocol::boot_info();
     let framebuffer = boot_info
         .framebuffer
@@ -179,8 +173,8 @@ fn boot_step_memory_pre_typestate(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
         .map(|bf| (*bf.address as u64, &bf.info));
 
     klog_debug!("Initializing memory management from Limine data...");
-    let rc = init_memory_system_pre_typestate(
-        memmap,
+    init_memory_system_pre_typestate(
+        crate::limine_protocol::memory_regions(),
         hhdm,
         hhdm_available,
         framebuffer,
@@ -188,29 +182,19 @@ fn boot_step_memory_pre_typestate(_ctx: &mut BootCtx<'_, BspInit>) -> i32 {
         boot_info.kernel_virt_base,
         crate::base::unused_frames(),
     );
-    if rc != 0 {
-        klog_info!("ERROR: Memory system pre-typestate init failed");
-        return -1;
-    }
 
     klog_debug!("Memory pre-typestate phase complete.");
-    0
 }
 
-fn boot_step_memory_post_typestate(ctx: &mut BootCtx<'_, BspInit>) -> i32 {
-    let rc = init_memory_system_post_typestate(&ctx.bsp_token());
-    if rc != 0 {
-        klog_info!("ERROR: Memory system post-typestate init failed");
-        return -1;
-    }
+fn boot_step_memory_post_typestate(ctx: &mut BootCtx<'_, BspInit>) {
+    init_memory_system_post_typestate(&ctx.bsp_token(), crate::limine_protocol::memory_regions());
     klog_debug!("Memory management initialized.");
-    0
 }
 
 fn boot_step_memory_verify(_ctx: &mut BootCtx<'_, BspInit>) {
     let stack_ptr = slopos_ostd::cpu::x86_64::stack::read_rsp();
 
-    if klog::is_enabled_level(KlogLevel::Debug) {
+    if klog::is_enabled(KlogLevel::Debug) {
         klog_debug!("Stack pointer read successfully!");
         klog_info!("Current Stack Pointer: 0x{:x}", stack_ptr);
 
@@ -237,7 +221,6 @@ crate::boot_init!(
     memory,
     b"memory init pre-typestate\0",
     boot_step_memory_pre_typestate,
-    fallible,
     flags = boot_init_priority(2)
 );
 crate::boot_init!(
@@ -266,7 +249,6 @@ crate::boot_init!(
     memory,
     b"memory init post-typestate\0",
     boot_step_memory_post_typestate,
-    fallible,
     flags = boot_init_priority(10)
 );
 crate::boot_init!(

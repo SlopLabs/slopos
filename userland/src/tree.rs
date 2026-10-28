@@ -70,18 +70,6 @@ pub fn write_durably(path: &str, bytes: &[u8]) -> Result<(), String> {
     replace(path, bytes, None).map_err(|e| format!("{path}: {e}"))
 }
 
-/// A file the root holds at `path`, if any; anything else there is refused.
-pub fn read_regular(path: &str) -> Result<Option<String>, String> {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_file() => fs::read_to_string(path)
-            .map(Some)
-            .map_err(|e| format!("{path}: {e}")),
-        Ok(_) => Err(format!("{path} is not a file")),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{path}: {e}")),
-    }
-}
-
 /// The manifest of the tree `name`, made for `keeper` to rewrite in place
 /// where it may not make one: an install begun with nothing recorded. Kept
 /// when there is one.

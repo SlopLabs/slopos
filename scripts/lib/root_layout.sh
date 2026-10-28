@@ -7,19 +7,16 @@ ROOT_LAYOUT=(/:0:0:0755 /etc:0:0:0755 /var:0:0:0755 /var/lib:0:0:0755 /var/lib/s
 PERSON_TREES=(/home/user /src /usr/local)
 PERSON_OWNER=1000:1000
 OWNERS_RECORD=/var/lib/slopos/owners
-ACCOUNTS_STORE=/var/lib/slopos/accounts
 # The trees the root's record names, every one on a new root.
 HELD_TREES=("${PERSON_TREES[@]}")
 
-# Set HELD_TREES from a record on stdin. One written before the map named the
-# first person's home `/home`.
+# Set HELD_TREES from a record on stdin.
 root_layout_read_record() {
     local line tree want named=()
     while IFS= read -r line; do
         line="${line%$'\r'}"
         [ "${line%% *}" = "$PERSON_OWNER" ] || continue
         tree="${line#* }"
-        [ "$tree" != /home ] || tree="${PERSON_TREES[0]}"
         named+=("$tree")
     done
     HELD_TREES=()

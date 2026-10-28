@@ -7,8 +7,8 @@
 
 use slopos_abi::fs::BASE_DIRS;
 use slopos_abi::{BASE_INTERFACE, BASE_INTERFACE_MIN};
+use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::sync::Mutex;
-use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::{KVec, klog_info, lock_class};
 
 use super::{BASE_FS, BaseFs, Source, StageError, is_base, monitor, reap, stage};

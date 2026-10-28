@@ -11,33 +11,23 @@ cargo_target_dir := build_dir / "target"
 limine_dir       := "third_party/limine"
 ovmf_dir         := "third_party/ovmf"
 fs_image_dir     := "fs/assets"
-fs_image         := fs_image_dir / "ext2.img"
-fs_image_tests   := fs_image_dir / "ext2-tests.img"
-fs_image_persist := fs_image_dir / "ext2-persist.img"
+fs_image         := fs_image_dir / "ext4.img"
+fs_image_tests   := fs_image_dir / "ext4-tests.img"
+fs_image_persist := fs_image_dir / "ext4-persist.img"
 fs_image_size    := env("FS_IMAGE_SIZE", "32M")
-# The tests image carries `bigprog_test`, a deliberately 24 MiB binary that is
-# what proves `exec` no longer stages an image in kernel memory, and the C++
-# runtime with the two fixtures that exercise it. Sized on its own so the
-# shipped root stays 32M — and no larger than it has to be, because
-# `persist_test`'s space filler must still meet the volume's reserve before it
-# meets the 8192-block `DiskBlocks` quota. 64M left 809 free blocks against a
-# 819-block reserve once `libc++.so` was on it, which refuses the filler before
-# it has written anything; 80M left 732 once `remoted` and `cpufreq` joined,
-# and 96M 1244 against 1228 once the extensions' tests did, so uid 1000 could
-# write nothing. Each filler now has a ceiling of its own, so size is no
-# longer bounded by one quota.
+# The tests image carries `bigprog_test`, a 24 MiB binary `exec` must map
+# without staging it in kernel memory, and the C++ runtime with the two
+# fixtures that exercise it. Sized on its own so the shipped root stays 32M.
 fs_image_size_tests := env("FS_IMAGE_SIZE_TESTS", "128M")
-# Sized on its own: this disk holds work, not the shipped appliance root. No
-# longer capped at 1 GiB — the verity hash array is chunked, so what bounds it
-# is the 4 bytes of resident hash per 4 KiB block the machine's RAM can hold,
-# which the mount refuses past rather than discovering.
+# Sized on its own: this disk holds work, not the shipped appliance root. What
+# bounds it is the 4 bytes of resident verity hash per 4 KiB block the
+# machine's RAM can hold, which the mount refuses past rather than discovering.
 persist_image_size := env("PERSIST_IMAGE_SIZE", "512M")
 # The capacity volume `just test-capacity` measures: 16 GiB, two orders of
-# magnitude past the appliance root, which is what puts every mount-time
-# allocation and every metadata cache decision past the size they were chosen
-# at. 1 GiB is no longer the ceiling — the verity hash array is chunked — and
-# this image carries no trailer at all.
-fs_image_capacity     := fs_image_dir / "ext2-capacity.img"
+# magnitude past the appliance root, which puts every mount-time allocation
+# and every metadata cache decision past the size it was chosen at. It carries
+# no verity trailer.
+fs_image_capacity     := fs_image_dir / "ext4-capacity.img"
 capacity_image_size   := env("CAPACITY_IMAGE_SIZE", "16G")
 capacity_inode_ratio  := env("CAPACITY_INODE_RATIO", "16384")
 capacity_qemu_mem     := env("CAPACITY_QEMU_MEM", "2G")
@@ -58,7 +48,7 @@ root_journal_size     := "64M"
 # The self-hosting root the toolchain, self-hosting and guest-install checks
 # boot: the persistent root's shape and a clone seeded with the vendored crates,
 # under the tests base. Rebuilt every run, as the tests image is.
-fs_image_selfhost     := fs_image_dir / "ext2-selfhost.img"
+fs_image_selfhost     := fs_image_dir / "ext4-selfhost.img"
 selfhost_stage        := build_dir / "selfhost-stage"
 # The host's half of the ladder's ssh fixture, which `sshd -i` serves the
 # guest from; staged with the root, so both boots of `test-toolchain` use it.
@@ -67,7 +57,7 @@ ladder_sshd           := build_dir / "ladder-sshd"
 guest_push_repo       := fs_image_dir / "guest-push.git"
 # A compiler session: the `core` compile peaks at 1.15 GiB anonymous, and the
 # file map's per-process cap is usable memory / 8, which the debug tests
-# kernel's link outgrew at 4G (refused at 126394 of its 124720 pages).
+# kernel's link exceeds at 4G (126394 pages against 124720).
 dev_qemu_mem          := env("DEV_QEMU_MEM", "6G")
 # The toolchain's execs and forks hold interrupts masked for seconds under TCG,
 # which runs that work far slower than the timer; at the default threshold each
@@ -98,7 +88,7 @@ install_medium := build_dir / "install.cpio"
 # building one.
 iso_installer   := build_dir / "slop-installer.iso"
 installer_medium := build_dir / "install-tests.cpio"
-installer_live_cmdline := "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=off roulette=skip root=initramfs " + dev_watchdog + " tests.run=*ext2_aaa*,*installer*"
+installer_live_cmdline := "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=off roulette=skip root=initramfs " + dev_watchdog + " tests.run=*ext4_aaa*,*installer*"
 iso_tests    := build_dir / "slop-tests.iso"
 # `test-elf`: a kernel built elsewhere, never the build's own ISO.
 iso_elf_tests := build_dir / "slop-elf-tests.iso"
@@ -131,8 +121,8 @@ gpu                 := env("GPU", "virtio-vga")
 boot_log_timeout := env("BOOT_LOG_TIMEOUT", "15")
 boot_cmdline     := env("BOOT_CMDLINE", "tests=off root=initramfs")
 test_cmdline     := "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=on roulette=skip root=auto mount=LABEL=slopos-media:/media"
-# `TEST_CMDLINE=…` is how `builddir/run_tests` threads filter / verbosity flags
-# into the ISO at build time.
+# `builddir/run_tests` reads `test_cmdline` (`just --evaluate`) and threads its
+# filter / verbosity flags into the ISO through `TEST_CMDLINE=…`.
 test_cmdline_effective := env("TEST_CMDLINE", test_cmdline)
 # The self-hosting root's boots run a compiler: debug klog there is a line per
 # thread created and exited, over a serial port that costs a VM exit a byte.
@@ -235,8 +225,7 @@ _fs-image-selfhost: _build-userland
 # the suite.
 #
 # It comes up holding residency, not geometry alone: a checked-out copy of this
-# repository plus the pinned toolchain sysroot, which is what "holds a
-# checked-out copy of this repository plus a toolchain sysroot" asks for.
+# repository plus the pinned toolchain sysroot.
 _fs-image-capacity:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -479,7 +468,7 @@ ui-shots *ARGS:
 test-install:
     #!/usr/bin/env bash
     set -euo pipefail
-    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext2_aaa*,*install*,*base_tests*" BOOTDISK_PANIC_ENTRY=1 \
+    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext4_aaa*,*install*,*base_tests*" BOOTDISK_PANIC_ENTRY=1 \
         BOOTDISK_ROOT_IMAGE={{fs_image_tests}} just _boot-disk
     . scripts/lib/bootdisk.sh
     bootdisk_layout
@@ -550,7 +539,7 @@ test-install-guest:
     just _fs-image-selfhost
     # Slot a is the optimized tests kernel, as for test-selfhost: it is the
     # machine that runs the build.
-    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} tests.run=*ext2_aaa*,*install*" \
+    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} tests.run=*ext4_aaa*,*install*" \
         BOOTDISK_PANIC_ENTRY=1 just _boot-disk
     log="{{build_dir}}/install-guest.log"
     push="$PWD/{{build_dir}}/install-guest-push.git"
@@ -847,9 +836,7 @@ test-installer *DISKS:
             # from its boot menu, which a fresh varstore stands in for.
             rm -f "$vars"
             markers=("INSTALLER-NOT-OFFERED /dev/sda: ReadOnly"
-                "INSTALLER-LEFT-SLOT-BASE /boot/a/base.img"
                 "INSTALLER-RESCUED /dev/" "INSTALLER-RESCUED at a terminal"
-                "removed /boot/a/base.img, a base the disk kept per slot"
                 "INSTALLER-INSTALLED Reinstall" "ok 1 - installed_built_and_committed"
                 "installed the apps at /usr/local" "installer:   e2fsck: Pass 5: ")
             [ "$payload" = 0 ] ||
@@ -918,9 +905,7 @@ debug-monitor:
 
 # These compare one emulated clock against another, which icount decouples;
 # skipping them lets the "tests" boot step pass so recording reaches the
-# userland phase. `test_hpet_delay_accuracy` came off this list once it started
-# measuring the HPET against itself over a minimum of several rounds — an
-# exemption that stops describing a real failure is a dead exemption.
+# userland phase.
 rr_skip := "slopos_core::syscall::tests::test_kill_process_group_semantics,slopos_drivers::tests::apic_timer_tests::test_lapic_timer_tick_rate_reasonable"
 
 [doc("Record a deterministic test run to builddir/replay.bin (TCG, smp=1)")]
@@ -974,7 +959,7 @@ test-raw: _build-run-tests
 test-json PATH: _build-run-tests
     {{build_dir}}/run_tests --json "{{PATH}}"
 
-[doc("Skip the kernel-side test phase; run only the Phase 3 userland tests.")]
+[doc("Skip the kernel-side test phase; run only the userland tests.")]
 test-userland-only: _iso-tests-userland-only _build-run-tests
     {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}"
 
@@ -1006,8 +991,8 @@ test-elf +ARGS: _fs-image _fs-image-tests _initramfs-tests _build-run-tests
 test-persist: _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
-    # `*ext2_aaa*` is the ext2 root mount every file-creating filtered run needs.
-    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext2_aaa*,*persist*" just _iso-tests
+    # `*ext4_aaa*` is the ext4 root mount every file-creating filtered run needs.
+    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext4_aaa*,*persist*" just _iso-tests
     echo "── boot 1: seed ──"
     {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}"
     scripts/check_fs_image.sh --map "{{fs_image_tests}}"
@@ -1039,7 +1024,7 @@ test-rude-exit: _build-run-tests
         echo "FAIL: the boot never committed its file — full log in {{build_dir}}/rude-exit.log" >&2
         exit 1
     fi
-    printf 'slopos-rude-exit-v1\n' > {{build_dir}}/rude-exit.payload
+    printf 'slopos-rude-exit\n' > {{build_dir}}/rude-exit.payload
     scripts/check_fs_replay.sh "{{fs_image_tests}}" /rude-exit {{build_dir}}/rude-exit.payload
 
 # The ISO names the explicit tests, which run only when named since the host
@@ -1081,7 +1066,7 @@ test-usb: _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
 test-capacity: _build-run-tests _fs-image-capacity
     #!/usr/bin/env bash
     set -euo pipefail
-    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext2_aaa*,*capacity*" just _iso-tests
+    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext4_aaa*,*capacity*" just _iso-tests
     # The silence guard is the wrong instrument here: the capacity fill is one
     # test that legitimately runs for minutes emitting nothing, and a host
     # still flushing 1.35 GB of freshly written image makes the guest's
@@ -1108,7 +1093,7 @@ test-toolchain: _build-run-tests
     free="$(dumpe2fs -h "{{fs_image_selfhost}}" 2>/dev/null | awk -F: '/^Free blocks:/ {f=$2} /^Block size:/ {b=$2} END {print f * b}')"
     [ "$free" -ge "$(numfmt --from=iec {{root_free_floor}})" ] ||
         { echo "FAIL: the self-hosting root has ${free}B free, under the {{root_free_floor}} floor" >&2; exit 1; }
-    TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*ext2_aaa*,*toolchain*,*reboot_clone*" just _iso-tests
+    TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*ext4_aaa*,*toolchain*,*reboot_clone*" just _iso-tests
     push="$PWD/{{build_dir}}/toolchain-push.git"
     # Only the toolchain's ssh dials the peer, so only then is sshd needed.
     ssh_peer=""
@@ -1156,7 +1141,7 @@ test-selfhost: _build-run-tests
     just _fs-image-selfhost
     # The machine running the build boots the optimized tests kernel: a
     # dev-profile one spends ten times as long in every syscall and fault.
-    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*ext2_aaa*,*selfhost*" just _iso-tests
+    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*ext4_aaa*,*selfhost*" just _iso-tests
     rc=0
     push="$PWD/{{build_dir}}/selfhost-push.git"
     rm -rf "$push"
@@ -1188,7 +1173,7 @@ bench-selfhost: _build-run-tests
     set -euo pipefail
     [ -d "{{toolchain_install}}" ] || { echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain" >&2; exit 1; }
     just _fs-image-selfhost
-    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} ${BENCH_PROF-prof=on} {{test_cmdline_extra}} tests.run=*ext2_aaa*,*selfhost*" just _iso-tests
+    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} ${BENCH_PROF-prof=on} {{test_cmdline_extra}} tests.run=*ext4_aaa*,*selfhost*" just _iso-tests
     cp {{build_dir}}/libc.so {{build_dir}}/bench-libc.so
     rc=0
     push="$PWD/{{build_dir}}/bench-push.git"
@@ -1260,10 +1245,10 @@ remote-install *ARGS:
 
 # An installed machine as the bare-metal layout has it — a boot disk whose
 # slots boot a base paired with a broker on this host's loopback, which SLIRP
-# shows the guest as 10.0.2.2, and a root partition where a pairing with
-# another broker is planted under /etc/remote, which remoted must ignore. The
-# kernel carries a build tag and is built in a target directory of its own, so
-# the tag never rebuilds the shared one.
+# shows the guest as 10.0.2.2, and a root partition carrying a pairing with
+# another broker at /etc/remote: a pairing on the writable root is never
+# dialled. The kernel carries a build tag and is built in a target directory
+# of its own, so the tag never rebuilds the shared one.
 [doc("Remote-control check: boot an installed machine whose base is paired with a broker on this host and drive it through scripts/remote.py — wait for its build tag; run commands and check stdout, stderr, exit codes, cwd, env, stdin, a timeout and two at once; push a random 8 MiB file, pull it back byte-identical; read /dev/kmsg; find the base's pairing unwritable and a pairing planted on the root ignored; serve from two daemons; install a base that runs at once; install into the spare slot, reboot into it and commit it, keeping that base; power off with /bin/halt and require QEMU to exit")]
 test-remote: _build-userland _base-recipes
     #!/usr/bin/env bash
@@ -1303,8 +1288,8 @@ test-remote: _build-userland _base-recipes
         COREUTILS_LINKS="{{coreutils_tools}}" {{base_recipe_env}} SLOPOS_BUILD_TAG="${base%%:*}" REMOTE_PAIRING_DIR="$work/pairing" \
             scripts/build_initramfs.sh "$work/${base#*:}" "{{build_dir}}" {{userland_bins}}
     done
-    # Where remoted once read a pairing, and any program can write: one with
-    # a broker of its own, which must never hear from the machine.
+    # A pairing on the writable root, which any program may write, with a
+    # broker of its own that must never hear from the machine.
     scripts/remote.py --state "$work/decoy-state" provision "$work/planted" --broker "10.0.2.2:$decoy_port"
     # Readable by the session, which the check runs as: a decoy keeps nothing.
     chmod -R a+rX "$work/planted"
@@ -1386,8 +1371,8 @@ test-remote: _build-userland _base-recipes
         fail "the base's remote.conf changed"
     remote run -- cat /etc/remote/remote.conf | grep -qx "broker = 10.0.2.2:$decoy_port" ||
         fail "the decoy pairing was not planted on the root"
-    rc=0; remote run -- remoted pair "10.0.2.2:$port" 00 >/dev/null 2>&1 || rc=$?
-    [ "$rc" != 0 ] || fail "remoted still takes arguments"
+    rc=0; remote run -- remoted "10.0.2.2:$decoy_port" >/dev/null 2>&1 || rc=$?
+    [ "$rc" != 0 ] || fail "remoted took a broker from its command line"
     # A second daemon, from the same base pairing: the broker prefers the
     # newer boot id.
     first="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["boot"])' "$work/agent.json")"
@@ -1532,7 +1517,7 @@ check-miri:
     done
     exit "$rc"
 
-[doc("Print TCB ratio: unsafe lines in slopos-ostd / total kernel Rust LoC (target Phase 1 <= 1.5%, Phase 2 <= 1.0%)")]
+[doc("Print TCB ratio: unsafe lines in slopos-ostd / total kernel Rust LoC (the gates hold it to <= 1.0%)")]
 tcb-ratio:
     scripts/tcb_ratio.sh
 
@@ -1637,6 +1622,7 @@ check-framekernel-gates:
     scripts/check_libc_exports.sh --self-test
     scripts/check_loose_programs.sh --self-test
     scripts/check_ui_literals.sh --self-test
+    scripts/check_app_deps.sh --self-test
     scripts/check_codegen_backend.sh --self-test
     scripts/check_linker_script.sh --self-test
     scripts/check_offline_build.sh --self-test
@@ -1665,12 +1651,14 @@ check-framekernel-gates:
     scripts/check_wait_result_handling.sh
     scripts/check_task_ownership.sh
     scripts/check_process_designator.sh
+    scripts/check_kernel_pml4_writer.sh
     scripts/check_frame_ownership.sh
     scripts/check_safe_contract_surface.sh
     scripts/check_charge_linearity.sh
     scripts/check_syscall_abi.sh
     scripts/check_base_interface.sh
     scripts/check_ui_literals.sh
+    scripts/check_app_deps.sh
     just check-toolchain-coverage
     scripts/tcb_ratio.sh --max 1.0
 
@@ -1708,36 +1696,9 @@ show-qemu-resolution:
 fmt:
     {{cargo}} +{{rust_channel}} fmt --all -- --check
 
-[doc("Enforce kernel allocation + stack-frame invariants against the dev kernel ELF")]
-check:
-    scripts/check_alloc_dep.sh
-    scripts/check_stack_sizes.sh --variant dev {{build_dir}}/kernel-dev.elf
-
-[doc("Heuristic audit: kernel `pub fn` returning large by-value types — slow, not part of `check`")]
+[doc("Heuristic audit: kernel `pub fn` returning large by-value types — slow and advisory")]
 check-return-types:
     scripts/check_return_types.sh
-
-[doc("Audit kernel ELF for functions whose stack frame exceeds the 32 KiB task-stack budget")]
-stack-audit:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ ! -f "{{kernel_elf}}" ]; then
-        echo "{{kernel_elf}} missing — run \`just build\` first" >&2
-        exit 1
-    fi
-    # Anything above 8 KiB eats into the call-depth budget on a 32 KiB task stack.
-    THRESHOLD="${THRESHOLD:-8192}"
-    echo "Kernel functions with frame > ${THRESHOLD} bytes:"
-    OBJDUMP="$(scripts/llvm_tool.sh llvm-objdump)"
-    "$OBJDUMP" -d --no-show-raw-insn --x86-asm-syntax=intel \
-        "{{kernel_elf}}" \
-      | awk -v t="${THRESHOLD}" '
-          /^ffffffff[0-9a-f]+ <.*>:/ { fn=$0 }
-          /sub[[:space:]]+rsp,0x/ {
-              m=$0; sub(/.*sub[[:space:]]+rsp,0x/,"",m); v=strtonum("0x" m);
-              if (v>t) printf "%8d  %s\n", v, fn;
-          }' \
-      | sort -rn
 
 [doc("Clean build artifacts")]
 clean:

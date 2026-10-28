@@ -61,9 +61,8 @@ const ROOT_DIRS: [(&str, u32); 12] = [
     ("/opt/bin", MODE_DIR),
 ];
 
-/// `slopos_abi::fs::OWNERS_RECORD` and what init writes there once the
-/// first person's trees are theirs, which a root with nothing in them
-/// already is.
+/// `slopos_abi::fs::OWNERS_RECORD` and the record a new root carries: the
+/// first person holds all three trees.
 const OWNERS_RECORD: (&str, &str) = (
     "/var/lib/slopos/owners",
     "1000:1000 /home/user\n1000:1000 /src\n1000:1000 /usr/local\n",
@@ -311,13 +310,6 @@ fn layout(
         n.ends_with(".ttf") || n.ends_with("-OFL.txt") || n.ends_with("-LICENSE.txt")
     })? {
         add(format!("/usr/share/fonts/{name}"), MODE_DATA, read(&path)?);
-    }
-    for (name, path) in listing(&assets.join("docs"), |n| n.ends_with(".md"))? {
-        add(
-            format!("/usr/share/slopos/doc/{name}"),
-            MODE_DATA,
-            read(&path)?,
-        );
     }
     for (name, path) in listing(&assets.join("apps"), |n| n.ends_with(".app"))? {
         add(
@@ -809,10 +801,10 @@ mod tests {
 
     /// `scripts/build_fs_image.sh` mirrors `SLIBC_LICENSES` and
     /// `slopos_abi::fs::BASE_DIRS`, `scripts/lib/root_layout.sh` mirrors
-    /// `ROOT_LAYOUT`, `PERSON_TREES`, the first person's ids, the record and
-    /// the accounts store, `ROOT_DIRS` is the layout's directories below `/`
-    /// that are no tree of theirs, and `OWNERS_RECORD` names every tree as
-    /// init does.
+    /// `ROOT_LAYOUT`, `PERSON_TREES`, the first person's ids and the record,
+    /// `ROOT_DIRS` is the layout's directories below `/` that are no tree of
+    /// theirs, and `OWNERS_RECORD` names every tree, as a new root's record
+    /// does.
     #[test]
     fn the_mirrored_lists_agree() {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -852,8 +844,6 @@ mod tests {
         assert!(layout_sh.contains(&format!("\nPERSON_OWNER={person}\n")));
         assert_eq!(constant("OWNERS_RECORD"), OWNERS_RECORD.0);
         assert!(layout_sh.contains(&format!("\nOWNERS_RECORD={}\n", OWNERS_RECORD.0)));
-        let accounts = format!("\nACCOUNTS_STORE={}\n", constant("ACCOUNTS_STORE"));
-        assert!(layout_sh.contains(&accounts));
         let record: String = trees
             .iter()
             .map(|tree| format!("{person} {tree}\n"))

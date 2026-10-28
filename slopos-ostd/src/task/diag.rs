@@ -49,8 +49,8 @@ pub struct TaskDiag {
     /// Exclusive upper bound of the kernel stack.
     pub kernel_stack_top: u64,
     pub flags: u16,
-    /// The task's saved `context.cr3`, for comparison against live CR3.
-    pub context_cr3: u64,
+    /// The task's address-space root, for comparison against live CR3.
+    pub cr3: u64,
 }
 
 impl TaskDiag {
@@ -122,12 +122,8 @@ where
             kernel_stack_base: addr_of!((*task).kernel_stack_base).read_volatile(),
             kernel_stack_top: addr_of!((*task).kernel_stack_top).read_volatile(),
             flags: addr_of!((*task).flags).read_volatile(),
-            // `as_ptr_racy` is the `TaskOwnCell`'s sanctioned unsynchronised
-            // read path, and yields a pointer without forming a reference.
-            // `read_unaligned`, not `read_volatile`: `TaskContext` is
-            // `#[repr(C, packed)]`, so a pointer to one of its `u64` fields
-            // carries no alignment guarantee.
-            context_cr3: addr_of!((*(*task).context.as_ptr_racy()).cr3).read_unaligned(),
+            // `AtomicU64` has `u64`'s layout.
+            cr3: addr_of!((*task).cr3).cast::<u64>().read_volatile(),
         })
     }
 }

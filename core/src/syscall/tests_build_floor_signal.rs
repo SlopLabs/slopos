@@ -1,6 +1,5 @@
 //! Coverage for the signal surface a build system needs.
 
-use core::ffi::c_char;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
@@ -22,21 +21,21 @@ use slopos_kernel_services::driver_runtime::{signal_process_group, signal_sessio
 use slopos_mm::memory_layout_defs::PROCESS_CODE_START_VA;
 use slopos_mm::oom::{Killed, OomOps, Standing, oom_forget_victim_for_test, oom_swap_ops};
 use slopos_mm::page_fault::{FaultOutcome, try_resolve_user_fault};
-use slopos_mm::paging_defs::PageFlags;
 use slopos_mm::process_vm::{
     create_process_vm, destroy_process_vm, pack_process_vm_handle, process_vm_alloc,
     process_vm_get_stack_top, process_vm_handle, process_vm_mmap,
 };
 use slopos_mm::user_copy::{copy_from_user, copy_to_user, set_test_process_id};
-use slopos_mm::user_ptr::UserPtr;
 use slopos_ostd::KBox;
 use slopos_ostd::authority::{CAP_UNIVERSAL, Capability};
+use slopos_ostd::mm::page_property::PageProperty;
 use slopos_ostd::process::quota::{
     quota_mode, root as quota_root, set_limit, set_quota_mode, stats,
 };
 use slopos_ostd::process::{Process, ProcessId};
 use slopos_ostd::task::SchedPlacement;
 use slopos_ostd::user::context::UserContext;
+use slopos_ostd::user::ptr::UserPtr;
 use slopos_sched::task;
 use slopos_sched::task::{
     task_clone, task_consume_zombie, task_create, task_find_by_id, task_fork, task_group_continue,
@@ -53,7 +52,7 @@ use crate::syscall::signal::{
 };
 use crate::tests::helpers::install_static_program;
 
-type SyscallFixture = slopos_sched::test_fixture::KernelTestScope;
+use slopos_sched::test_fixture::KernelTestScope;
 
 const TEST_HANDLER: u64 = 0x4100_0000;
 const TEST_RESTORER: u64 = 0x4200_0000;
@@ -61,7 +60,7 @@ const TEST_RESTORER: u64 = 0x4200_0000;
 fn create_test_user_task_holding(caps: u64) -> u32 {
     let user_entry = slopos_sched::task::task_entry_from_kernel_va(PROCESS_CODE_START_VA as u64);
     let id = task_create(
-        b"SigTest\0".as_ptr() as *const c_char,
+        b"SigTest",
         user_entry,
         ptr::null_mut(),
         1,
@@ -95,8 +94,8 @@ fn fdtable_of(task_id: u32) -> Option<FdTable> {
 }
 
 fn park_bootstrap_on_current_cpu() {
-    slopos_arch::pcr::park_bootstrap_task(
-        slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut ()
+    slopos_ostd::cpu::x86_64::pcr::park_bootstrap_task(
+        slopos_ostd::task::bootstrap::BSP_BOOTSTRAP_TASK.get() as *mut (),
     );
 }
 
@@ -112,7 +111,7 @@ fn make_task_current(task_id: u32) -> bool {
     // `dispatch` asserts the task is Ready or Running; a parked one has to be
     // walked back through Ready first. Only these two statuses have that edge.
     if matches!(task.status(), TaskStatus::Blocked | TaskStatus::Stopped)
-        && task_set_state(task_id, TaskStatus::Ready) != 0
+        && !task_set_state(task_id, TaskStatus::Ready)
     {
         return false;
     }
@@ -120,7 +119,7 @@ fn make_task_current(task_id: u32) -> bool {
         return false;
     }
     task.set_sched_placement(SchedPlacement::OnCpu);
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     slopos_sched::scheduler::dispatch_task_for_test(cpu_id, task_id)
 }
 
@@ -196,21 +195,17 @@ fn user_copy_in<T: Copy>(table: FdTable, addr: u64) -> Option<T> {
 
 fn map_user_rw_region(table: FdTable, pages: usize) -> Option<u64> {
     let process = table.process()?;
-    let base = process_vm_alloc(
-        process,
-        (pages * 4096) as u64,
-        PageFlags::USER_RW.bits() as u32,
-    );
+    let base = process_vm_alloc(process, (pages * 4096) as u64, true);
     if base == 0 {
         return None;
     }
     for page in 0..pages {
         let addr = base + (page * 4096) as u64;
         let mapped = slopos_mm::process_vm::process_vm_with_vm_space(process, |vs| {
-            slopos_mm::user_mappings::ostd_map_4kb_user_fresh(
+            slopos_mm::user_mappings::map_4kb_user_fresh(
                 vs,
                 slopos_abi::addr::VirtAddr::new(addr),
-                PageFlags::USER_RW.bits(),
+                PageProperty::USER_RW,
             )
             .is_ok()
         });
@@ -261,7 +256,7 @@ fn spawn_thread_group() -> Option<(u32, u32)> {
 }
 
 pub fn test_group_stop_parks_every_thread_and_continue_resumes() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some((leader_id, thread_id)) = spawn_thread_group() else {
         return TestResult::Fail;
@@ -322,7 +317,7 @@ pub fn test_group_stop_parks_every_thread_and_continue_resumes() -> TestResult {
 
 /// A stop also retires an unconsumed continue report.
 pub fn test_stop_report_is_consumed_once() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -372,7 +367,7 @@ pub fn test_stop_report_is_consumed_once() -> TestResult {
 }
 
 pub fn test_catchable_stop_signal_handler_wins_over_stop() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -412,7 +407,7 @@ pub fn test_catchable_stop_signal_handler_wins_over_stop() -> TestResult {
 }
 
 pub fn test_kill_reaches_a_non_leader_thread() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some((leader_id, thread_id)) = spawn_thread_group() else {
         return TestResult::Fail;
@@ -458,7 +453,7 @@ pub fn test_kill_reaches_a_non_leader_thread() -> TestResult {
 /// The exit code alone cannot distinguish a signal death from
 /// `exit(128 + signal)`.
 pub fn test_exit_info_reports_the_killing_signal() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let killed_id = create_test_user_task();
     assert_test!(killed_id != INVALID_TASK_ID, "failed to create user task");
@@ -504,9 +499,8 @@ pub fn test_exit_info_reports_the_killing_signal() -> TestResult {
     assert_test!(reaper_id != INVALID_TASK_ID, "failed to create the reaper");
     let exited_id = create_test_user_task();
     assert_test!(exited_id != INVALID_TASK_ID, "failed to create user task");
-    assert_eq_test!(
+    assert_test!(
         task::task_set_parent(exited_id, reaper_id),
-        0,
         "could not parent the exiting task"
     );
     assert_test!(
@@ -539,7 +533,7 @@ pub fn test_exit_info_reports_the_killing_signal() -> TestResult {
 
 /// `SA_SIGINFO` is what puts the records in RSI and RDX.
 pub fn test_fault_signal_delivers_siginfo_with_fault_address() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -639,7 +633,7 @@ pub fn test_fault_signal_delivers_siginfo_with_fault_address() -> TestResult {
 /// Re-pending instead would return to user mode, re-execute the faulting
 /// instruction and loop forever.
 pub fn test_fault_signal_with_unpushable_frame_terminates() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -692,7 +686,7 @@ pub fn test_fault_signal_with_unpushable_frame_terminates() -> TestResult {
 /// On-stack is a property of the interrupted stack pointer, so every call
 /// below states the RSP it is made with.
 pub fn test_sigaltstack_bounds_and_onstack_delivery() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -839,7 +833,7 @@ pub fn test_sigaltstack_bounds_and_onstack_delivery() -> TestResult {
 
 /// `SA_RESETHAND` reverts to `SIG_DFL` before the handler runs.
 pub fn test_sa_resethand_restores_default_after_one_delivery() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -877,7 +871,7 @@ pub fn test_sa_resethand_restores_default_after_one_delivery() -> TestResult {
 
 /// A `fork` child gets a private copy of the shared table.
 pub fn test_clone_sighand_shares_the_action_table() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some((leader_id, thread_id)) = spawn_thread_group() else {
         return TestResult::Fail;
@@ -936,7 +930,7 @@ pub fn test_clone_sighand_shares_the_action_table() -> TestResult {
 }
 
 pub fn test_stopped_parent_still_parents_its_children() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create parent");
@@ -975,7 +969,7 @@ pub fn test_stopped_parent_still_parents_its_children() -> TestResult {
 /// nothing else references the overwritten table, so the leak is
 /// unreclaimable.
 pub fn test_clone_from_releases_the_slots_own_signal_table() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create user task");
@@ -998,7 +992,7 @@ pub fn test_clone_from_releases_the_slots_own_signal_table() -> TestResult {
 /// `unblock_task` refuses anything that is not `Blocked`, and a `Stopped`
 /// task is not.
 pub fn test_tty_hangup_continue_resumes_a_stopped_group() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -1047,7 +1041,7 @@ pub fn test_tty_hangup_continue_resumes_a_stopped_group() -> TestResult {
 /// Only the dispatcher checks a capability, so this goes through the table
 /// entry rather than the handler.
 pub fn test_clock_settime_requires_the_clock_capability() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let plain_id = create_test_user_task();
     let granted_id = create_test_user_task_holding(CAP_UNIVERSAL | Capability::Clock.bit());
@@ -1108,7 +1102,7 @@ pub fn test_clock_settime_requires_the_clock_capability() -> TestResult {
 }
 
 pub fn test_a_reaped_leader_does_not_strand_its_threads() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     let leader_id = create_test_user_task();
@@ -1116,9 +1110,8 @@ pub fn test_a_reaped_leader_does_not_strand_its_threads() -> TestResult {
         parent_id != INVALID_TASK_ID && leader_id != INVALID_TASK_ID,
         "failed to create the parent and the leader"
     );
-    assert_eq_test!(
+    assert_test!(
         task_set_parent(leader_id, parent_id),
-        0,
         "parenting the leader failed"
     );
 
@@ -1187,7 +1180,7 @@ pub fn test_a_reaped_leader_does_not_strand_its_threads() -> TestResult {
 /// A fatal signal one thread takes ends its whole group with that signal, so
 /// the leader a parent waits on reports it rather than living on.
 pub fn test_a_fatal_signal_ends_the_whole_group() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some((leader_id, thread_id)) = spawn_thread_group() else {
         return TestResult::Fail;
@@ -1221,7 +1214,7 @@ pub fn test_a_fatal_signal_ends_the_whole_group() -> TestResult {
 /// A sibling acts on a group exit's kill at its next delivery point, where a
 /// signal it had pending must neither restamp the group's code nor be handled.
 pub fn test_a_group_exit_outranks_a_signal_the_sibling_had_pending() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some((leader_id, thread_id)) = spawn_thread_group() else {
         return TestResult::Fail;
@@ -1253,7 +1246,7 @@ pub fn test_a_group_exit_outranks_a_signal_the_sibling_had_pending() -> TestResu
 /// The kill flag is only acted on at a delivery point a *running* task
 /// reaches, so a task left Stopped with it pending never dies.
 pub fn test_a_completed_kill_is_not_parked_by_a_group_stop() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -1284,7 +1277,7 @@ pub fn test_a_completed_kill_is_not_parked_by_a_group_stop() -> TestResult {
 /// which re-enters the stop — and a group already stopped changes nothing —
 /// so neither may publish.
 pub fn test_one_stop_publishes_one_report() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some((leader_id, thread_id)) = spawn_thread_group() else {
         return TestResult::Fail;
@@ -1293,9 +1286,8 @@ pub fn test_one_stop_publishes_one_report() -> TestResult {
     let thread = assert_some!(task_find_by_id(thread_id), "thread lookup failed");
 
     // A member the stop can only poke: executing, and not the caller.
-    assert_eq_test!(
+    assert_test!(
         task_set_state(thread_id, TaskStatus::Running),
-        0,
         "could not make the sibling executing"
     );
 
@@ -1314,9 +1306,8 @@ pub fn test_one_stop_publishes_one_report() -> TestResult {
 
     // The poked member reaching its own boundary and parking, which is where
     // the second report came from.
-    assert_eq_test!(
+    assert_test!(
         task_set_state(thread_id, TaskStatus::Ready),
-        0,
         "could not return the sibling to Ready"
     );
     assert_test!(
@@ -1349,7 +1340,7 @@ pub fn test_one_stop_publishes_one_report() -> TestResult {
 }
 
 pub fn test_a_kill_outranks_an_outstanding_stop_join() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some((leader_id, thread_id)) = spawn_thread_group() else {
         return TestResult::Fail;
@@ -1359,10 +1350,10 @@ pub fn test_a_kill_outranks_an_outstanding_stop_join() -> TestResult {
     else {
         return fail_and_clean(&ids);
     };
-    let running = task_set_state(thread_id, TaskStatus::Running) == 0;
+    let running = task_set_state(thread_id, TaskStatus::Running);
     let stopped = task_group_stop(leader_id, SIGTSTP);
     slopos_sched::task::task_sigkill_member(&thread, slopos_abi::signal::SigInfo::KERNEL);
-    let ready = task_set_state(thread_id, TaskStatus::Ready) == 0;
+    let ready = task_set_state(thread_id, TaskStatus::Ready);
     let claimed = crate::syscall::signal::claim_pending_signal_for_test(&thread);
     let kill_taken = thread.signal_pending() & sig_bit(slopos_abi::signal::SIGKILL) == 0;
     let thread_stopped = thread.is_stopped();
@@ -1381,7 +1372,7 @@ pub fn test_a_kill_outranks_an_outstanding_stop_join() -> TestResult {
 }
 
 pub fn test_a_poked_member_exiting_completes_the_stop() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some((leader_id, thread_id)) = spawn_thread_group() else {
         return TestResult::Fail;
@@ -1390,10 +1381,10 @@ pub fn test_a_poked_member_exiting_completes_the_stop() -> TestResult {
     let Some(leader) = task_find_by_id(leader_id) else {
         return fail_and_clean(&ids);
     };
-    let running = task_set_state(thread_id, TaskStatus::Running) == 0;
+    let running = task_set_state(thread_id, TaskStatus::Running);
     let stopped = task_group_stop(leader_id, SIGTSTP);
     let early_report = leader.has_stop_report();
-    let ready = task_set_state(thread_id, TaskStatus::Ready) == 0;
+    let ready = task_set_state(thread_id, TaskStatus::Ready);
     task_terminate(thread_id);
     let report = leader.take_stop_report();
     let _ = task_group_continue(leader_id);
@@ -1408,7 +1399,7 @@ pub fn test_a_poked_member_exiting_completes_the_stop() -> TestResult {
 
 /// The report waits for the blocking member to park.
 pub fn test_group_stop_reaches_a_member_blocking_the_signal() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some((leader_id, thread_id)) = spawn_thread_group() else {
         return TestResult::Fail;
@@ -1419,7 +1410,7 @@ pub fn test_group_stop_reaches_a_member_blocking_the_signal() -> TestResult {
         return fail_and_clean(&ids);
     };
     thread.set_signal_blocked(sig_bit(SIGTSTP));
-    let running = task_set_state(thread_id, TaskStatus::Running) == 0;
+    let running = task_set_state(thread_id, TaskStatus::Running);
     let sent = task_group_signal(leader_id, SIGTSTP) != 0;
     let leader_stopped = leader.is_stopped();
     let early_report = leader.has_stop_report();
@@ -1427,7 +1418,7 @@ pub fn test_group_stop_reaches_a_member_blocking_the_signal() -> TestResult {
 
     // The member's own return to user: the join is claimed through its mask,
     // and its park completes the stop.
-    let ready = task_set_state(thread_id, TaskStatus::Ready) == 0;
+    let ready = task_set_state(thread_id, TaskStatus::Ready);
     let claimed = crate::syscall::signal::claim_pending_signal_for_test(&thread);
     let parked = task_group_stop(thread_id, SIGTSTP);
     let thread_stopped = thread.is_stopped();
@@ -1449,7 +1440,7 @@ pub fn test_group_stop_reaches_a_member_blocking_the_signal() -> TestResult {
 }
 
 pub fn test_a_pending_blocked_stop_keeps_the_continue_report() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -1477,7 +1468,7 @@ pub fn test_a_pending_blocked_stop_keeps_the_continue_report() -> TestResult {
 /// The target may have unblocked the signal and gone to sleep since its mask
 /// was read.
 pub fn test_a_directed_blocked_stop_wakes_its_target() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some((leader_id, thread_id)) = spawn_thread_group() else {
         return TestResult::Fail;
@@ -1493,7 +1484,7 @@ pub fn test_a_directed_blocked_stop_wakes_its_target() -> TestResult {
     let _ = task_set_state(thread_id, TaskStatus::Ready);
     let running = task_set_state(thread_id, TaskStatus::Running);
     let sleeping = task_set_state(thread_id, TaskStatus::Blocked);
-    let blocked = running == 0 && sleeping == 0;
+    let blocked = running && sleeping;
     let post = slopos_sched::task::task_thread_signal_info(
         leader_id,
         thread_id,
@@ -1513,7 +1504,7 @@ pub fn test_a_directed_blocked_stop_wakes_its_target() -> TestResult {
 }
 
 pub fn test_an_ignored_stop_signal_is_discarded() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -1552,7 +1543,7 @@ pub fn test_an_ignored_stop_signal_is_discarded() -> TestResult {
 /// inner return retires would base the next frame at the top of the stack the
 /// outer handler is still running on, overwriting it.
 pub fn test_a_nested_sigreturn_keeps_the_outer_frame() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -1641,7 +1632,7 @@ pub fn test_a_nested_sigreturn_keeps_the_outer_frame() -> TestResult {
 /// disposition — would convert a caught signal into its default action, and a
 /// push that keeps failing must terminate rather than be retried forever.
 pub fn test_a_refused_frame_push_keeps_the_handler_then_terminates() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -1705,7 +1696,7 @@ pub fn test_a_refused_frame_push_keeps_the_handler_then_terminates() -> TestResu
 /// `waitpid` candidate, and retires itself on exit rather than parking as a
 /// zombie nothing would claim.
 pub fn test_a_thread_is_not_its_creators_child() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     let leader_id = create_test_user_task();
@@ -1713,9 +1704,8 @@ pub fn test_a_thread_is_not_its_creators_child() -> TestResult {
         parent_id != INVALID_TASK_ID && leader_id != INVALID_TASK_ID,
         "failed to create the parent and the leader"
     );
-    assert_eq_test!(
+    assert_test!(
         task_set_parent(leader_id, parent_id),
-        0,
         "parenting the leader failed"
     );
 
@@ -1782,7 +1772,7 @@ pub fn test_a_thread_is_not_its_creators_child() -> TestResult {
 /// A user-authored sigframe mask reaches `signal_blocked` whole — all 64 bits,
 /// less the uncatchable pair — and no value of it marks the task killed.
 pub fn test_sigreturn_restores_a_full_mask_without_the_kill_flag() -> TestResult {
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     const INTERRUPTED_RIP: u64 = 0x5000_7777;
 
@@ -1991,7 +1981,7 @@ fn call_as(handler: crate::syscall::common::SyscallHandler, caller: u32, args: [
 pub fn test_realtime_signals_queue_and_standard_ones_coalesce() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SI_USER, SIGRTMIN, SigInfo};
     use slopos_sched::task::{SignalPost, task_signal_post_info};
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -2050,7 +2040,7 @@ pub fn test_realtime_signals_queue_and_standard_ones_coalesce() -> TestResult {
 pub fn test_realtime_queue_limit_refuses_the_surplus() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SIGQUEUE_MAX, SIGRTMAX, SigInfo};
     use slopos_sched::task::{SignalPost, task_signal_post_info};
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -2089,7 +2079,7 @@ pub fn test_realtime_queue_limit_refuses_the_surplus() -> TestResult {
 /// forged codes aimed elsewhere; `kill`/`tgkill` report `SI_USER`/`SI_TKILL`.
 pub fn test_sent_signals_carry_the_real_sender() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SI_TKILL, SI_USER, SIGRTMIN, SigInfo, UserSiginfo};
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let sender = create_test_user_task();
     let target = create_test_user_task();
@@ -2230,13 +2220,10 @@ fn scratch_victim() -> Option<ProcessId> {
 fn is_cow_in(table: FdTable, addr: u64) -> bool {
     table.process().is_some_and(|process| {
         slopos_mm::process_vm::process_vm_with_vm_space(process, |vs| {
-            slopos_mm::user_mappings::ostd_get_pte_flags_4kb(
-                vs,
-                slopos_abi::addr::VirtAddr::new(addr),
-            )
+            slopos_mm::user_mappings::leaf_property_4kb(vs, slopos_abi::addr::VirtAddr::new(addr))
         })
         .flatten()
-        .is_some_and(|flags| flags.contains(PageFlags::COW))
+        .is_some_and(|leaf| slopos_mm::user_mappings::is_cow(&leaf))
     })
 }
 
@@ -2252,9 +2239,9 @@ enum Delivery {
 fn deliver_on_irq_exit_as_current(
     task_id: u32,
     table: FdTable,
-    frame: &mut slopos_arch::InterruptFrame,
+    frame: &mut slopos_ostd::irq::interrupt_frame::InterruptFrame,
 ) -> bool {
-    use slopos_arch::cpu;
+    use slopos_ostd::cpu::x86_64 as cpu;
     use slopos_ostd::cpu::x86_64::pcr::{interrupt_nesting_enter, interrupt_nesting_exit};
 
     if !make_task_current(task_id) {
@@ -2285,7 +2272,7 @@ pub fn test_sigframe_on_a_shared_forked_stack_waits_for_the_killer() -> TestResu
 
 fn sigframe_on_a_shared_forked_stack(delivery: Delivery) -> TestResult {
     const INTERRUPTED_RIP: u64 = 0x5000_7777;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let parent_id = create_test_user_task();
     assert_test!(parent_id != INVALID_TASK_ID, "failed to create the parent");
@@ -2327,7 +2314,8 @@ fn sigframe_on_a_shared_forked_stack(delivery: Delivery) -> TestResult {
     let mut ctx: KBox<UserContext> = KBox::zeroed().expect("alloc");
     ctx.regs_mut().rsp = rsp;
     ctx.regs_mut().rip = INTERRUPTED_RIP;
-    let mut trap: KBox<slopos_arch::InterruptFrame> = KBox::zeroed().expect("alloc");
+    let mut trap: KBox<slopos_ostd::irq::interrupt_frame::InterruptFrame> =
+        KBox::zeroed().expect("alloc");
     trap.rip = INTERRUPTED_RIP;
     trap.rsp = rsp;
     trap.cs = 0x23;
@@ -2591,7 +2579,7 @@ fn take_next(task_id: u32) -> Option<(u8, u64)> {
 
 pub fn test_one_sigqueue_to_a_process_is_taken_once() -> TestResult {
     use slopos_abi::signal::SIGRTMIN;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some(ids) = spawn_threads::<3>() else {
         return TestResult::Fail;
@@ -2627,8 +2615,8 @@ pub fn test_one_sigqueue_to_a_process_is_taken_once() -> TestResult {
 /// Forty `sigqueue`s (past `SIGQUEUE_MAX`) to a process whose other threads
 /// block `SIGRTMIN` all succeed, and the unblocked thread takes each in order.
 pub fn test_blocked_threads_leave_process_signals_to_the_unblocked_one() -> TestResult {
+    let _fixture = KernelTestScope::enter();
     use slopos_abi::signal::SIGRTMIN;
-    let _fixture = SyscallFixture::new();
 
     let Some(ids) = spawn_threads::<3>() else {
         return TestResult::Fail;
@@ -2678,7 +2666,7 @@ pub fn test_blocked_threads_leave_process_signals_to_the_unblocked_one() -> Test
 pub fn test_a_signal_every_thread_blocks_goes_to_the_first_to_unblock() -> TestResult {
     use slopos_abi::signal::SIGRTMIN;
     use slopos_sched::task::task_has_deliverable_signal;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some(ids) = spawn_threads::<3>() else {
         return TestResult::Fail;
@@ -2738,7 +2726,7 @@ pub fn test_a_signal_every_thread_blocks_goes_to_the_first_to_unblock() -> TestR
 pub fn test_only_a_kill_pends_past_the_queue_limit() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SI_USER, SIGQUEUE_MAX, SIGRTMAX, SIGRTMIN, SigInfo};
     use slopos_sched::task::{SignalPost, task_signal_post_info};
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let sender = create_test_user_task();
     let target = create_test_user_task();
@@ -2815,7 +2803,7 @@ pub fn test_only_a_kill_pends_past_the_queue_limit() -> TestResult {
 pub fn test_a_requeued_instance_survives_a_refilled_queue() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SIGQUEUE_MAX, SIGRTMIN, SigInfo};
     use slopos_sched::task::{SignalPost, task_signal_post_info};
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     let Some(task) = task_find_by_id(task_id) else {
@@ -2868,7 +2856,7 @@ pub fn test_a_second_put_back_into_a_full_process_queue_is_refused() -> TestResu
     use slopos_abi::signal::{SI_QUEUE, SIGQUEUE_MAX, SIGRTMIN, SigInfo};
     use slopos_ostd::task::ops::task_group_post_info;
     use slopos_sched::task::SignalPost;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some(ids) = spawn_threads::<2>() else {
         return TestResult::Fail;
@@ -2937,7 +2925,7 @@ pub fn test_a_pick_landing_after_the_takers_exit_moves_to_a_sibling() -> TestRes
     use slopos_sched::task::{
         SignalPost, task_has_deliverable_signal, task_pick_for_shared_signals,
     };
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some(ids) = spawn_threads::<3>() else {
         return TestResult::Fail;
@@ -2982,9 +2970,9 @@ pub fn test_a_pick_landing_after_the_takers_exit_moves_to_a_sibling() -> TestRes
 /// sent to it is not pending for its parent.
 pub fn test_a_forked_process_shares_its_own_signal_set_with_its_threads() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SIGRTMIN, SigInfo};
+    let _fixture = KernelTestScope::enter();
     use slopos_ostd::task::ops::task_group_post_info;
     use slopos_sched::task::SignalPost;
-    let _fixture = SyscallFixture::new();
 
     let parent_id = create_test_user_task();
     let Some(parent) = task_find_by_id(parent_id) else {
@@ -3034,7 +3022,7 @@ pub fn test_a_forked_process_shares_its_own_signal_set_with_its_threads() -> Tes
 pub fn test_sigpipe_names_the_writer_as_sender() -> TestResult {
     use slopos_abi::signal::{SI_USER, SIGPIPE, SigInfo};
     use slopos_fs::fileio::{file_close_fd, file_pipe_create};
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     let (Some(task), Some(table)) = (task_find_by_id(task_id), fdtable_of(task_id)) else {
@@ -3123,8 +3111,8 @@ fn take_deliverable(task_id: u32) -> Option<(u8, u64)> {
 /// Blocking it through `rt_sigprocmask` before taking it moves the pick.
 pub fn test_blocking_a_picked_signal_hands_it_to_a_sibling() -> TestResult {
     use slopos_abi::signal::{SIG_BLOCK, SIGRTMIN};
+    let _fixture = KernelTestScope::enter();
     use slopos_sched::task::task_has_deliverable_signal;
-    let _fixture = SyscallFixture::new();
 
     let Some(ids) = spawn_threads::<2>() else {
         return TestResult::Fail;
@@ -3177,7 +3165,7 @@ pub fn test_blocking_a_picked_signal_hands_it_to_a_sibling() -> TestResult {
 pub fn test_sigpending_reports_the_blocked_pending_signals() -> TestResult {
     use slopos_abi::signal::{SIGRTMIN, SIGUSR2, SigInfo};
     use slopos_sched::task::task_signal_post_info;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some(ids) = spawn_threads::<2>() else {
         return TestResult::Fail;
@@ -3239,7 +3227,7 @@ pub fn test_sigpending_reports_the_blocked_pending_signals() -> TestResult {
 pub fn test_sigtimedwait_takes_realtime_instances_in_order() -> TestResult {
     use slopos_abi::signal::{SI_QUEUE, SIGRTMIN};
     use slopos_abi::syscall::Timespec;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some(ids) = spawn_threads::<2>() else {
         return TestResult::Fail;
@@ -3322,9 +3310,9 @@ pub fn test_sigtimedwait_takes_realtime_instances_in_order() -> TestResult {
 /// One instance sent to a process is taken by one waiter: any thread's
 /// `rt_sigtimedwait`, picked or not, and no other thread's after it.
 pub fn test_sigtimedwait_takes_a_process_instance_once() -> TestResult {
+    let _fixture = KernelTestScope::enter();
     use slopos_abi::signal::SIGRTMIN;
     use slopos_abi::syscall::Timespec;
-    let _fixture = SyscallFixture::new();
 
     let Some(ids) = spawn_threads::<3>() else {
         return TestResult::Fail;
@@ -3396,8 +3384,11 @@ fn spin_until(done: impl Fn() -> bool, budget_ms: u64) -> bool {
 }
 
 fn waiter_body(wait: impl FnOnce() -> u64) {
+    WAITER_TASK.store(
+        slopos_ostd::cpu::x86_64::pcr::current_task_id(),
+        Ordering::Release,
+    );
     use slopos_kernel_services::clock::uptime_ms;
-    WAITER_TASK.store(slopos_arch::pcr::current_task_id(), Ordering::Release);
     let started = uptime_ms();
     let result = wait();
     WAITER_ELAPSED_MS.store(uptime_ms() - started, Ordering::Release);
@@ -3618,8 +3609,8 @@ fn read_signalfd_as(reader: u32, table: FdTable, fd: i32) -> Option<(isize, u32)
 pub fn test_a_signalfd_serves_the_task_using_it() -> TestResult {
     use slopos_abi::signal::{SIGUSR2, SigInfo};
     use slopos_abi::syscall::{POLLIN, SFD_NONBLOCK};
+    let _fixture = KernelTestScope::enter();
     use slopos_sched::task::task_signal_post_info;
-    let _fixture = SyscallFixture::new();
 
     let creator = create_test_user_task();
     let holder = create_test_user_task();
@@ -3691,7 +3682,7 @@ pub fn test_signalfd4_takes_nonblock_and_cloexec() -> TestResult {
     use slopos_abi::syscall::{
         F_GETFD, F_GETFL, FD_CLOEXEC, O_NONBLOCK, SFD_CLOEXEC, SFD_NONBLOCK,
     };
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     if task_id == INVALID_TASK_ID {
@@ -3819,7 +3810,7 @@ pub fn test_sigreturn_restoring_erestartsys_does_not_restart() -> TestResult {
     use slopos_abi::signal::SA_RESTART;
     use slopos_abi::syscall::{ERRNO_ERESTARTSYS, SYSCALL_RT_SIGRETURN};
     const INTERRUPTED_RIP: u64 = 0x5000_6006;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     assert_test!(task_id != INVALID_TASK_ID, "failed to create user task");
@@ -3890,7 +3881,7 @@ pub fn test_erestartsys_is_settled_on_the_signal_taken() -> TestResult {
     use slopos_abi::signal::SA_RESTART;
     use slopos_abi::syscall::{ERRNO_ERESTARTSYS, SYSCALL_WRITE};
     const SYSCALL_RIP: u64 = 0x5000_3002;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some((leader_id, thread_id)) = spawn_thread_group() else {
         return TestResult::Fail;
@@ -3975,7 +3966,7 @@ pub fn test_erestartsys_is_settled_on_the_signal_taken() -> TestResult {
 
 pub fn test_signalfd4_never_watches_kill_or_stop() -> TestResult {
     use slopos_abi::syscall::SFD_NONBLOCK;
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let task_id = create_test_user_task();
     if task_id == INVALID_TASK_ID {
@@ -4027,7 +4018,7 @@ pub fn test_signalfd4_never_watches_kill_or_stop() -> TestResult {
 /// a signalfd, or stops the group (or the `tgkill`ed thread) once unblocked.
 pub fn test_a_blocked_stop_signal_pends_instead_of_stopping() -> TestResult {
     use slopos_abi::signal::{SI_TKILL, SIGTTIN, SigInfo};
-    let _fixture = SyscallFixture::new();
+    let _fixture = KernelTestScope::enter();
 
     let Some((leader_id, thread_id)) = spawn_thread_group() else {
         return TestResult::Fail;
@@ -4110,8 +4101,8 @@ pub fn test_a_blocked_stop_signal_pends_instead_of_stopping() -> TestResult {
 pub fn test_a_lost_standard_record_reads_as_a_kill_from_no_one() -> TestResult {
     use slopos_abi::signal::{CLD_EXITED, SI_KERNEL, SI_QUEUE, SI_USER, SIGCHLD, SigInfo};
     use slopos_ostd::task::ops::inject_sigqueue_store_alloc_failures;
+    let _fixture = KernelTestScope::enter();
     use slopos_sched::task::task_signal_post_info;
-    let _fixture = SyscallFixture::new();
 
     let task_id = create_test_user_task();
     if task_id == INVALID_TASK_ID {
@@ -4169,6 +4160,3 @@ slopos_testing::stest!(
     name = test_a_lost_standard_record_reads_as_a_kill_from_no_one,
     suite = syscall_signal_build_floor
 );
-
-#[allow(dead_code)]
-const _UNUSED: Ordering = Ordering::Relaxed;

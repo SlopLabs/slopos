@@ -143,7 +143,7 @@ pub fn wait_settled(bound_ms: u32) -> Settle {
     if xhci::published().next().is_none() {
         return Settle::Settled;
     }
-    if slopos_arch::pcr::get_online_cpu_count() < 2 {
+    if slopos_ostd::cpu::x86_64::pcr::get_online_cpu_count() < 2 {
         return Settle::OneCpu;
     }
     wake();

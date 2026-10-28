@@ -1,6 +1,6 @@
 //! The per-principal disk-block ceiling.
 //!
-//! ext2's own `s_r_blocks_count` is a system floor: it keeps a reserve for
+//! ext4's own `s_r_blocks_count` is a system floor: it keeps a reserve for
 //! its reserved uid and group and the kernel's writes, and says nothing about
 //! how the space *above* it is shared. These tests cover the other half — one
 //! process cannot take all of it, what it took comes back when it frees, and
@@ -17,9 +17,9 @@ use slopos_testing::{TestResult, fail};
 
 use super::{Ext2ImageSpec, FIX_FILE_BLOCK, ScratchProcess, build_ext2_image};
 use crate::blockdev::{BlockDevice, MemoryBlockDevice};
-use crate::ext2::Ext2Fs;
-use crate::ext2::blockcharge::{BlockCharges, MAX_ROWS};
-use crate::ext2::cache::{BlockCache, CACHE_ENTRIES_MIN};
+use crate::ext4::Ext4Fs;
+use crate::ext4::blockcharge::{BlockCharges, MAX_ROWS};
+use crate::ext4::cache::{BlockCache, CACHE_ENTRIES_MIN};
 
 /// Small enough that the first handful of files reaches it.
 const CEILING: u32 = 6;
@@ -52,12 +52,12 @@ fn image() -> Option<MemoryBlockDevice> {
 #[inline(never)]
 fn with_mount(
     device: &dyn BlockDevice,
-    body: fn(&mut Ext2Fs<'_>) -> Result<(), &'static str>,
+    body: fn(&mut Ext4Fs<'_>) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
-    let (sb, geom) = Ext2Fs::mount_params(device).map_err(|_| "mount_params")?;
+    let (sb, geom) = Ext4Fs::mount_params(device).map_err(|_| "mount_params")?;
     let mut cache =
         BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN).map_err(|_| "cache")?;
-    let mut fs = Ext2Fs::new(device, &mut cache, sb, geom);
+    let mut fs = Ext4Fs::new(device, &mut cache, sb, geom);
     fs.set_account(account());
     body(&mut fs)
 }
@@ -105,7 +105,7 @@ pub fn test_quota_diskblocks_ceiling_refuses_and_refunds() -> TestResult {
     TestResult::Pass
 }
 
-fn fill_then_free(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn fill_then_free(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let account = account();
     let held_before = blocks_held(account);
     let mut created = 0usize;
@@ -175,7 +175,7 @@ pub fn test_quota_diskblocks_release_at_exit_is_not_inheritance() -> TestResult 
     TestResult::Pass
 }
 
-fn fill_and_keep(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn fill_and_keep(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let account = account();
     for name in NAMES.iter().take(3) {
         let ino = fs.create_file(2, name).map_err(|_| "create")?;
@@ -214,7 +214,7 @@ fn other() -> AccountId {
     AccountId::from_raw(OTHER.load(Ordering::Relaxed))
 }
 
-fn foreign_unlink(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn foreign_unlink(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let (owner, remover) = (account(), other());
     let owner_before = blocks_held(owner);
     let remover_before = blocks_held(remover);

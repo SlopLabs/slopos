@@ -1,10 +1,10 @@
 use core::mem::size_of;
 
 use slopos_abi::addr::PhysAddr;
-use slopos_mm::mmio::MmioRegion;
 use slopos_mm::page_alloc::OwnedPageFrame;
 use slopos_ostd::Pod;
 use slopos_ostd::dma::VirtqueueRegion;
+use slopos_ostd::mm::IoMem;
 use slopos_ostd::mm::frame::{Frame, KernelMeta};
 
 use super::{
@@ -190,7 +190,7 @@ impl Virtqueue {
 /// MSI-X table index, or [`VIRTIO_MSI_NO_VECTOR`] when MSI-X is not in use. On
 /// failure `out` is left inert and empty.
 pub fn setup_queue_into(
-    common_cfg: &MmioRegion,
+    common_cfg: &IoMem,
     queue_index: u16,
     max_size: u16,
     msix_vector: u16,
@@ -268,7 +268,7 @@ pub fn setup_queue_into(
 }
 
 pub fn notify_queue(
-    notify_cfg: &MmioRegion,
+    notify_cfg: &IoMem,
     notify_off_multiplier: u32,
     queue: &Virtqueue,
     queue_index: u16,

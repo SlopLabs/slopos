@@ -41,15 +41,18 @@ pub fn get_scheduler_stats() -> SchedulerStats {
 pub fn boot_step_task_manager_init(
     _ctx: &mut slopos_hermetic::BootCtx<'_, slopos_hermetic::BspInit>,
 ) -> i32 {
-    crate::task::ensure_task_manager_initialized()
+    if crate::task::ensure_task_manager_initialized() {
+        0
+    } else {
+        -1
+    }
 }
 
 pub fn boot_step_scheduler_init(
     ctx: &mut slopos_hermetic::BootCtx<'_, slopos_hermetic::BspInit>,
 ) -> i32 {
-    let rc = init_scheduler();
-    if rc != 0 {
-        return rc;
+    if !init_scheduler() {
+        return -1;
     }
     install_reschedule_callback(&ctx.bsp_token());
     0
@@ -58,13 +61,13 @@ pub fn boot_step_scheduler_init(
 pub fn boot_step_idle_task(
     _ctx: &mut slopos_hermetic::BootCtx<'_, slopos_hermetic::BspInit>,
 ) -> i32 {
-    create_idle_task()
+    if create_idle_task() { 0 } else { -1 }
 }
 
 pub fn init_scheduler_for_ap(cpu_id: usize) {
     per_cpu::init_percpu_scheduler(cpu_id);
 
-    if create_idle_task_for_cpu(cpu_id) != 0 {
+    if !create_idle_task_for_cpu(cpu_id) {
         klog_info!(
             "SCHED: Warning - failed to create idle task for CPU {}",
             cpu_id
@@ -98,11 +101,11 @@ pub fn get_total_ready_tasks_all_cpus() -> u32 {
 /// A CPU that is online but not placement-eligible still dispatches whatever
 /// work stealing hands it, so nothing else on the wire distinguishes it.
 pub fn sched_cpu_report(phase: &str) {
-    let cpu_count = slopos_arch::pcr::get_cpu_count();
+    let cpu_count = slopos_ostd::cpu::x86_64::pcr::get_cpu_count();
     let mut online = 0u64;
     let mut eligible = 0u64;
     for cpu_id in 0..cpu_count.min(64) {
-        if slopos_arch::pcr::is_cpu_online(cpu_id) {
+        if slopos_ostd::cpu::x86_64::pcr::is_cpu_online(cpu_id) {
             online |= 1u64 << cpu_id;
         }
         if per_cpu::cpu_accepts_placement(cpu_id) {
@@ -132,7 +135,7 @@ pub fn sched_cpu_report(phase: &str) {
             "SCHEDCPU[{}]: cpu={} online={} eligible={} switches={} ticks={} idle={} pulled={} pushed={}",
             phase,
             cpu_id,
-            u8::from(slopos_arch::pcr::is_cpu_online(cpu_id)),
+            u8::from(slopos_ostd::cpu::x86_64::pcr::is_cpu_online(cpu_id)),
             u8::from(per_cpu::cpu_accepts_placement(cpu_id)),
             switches,
             ticks,
@@ -144,14 +147,14 @@ pub fn sched_cpu_report(phase: &str) {
 }
 
 pub fn send_reschedule_ipi(target_cpu: usize) {
-    use slopos_arch::arch::idt::RESCHEDULE_IPI_VECTOR;
+    use slopos_ostd::irq::idt::RESCHEDULE_IPI_VECTOR;
 
-    let current_cpu = slopos_arch::pcr::get_current_cpu();
+    let current_cpu = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
     if target_cpu == current_cpu {
         return;
     }
 
-    if let Some(apic_id) = slopos_arch::pcr::apic_id_from_cpu_index(target_cpu) {
-        slopos_arch::pcr::send_ipi_to_cpu(apic_id, RESCHEDULE_IPI_VECTOR);
+    if let Some(apic_id) = slopos_ostd::cpu::x86_64::pcr::apic_id_from_cpu_index(target_cpu) {
+        slopos_ostd::cpu::x86_64::pcr::send_ipi_to_cpu(apic_id, RESCHEDULE_IPI_VECTOR);
     }
 }

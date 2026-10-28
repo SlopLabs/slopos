@@ -6,7 +6,7 @@
 
 use slopos_testing::TestResult;
 
-use crate::vfs::init::{vfs_claim_block_device, vfs_ext2_pool_claim};
+use crate::vfs::init::{vfs_claim_block_device, vfs_ext4_pool_claim};
 use crate::vfs::{mount, vfs_init_builtin_filesystems, vfs_mkdir, vfs_open};
 
 /// The disk `scripts/qemu_run.sh` attaches the tests image as.
@@ -14,7 +14,7 @@ const ROOT_DISK: &[u8] = b"nvme0n1";
 const MOUNT_POINT: &[u8] = b"/tmp/rude-exit";
 const FILE: &[u8] = b"/tmp/rude-exit/rude-exit";
 /// What `just test-rude-exit` expects to read back at `/rude-exit`.
-const PAYLOAD: &[u8] = b"slopos-rude-exit-v1\n";
+const PAYLOAD: &[u8] = b"slopos-rude-exit\n";
 
 /// `fsync` a file on the root disk with the flusher kept off the mount, so only
 /// its data and journal transaction land, then end the machine.
@@ -25,8 +25,8 @@ pub fn test_ext4_rude_exit() -> TestResult {
     let Ok(device) = vfs_claim_block_device(ROOT_DISK) else {
         return slopos_testing::fail!("no root disk to write to");
     };
-    let Some(fs) = vfs_ext2_pool_claim() else {
-        return slopos_testing::fail!("the ext2 pool handed out no instance");
+    let Some(fs) = vfs_ext4_pool_claim() else {
+        return slopos_testing::fail!("the ext4 pool handed out no instance");
     };
     fs.exclude_flusher_for_test(true);
     if fs.attach(device, false).is_err() || fs.is_read_only() {

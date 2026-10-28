@@ -10,7 +10,7 @@ use crate::virtio::VirtioMsixState;
 use crate::virtio_net;
 use crate::{block, virtio_blk};
 
-/// Mirrors the vector range `msi_alloc_vector` allocates from.
+/// Mirrors the vector range `IrqAllocator::alloc` hands out.
 const MSI_VECTOR_BASE: u8 = 48;
 const MSI_VECTOR_MAX: u8 = 223;
 

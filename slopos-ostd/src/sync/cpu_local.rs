@@ -23,7 +23,7 @@ use core::marker::PhantomData;
 use core::ops::Deref;
 
 use crate::cpu::preempt::PreemptGuard;
-use crate::cpu::x86_64::pcr::{MAX_CPUS, get_current_cpu};
+use crate::cpu::x86_64::pcr::{MAX_CPUS, current_cpu_id};
 
 #[repr(C, align(64))]
 pub struct CacheAligned<T>(pub T);
@@ -53,7 +53,7 @@ impl<T> CpuLocal<T> {
     #[inline]
     pub fn get(&self) -> CpuPinned<'_, T> {
         let guard = PreemptGuard::new();
-        let cpu_id = get_current_cpu();
+        let cpu_id = current_cpu_id();
         // SAFETY: the PreemptGuard prevents migration, and cpu_id < MAX_CPUS.
         let ptr = unsafe { (*self.data.get()).get_unchecked(cpu_id) };
         CpuPinned {
@@ -66,7 +66,7 @@ impl<T> CpuLocal<T> {
     #[inline]
     pub fn get_mut(&self) -> CpuPinnedMut<'_, T> {
         let guard = PreemptGuard::new();
-        let cpu_id = get_current_cpu();
+        let cpu_id = current_cpu_id();
         // SAFETY: the PreemptGuard prevents migration, cpu_id < MAX_CPUS, and
         // each CPU reaches only its own slot while pinned.
         let ptr = unsafe { (*self.data.get()).get_unchecked_mut(cpu_id) };
@@ -139,7 +139,7 @@ impl<T> CpuLocal<T> {
         debug_assert!(cpu < MAX_CPUS);
         debug_assert_eq!(
             cpu,
-            get_current_cpu(),
+            current_cpu_id(),
             "CpuLocal::get_pinned_mut: cpu argument must match current CPU"
         );
         // SAFETY: the PreemptGuard pins this thread to `cpu`, so no other
@@ -178,7 +178,7 @@ impl<T> Deref for CpuPinned<'_, T> {
 impl<T> CpuPinned<'_, T> {
     #[inline]
     pub fn cpu_id(&self) -> usize {
-        get_current_cpu()
+        current_cpu_id()
     }
 }
 
@@ -207,7 +207,7 @@ impl<T> core::ops::DerefMut for CpuPinnedMut<'_, T> {
 impl<T> CpuPinnedMut<'_, T> {
     #[inline]
     pub fn cpu_id(&self) -> usize {
-        get_current_cpu()
+        current_cpu_id()
     }
 }
 

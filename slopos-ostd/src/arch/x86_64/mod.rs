@@ -9,7 +9,6 @@ pub mod linker;
 pub mod mem_fence;
 pub mod msr;
 pub mod naked;
-pub mod per_cpu_gdt;
 pub mod safestack;
 pub mod tsc;
 pub mod tss;

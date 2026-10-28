@@ -359,7 +359,7 @@ fn change(request: Request) -> Result<String, String> {
 fn share_for_second(top: &Path) -> Result<bool, String> {
     let Some(owners) = Owners::read(top) else {
         return Err(format!(
-            "{OWNERS_RECORD} cannot be read, which a boot that lays out the root writes; nobody was added"
+            "{OWNERS_RECORD} is absent or cannot be read; nobody was added"
         ));
     };
     if !owners.holds(LOCAL) {

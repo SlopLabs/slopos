@@ -7,8 +7,8 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use slopos_arch::pcr::{MAX_CPUS, get_cpu_count};
 use slopos_ostd::cpu::x86_64::interrupts::IrqDisabled;
+use slopos_ostd::cpu::x86_64::pcr::{MAX_CPUS, get_cpu_count};
 use slopos_ostd::sync::InitFlag;
 use slopos_ostd::sync::cpu_local::{CacheAligned, CpuLocal};
 

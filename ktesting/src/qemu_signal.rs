@@ -1,7 +1,5 @@
 //! QEMU exit mechanism for the test harness.
 
-use core::ffi::c_char;
-
 use slopos_ostd::klog_info;
 
 /// Request test harness shutdown via QEMU debug exit port.
@@ -18,9 +16,9 @@ pub fn qemu_signal_exit(failed_tests: i32) {
     slopos_ostd::platform::power::shutdown(
         &cap,
         if failed_tests == 0 {
-            b"Tests completed successfully\0".as_ptr() as *const c_char
+            "Tests completed successfully"
         } else {
-            b"Tests failed\0".as_ptr() as *const c_char
+            "Tests failed"
         },
     );
 }

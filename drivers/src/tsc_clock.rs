@@ -18,10 +18,10 @@
 
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
-use slopos_arch::MAX_CPUS;
-use slopos_arch::cpu::cpuid::{cpuid, cpuid_count};
-use slopos_arch::cpu::msr::{Msr, read_msr, write_msr};
-use slopos_arch::tsc::rdtsc;
+use slopos_ostd::arch::x86_64::cpuid::{cpuid, cpuid_count};
+use slopos_ostd::arch::x86_64::msr::{Msr, read_msr, write_msr};
+use slopos_ostd::arch::x86_64::tsc::rdtsc;
+use slopos_ostd::cpu::x86_64::pcr::MAX_CPUS;
 use slopos_ostd::klog_info;
 use slopos_ostd::sync::InitFlag;
 

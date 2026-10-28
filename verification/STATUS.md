@@ -35,14 +35,14 @@ own doc-comments — not duplicated here.
 
 > `mm::vm_space` uses the coarse lock-per-`VmSpace` model, in two tiers. The
 > borrow checker admits one `CursorMut` per `VmSpace` *object* (`CursorMut<'a>`
-> holds `&'a mut VmSpace`) — Phase 3D.3's sanctioned fallback. That alone is
-> not the whole-system guarantee: it says nothing about a second walker over
-> the same *physical* page tables reached some other way. So every `VmSpace`
-> shared across CPUs lives behind the lock that is the sole minter of the
-> `&mut` — `PROCESS_VMS[slot]` per process, `KERNEL_VM_SPACE` for the kernel
-> master — and no other writer of those tables exists.
-> `scripts/check_kernel_pml4_writer.sh` fails the build if one reappears; the
-> tier-2 argument is enforced there, not in prose.
+> holds `&'a mut VmSpace`). That alone is not the whole-system guarantee: it
+> says nothing about a second walker over the same *physical* page tables
+> reached some other way. So every `VmSpace` shared across CPUs lives behind
+> the lock that is the sole minter of the `&mut` — `PROCESS_VMS[slot]` per
+> process, `KERNEL_VM_SPACE` for the kernel master — and no other writer of
+> those tables exists. `scripts/check_kernel_pml4_writer.sh` holds the kernel
+> master to one writer — outside OSTD only `slopos_mm::kernel_mappings` takes a
+> `CursorMut` on it — so the tier-2 argument is enforced there, not in prose.
 >
 > The Verus block covers all four mutators — `map`, `map_kernel`, `map_io`,
 > `unmap` — with `Inv. 4 + 5` conditioned on user visibility, plus four
@@ -53,13 +53,11 @@ own doc-comments — not duplicated here.
 > surrounding prose: the two-tier premise above is reviewed text, not a
 > checked claim.
 >
-> `caller_holds_frame` and the `MapFailed` step were added after the model
-> verified green against a tree whose refused map dropped the frame: `map`
-> took `UFrame<M>` by value and returned a bare `MapError`, so `?` on any
-> fallible step after the move freed the page while the caller still held the
-> `PhysAddr` it had passed in and freed it again. The model had no vocabulary
-> for the failure path, so it had nothing to say about it. Conservation is
-> stated as a property of the *transition*
+> `caller_holds_frame` and the `MapFailed` step give the model the failure
+> path: a `map` that took `UFrame<M>` by value and returned a bare `MapError`
+> would let `?` on any fallible step after the move free the page while the
+> caller still held the `PhysAddr` it had passed in and freed it again.
+> Conservation is stated as a property of the *transition*
 > (`ref_conserve_map_attempt`), not of a state: on the `Overlap` path the
 > caller gets its frame back while the leaf still holds the different one it
 > already had, so no state predicate relates the two.
@@ -76,7 +74,7 @@ own doc-comments — not duplicated here.
 > cursors (`sq_tail`, `cq_head`) are modelled as adversarial-monotone inputs.
 > The volatile `UFrame` accessors beneath it and the kernel/userland
 > release/acquire memory-ordering protocol are **NOT** machine-checked: they
-> remain audited-only and KernMiri-covered (see the Phase-3G paragraph
+> remain audited-only and KernMiri-covered (see the `mm::uframe` paragraph
 > below). The proof covers the kernel's half of the protocol, not a malicious
 > user racing the shared cells at the memory level.
 
@@ -104,7 +102,7 @@ own doc-comments — not duplicated here.
 > universal set (a dropped `Fate` comes back), an endowment taken without its
 > subset check, a spawn that hands every child the universal set, a spawn that
 > hands the child its spawner's whole mask, a spawn that adds a grant for the
-> program it loads (the deleted table), a drop that narrows only its caller, a
+> program it loads, a drop that narrows only its caller, a
 > drop that records nothing on the process, and a fallible drop. Planting each
 > into the model fails its obligation: a widening `Act` fails
 > `no_step_widens`; an exec keeping the mask fails `exec_keeps_nothing_gated`;
@@ -133,11 +131,6 @@ own doc-comments — not duplicated here.
 > `const` totality assert over the syscall table plus
 > `scripts/check_authority_reachability.sh`, neither of which is a Verus
 > obligation.
->
-> Deleted with the grant table: the witness that `parent.caps & grant`
-> starved a grant. It defended conferral by a launcher that did not hold what
-> it conferred; authority now flows only from holders, and that intersection
-> is S3.
 
 > `slopos_ostd::task` verifies the **ownership state-machine LOGIC only** — the
 > strong-count ledger split by owner class, the existence-reference flag
@@ -171,18 +164,17 @@ verification gets the bulk of the credibility for a fraction of the cost.
 `arch` · `boot` · `cpu` · `dma` · `io` · `irq` · `sync` · `user` ·
 `util` · the `mm` remainder (`frame_alloc`, `heap`, `hhdm_bytes`, `io_mem`,
 `page_table`, `phys`, `tlb`, `uframe`) · `acpi` · `dev` · `ffi` · `pci` ·
-and the top-level support modules carrying contained `unsafe` (`memory`,
-`string`, `ring_buffer`, `bitmap`, `atomic_bitmap`, `stacktrace`,
-`panic_recovery`, `early_console`).
+and the top-level support modules carrying contained `unsafe`
+(`ring_buffer`, `bitmap`, `atomic_bitmap`, `panic_recovery`,
+`early_console`).
 
-The Phase-3G SlopRing accessor (`mm::uframe::{load_u32_acquire,
-store_u32_release, copy_out_volatile, copy_in_volatile}`) is the only new
-OSTD `unsafe` added since the proofs landed: ~6 lines of `read_volatile`/
+The SlopRing accessor (`mm::uframe::{load_u32_acquire, store_u32_release,
+copy_out_volatile, copy_in_volatile}`) is ~6 lines of `read_volatile`/
 `write_volatile` + acquire/release fences, each with a `// SAFETY:` note
 naming Inv. 4/5, KernMiri-covered (`tests/uframe_round_trip.rs`). The
 `ring/` kernel crate that consumes it is `#![forbid(unsafe_code)]` and so
 needs no audit — it reaches ring memory only through this verified-by-Miri
-byte-copy surface (AD-3 / Inv. 4/5). The Phase-7 SlopRing proofs
+byte-copy surface (AD-3 / Inv. 4/5). The SlopRing proofs
 (`proofs/ring_cursor.rs`, `proofs/ring_layout.rs`) machine-check the ring's
 index/state-machine **logic only** (cursor bounds, overflow accounting,
 in-flight cap, in-bounds masking); the four `mm::uframe` accessors above and
@@ -247,7 +239,7 @@ logic only**. What it does not reach, and what is audited instead:
   assertion `insert` carries.
 - Reclaim's *timing*. L6 covers reclaim as a refund bounded by the charge, so
   it cannot manufacture headroom. What it does not model is the `try_lock`
-  the ext2 reclaimer takes: whether declining to block is enough to keep the
+  the ext4 reclaimer takes: whether declining to block is enough to keep the
   reclaim path free of the deadlock its own allocation failure could cause is
   a lock-order argument, checked by lockdep and by
   `scripts/check_lockdep_headroom.sh`, not by Verus.
@@ -294,8 +286,8 @@ Three gates carry the claim between them:
 - `check_unsafe_expansion.sh` — no `unsafe` *reaches the compiler* in a
   kernel crate beyond an allowlisted `unsafe impl`, `link_section` or
   `no_mangle`, each with a recorded reason. Run over each crate's feature
-  configurations, because the ~2 700 `stest!` registrations live behind
-  test features.
+  configurations, because the `stest!` registrations live behind test
+  features.
 - `check_registry_sections.sh` — `kernel.elf` holds only the sections
   `link.ld` declares, each registry a whole number of entries. This is the
   only gate that sees a *dependency's* `link_section`.

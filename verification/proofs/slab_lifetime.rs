@@ -53,8 +53,8 @@ pub open spec fn slab_init(s: SlabState) -> bool {
 
 /// One critical section against the class's slab page.
 pub enum Step {
-    /// `SlabAllocator::grow_one`. The model carries a single page per class
-    /// epoch, so this fires only when no page is live.
+    /// `SlabAllocator::build_slab_page`. The model carries a single page per
+    /// class epoch, so this fires only when no page is live.
     Grow { cap: nat, size: nat, align: nat },
     /// `SlabAllocator::alloc_one` slow path: pop one cell off the page
     /// free-list.
@@ -192,7 +192,7 @@ pub open spec fn broken_reclaim(s: SlabState) -> SlabState {
 }
 
 /// Inv. 9 genuinely depends on the `outstanding == 0` guard: the broken
-/// reclaim reaches a state violating `slab_inv`, the fixed one never does.
+/// reclaim reaches a state violating `slab_inv`, the real one never does.
 pub proof fn broken_reclaim_violates_invariant()
     ensures
         exists|s: SlabState|

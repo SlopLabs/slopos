@@ -13,13 +13,13 @@ use core::mem::{align_of, size_of};
 use crate::{AllocError, KVec};
 
 use crate::mm::frame::{
-    AnonymousMeta, AnyFrameMeta, Frame, FrameError, Paddr, PageTableMeta as _PageTableMeta,
-    RingMeta,
+    AnonymousMeta, AnyFrameMeta, Frame, FrameError, PageTableMeta as _PageTableMeta, RingMeta,
 };
 use crate::mm::phys;
 use crate::mm::pod::Pod;
 use crate::process::AccountId;
 use crate::process::quota::{Charge, try_charge};
+use slopos_abi::addr::PhysAddr;
 use slopos_abi::quota::PinnedBytesAxis;
 
 const PAGE_SIZE: usize = 4096;
@@ -31,9 +31,6 @@ pub enum UFrameError {
     /// `(paddr + offset) % align_of::<T>() != 0` for a `read_pod` /
     /// `write_pod` call.
     Misaligned,
-    /// A vectored byte-copy completed only part of the requested transfer.
-    /// Reserved for future vectored-I/O paths; unused today.
-    Truncated,
     /// The kernel heap refused `USegment`'s per-segment bookkeeping.
     OutOfMemory,
 }
@@ -66,7 +63,7 @@ unsafe impl AnyUFrameMeta for AnonymousMeta {}
 // SAFETY: `RingMeta` backs a SlopRing SQ/CQ region mapped read+write into
 // userspace and mutated concurrently by a user thread. The kernel reaches the
 // bytes only through this module's volatile byte-copy interface, never forming
-// a `&Sqe` / `&mut Cqe` over the frame (SLOPRING § 5.2 / § 5.3).
+// a `&Sqe` / `&mut Cqe` over the frame.
 unsafe impl AnyUFrameMeta for RingMeta {}
 
 // Keeps the unused-import lint quiet on `_PageTableMeta`, which is
@@ -83,7 +80,7 @@ pub(crate) fn check_range(offset: usize, len: usize, region: usize) -> Result<()
 }
 
 #[inline]
-fn check_alignment<T: Pod>(paddr: Paddr, offset: usize) -> Result<(), UFrameError> {
+fn check_alignment<T: Pod>(paddr: PhysAddr, offset: usize) -> Result<(), UFrameError> {
     let align = align_of::<T>();
     let abs = (paddr.as_u64() as usize).wrapping_add(offset);
     if abs % align != 0 {
@@ -126,7 +123,7 @@ fn check_alignment<T: Pod>(paddr: Paddr, offset: usize) -> Result<(), UFrameErro
 /// ```
 pub struct UFrame<M: AnyUFrameMeta = AnonymousMeta>(Frame<M>);
 
-/// Paddr and ref-count, never frame contents: a formatter that printed those
+/// PhysAddr and ref-count, never frame contents: a formatter that printed those
 /// would be the no-reference rule broken from inside this module.
 impl<M: AnyUFrameMeta> core::fmt::Debug for UFrame<M> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -143,7 +140,7 @@ impl UFrame<AnonymousMeta> {
     /// caller does not in fact own this page. That is a refusal rather than an
     /// alias because the two differ in who frees the page, and a caller that
     /// asked to claim has an allocation it must undo.
-    pub fn claim_user_paddr(paddr: Paddr) -> Result<Self, FrameError> {
+    pub fn claim_user_paddr(paddr: PhysAddr) -> Result<Self, FrameError> {
         Ok(Self(Frame::<AnonymousMeta>::from_unused(
             paddr,
             AnonymousMeta::default(),
@@ -157,7 +154,7 @@ impl UFrame<AnonymousMeta> {
     ///
     /// [`FrameError::StateMismatch`] means the slot is UNUSED or BUSY: nobody
     /// owns the page, so there is no ref to share.
-    pub fn alias_user_paddr(paddr: Paddr) -> Result<Self, FrameError> {
+    pub fn alias_user_paddr(paddr: PhysAddr) -> Result<Self, FrameError> {
         Ok(Self(Frame::<AnonymousMeta>::from_in_use(paddr)?))
     }
 }
@@ -165,8 +162,8 @@ impl UFrame<AnonymousMeta> {
 impl UFrame<RingMeta> {
     /// Allocate a single zeroed physical frame from the registered frame
     /// allocator and wrap it as an untyped `UFrame<RingMeta>` — the SlopRing
-    /// allocation entry point (SLOPRING § 5.1). `None` if no allocator is
-    /// registered or the buddy is exhausted.
+    /// allocation entry point. `None` if no allocator is registered or the
+    /// buddy is exhausted.
     pub fn alloc() -> Option<Self> {
         let alloc = crate::mm::frame_alloc::current_frame_allocator()?;
         let opts = crate::mm::frame::FrameAllocOptions::single().zeroed();
@@ -185,18 +182,18 @@ impl<M: AnyUFrameMeta> UFrame<M> {
     /// Wrap a freshly-allocated, currently-unused physical frame and
     /// install `meta` into its slot. Mirrors
     /// [`Frame::from_unused`] but yields a no-reference handle.
-    pub fn from_unused(paddr: Paddr, meta: M) -> Result<Self, FrameError> {
+    pub fn from_unused(paddr: PhysAddr, meta: M) -> Result<Self, FrameError> {
         Ok(Self(Frame::<M>::from_unused(paddr, meta)?))
     }
 
     /// Borrow an already-live untyped frame, bumping its
     /// ref-count. The slot's `M` must already match the wrapper's
     /// `M`; mismatches return [`FrameError::StateMismatch`].
-    pub fn from_in_use(paddr: Paddr) -> Result<Self, FrameError> {
+    pub fn from_in_use(paddr: PhysAddr) -> Result<Self, FrameError> {
         Ok(Self(Frame::<M>::from_in_use(paddr)?))
     }
 
-    pub fn paddr(&self) -> Paddr {
+    pub fn paddr(&self) -> PhysAddr {
         self.0.paddr()
     }
 
@@ -324,7 +321,7 @@ impl<M: AnyUFrameMeta> UFrame<M> {
     /// Volatile byte-copy *out* of the ring into `dst` (a private
     /// kernel buffer). The volatile read makes a concurrent userspace
     /// write of these bytes well-defined; the caller validates and acts
-    /// only on the returned snapshot (SLOPRING § 5.3 / § 13.3).
+    /// only on the returned snapshot.
     pub fn copy_out_volatile(&self, offset: usize, dst: &mut [u8]) -> Result<(), UFrameError> {
         check_range(offset, dst.len(), PAGE_SIZE)?;
         if dst.is_empty() {
@@ -380,7 +377,7 @@ pub struct USegment<M: AnyUFrameMeta = AnonymousMeta> {
     /// `#[allow(dead_code)]`.
     #[allow(dead_code)]
     frames: KVec<Frame<M>>,
-    head_paddr: Paddr,
+    head_paddr: PhysAddr,
     len_pages: usize,
     _marker: PhantomData<M>,
 }
@@ -391,18 +388,18 @@ impl<M: AnyUFrameMeta> USegment<M> {
     /// any per-frame failure the frames already installed are dropped,
     /// releasing their slots.
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn from_unused_run(head: Paddr, len_pages: usize) -> Result<Self, UFrameError> {
+    pub fn from_unused_run(head: PhysAddr, len_pages: usize) -> Result<Self, UFrameError> {
         Self::from_unused_run_inner(head, len_pages)
     }
 
     #[allow(dead_code)]
     pub(crate) fn from_unused_run_inner(
-        head: Paddr,
+        head: PhysAddr,
         len_pages: usize,
     ) -> Result<Self, UFrameError> {
         let mut frames: KVec<Frame<M>> = KVec::with_capacity(len_pages)?;
         for i in 0..len_pages {
-            let paddr = Paddr::new(head.as_u64() + (i * PAGE_SIZE) as u64);
+            let paddr = PhysAddr::new(head.as_u64() + (i * PAGE_SIZE) as u64);
             match Frame::<M>::from_unused(paddr, M::default()) {
                 Ok(f) => {
                     if frames.push(f).is_err() {
@@ -423,7 +420,7 @@ impl<M: AnyUFrameMeta> USegment<M> {
         })
     }
 
-    pub fn head_paddr(&self) -> Paddr {
+    pub fn head_paddr(&self) -> PhysAddr {
         self.head_paddr
     }
 
@@ -508,7 +505,7 @@ impl<M: AnyUFrameMeta> USegment<M> {
 /// a reference — it deliberately exposes no `&[u8]`.
 #[derive(Clone, Copy, Debug)]
 pub struct UIoSlice {
-    pub paddr: Paddr,
+    pub paddr: PhysAddr,
     pub len: usize,
 }
 
@@ -516,7 +513,7 @@ pub struct UIoSlice {
 /// [`UIoSlice`] so the type system tracks read-vs-write intent.
 #[derive(Debug)]
 pub struct UIoSliceMut {
-    pub paddr: Paddr,
+    pub paddr: PhysAddr,
     pub len: usize,
 }
 
@@ -687,13 +684,13 @@ mod tests {
 
     #[test]
     fn check_alignment_accepts_aligned() {
-        let p = Paddr::new(0x1000);
+        let p = PhysAddr::new(0x1000);
         assert!(check_alignment::<u64>(p, 8).is_ok());
     }
 
     #[test]
     fn check_alignment_rejects_misaligned() {
-        let p = Paddr::new(0x1000);
+        let p = PhysAddr::new(0x1000);
         assert_eq!(check_alignment::<u64>(p, 1), Err(UFrameError::Misaligned));
     }
 

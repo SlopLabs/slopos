@@ -1017,13 +1017,13 @@ impl Engine {
             return Err(BlkError::BadRequest);
         }
         let mut last = BlkError::Busy;
-        let began = slopos_arch::tsc::rdtsc();
+        let began = slopos_ostd::arch::x86_64::tsc::rdtsc();
         for _ in 0..REQUEST_ATTEMPTS {
             match self.attempt(req, fill, drain) {
                 Ok(()) => {
                     stats::note_request_cycles(
                         req.op == Op::Write,
-                        slopos_arch::tsc::rdtsc().saturating_sub(began),
+                        slopos_ostd::arch::x86_64::tsc::rdtsc().saturating_sub(began),
                     );
                     return Ok(());
                 }
@@ -1341,11 +1341,14 @@ pub mod hooks {
 
     /// Mark the calling task killed once its next request is in the device.
     pub fn kill_after_next_submit() {
-        KILL_AFTER_SUBMIT.store(slopos_arch::pcr::current_task_id(), Ordering::Release);
+        KILL_AFTER_SUBMIT.store(
+            slopos_ostd::cpu::x86_64::pcr::current_task_id(),
+            Ordering::Release,
+        );
     }
 
     pub(super) fn kill_if_armed() {
-        let me = slopos_arch::pcr::current_task_id();
+        let me = slopos_ostd::cpu::x86_64::pcr::current_task_id();
         if me != INVALID_TASK_ID
             && KILL_AFTER_SUBMIT
                 .compare_exchange(me, INVALID_TASK_ID, Ordering::AcqRel, Ordering::Acquire)

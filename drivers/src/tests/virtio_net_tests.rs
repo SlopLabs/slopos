@@ -87,7 +87,7 @@ pub fn test_virtio_net_raw_udp_tx() -> TestResult {
     pass!()
 }
 
-/// Zero-copy SG TX chain linkage, `[header] -> run0 -> run1` (SLOPRING § 13).
+/// Zero-copy SG TX chain linkage, `[header] -> run0 -> run1`.
 pub fn test_build_tx_chain_links_runs() -> TestResult {
     let slots = [3u16, 4, 5];
     let runs = [(0x0020_0000u64, 1500u32), (0x0030_0000u64, 200u32)];

@@ -31,7 +31,7 @@ ALLOWLIST=()
 # Same crate set the sibling gate scans. `userland/` is out of scope: it has
 # no kernel wait queues.
 KERNEL_DIRS=(
-    abi acpi boot core drivers font fs gfx hermetic karch keymap-core
+    abi acpi boot core drivers font fs gfx hermetic keymap-core
     kernel-services ktesting mm net pidfd ring sched service-core signalfd
     slopos-ostd slopos-ostd-derive video vt
 )

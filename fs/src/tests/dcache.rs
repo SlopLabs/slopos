@@ -1,4 +1,4 @@
-//! The ext2 name and attribute caches never answer from before a change.
+//! The ext4 name and attribute caches never answer from before a change.
 //!
 //! Every check reads a name or an inode twice before the change it is about,
 //! so the answer after it would come from the cache if nothing invalidated it.
@@ -8,9 +8,9 @@ use slopos_testing::TestResult;
 
 use super::{Ext2ImageSpec, FIX_FILE_BLOCK, build_ext2_image};
 use crate::blockdev::BlockDevice;
-use crate::ext2_vfs::Ext2Mount;
+use crate::ext4_vfs::Ext4Mount;
 use crate::vfs::VfsError;
-use crate::vfs::init::{vfs_ext2_pool_claim, vfs_ext2_pool_release};
+use crate::vfs::init::{vfs_ext4_pool_claim, vfs_ext4_pool_release};
 use crate::vfs::traits::{FileStat, FileSystem, FileType, InodeId, VfsResult};
 
 const IMAGE_BLOCKS: u32 = 512;
@@ -30,18 +30,18 @@ fn image(file: Option<(&[u8], &[u8])>) -> Option<KBox<dyn BlockDevice + Send + S
 }
 
 /// Run `body` against a pooled instance with a fresh fixture attached.
-fn on_fresh_mount(body: fn(&'static Ext2Mount) -> Check) -> TestResult {
+fn on_fresh_mount(body: fn(&'static Ext4Mount) -> Check) -> TestResult {
     let Some(device) = image(None) else {
         return TestResult::Skipped;
     };
-    let Some(fs) = vfs_ext2_pool_claim() else {
-        return slopos_testing::fail!("the ext2 pool handed out no instance");
+    let Some(fs) = vfs_ext4_pool_claim() else {
+        return slopos_testing::fail!("the ext4 pool handed out no instance");
     };
     let outcome = match fs.attach(device, false) {
         Ok(_) => body(fs),
         Err(_) => Err("the fixture would not attach"),
     };
-    vfs_ext2_pool_release(fs, false);
+    vfs_ext4_pool_release(fs, false);
     match outcome {
         Ok(()) => TestResult::Pass,
         Err(msg) => slopos_testing::fail!(msg),
@@ -49,7 +49,7 @@ fn on_fresh_mount(body: fn(&'static Ext2Mount) -> Check) -> TestResult {
 }
 
 /// `lookup` twice, both answering `want`: the second is the cached one.
-fn resolves(fs: &Ext2Mount, parent: InodeId, name: &[u8], want: InodeId) -> Check {
+fn resolves(fs: &Ext4Mount, parent: InodeId, name: &[u8], want: InodeId) -> Check {
     for _ in 0..2 {
         if fs.lookup(parent, name) != Ok(want) {
             return Err("a name resolved to the wrong inode");
@@ -58,7 +58,7 @@ fn resolves(fs: &Ext2Mount, parent: InodeId, name: &[u8], want: InodeId) -> Chec
     Ok(())
 }
 
-fn absent(fs: &Ext2Mount, parent: InodeId, name: &[u8]) -> Check {
+fn absent(fs: &Ext4Mount, parent: InodeId, name: &[u8]) -> Check {
     for _ in 0..2 {
         if fs.lookup(parent, name) != Err(VfsError::NotFound) {
             return Err("a name that should be absent resolved");
@@ -68,7 +68,7 @@ fn absent(fs: &Ext2Mount, parent: InodeId, name: &[u8]) -> Check {
 }
 
 /// `stat` twice, answering the second.
-fn stat2(fs: &Ext2Mount, inode: InodeId) -> VfsResult<FileStat> {
+fn stat2(fs: &Ext4Mount, inode: InodeId) -> VfsResult<FileStat> {
     fs.stat(inode)?;
     fs.stat(inode)
 }
@@ -80,12 +80,12 @@ fn made(result: VfsResult<InodeId>) -> Result<InodeId, &'static str> {
 /// A rename moves the binding out of the old directory and into the new one,
 /// a directory's `..` follows it, and a rename over a name frees the inode it
 /// displaced.
-pub fn test_ext2_dcache_rename_across_directories() -> TestResult {
+pub fn test_ext4_dcache_rename_across_directories() -> TestResult {
     on_fresh_mount(rename_body)
 }
 
 #[inline(never)]
-fn rename_body(fs: &'static Ext2Mount) -> Check {
+fn rename_body(fs: &'static Ext4Mount) -> Check {
     let root = fs.root_inode();
     let d1 = made(fs.create(root, b"d1", FileType::Directory))?;
     let d2 = made(fs.create(root, b"d2", FileType::Directory))?;
@@ -128,12 +128,12 @@ fn rename_body(fs: &'static Ext2Mount) -> Check {
 
 /// An unlinked name is absent, a name cached as absent appears when created,
 /// and an orphan's record follows it through its detach and its release.
-pub fn test_ext2_dcache_unlink_and_create() -> TestResult {
+pub fn test_ext4_dcache_unlink_and_create() -> TestResult {
     on_fresh_mount(unlink_create_body)
 }
 
 #[inline(never)]
-fn unlink_create_body(fs: &'static Ext2Mount) -> Check {
+fn unlink_create_body(fs: &'static Ext4Mount) -> Check {
     let root = fs.root_inode();
     let f = made(fs.create(root, b"u", FileType::Regular))?;
     resolves(fs, root, b"u", f)?;
@@ -170,12 +170,12 @@ fn unlink_create_body(fs: &'static Ext2Mount) -> Check {
 
 /// Every change a record takes is what the next `stat` reports: mode, size
 /// both ways, the link count through `link` and `unlink`, times and the seal.
-pub fn test_ext2_dcache_stat_follows_every_record_change() -> TestResult {
+pub fn test_ext4_dcache_stat_follows_every_record_change() -> TestResult {
     on_fresh_mount(attr_body)
 }
 
 #[inline(never)]
-fn attr_body(fs: &'static Ext2Mount) -> Check {
+fn attr_body(fs: &'static Ext4Mount) -> Check {
     let root = fs.root_inode();
     let f = made(fs.create(root, b"a", FileType::Regular))?;
     if stat2(fs, f).map(|s| (s.mode & 0o777, s.size, s.nlink)) != Ok((0o644, 0, 1)) {
@@ -226,12 +226,12 @@ fn attr_body(fs: &'static Ext2Mount) -> Check {
 
 /// A create that fails and rolls back after allocating its inode leaves the
 /// name absent, and the create that later succeeds is seen.
-pub fn test_ext2_dcache_failed_create_stays_absent() -> TestResult {
+pub fn test_ext4_dcache_failed_create_stays_absent() -> TestResult {
     on_fresh_mount(failed_create_body)
 }
 
 #[inline(never)]
-fn failed_create_body(fs: &'static Ext2Mount) -> Check {
+fn failed_create_body(fs: &'static Ext4Mount) -> Check {
     let root = fs.root_inode();
     let dir = made(fs.create(root, b"full", FileType::Directory))?;
     let big = made(fs.create(root, b"big", FileType::Regular))?;
@@ -264,7 +264,7 @@ fn failed_create_body(fs: &'static Ext2Mount) -> Check {
 }
 
 #[inline(never)]
-fn fill_volume(fs: &Ext2Mount, file: InodeId) -> Check {
+fn fill_volume(fs: &Ext4Mount, file: InodeId) -> Check {
     let chunk = [0xa5u8; 1024];
     let mut at = 0u64;
     for _ in 0..IMAGE_BLOCKS * 2 {
@@ -280,7 +280,7 @@ fn fill_volume(fs: &Ext2Mount, file: InodeId) -> Check {
 /// Fill the directory's one block with ever shorter names until not even
 /// `probe`'s entry fits: growing it would need a block the volume has not got.
 #[inline(never)]
-fn fill_directory(fs: &Ext2Mount, dir: InodeId) -> Check {
+fn fill_directory(fs: &Ext4Mount, dir: InodeId) -> Check {
     let mut name = [b'x'; 200];
     let mut serial = 0u32;
     for len in [200usize, 100, 48, 24, 12, 8] {
@@ -301,12 +301,12 @@ fn fill_directory(fs: &Ext2Mount, dir: InodeId) -> Check {
 /// A removed directory answers no name it was cached with, and its inode
 /// number, handed to a new directory and then to a file, answers only for
 /// what it now is.
-pub fn test_ext2_dcache_reused_directory_number() -> TestResult {
+pub fn test_ext4_dcache_reused_directory_number() -> TestResult {
     on_fresh_mount(reused_directory_body)
 }
 
 #[inline(never)]
-fn reused_directory_body(fs: &'static Ext2Mount) -> Check {
+fn reused_directory_body(fs: &'static Ext4Mount) -> Check {
     let root = fs.root_inode();
     let old = made(fs.create(root, b"old", FileType::Directory))?;
     let x = made(fs.create(old, b"x", FileType::Regular))?;
@@ -356,12 +356,12 @@ fn reused_directory_body(fs: &'static Ext2Mount) -> Check {
 
 /// A directory renamed over an empty one takes its name, and the one it
 /// displaced is freed with every name it was cached with.
-pub fn test_ext2_dcache_rename_over_an_empty_directory() -> TestResult {
+pub fn test_ext4_dcache_rename_over_an_empty_directory() -> TestResult {
     on_fresh_mount(rename_over_dir_body)
 }
 
 #[inline(never)]
-fn rename_over_dir_body(fs: &'static Ext2Mount) -> Check {
+fn rename_over_dir_body(fs: &'static Ext4Mount) -> Check {
     let root = fs.root_inode();
     let d1 = made(fs.create(root, b"d1", FileType::Directory))?;
     let d2 = made(fs.create(root, b"d2", FileType::Directory))?;
@@ -399,12 +399,12 @@ fn rename_over_dir_body(fs: &'static Ext2Mount) -> Check {
 
 /// A rename over a file that is still open keeps the displaced inode as an
 /// orphan: unnamed, unlinked, still a file until it is released.
-pub fn test_ext2_dcache_rename_over_an_open_file() -> TestResult {
+pub fn test_ext4_dcache_rename_over_an_open_file() -> TestResult {
     on_fresh_mount(rename_over_open_body)
 }
 
 #[inline(never)]
-fn rename_over_open_body(fs: &'static Ext2Mount) -> Check {
+fn rename_over_open_body(fs: &'static Ext4Mount) -> Check {
     let root = fs.root_inode();
     let dir = made(fs.create(root, b"d", FileType::Directory))?;
     let a = made(fs.create(dir, b"a", FileType::Regular))?;
@@ -439,18 +439,18 @@ fn rename_over_open_body(fs: &'static Ext2Mount) -> Check {
 
 /// A pool slot handed a different image answers from that image, not from
 /// what it cached of the last one.
-pub fn test_ext2_dcache_forgets_a_detached_image() -> TestResult {
+pub fn test_ext4_dcache_forgets_a_detached_image() -> TestResult {
     let (Some(first), Some(second)) = (
         image(Some((b"alpha", b"first"))),
         image(Some((b"beta", b"second-image"))),
     ) else {
         return TestResult::Skipped;
     };
-    let Some(fs) = vfs_ext2_pool_claim() else {
-        return slopos_testing::fail!("the ext2 pool handed out no instance");
+    let Some(fs) = vfs_ext4_pool_claim() else {
+        return slopos_testing::fail!("the ext4 pool handed out no instance");
     };
     let outcome = reattach_body(fs, first, second);
-    vfs_ext2_pool_release(fs, false);
+    vfs_ext4_pool_release(fs, false);
     match outcome {
         Ok(()) => TestResult::Pass,
         Err(msg) => slopos_testing::fail!(msg),
@@ -459,7 +459,7 @@ pub fn test_ext2_dcache_forgets_a_detached_image() -> TestResult {
 
 #[inline(never)]
 fn reattach_body(
-    fs: &'static Ext2Mount,
+    fs: &'static Ext4Mount,
     first: KBox<dyn BlockDevice + Send + Sync>,
     second: KBox<dyn BlockDevice + Send + Sync>,
 ) -> Check {
@@ -489,22 +489,22 @@ fn reattach_body(
 }
 
 slopos_testing::stest!(
-    name = test_ext2_dcache_rename_across_directories,
+    name = test_ext4_dcache_rename_across_directories,
     suite = fs
 );
-slopos_testing::stest!(name = test_ext2_dcache_unlink_and_create, suite = fs);
+slopos_testing::stest!(name = test_ext4_dcache_unlink_and_create, suite = fs);
 slopos_testing::stest!(
-    name = test_ext2_dcache_stat_follows_every_record_change,
+    name = test_ext4_dcache_stat_follows_every_record_change,
     suite = fs
 );
 slopos_testing::stest!(
-    name = test_ext2_dcache_failed_create_stays_absent,
+    name = test_ext4_dcache_failed_create_stays_absent,
     suite = fs
 );
-slopos_testing::stest!(name = test_ext2_dcache_forgets_a_detached_image, suite = fs);
-slopos_testing::stest!(name = test_ext2_dcache_reused_directory_number, suite = fs);
+slopos_testing::stest!(name = test_ext4_dcache_forgets_a_detached_image, suite = fs);
+slopos_testing::stest!(name = test_ext4_dcache_reused_directory_number, suite = fs);
 slopos_testing::stest!(
-    name = test_ext2_dcache_rename_over_an_empty_directory,
+    name = test_ext4_dcache_rename_over_an_empty_directory,
     suite = fs
 );
-slopos_testing::stest!(name = test_ext2_dcache_rename_over_an_open_file, suite = fs);
+slopos_testing::stest!(name = test_ext4_dcache_rename_over_an_open_file, suite = fs);

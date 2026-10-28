@@ -8,8 +8,8 @@ use crate::MAX_NAME_LEN;
 use crate::vfs::{
     FileStat, FileSystem, FileType, FsStats, InodeId, Owner, Timestamp, VfsError, VfsResult,
 };
+use slopos_ostd::sync::LockClassKey;
 use slopos_ostd::sync::SpinLock;
-use slopos_ostd::sync::lock_tracking::LockClassKey;
 
 const PAGE_SIZE: u64 = 4096;
 
@@ -31,8 +31,8 @@ pub(crate) const RAMFS_CHUNK_BATCH: usize = 32;
 /// so one staging array covers every one of them.
 const SYMLINK_CHUNKS: usize = (crate::MAX_PATH_LEN + RAMFS_FILE_CHUNK - 1) / RAMFS_FILE_CHUNK;
 
-/// What this filesystem was fixed at before its bounds were derived from the
-/// machine, kept as floors so a small one behaves exactly as it did.
+/// Floors under the bounds derived from the machine, so a small one still
+/// holds a 16 MiB file and 4096 inodes.
 pub(crate) const RAMFS_MIN_FILE_SIZE: usize = 16 * 1024 * 1024;
 pub(crate) const RAMFS_MIN_INODES: usize = 4096;
 
@@ -511,7 +511,7 @@ impl RamInode {
 }
 
 /// Stamp a timestamp only when the wall clock can answer, so a boot without
-/// one leaves the field unset rather than claiming 1970, as ext2 does.
+/// one leaves the field unset rather than claiming 1970, as ext4 does.
 fn stamp(field: &mut Timestamp) {
     if let Some(now) = Timestamp::now() {
         *field = now;

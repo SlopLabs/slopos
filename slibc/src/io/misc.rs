@@ -134,18 +134,18 @@ pub unsafe extern "C" fn fcntl(fd: c_int, cmd: c_int, mut args: ...) -> c_int {
 
 pub const F_DUPFD_CLOEXEC: u64 = slopos_abi::syscall::F_DUPFD_CLOEXEC;
 
-/// Returns 1 if `fd` is a terminal, 0 otherwise.
-///
 /// Goes to `Sys::ioctl` rather than the exported `ioctl` so the probe carries
 /// the kernel's own `UserTermios` size: the libc-declared `struct termios` is
 /// wider, and this is a probe rather than a read of the settings.
+pub(crate) fn is_terminal(fd: i32) -> bool {
+    let mut buf = [0u8; core::mem::size_of::<slopos_abi::syscall::UserTermios>()];
+    Sys::ioctl(fd, slopos_abi::syscall::TCGETS, buf.as_mut_ptr() as u64).is_ok()
+}
+
+/// Returns 1 if `fd` is a terminal, 0 otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn isatty(fd: i32) -> i32 {
-    let mut buf = [0u8; core::mem::size_of::<slopos_abi::syscall::UserTermios>()];
-    match Sys::ioctl(fd, slopos_abi::syscall::TCGETS, buf.as_mut_ptr() as u64) {
-        Ok(_) => 1,
-        Err(_) => 0,
-    }
+    is_terminal(fd) as i32
 }
 
 /// `ioctl(2)`, variadic as C has it.

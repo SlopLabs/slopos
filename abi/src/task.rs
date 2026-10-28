@@ -33,13 +33,9 @@ pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;
 pub const MAX_PROCESSES: usize = 1024;
 
 /// The login tags init gives the sessions people log in to, one each and
-/// never twice in a boot; only a tag in this range, or the one desktop's of
-/// an init from before them, has a clipboard. Every other tag, and 0, names
-/// something running for the system.
+/// never twice in a boot; only a tag in this range has a clipboard. Every
+/// other tag, and 0, names something running for the system.
 pub const SESSION_LOGINS: core::ops::Range<u32> = 0x10_0000..0x20_0000;
-/// The login tag of the one desktop an init from before [`SESSION_LOGINS`]
-/// runs.
-pub const DESKTOP_LOGIN: u32 = 1;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -108,33 +104,37 @@ impl TaskStatus {
     }
 }
 
-/// Discriminant `1` is retired and reserved.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum BlockReason {
     #[default]
     None = 0,
-    Sleep = 2,
-    IoWait = 3,
-    MutexWait = 4,
-    KeyboardWait = 5,
-    IpcWait = 6,
-    Generic = 7,
-    FutexWait = 8,
+    Sleep = 1,
+    IoWait = 2,
+    MutexWait = 3,
+    Generic = 4,
+    FutexWait = 5,
 }
 
 impl BlockReason {
+    /// Every reason, ordered by discriminant.
+    pub const ALL: [Self; 6] = [
+        Self::None,
+        Self::Sleep,
+        Self::IoWait,
+        Self::MutexWait,
+        Self::Generic,
+        Self::FutexWait,
+    ];
+
     #[inline]
     pub const fn from_u8(value: u8) -> Self {
         match value {
-            0 => Self::None,
-            2 => Self::Sleep,
-            3 => Self::IoWait,
-            4 => Self::MutexWait,
-            5 => Self::KeyboardWait,
-            6 => Self::IpcWait,
-            7 => Self::Generic,
-            8 => Self::FutexWait,
+            1 => Self::Sleep,
+            2 => Self::IoWait,
+            3 => Self::MutexWait,
+            4 => Self::Generic,
+            5 => Self::FutexWait,
             _ => Self::None,
         }
     }
@@ -212,12 +212,12 @@ pub const TASK_FLAG_NO_PREEMPT: u16 = 0x04;
 /// Place the spawned task into its own process group (`pgid = task_id`) instead
 /// of inheriting the parent's, closing the SMP race between spawn and the
 /// parent's `setpgid` + `tcsetpgrp` calls.
-pub const TASK_FLAG_NEW_PGRP: u16 = 0x80;
+pub const TASK_FLAG_NEW_PGRP: u16 = 0x08;
 /// Make the spawned task's process group the foreground group of its inherited
 /// controlling terminal *before* the task becomes schedulable, closing the race
 /// against the parent's `tcsetpgrp`. Only honoured when the child's session
 /// matches the terminal's controlling session.
-pub const TASK_FLAG_FOREGROUND: u16 = 0x100;
+pub const TASK_FLAG_FOREGROUND: u16 = 0x10;
 
 // The four masks below partition the word, so "may a caller set this bit?" is
 // answered once, here.
@@ -240,12 +240,10 @@ pub const SPAWN_PRIVILEGED: u16 = TASK_FLAG_NO_PREEMPT;
 /// as `NoMem`.
 pub const SPAWN_MODE_BITS: u16 = TASK_FLAG_USER_MODE | TASK_FLAG_KERNEL_MODE;
 
-/// Undefined flag bits, all failing closed with `EINVAL`: `0x0040` is the
-/// retired `TASK_FLAG_FPU_INITIALIZED`, and the rest are the privileges that
-/// moved to the capability mask. A literal on purpose: deriving it from the
+/// Undefined flag bits: `EINVAL`. A literal on purpose: deriving it from the
 /// complement of the other three would make the partition assert below
 /// unfailable, which is the only reason that assert exists.
-pub const SPAWN_RESERVED: u16 = 0xFE78;
+pub const SPAWN_RESERVED: u16 = 0xFFE0;
 
 const _: () = assert!(
     (SPAWN_USER_SETTABLE | SPAWN_PRIVILEGED | SPAWN_MODE_BITS | SPAWN_RESERVED) == u16::MAX,

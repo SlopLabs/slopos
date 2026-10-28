@@ -1,9 +1,9 @@
 use core::ffi::CStr;
 
 use slopos_abi::task::TaskFaultReason;
-use slopos_arch::InterruptFrame;
-use slopos_arch::cpu;
 use slopos_kernel_services::kernel_vm_space::activate_post_user_fault;
+use slopos_ostd::cpu::x86_64 as cpu;
+use slopos_ostd::irq::interrupt_frame::InterruptFrame;
 use slopos_ostd::{kdiag_dump_interrupt_frame, klog_info};
 use slopos_sched::scheduler::schedule;
 use slopos_sched::task::TaskRef;
@@ -33,7 +33,7 @@ fn retire_faulted_cpu(task_ref: TaskRef, reason: TaskFaultReason, on_ist: bool) 
         // Re-prime with a naked store: an instrumented setter would resolve this
         // slot as its own data-SP and undo the write on return.
         let dstack_top = crate::ist_stacks::exc_dstack_top_current_cpu();
-        slopos_arch::pcr::reset_ist_unsafe_sp(dstack_top);
+        slopos_ostd::cpu::x86_64::pcr::reset_ist_unsafe_sp(dstack_top);
         // This handler diverges into `schedule()`, so the exception-entry preempt
         // hold from the IST dispatcher would leak, leaving the next task's preempt
         // count stuck at >=1.
@@ -146,7 +146,7 @@ pub(crate) fn resolve_user_fault_task() -> Option<TaskRef> {
         .map(|current| current.id())
         .and_then(slopos_sched::task::task_find_by_id)
     {
-        let task_cr3 = task_ref.context_cr3() & !0xFFF;
+        let task_cr3 = task_ref.cr3() & !0xFFF;
         if task_cr3 == hw_cr3 {
             return Some(task_ref);
         }

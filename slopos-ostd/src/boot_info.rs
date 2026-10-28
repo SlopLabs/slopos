@@ -2,61 +2,6 @@ use slopos_abi::DisplayInfo;
 
 use crate::sync::KernelSync;
 
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub struct LimineMemmapEntry {
-    pub base: u64,
-    pub length: u64,
-    pub typ: u64,
-}
-
-#[repr(C)]
-pub struct LimineMemmapResponse {
-    pub revision: u64,
-    pub entry_count: u64,
-    /// Bootloader-published `[*const LimineMemmapEntry; entry_count]`, every
-    /// entry at a lifetime-stable address. `KernelSync` is what makes the
-    /// surrounding struct auto-derive `Send + Sync`.
-    pub entries: KernelSync<*const *const LimineMemmapEntry>,
-}
-
-/// Iterate the entries of a Limine memmap response; empty if `memmap` is null
-/// or its entries array is empty.
-#[inline]
-pub fn limine_memmap_iter(
-    memmap: *const LimineMemmapResponse,
-) -> impl Iterator<Item = LimineMemmapEntry> {
-    // SAFETY: `memmap` is null (handled below) or points at the
-    // bootloader-published, lifetime-stable response; its `entries` array is
-    // `[*const LimineMemmapEntry; entry_count]` of the same lifetime.
-    let parts: Option<(usize, *const *const LimineMemmapEntry)> = unsafe {
-        if memmap.is_null() {
-            None
-        } else {
-            let response = &*memmap;
-            if response.entry_count == 0 || response.entries.is_null() {
-                None
-            } else {
-                let count = response.entry_count.min(u32::MAX as u64) as usize;
-                Some((count, *response.entries))
-            }
-        }
-    };
-    let (count, entries_ptr) = parts.unwrap_or((0, core::ptr::null()));
-    (0..count).filter_map(move |i| {
-        // SAFETY: `i < count` and `entries_ptr` is non-null per the Some()
-        // branch above; the bootloader guarantees the slot's lifetime.
-        unsafe {
-            let entry_ptr = *entries_ptr.add(i);
-            if entry_ptr.is_null() {
-                None
-            } else {
-                Some(*entry_ptr)
-            }
-        }
-    })
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u64)]
 pub enum MemoryRegionKind {

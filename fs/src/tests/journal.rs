@@ -5,7 +5,7 @@
 //! [`synthetic_log`] serves tests that need more slots than that journal has.
 //!
 //! Every mount goes through [`with_log`] and the probe device reports through
-//! statics rather than a handle the bodies would carry: one `Ext2Fs` plus one
+//! statics rather than a handle the bodies would carry: one `Ext4Fs` plus one
 //! `BlockCache` already fills a 2 KiB frame.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -16,12 +16,12 @@ use slopos_testing::{TestResult, fail};
 
 use super::{Ext2ImageSpec, FIX_FILE_BLOCK, build_ext2_image, ext4_image};
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
-use crate::ext2::cache::{BlockCache, BlockKind, CACHE_ENTRIES_MIN};
-use crate::ext2::journal::{
+use crate::ext4::cache::{BlockCache, BlockKind, CACHE_ENTRIES_MIN};
+use crate::ext4::journal::{
     AttachError, Journal, JournalRecovery, JournalRuns, LogExtent, LogVolume, MAX_LOG_SLOTS,
 };
-use crate::ext2::types::BlockNum;
-use crate::ext2::{Ext2Error, Ext2Fs, ReadOnlyReason};
+use crate::ext4::types::BlockNum;
+use crate::ext4::{Ext4Error, Ext4Fs, ReadOnlyReason};
 
 /// Comfortably above `journal::MIN_LOG_SLOTS`, and small enough to leave the
 /// fixture room to allocate.
@@ -133,12 +133,12 @@ fn plain_image() -> Option<MemoryBlockDevice> {
 #[inline(never)]
 fn with_log(
     device: &dyn BlockDevice,
-    body: fn(&mut Ext2Fs<'_>) -> Result<(), &'static str>,
+    body: fn(&mut Ext4Fs<'_>) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
-    let (sb, geom) = Ext2Fs::mount_params(device).map_err(|_| "mount_params")?;
+    let (sb, geom) = Ext4Fs::mount_params(device).map_err(|_| "mount_params")?;
     let mut cache =
         BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN).map_err(|_| "cache")?;
-    let mut fs = Ext2Fs::new(device, &mut cache, sb, geom);
+    let mut fs = Ext4Fs::new(device, &mut cache, sb, geom);
     body(&mut fs)
 }
 
@@ -149,7 +149,7 @@ pub(super) fn journal_image() -> Option<MemoryBlockDevice> {
 
 /// Attach the journal and stamp the volume in use: what a writable mount
 /// does, in that order.
-fn attach(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn attach(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     match fs.attach_journal() {
         Ok(Some(_)) => {}
         Ok(None) => return Err("the fixture's journal was not attached"),
@@ -160,17 +160,17 @@ fn attach(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 
 /// An operation the log committed and nothing else wrote home survives a mount
 /// that never saw a clean unmount — the whole point of having a log.
-pub fn test_ext2_journal_replays_an_unsynced_operation() -> TestResult {
+pub fn test_ext4_journal_replays_an_unsynced_operation() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
     };
     if let Err(msg) = with_log(&device, log_one_operation) {
         return fail!("staging the transaction: {}", msg);
     }
-    let Ok((sb, ..)) = Ext2Fs::mount_params(&device) else {
+    let Ok((sb, ..)) = Ext4Fs::mount_params(&device) else {
         return fail!("the staged image no longer parses");
     };
-    if Ext2Fs::mount_read_only_reason(&sb, &device) != Some(ReadOnlyReason::NeedsRecovery) {
+    if Ext4Fs::mount_read_only_reason(&sb, &device) != Some(ReadOnlyReason::NeedsRecovery) {
         return fail!("the image should read as needing recovery");
     }
     match with_log(&device, replay_and_check) {
@@ -179,7 +179,7 @@ pub fn test_ext2_journal_replays_an_unsynced_operation() -> TestResult {
     }
 }
 
-fn log_one_operation(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn log_one_operation(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let ino = fs.create_file(2, b"logged.txt").map_err(|_| "create")?;
     fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
@@ -191,9 +191,9 @@ fn log_one_operation(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 
 /// A read-only mount of a volume whose journal needs recovery is refused:
 /// it may not replay, and the homes are older than the journal.
-pub fn test_ext2_read_only_mount_needing_recovery_is_refused() -> TestResult {
+pub fn test_ext4_read_only_mount_needing_recovery_is_refused() -> TestResult {
     use crate::vfs::VfsError;
-    use crate::vfs::init::{vfs_ext2_pool_claim, vfs_ext2_pool_release};
+    use crate::vfs::init::{vfs_ext4_pool_claim, vfs_ext4_pool_release};
 
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
@@ -204,11 +204,11 @@ pub fn test_ext2_read_only_mount_needing_recovery_is_refused() -> TestResult {
     let Ok(device) = KBox::try_new(device) else {
         return fail!("out of memory");
     };
-    let Some(fs) = vfs_ext2_pool_claim() else {
-        return fail!("the ext2 pool handed out no instance");
+    let Some(fs) = vfs_ext4_pool_claim() else {
+        return fail!("the ext4 pool handed out no instance");
     };
     let attached = fs.attach(device, true).map(|_| ());
-    vfs_ext2_pool_release(fs, false);
+    vfs_ext4_pool_release(fs, false);
     match attached {
         Err(VfsError::ReadOnly) => TestResult::Pass,
         Ok(()) => fail!("a read-only mount came up over a journal it could not replay"),
@@ -218,8 +218,8 @@ pub fn test_ext2_read_only_mount_needing_recovery_is_refused() -> TestResult {
 
 /// Freed blocks are kept as runs: a file freed end to end costs one entry,
 /// and a block between two runs joins them.
-pub fn test_ext2_freed_blocks_are_kept_as_runs() -> TestResult {
-    use crate::ext2::cache::BlockRuns;
+pub fn test_ext4_freed_blocks_are_kept_as_runs() -> TestResult {
+    use crate::ext4::cache::BlockRuns;
 
     let mut runs = BlockRuns::new();
     for block in (1000..5000).chain([20, 22, 10]) {
@@ -247,7 +247,7 @@ pub fn test_ext2_freed_blocks_are_kept_as_runs() -> TestResult {
 
 /// A journal holding a transaction under a clear `needs_recovery` is not
 /// replayed: its copies may be older than the homes, and `e2fsck` decides.
-pub fn test_ext2_journal_under_a_clear_flag_is_not_replayed() -> TestResult {
+pub fn test_ext4_journal_under_a_clear_flag_is_not_replayed() -> TestResult {
     use slopos_ext4_core::bytes::{le32, put_le32};
 
     let Some(device) = journal_image() else {
@@ -281,7 +281,7 @@ pub fn test_ext2_journal_under_a_clear_flag_is_not_replayed() -> TestResult {
 /// An operation whose records never left the in-memory ring is not
 /// replayed, and neither is anything after it: the mount comes back at the
 /// last durable commit, not at a mix of old homes and half a transaction.
-pub fn test_ext2_journal_drops_an_uncommitted_ring_whole() -> TestResult {
+pub fn test_ext4_journal_drops_an_uncommitted_ring_whole() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -294,7 +294,7 @@ pub fn test_ext2_journal_drops_an_uncommitted_ring_whole() -> TestResult {
     }
 }
 
-fn commit_one_then_stage_one(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn commit_one_then_stage_one(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let ino = fs.create_file(2, b"logged.txt").map_err(|_| "create")?;
     fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
@@ -306,7 +306,7 @@ fn commit_one_then_stage_one(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn replay_keeps_only_the_commit(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn replay_keeps_only_the_commit(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     replay_and_check(fs)?;
     if fs.resolve_path(b"/lost.txt").is_ok() {
         return Err("a create that never left the ring was replayed");
@@ -315,7 +315,7 @@ fn replay_keeps_only_the_commit(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str>
 }
 
 slopos_testing::stest!(
-    name = test_ext2_journal_drops_an_uncommitted_ring_whole,
+    name = test_ext4_journal_drops_an_uncommitted_ring_whole,
     suite = fs
 );
 
@@ -331,7 +331,7 @@ fn unlogged_byte(i: usize) -> u8 {
 /// write's commit does — even when a later operation frees the blocks before
 /// either commit leaves the ring, and the crash keeps the first commit and
 /// loses the second.
-pub fn test_ext2_journal_orders_data_a_later_truncate_frees() -> TestResult {
+pub fn test_ext4_journal_orders_data_a_later_truncate_frees() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -344,7 +344,7 @@ pub fn test_ext2_journal_orders_data_a_later_truncate_frees() -> TestResult {
     }
 }
 
-fn write_then_truncate_then_crash(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn write_then_truncate_then_crash(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let bs = fs.block_size() as usize;
     let mut payload = KVec::<u8>::zeroed(UNLOGGED_BLOCKS * bs).map_err(|_| "payload")?;
@@ -362,7 +362,7 @@ fn write_then_truncate_then_crash(fs: &mut Ext2Fs<'_>) -> Result<(), &'static st
         .map_err(|_| "partial log sync")
 }
 
-fn expect_the_write(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn expect_the_write(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     match fs.attach_journal() {
         Ok(Some(recovery)) if recovery.replayed() => {}
         Ok(Some(_)) => return Err("the log held the write's commit and replayed nothing"),
@@ -392,11 +392,11 @@ fn expect_the_write(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 }
 
 slopos_testing::stest!(
-    name = test_ext2_journal_orders_data_a_later_truncate_frees,
+    name = test_ext4_journal_orders_data_a_later_truncate_frees,
     suite = fs
 );
 
-fn replay_and_check(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn replay_and_check(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let recovery = match fs.attach_journal() {
         Ok(Some(recovery)) => recovery,
         Ok(None) => return Err("no log on the remount"),
@@ -419,7 +419,7 @@ fn replay_and_check(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 /// A commit that cannot reach the medium leaves neither the log nor the
 /// filesystem carrying half an operation. With the ring deferring records,
 /// the commit that meets the device is the one that finds the ring full.
-pub fn test_ext2_journal_retracts_a_failed_commit() -> TestResult {
+pub fn test_ext4_journal_retracts_a_failed_commit() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -430,7 +430,7 @@ pub fn test_ext2_journal_retracts_a_failed_commit() -> TestResult {
     }
 }
 
-fn retract_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn retract_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     // A ring shorter than the log's headroom, so it fills before the log
     // forces a check point, and the next create cannot fit without writing
@@ -481,7 +481,7 @@ fn retract_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 
 /// A read refused because its requester was killed says nothing about the
 /// image: the operation fails and the mount stays writable.
-pub fn test_ext2_killed_read_is_not_damage() -> TestResult {
+pub fn test_ext4_killed_read_is_not_damage() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -492,7 +492,7 @@ pub fn test_ext2_killed_read_is_not_damage() -> TestResult {
     }
 }
 
-fn killed_read_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn killed_read_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let ino = fs.create_file(2, b"killed.txt").map_err(|_| "create")?;
     fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
@@ -503,7 +503,7 @@ fn killed_read_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     let read = fs.read_file(ino, 0, &mut buf);
     let read = fs.note_result(read);
     PROBE_INTERRUPTS.store(false, Ordering::Relaxed);
-    if read != Err(Ext2Error::Interrupted) {
+    if read != Err(Ext4Error::Interrupted) {
         return Err("the refused read did not answer Interrupted");
     }
     if fs.corruption_seen() {
@@ -518,7 +518,7 @@ fn killed_read_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
-pub fn test_ext2_rename_fails_when_the_target_lookup_does() -> TestResult {
+pub fn test_ext4_rename_fails_when_the_target_lookup_does() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -529,7 +529,7 @@ pub fn test_ext2_rename_fails_when_the_target_lookup_does() -> TestResult {
     }
 }
 
-fn unreadable_target_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn unreadable_target_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let dir = fs.create_directory(2, b"d").map_err(|_| "mkdir")?;
     let target = fs.create_file(dir, b"b").map_err(|_| "create target")?;
@@ -559,7 +559,7 @@ fn unreadable_target_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 
 /// The inode `name` names in `dir`, or `None` unless exactly one record
 /// carries it.
-fn sole_holder(fs: &mut Ext2Fs<'_>, dir: u32, name: &[u8]) -> Result<Option<u32>, &'static str> {
+fn sole_holder(fs: &mut Ext4Fs<'_>, dir: u32, name: &[u8]) -> Result<Option<u32>, &'static str> {
     let mut names = 0;
     let mut holder = 0;
     fs.for_each_dir_entry(dir, |entry| {
@@ -573,7 +573,7 @@ fn sole_holder(fs: &mut Ext2Fs<'_>, dir: u32, name: &[u8]) -> Result<Option<u32>
     Ok((names == 1).then_some(holder))
 }
 
-pub fn test_ext2_create_and_link_fail_when_the_lookup_does() -> TestResult {
+pub fn test_ext4_create_and_link_fail_when_the_lookup_does() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -584,7 +584,7 @@ pub fn test_ext2_create_and_link_fail_when_the_lookup_does() -> TestResult {
     }
 }
 
-fn unreadable_name_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn unreadable_name_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let dir = fs.create_directory(2, b"d").map_err(|_| "mkdir")?;
     let taken = fs.create_file(dir, b"b").map_err(|_| "create")?;
@@ -615,7 +615,7 @@ fn unreadable_name_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 
 /// Cached as file data, a new directory block goes home on an eviction rather
 /// than into the log, and a rollback can no longer retract an edit to it.
-pub fn test_ext2_new_directory_block_is_metadata() -> TestResult {
+pub fn test_ext4_new_directory_block_is_metadata() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -625,7 +625,7 @@ pub fn test_ext2_new_directory_block_is_metadata() -> TestResult {
     }
 }
 
-fn new_directory_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn new_directory_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let dir = fs.create_directory(2, b"fresh").map_err(|_| "mkdir")?;
     let block = fs.block_of_for_test(dir, 0).map_err(|_| "map dir")?;
@@ -642,7 +642,7 @@ fn new_directory_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 
 /// The journal is the volume's own: no name reaches it, so nothing in
 /// userland can read the metadata copies it holds or write into it.
-pub fn test_ext2_journal_inode_takes_no_name() -> TestResult {
+pub fn test_ext4_journal_inode_takes_no_name() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -652,7 +652,7 @@ pub fn test_ext2_journal_inode_takes_no_name() -> TestResult {
     }
 }
 
-fn guard_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn guard_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     if fs.link_entry(2, b"journal", JOURNAL_INO).is_ok() {
         return Err("a name was given to the journal inode");
@@ -665,7 +665,7 @@ fn guard_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 
 /// A writeback step writes at most its budget and a pass driven one write at a
 /// time still finishes — which is what bounds the wait behind `sync(2)`.
-pub fn test_ext2_writeback_step_respects_its_budget() -> TestResult {
+pub fn test_ext4_writeback_step_respects_its_budget() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -676,7 +676,7 @@ pub fn test_ext2_writeback_step_respects_its_budget() -> TestResult {
     }
 }
 
-fn budget_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn budget_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     for name in [&b"a.txt"[..], b"b.txt", b"c.txt", b"d.txt"] {
         let ino = fs.create_file(2, name).map_err(|_| "create")?;
@@ -708,7 +708,7 @@ fn budget_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 /// A pass writes what was dirty when it opened and nothing an operation
 /// dirtied behind it. Without that, releasing the mount lock between steps
 /// would publish metadata ahead of a later operation's data.
-pub fn test_ext2_writeback_leaves_a_later_operation_alone() -> TestResult {
+pub fn test_ext4_writeback_leaves_a_later_operation_alone() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -718,7 +718,7 @@ pub fn test_ext2_writeback_leaves_a_later_operation_alone() -> TestResult {
     }
 }
 
-fn epoch_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn epoch_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let ino = fs.create_file(2, b"first.txt").map_err(|_| "create")?;
     fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
@@ -745,7 +745,7 @@ fn epoch_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn drive(fs: &mut Ext2Fs<'_>, mut pass: crate::ext2::SyncPass) -> Result<(), &'static str> {
+fn drive(fs: &mut Ext4Fs<'_>, mut pass: crate::ext4::SyncPass) -> Result<(), &'static str> {
     let mut steps = 0usize;
     while !pass.is_done() {
         fs.sync_step(&mut pass, 8).map_err(|_| "step")?;
@@ -759,21 +759,21 @@ fn drive(fs: &mut Ext2Fs<'_>, mut pass: crate::ext2::SyncPass) -> Result<(), &'s
 
 /// A block whose only current copy is a log record reaches its home location.
 ///
-/// The path that broke: a cache miss served from the log left the entry
-/// *clean*, so the pass had nothing to write, the check point skipped it (the
-/// cache said the home matched) and the reset dropped the only copy. Every
-/// read still answered correctly until the mount went away.
-pub fn test_ext2_journal_checkpoints_a_block_read_back_from_the_log() -> TestResult {
+/// A cache miss served from the log that left the entry *clean* would give the
+/// pass nothing to write: the check point would skip it (the cache saying the
+/// home matched) and the reset drop the only copy, while every read answered
+/// correctly until the mount went away.
+pub fn test_ext4_journal_checkpoints_a_block_read_back_from_the_log() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
     };
     if let Err(msg) = with_log(&device, log_then_reread) {
         return fail!("{}", msg);
     }
-    let Ok((sb, ..)) = Ext2Fs::mount_params(&device) else {
+    let Ok((sb, ..)) = Ext4Fs::mount_params(&device) else {
         return fail!("the image no longer parses");
     };
-    if let Some(reason) = Ext2Fs::mount_read_only_reason(&sb, &device) {
+    if let Some(reason) = Ext4Fs::mount_read_only_reason(&sb, &device) {
         return fail!("the image should have been left clean, got {:?}", reason);
     }
     match with_log(&device, expect_survivor) {
@@ -782,7 +782,7 @@ pub fn test_ext2_journal_checkpoints_a_block_read_back_from_the_log() -> TestRes
     }
 }
 
-fn log_then_reread(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn log_then_reread(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let ino = fs.create_file(2, b"keep.txt").map_err(|_| "create")?;
     fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
@@ -805,7 +805,7 @@ fn log_then_reread(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     fs.mark_clean().map_err(|_| "clean stamp")
 }
 
-fn expect_survivor(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn expect_survivor(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let recovery = match fs.attach_journal() {
         Ok(Some(recovery)) => recovery,
         Ok(None) => return Err("no log on the remount"),
@@ -827,17 +827,17 @@ fn expect_survivor(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 
 /// A boot that dies with an empty journal leaves its volume stamped in use; the
 /// next mount replays nothing and writes again, as Linux and `e2fsck` would.
-pub fn test_ext2_journal_volume_down_in_use_with_an_empty_log_recovers() -> TestResult {
+pub fn test_ext4_journal_volume_down_in_use_with_an_empty_log_recovers() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
     };
     if let Err(msg) = with_log(&device, crash_with_an_empty_log) {
         return fail!("staging the crash: {}", msg);
     }
-    let Ok((sb, ..)) = Ext2Fs::mount_params(&device) else {
+    let Ok((sb, ..)) = Ext4Fs::mount_params(&device) else {
         return fail!("the staged image no longer parses");
     };
-    if Ext2Fs::mount_read_only_reason(&sb, &device) != Some(ReadOnlyReason::NeedsRecovery) {
+    if Ext4Fs::mount_read_only_reason(&sb, &device) != Some(ReadOnlyReason::NeedsRecovery) {
         return fail!("the image should read as needing recovery");
     }
     match with_log(&device, expect_writable_after_nothing_to_replay) {
@@ -846,7 +846,7 @@ pub fn test_ext2_journal_volume_down_in_use_with_an_empty_log_recovers() -> Test
     }
 }
 
-fn crash_with_an_empty_log(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn crash_with_an_empty_log(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let ino = fs.create_file(2, b"synced.txt").map_err(|_| "create")?;
     fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
@@ -854,7 +854,7 @@ fn crash_with_an_empty_log(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn expect_writable_after_nothing_to_replay(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn expect_writable_after_nothing_to_replay(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let recovery = match fs.attach_journal() {
         Ok(Some(recovery)) => recovery,
         Ok(None) => return Err("no journal on the remount"),
@@ -872,61 +872,60 @@ fn expect_writable_after_nothing_to_replay(fs: &mut Ext2Fs<'_>) -> Result<(), &'
 }
 
 slopos_testing::stest!(
-    name = test_ext2_journal_replays_an_unsynced_operation,
+    name = test_ext4_journal_replays_an_unsynced_operation,
     suite = fs
 );
 slopos_testing::stest!(
-    name = test_ext2_journal_under_a_clear_flag_is_not_replayed,
+    name = test_ext4_journal_under_a_clear_flag_is_not_replayed,
     suite = fs
 );
-slopos_testing::stest!(name = test_ext2_freed_blocks_are_kept_as_runs, suite = fs);
+slopos_testing::stest!(name = test_ext4_freed_blocks_are_kept_as_runs, suite = fs);
 slopos_testing::stest!(
-    name = test_ext2_read_only_mount_needing_recovery_is_refused,
-    suite = fs
-);
-slopos_testing::stest!(
-    name = test_ext2_journal_volume_down_in_use_with_an_empty_log_recovers,
+    name = test_ext4_read_only_mount_needing_recovery_is_refused,
     suite = fs
 );
 slopos_testing::stest!(
-    name = test_ext2_journal_retracts_a_failed_commit,
-    suite = fs
-);
-slopos_testing::stest!(name = test_ext2_killed_read_is_not_damage, suite = fs);
-slopos_testing::stest!(
-    name = test_ext2_rename_fails_when_the_target_lookup_does,
+    name = test_ext4_journal_volume_down_in_use_with_an_empty_log_recovers,
     suite = fs
 );
 slopos_testing::stest!(
-    name = test_ext2_create_and_link_fail_when_the_lookup_does,
+    name = test_ext4_journal_retracts_a_failed_commit,
     suite = fs
 );
-slopos_testing::stest!(name = test_ext2_new_directory_block_is_metadata, suite = fs);
+slopos_testing::stest!(name = test_ext4_killed_read_is_not_damage, suite = fs);
 slopos_testing::stest!(
-    name = test_ext2_journal_checkpoints_a_block_read_back_from_the_log,
-    suite = fs
-);
-slopos_testing::stest!(name = test_ext2_journal_inode_takes_no_name, suite = fs);
-slopos_testing::stest!(
-    name = test_ext2_writeback_step_respects_its_budget,
+    name = test_ext4_rename_fails_when_the_target_lookup_does,
     suite = fs
 );
 slopos_testing::stest!(
-    name = test_ext2_writeback_leaves_a_later_operation_alone,
+    name = test_ext4_create_and_link_fail_when_the_lookup_does,
+    suite = fs
+);
+slopos_testing::stest!(name = test_ext4_new_directory_block_is_metadata, suite = fs);
+slopos_testing::stest!(
+    name = test_ext4_journal_checkpoints_a_block_read_back_from_the_log,
+    suite = fs
+);
+slopos_testing::stest!(name = test_ext4_journal_inode_takes_no_name, suite = fs);
+slopos_testing::stest!(
+    name = test_ext4_writeback_step_respects_its_budget,
+    suite = fs
+);
+slopos_testing::stest!(
+    name = test_ext4_writeback_leaves_a_later_operation_alone,
     suite = fs
 );
 
 /// An `unlink` of a file something still holds open must publish nothing to a
 /// home location before its transaction commits.
 ///
-/// The path that broke: the orphan list got its ordering by flushing the
-/// member's record *home* mid-operation, which under a log publishes
-/// uncommitted metadata that the rollback then drops rather than repairs — so
-/// a later failure left a live name pointing at `links_count == 0`.
+/// Ordering the orphan list by flushing the member's record *home*
+/// mid-operation would publish uncommitted metadata that a rollback then drops
+/// rather than repairs, leaving a live name pointing at `links_count == 0`.
 ///
 /// Observed as the barrier count: a mid-operation home write barriers behind
-/// itself, so the old path issued two where the log path issues one.
-pub fn test_ext2_journal_orphan_publishes_nothing_before_the_commit() -> TestResult {
+/// itself, so it would issue two where the log path issues one.
+pub fn test_ext4_journal_orphan_publishes_nothing_before_the_commit() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -937,7 +936,7 @@ pub fn test_ext2_journal_orphan_publishes_nothing_before_the_commit() -> TestRes
     }
 }
 
-fn orphan_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn orphan_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let ino = fs.create_file(2, b"orphan.txt").map_err(|_| "create")?;
     fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
@@ -966,7 +965,7 @@ fn orphan_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 }
 
 slopos_testing::stest!(
-    name = test_ext2_journal_orphan_publishes_nothing_before_the_commit,
+    name = test_ext4_journal_orphan_publishes_nothing_before_the_commit,
     suite = fs
 );
 
@@ -981,7 +980,7 @@ slopos_testing::stest!(
 ///
 /// Observed as the offset of the first device write: the head is at byte 1024,
 /// and a deferred one would put a log block first.
-pub fn test_ext2_journal_orphan_removal_publishes_the_head_first() -> TestResult {
+pub fn test_ext4_journal_orphan_removal_publishes_the_head_first() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -992,7 +991,7 @@ pub fn test_ext2_journal_orphan_removal_publishes_the_head_first() -> TestResult
     }
 }
 
-fn orphan_removal_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn orphan_removal_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let ino = fs.create_file(2, b"unthread.txt").map_err(|_| "create")?;
     fs.write_file(ino, 0, PAYLOAD).map_err(|_| "write")?;
@@ -1011,7 +1010,7 @@ fn orphan_removal_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 }
 
 slopos_testing::stest!(
-    name = test_ext2_journal_orphan_removal_publishes_the_head_first,
+    name = test_ext4_journal_orphan_removal_publishes_the_head_first,
     suite = fs
 );
 
@@ -1026,7 +1025,7 @@ fn on_disk_u16(device: &dyn BlockDevice, field_offset: u64) -> u16 {
 
 /// A volume stamped clean while mounted is stamped in use again before its next
 /// mutation reaches the medium, and the re-stamp bills no mount.
-pub fn test_ext2_clean_stamp_thaws_before_the_next_write() -> TestResult {
+pub fn test_ext4_clean_stamp_thaws_before_the_next_write() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -1066,12 +1065,12 @@ fn on_disk_u32(device: &dyn BlockDevice, field: usize) -> u32 {
     u32::from_le_bytes(buf)
 }
 
-fn attach_then_clean(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn attach_then_clean(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     fs.mark_clean().map_err(|_| "clean")
 }
 
-fn thaw_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn thaw_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     // Measure from after the attach, which writes the journal superblock but
     // leaves the in-use stamp to the thaw.
     if !matches!(fs.attach_journal(), Ok(Some(_))) {
@@ -1084,7 +1083,7 @@ fn thaw_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 }
 
 slopos_testing::stest!(
-    name = test_ext2_clean_stamp_thaws_before_the_next_write,
+    name = test_ext4_clean_stamp_thaws_before_the_next_write,
     suite = fs
 );
 
@@ -1125,7 +1124,7 @@ fn synthetic_attach(
             Some(last) if last.1 + last.2 == block => last.2 += 1,
             _ => runs
                 .push((i, block, 1))
-                .map_err(|_| AttachError::Fs(Ext2Error::OutOfMemory))?,
+                .map_err(|_| AttachError::Fs(Ext4Error::OutOfMemory))?,
         }
     }
     write_synthetic_superblock(device, bs, count).map_err(|_| AttachError::BadSuperblock)?;
@@ -1175,14 +1174,14 @@ fn write_synthetic_superblock(
 /// Its own frame: `mount_params` hands back a whole superblock.
 #[inline(never)]
 fn image_block_size(device: &dyn BlockDevice) -> Result<u32, &'static str> {
-    Ext2Fs::mount_params(device)
+    Ext4Fs::mount_params(device)
         .map(|(_, geom)| geom.block_size())
         .map_err(|_| "mount_params")
 }
 
 /// A block logged several times resolves to its newest record, and to nothing
-/// once revoked. The scan this index replaced answered by walking every slot.
-pub fn test_ext2_journal_index_answers_the_newest_record() -> TestResult {
+/// once revoked.
+pub fn test_ext4_journal_index_answers_the_newest_record() -> TestResult {
     let Some(device) = plain_image() else {
         return TestResult::Skipped;
     };
@@ -1221,7 +1220,7 @@ fn newest_record_body(device: &dyn BlockDevice) -> Result<(), &'static str> {
 
 /// An aborted operation leaves the index as the committed log left it: no
 /// mapping for what it logged, and the mapping its revoke cleared back in place.
-pub fn test_ext2_journal_index_rewinds_with_an_aborted_operation() -> TestResult {
+pub fn test_ext4_journal_index_rewinds_with_an_aborted_operation() -> TestResult {
     let Some(device) = plain_image() else {
         return TestResult::Skipped;
     };
@@ -1273,7 +1272,7 @@ fn index_rewind_body(device: &dyn BlockDevice) -> Result<(), &'static str> {
 
 /// A journal with more blocks than the kernel can index is used up to the
 /// cap, not refused, and the front of it still replays.
-pub fn test_ext2_journal_uses_the_front_of_an_oversized_log() -> TestResult {
+pub fn test_ext4_journal_uses_the_front_of_an_oversized_log() -> TestResult {
     let Some(device) = plain_image() else {
         return TestResult::Skipped;
     };
@@ -1322,14 +1321,14 @@ fn oversized_log_body(device: &dyn BlockDevice) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Blocks one transaction logs: more than the 256 the old flat low-water mark
-/// left however large the log was, which is what a batched write's metadata needs.
+/// Blocks one transaction logs, as a batched write's metadata does: more than
+/// 256, which a headroom that did not scale with the log would refuse.
 const BIG_TXN_BLOCKS: u32 = 400;
 
 /// The room the log promises an operation scales with the log, so a
-/// transaction bigger than the old flat mark commits instead of failing
+/// transaction of [`BIG_TXN_BLOCKS`] commits instead of failing
 /// `BlockCache::commit_op`'s slot check with `NoSpace`.
-pub fn test_ext2_journal_headroom_admits_a_large_transaction() -> TestResult {
+pub fn test_ext4_journal_headroom_admits_a_large_transaction() -> TestResult {
     let Some(device) = plain_image() else {
         return TestResult::Skipped;
     };
@@ -1345,10 +1344,10 @@ fn large_transaction_body(device: &dyn BlockDevice) -> Result<(), &'static str> 
     let per_record = log.max_entries() as u32;
     let want = BIG_TXN_BLOCKS + BIG_TXN_BLOCKS.div_ceil(per_record) + 1;
     if want <= 256 {
-        return Err("the fixture's transaction is no bigger than the old flat mark");
+        return Err("the fixture's transaction is no bigger than 256 blocks");
     }
     // Whenever the log claims headroom it must hold a whole transaction:
-    // `Ext2Fs::transaction` admits an operation on exactly that claim.
+    // `Ext4Fs::transaction` admits an operation on exactly that claim.
     while log.has_headroom() {
         if log.free_slots() < want {
             return Err("the log claimed headroom for a transaction it has no room for");
@@ -1380,19 +1379,19 @@ fn large_transaction_body(device: &dyn BlockDevice) -> Result<(), &'static str> 
 }
 
 slopos_testing::stest!(
-    name = test_ext2_journal_index_answers_the_newest_record,
+    name = test_ext4_journal_index_answers_the_newest_record,
     suite = fs
 );
 slopos_testing::stest!(
-    name = test_ext2_journal_index_rewinds_with_an_aborted_operation,
+    name = test_ext4_journal_index_rewinds_with_an_aborted_operation,
     suite = fs
 );
 slopos_testing::stest!(
-    name = test_ext2_journal_uses_the_front_of_an_oversized_log,
+    name = test_ext4_journal_uses_the_front_of_an_oversized_log,
     suite = fs
 );
 slopos_testing::stest!(
-    name = test_ext2_journal_headroom_admits_a_large_transaction,
+    name = test_ext4_journal_headroom_admits_a_large_transaction,
     suite = fs
 );
 
@@ -1485,9 +1484,9 @@ impl BlockDevice for ExtentDevice {
 
 /// A multi-block extent costs requests in proportion to the bytes it moves,
 /// not the blocks it touches, and the ordered-writeback phases stay separate
-/// while it does. The slow path issued one `write_at` per block, so a
-/// 64-block extent was 64 round trips against a device that takes a run.
-pub fn test_ext2_journal_write_extent_coalesces_its_requests() -> TestResult {
+/// while it does. One `write_at` per block would make a 64-block extent 64
+/// round trips against a device that takes a run.
+pub fn test_ext4_journal_write_extent_coalesces_its_requests() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -1530,7 +1529,7 @@ pub fn test_ext2_journal_write_extent_coalesces_its_requests() -> TestResult {
     TestResult::Pass
 }
 
-fn extent_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn extent_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let bs = fs.block_size() as usize;
     let len = bs * EXTENT_BLOCKS as usize;
@@ -1556,7 +1555,7 @@ fn extent_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     fs.mark_clean().map_err(|_| "clean")
 }
 
-fn extent_verify(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn extent_verify(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let ino = fs.resolve_path(b"/extent.bin").map_err(|_| "resolve")?;
     let bs = fs.block_size() as usize;
     let len = bs * EXTENT_BLOCKS as usize;
@@ -1577,18 +1576,17 @@ fn extent_verify(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 }
 
 slopos_testing::stest!(
-    name = test_ext2_journal_write_extent_coalesces_its_requests,
+    name = test_ext4_journal_write_extent_coalesces_its_requests,
     suite = fs
 );
 
 /// A small write overwritten by a large one: a cache miss and a check point
 /// must both answer the newer bytes.
 ///
-/// The path that once broke: while small writes were logged, the log kept its
-/// mapping of the older copy, so a miss read it back and the check point
-/// wrote it home. In the guest build every rlib member began with the zeros
-/// its archive header's small write had logged.
-pub fn test_ext2_journal_home_write_outranks_an_older_logged_copy() -> TestResult {
+/// A log that kept its mapping of the older copy would have a miss read it
+/// back and the check point write it home: every member of an archive whose
+/// header's small write was logged would begin with those zeros.
+pub fn test_ext4_journal_home_write_outranks_an_older_logged_copy() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -1603,7 +1601,7 @@ pub fn test_ext2_journal_home_write_outranks_an_older_logged_copy() -> TestResul
 
 /// The same two writes, committed and never check-pointed: the replay must not
 /// put the logged copy back over the home write that superseded it.
-pub fn test_ext2_journal_replay_keeps_a_home_write_over_an_older_logged_copy() -> TestResult {
+pub fn test_ext4_journal_replay_keeps_a_home_write_over_an_older_logged_copy() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -1618,7 +1616,7 @@ pub fn test_ext2_journal_replay_keeps_a_home_write_over_an_older_logged_copy() -
 
 const RELOG_SMALL: &[u8] = b"a small write the large one overwrites";
 
-fn relog_writes(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn relog_writes(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let ino = fs.create_file(2, b"relog.bin").map_err(|_| "create")?;
     fs.write_file(ino, 0, RELOG_SMALL)
         .map_err(|_| "small write")?;
@@ -1637,7 +1635,7 @@ fn relog_writes(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn relog_matches(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn relog_matches(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let ino = fs.resolve_path(b"/relog.bin").map_err(|_| "resolve")?;
     let len = fs.block_size() as usize * EXTENT_BLOCKS as usize;
     let mut buffer = KVec::<u8>::zeroed(len).map_err(|_| "buffer")?;
@@ -1656,7 +1654,7 @@ fn relog_matches(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn relog_then_reread(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn relog_then_reread(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     relog_writes(fs)?;
     fs.cache_drop_clean_for_test();
@@ -1666,18 +1664,18 @@ fn relog_then_reread(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     fs.mark_clean().map_err(|_| "clean")
 }
 
-fn relog_verify(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn relog_verify(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     relog_matches(fs)
 }
 
-fn relog_unsynced(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn relog_unsynced(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     relog_writes(fs)?;
     // Committed to the medium, never check pointed.
     fs.commit_log().map_err(|_| "commit")
 }
 
-fn relog_replay(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn relog_replay(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     match fs.attach_journal() {
         Ok(Some(recovery)) if recovery.replayed() => relog_matches(fs),
         Ok(_) => Err("the log held committed transactions and replayed none"),
@@ -1686,11 +1684,11 @@ fn relog_replay(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 }
 
 slopos_testing::stest!(
-    name = test_ext2_journal_home_write_outranks_an_older_logged_copy,
+    name = test_ext4_journal_home_write_outranks_an_older_logged_copy,
     suite = fs
 );
 slopos_testing::stest!(
-    name = test_ext2_journal_replay_keeps_a_home_write_over_an_older_logged_copy,
+    name = test_ext4_journal_replay_keeps_a_home_write_over_an_older_logged_copy,
     suite = fs
 );
 
@@ -1763,7 +1761,7 @@ const FIRST_DESCRIPTOR_SLOT: u32 = 1;
 
 /// A descriptor that reads differently after the scan checked it is refused
 /// before anything is written home.
-pub fn test_ext2_journal_block_that_reads_differently_is_refused() -> TestResult {
+pub fn test_ext4_journal_block_that_reads_differently_is_refused() -> TestResult {
     let Some(image) = plain_image() else {
         return TestResult::Skipped;
     };
@@ -1853,13 +1851,13 @@ fn tamper_fill(device: &TamperDevice, payload: &[u8]) -> Result<(), &'static str
 }
 
 slopos_testing::stest!(
-    name = test_ext2_journal_block_that_reads_differently_is_refused,
+    name = test_ext4_journal_block_that_reads_differently_is_refused,
     suite = fs
 );
 
 /// Clearing a list the drain could not read would leak its orphans until
 /// `e2fsck`.
-pub fn test_ext2_orphan_drain_keeps_a_list_it_could_not_read() -> TestResult {
+pub fn test_ext4_orphan_drain_keeps_a_list_it_could_not_read() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -1870,7 +1868,7 @@ pub fn test_ext2_orphan_drain_keeps_a_list_it_could_not_read() -> TestResult {
     }
 }
 
-fn unreadable_orphan_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn unreadable_orphan_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let ino = fs.create_file(2, b"o").map_err(|_| "create")?;
     fs.write_file(ino, 0, b"x").map_err(|_| "write")?;
@@ -1896,7 +1894,7 @@ fn unreadable_orphan_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 }
 
 slopos_testing::stest!(
-    name = test_ext2_orphan_drain_keeps_a_list_it_could_not_read,
+    name = test_ext4_orphan_drain_keeps_a_list_it_could_not_read,
     suite = fs
 );
 
@@ -1904,7 +1902,7 @@ slopos_testing::stest!(
 /// point and the mount's pass can: the one opened first must not check point a
 /// logged copy of a block the later one has already put home a newer copy of,
 /// then emptied the log behind.
-pub fn test_ext2_lagging_pass_never_puts_an_older_copy_home() -> TestResult {
+pub fn test_ext4_lagging_pass_never_puts_an_older_copy_home() -> TestResult {
     let Some(image) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -1919,7 +1917,7 @@ pub fn test_ext2_lagging_pass_never_puts_an_older_copy_home() -> TestResult {
 
 const RESURRECTED: &[u8] = b"resurrected";
 
-fn interleave_two_passes(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn interleave_two_passes(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let dir = fs.create_directory(2, b"d").map_err(|_| "mkdir")?;
     fs.sync().map_err(|_| "sync")?;
@@ -1968,19 +1966,19 @@ fn interleave_two_passes(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn unlinked_name_stays_gone(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn unlinked_name_stays_gone(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     if fs.resolve_path(b"/d").is_err() || fs.resolve_path(b"/later").is_err() {
         return Err("the passes lost a name that was never removed");
     }
     match fs.resolve_path(b"/d/resurrected") {
-        Err(Ext2Error::PathNotFound) => Ok(()),
+        Err(Ext4Error::PathNotFound) => Ok(()),
         Ok(_) => Err("an unlinked name came back on the medium"),
         Err(_) => Err("the directory could not be read back"),
     }
 }
 
 slopos_testing::stest!(
-    name = test_ext2_lagging_pass_never_puts_an_older_copy_home,
+    name = test_ext4_lagging_pass_never_puts_an_older_copy_home,
     suite = fs
 );
 
@@ -1993,7 +1991,7 @@ fn compound_mode(k: u16) -> u16 {
 
 /// Slots the log has taken since `start`, refusing a log emptied in between:
 /// a check point there would measure nothing.
-fn slots_since(fs: &Ext2Fs<'_>, start: u32) -> Result<u32, &'static str> {
+fn slots_since(fs: &Ext4Fs<'_>, start: u32) -> Result<u32, &'static str> {
     fs.journal_head()
         .checked_sub(start)
         .ok_or("the log was emptied under the measurement")
@@ -2004,7 +2002,7 @@ fn slots_since(fs: &Ext2Fs<'_>, start: u32) -> Result<u32, &'static str> {
 /// the first rewrites the images the first appended. The compound's one
 /// commit covers the images as they finally stand, so a replay applies the
 /// last operation.
-pub fn test_ext2_journal_compound_logs_each_block_once() -> TestResult {
+pub fn test_ext4_journal_compound_logs_each_block_once() -> TestResult {
     let Some(device) = journal_image() else {
         return TestResult::Skipped;
     };
@@ -2017,7 +2015,7 @@ pub fn test_ext2_journal_compound_logs_each_block_once() -> TestResult {
     }
 }
 
-fn compound_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn compound_body(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     attach(fs)?;
     let ino = fs.create_file(2, b"modes.txt").map_err(|_| "create")?;
     // Out to the medium, so the compound below starts in an empty ring.
@@ -2041,7 +2039,7 @@ fn compound_body(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn compound_replay(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
+fn compound_replay(fs: &mut Ext4Fs<'_>) -> Result<(), &'static str> {
     let recovery = match fs.attach_journal() {
         Ok(Some(recovery)) => recovery,
         Ok(None) => return Err("no log on the remount"),
@@ -2061,7 +2059,7 @@ fn compound_replay(fs: &mut Ext2Fs<'_>) -> Result<(), &'static str> {
 }
 
 slopos_testing::stest!(
-    name = test_ext2_journal_compound_logs_each_block_once,
+    name = test_ext4_journal_compound_logs_each_block_once,
     suite = fs
 );
 
@@ -2133,7 +2131,7 @@ const MAGIC_PAYLOAD: &[u8] = &[0xC0, 0x3B, 0x39, 0x98, b'e', b's', b'c'];
 
 /// A record spilled before its operation commits goes out escaped, checksummed
 /// and under a sealed descriptor, so the transaction that commits it replays.
-pub fn test_ext2_journal_spilled_record_is_settled_on_its_way_out() -> TestResult {
+pub fn test_ext4_journal_spilled_record_is_settled_on_its_way_out() -> TestResult {
     let Some(image) = plain_image() else {
         return TestResult::Skipped;
     };
@@ -2167,13 +2165,13 @@ fn spilled_body(device: &dyn BlockDevice) -> Result<(), &'static str> {
 }
 
 slopos_testing::stest!(
-    name = test_ext2_journal_spilled_record_is_settled_on_its_way_out,
+    name = test_ext4_journal_spilled_record_is_settled_on_its_way_out,
     suite = fs
 );
 
 /// A torn ring write applies none of the compound: cut short, the replay keeps
 /// the commit before it; missing a block, it is refused before anything lands.
-pub fn test_ext2_journal_torn_compound_replays_none_of_it() -> TestResult {
+pub fn test_ext4_journal_torn_compound_replays_none_of_it() -> TestResult {
     for lost_block in [false, true] {
         let Some(image) = plain_image() else {
             return TestResult::Skipped;
@@ -2243,7 +2241,7 @@ fn torn_compound(device: &ProbeDevice, lost_block: bool) -> Result<(), &'static 
 }
 
 slopos_testing::stest!(
-    name = test_ext2_journal_torn_compound_replays_none_of_it,
+    name = test_ext4_journal_torn_compound_replays_none_of_it,
     suite = fs
 );
 
@@ -2255,7 +2253,7 @@ const ABORT_RING: usize = 9;
 /// full and the write-out failed — leaves the images the compound's earlier
 /// operations put in the ring as they were: a re-read answers the last
 /// committed contents, and so does a replay.
-pub fn test_ext2_journal_abort_in_a_compound_keeps_earlier_images() -> TestResult {
+pub fn test_ext4_journal_abort_in_a_compound_keeps_earlier_images() -> TestResult {
     let Some(image) = plain_image() else {
         return TestResult::Skipped;
     };
@@ -2322,6 +2320,6 @@ fn compound_abort(device: &ProbeDevice) -> Result<(), &'static str> {
 }
 
 slopos_testing::stest!(
-    name = test_ext2_journal_abort_in_a_compound_keeps_earlier_images,
+    name = test_ext4_journal_abort_in_a_compound_keeps_earlier_images,
     suite = fs
 );

@@ -151,9 +151,9 @@ pub fn call_panic_cleanup() {
 pub fn call_panic_cleanup_above(held_mark: u32) {
     // SAFETY: single-writer — the panicking CPU is the only accessor. Rust
     // drops have already released normal guards; the poison-unlock covers
-    // legacy paths and partially constructed guards.
+    // locks taken without a guard and partially constructed guards.
     unsafe {
-        crate::sync::lock_tracking::poison_unlock_held_above(held_mark);
+        crate::sync::lock_graph::poison_unlock_held_above(held_mark);
     }
 
     let count = PANIC_CLEANUP_COUNT
@@ -196,7 +196,7 @@ pub struct RecoveryGuard {
 
 impl RecoveryGuard {
     pub fn enter() -> Self {
-        let held_mark = crate::sync::lock_tracking::held_depth_mark();
+        let held_mark = crate::sync::lock_graph::held_depth_mark();
         crate::cpu::x86_64::pcr::recovery_depth_enter();
         Self {
             active: true,
@@ -246,6 +246,8 @@ where
     }
 }
 
+/// Run `$code` with panic recovery armed: `Some` of its value, or `None` once a
+/// panic inside it has unwound and the cleanup hooks above the entry mark ran.
 #[macro_export]
 macro_rules! catch_panic {
     ($code:block) => {{
@@ -253,14 +255,14 @@ macro_rules! catch_panic {
 
         let recovery_guard = RecoveryGuard::enter();
         let held_mark = recovery_guard.held_mark();
-        let result = $crate::unwind::catch_unwind(|| -> i32 { $code });
+        let result = $crate::unwind::catch_unwind(|| $code);
         recovery_guard.exit();
 
         match result {
-            Ok(ret) => ret,
+            Ok(ret) => Some(ret),
             Err(_) => {
                 call_panic_cleanup_above(held_mark);
-                -1
+                None
             }
         }
     }};

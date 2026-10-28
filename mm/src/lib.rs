@@ -10,7 +10,7 @@ pub mod elf;
 pub mod error;
 pub mod filemap_hook;
 pub mod hhdm;
-pub mod io_mem_mapper_shim;
+pub mod io_mem_mapper;
 pub mod kconsole;
 pub mod kernel_mappings;
 pub mod kernel_meta;
@@ -41,7 +41,6 @@ pub mod user_copy;
 pub mod user_io_buf;
 pub mod user_mappings;
 pub mod user_msghdr;
-pub mod user_ptr;
 pub mod vma_region;
 
 use slopos_ostd::mm::heap::register_kernel_slab_handle;

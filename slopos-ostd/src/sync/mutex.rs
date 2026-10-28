@@ -7,7 +7,7 @@
 //! Until a [`WaitQueueBackend`](super::wait_queue::WaitQueueBackend) is
 //! registered, `lock()` falls back to spin-acquiring the inner spinlock.
 
-use crate::sync::lock_tracking::LockClassKey;
+use crate::sync::lock_graph::LockClassKey;
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::ptr::addr_of_mut;

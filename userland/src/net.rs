@@ -10,9 +10,6 @@ pub use slopos_net_core::{Cidr, Ipv4, Mac};
 
 use crate::syscall::net as syscall_net;
 
-/// Spelling used by tools that also name `std::net::Ipv4Addr`.
-pub type Ipv4Addr = Ipv4;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveError {
     InvalidHostname,
@@ -49,7 +46,7 @@ impl fmt::Display for ResolveError {
     }
 }
 
-pub fn resolve_host(host: &str) -> Result<Ipv4Addr, ResolveError> {
+pub fn resolve_host(host: &str) -> Result<Ipv4, ResolveError> {
     if host.is_empty() {
         return Err(ResolveError::InvalidHostname);
     }

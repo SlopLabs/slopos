@@ -257,41 +257,6 @@ pub unsafe extern "C" fn strtoul(s: *const u8, endptr: *mut *const u8, base: i32
     if neg { value.wrapping_neg() } else { value }
 }
 
-pub fn itoa_buf(n: i64, buf: *mut u8, base: u32) -> *mut u8 {
-    if buf.is_null() {
-        return core::ptr::null_mut();
-    }
-    unsafe {
-        if !(2..=36).contains(&base) {
-            *buf = 0;
-            return buf;
-        }
-
-        let mut p = buf.add(64);
-        *p = 0;
-
-        let negative = base == 10 && n < 0;
-        let mut value = if negative { n.unsigned_abs() } else { n as u64 };
-
-        loop {
-            let d = (value % base as u64) as u8;
-            p = p.sub(1);
-            *p = if d < 10 { b'0' + d } else { b'a' + (d - 10) };
-            value /= base as u64;
-            if value == 0 {
-                break;
-            }
-        }
-
-        if negative {
-            p = p.sub(1);
-            *p = b'-';
-        }
-
-        p
-    }
-}
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtoll(s: *const u8, endptr: *mut *const u8, base: i32) -> i64 {
     strtol(s, endptr, base)

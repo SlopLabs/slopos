@@ -1,4 +1,3 @@
-use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::addr::PhysAddr;
@@ -6,7 +5,9 @@ use slopos_abi::damage::DamageRect;
 use slopos_abi::video_traits::VideoResult;
 use slopos_abi::DisplayInfo;
 
-/// Task ID of the compositor process, set on first framebuffer flip.
+use super::scanout::Present;
+
+/// Task ID of the compositor process, set when it acquires the screen.
 static COMPOSITOR_TASK_ID: AtomicU32 = AtomicU32::new(0);
 
 #[inline]
@@ -23,7 +24,7 @@ pub fn compositor_task_id() -> u32 {
 slopos_service_core::define_service! {
     video => VideoServices {
         get_display_info() -> Option<DisplayInfo>;
-        @no_wrapper fb_flip(phys_addr: PhysAddr, size: usize, damage: *const DamageRect, damage_count: u32) -> c_int;
+        @no_wrapper fb_flip(phys_addr: PhysAddr, size: usize, damage: &[DamageRect]) -> Present;
         @no_wrapper roulette_draw(fate: u32) -> VideoResult;
         hw_cursor_available() -> bool;
         @no_wrapper cursor_set_image(image: *const u8, len: usize, hot_x: u32, hot_y: u32) -> bool;
@@ -39,13 +40,8 @@ pub fn cursor_set_image(image: &[u8], hot_x: u32, hot_y: u32) -> bool {
 }
 
 #[inline(always)]
-pub fn fb_flip_from_shm(
-    phys_addr: PhysAddr,
-    size: usize,
-    damage: *const DamageRect,
-    damage_count: u32,
-) -> c_int {
-    (video_services().fb_flip)(phys_addr, size, damage, damage_count)
+pub fn fb_flip_from_shm(phys_addr: PhysAddr, size: usize, damage: &[DamageRect]) -> Present {
+    (video_services().fb_flip)(phys_addr, size, damage)
 }
 
 #[inline(always)]

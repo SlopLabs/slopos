@@ -65,7 +65,7 @@ forks, all of upstream Rust projects licensed `MIT OR Apache-2.0`:
 None of the three is vendored into this repository. What is tracked is the diff:
 `toolchain/PIN` records the channel, the pinned `libc` crate version and its
 checksum, and a checksum per patch; `toolchain/compiler/PIN` records the rustc
-source tarball's checksum and its own patch's; and `toolchain/{rust,libc,compiler}/`
+source tarball's checksum and its patches'; and `toolchain/{rust,libc,compiler}/`
 carry the patches themselves. `scripts/make_slopos_sysroot.sh` materialises the
 first two into an owned sysroot at `third_party/rust-slopos/` and
 `scripts/make_rustc_src.sh` materialises the third into
@@ -234,7 +234,7 @@ reach all four.
 
 `just toolchain` cross-builds rustc, cargo, LLVM, clang and lld from the pinned
 rustc source tarball, and `just boot` installs the result at `/usr/local` on
-the development machine's root (`fs/assets/ext2-persist.img`), with each
+the development machine's root (`fs/assets/ext4-persist.img`), with each
 project's licence text under `share/licenses`, rustc's and cargo's under
 `share/doc`. An ISO built with `PAYLOAD=1` carries it, and the installer puts
 it at `/usr/local` on the disk it installs onto. Each
@@ -328,7 +328,7 @@ library under its MIT option (above). Its `LICENCE` travels with them at
 `share/licenses/openssh/LICENCE`.
 
 The programs the guest's own builds run are built the same way, each from
-its pinned release tarball:
+its pinned release tarball, CMake's with the one patch its entry names:
 
 - GNU Bash (`toolchain/recipes/bash/`): © the Free Software Foundation,
   `GPL-3.0-or-later`, with the glob and tilde code its tarball bundles under
@@ -438,7 +438,7 @@ beside it. Neither OFL family declares a Reserved Font Name.
 - **Inter** (Regular, SemiBold) — `Copyright (c) 2016 The Inter Project Authors
   (https://github.com/rsms/inter)` — SIL OFL 1.1, full text in
   [`assets/fonts/Inter-OFL.txt`](assets/fonts/Inter-OFL.txt)
-- **JetBrains Mono** (Regular, Bold) — `Copyright 2020 The JetBrains Mono
+- **JetBrains Mono** (Regular) — `Copyright 2020 The JetBrains Mono
   Project Authors (https://github.com/JetBrains/JetBrainsMono)` — SIL OFL 1.1,
   full text in
   [`assets/fonts/JetBrainsMono-OFL.txt`](assets/fonts/JetBrainsMono-OFL.txt)

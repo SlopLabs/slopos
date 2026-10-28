@@ -6,15 +6,13 @@ set -euo pipefail
 # `-Zbuild-std` resolves the standard library from
 # `<host sysroot>/lib/rustlib/src/rust/library` and rebuilds it in an ephemeral
 # workspace, so a `[patch]` in this workspace can never reach it — but owning
-# the sysroot can. This script therefore does not mutate the rustup toolchain
-# in place, the way the retired std-patching script did. It builds a
-# *separate* sysroot:
+# the sysroot can. This script never writes inside the rustup toolchain; it
+# builds a *separate* sysroot:
 #
 #   1. `cp -al` the pinned rustup toolchain into third_party/rust-slopos.
 #      Hardlinks, so it costs ~0.2 s and no disk.
 #   2. Replace `lib/rustlib/src` with a real (unlinked) copy. Editing through
-#      the hardlinks would write into the rustup toolchain itself, which is
-#      exactly the failure mode owning a sysroot is meant to retire, so the
+#      the hardlinks would write into the rustup toolchain itself, so the
 #      unlinking is asserted rather than assumed.
 #   3. Unpack the pinned `libc` crate at `.../library/libc`, apply
 #      toolchain/libc/*.patch inside it, then toolchain/rust/*.patch over
@@ -129,24 +127,6 @@ RUSTUP_SRC="$RUSTUP_TOOLCHAIN_DIR/lib/rustlib/src"
 if [ "$(tp_abspath "$RUSTUP_TOOLCHAIN_DIR")" = "$(tp_abspath "$SYSROOT")" ]; then
     die "rustc +$CHANNEL already resolves to $TP_SYSROOT_REL — refusing to clone the clone.
        Something has overridden the $CHANNEL toolchain to point at the fork."
-fi
-
-# The fork is cut against *pristine* rust-src. A machine that ever ran the
-# retired in-place std-patching script has slopos files sitting in the rustup
-# component itself, and the fork patches would then apply on top of them —
-# silently, and to a tree nobody can reproduce.
-POLLUTED="$(find "$RUSTUP_SRC" -name '*slopos*' -print 2>/dev/null | head -n 3)"
-if [ -n "$POLLUTED" ]; then
-    die "the rustup rust-src component is not pristine — it carries SlopOS files:
-$(printf '%s\n' "$POLLUTED" | sed 's/^/         /')
-       This machine ran the retired in-place std patcher. Both steps are
-       needed: a reinstall restores the files it *edited*, but rustup only
-       deletes what its own manifest lists, so the files it *added* survive
-       a remove/add untouched (measured, not assumed).
-         rustup component remove rust-src --toolchain $CHANNEL && \\
-           rustup component add rust-src --toolchain $CHANNEL
-         find '$RUSTUP_SRC' -name '*slopos*' -prune -exec rm -rf -- {} +
-       then re-run this script."
 fi
 
 # The one invariant worth asserting: after the copy, the src tree must not

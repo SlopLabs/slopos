@@ -5,7 +5,7 @@ use slopos_ostd::KVec;
 use slopos_ostd::sync::{LOCK_LEVEL_REGISTRY, SpinLock};
 use slopos_ostd::{klog_debug, klog_warn};
 
-use super::timer::{NET_TIMER_WHEEL, TimerKind, TimerToken};
+use super::timer::{self, TimerKind, TimerToken};
 use super::types::Ipv4Addr;
 
 const MAX_REASSEMBLY_GROUPS: usize = 32;
@@ -278,7 +278,7 @@ impl ReassemblyTable {
 
     fn init_group(&mut self, idx: usize, key: ReassemblyKey) {
         let group_id = alloc_group_id();
-        let token = NET_TIMER_WHEEL.schedule(
+        let token = timer::wheel().schedule(
             REASSEMBLY_TIMEOUT_MS,
             TimerKind::ReassemblyTimeout,
             group_id,
@@ -308,7 +308,7 @@ impl ReassemblyTable {
 
     fn clear_group(&mut self, idx: usize) {
         if let Some(token) = self.groups[idx].timer_token.take() {
-            NET_TIMER_WHEEL.cancel(token);
+            timer::wheel().cancel(token);
         }
         self.groups[idx].reset_in_place();
     }

@@ -39,9 +39,6 @@ use self::link::Link;
 use crate::syscall::{UserUtsname, core as sys_core, process};
 use crate::tls::{self, TrustStore};
 
-/// In the sealed base: `remote.conf`, `ca.pem`, `token`.
-const CONFIG_DIR: &str = "/usr/share/slopos/remote";
-
 /// What every connection reads for the life of the process; a connection's
 /// TLS client borrows the trust store and server name from it.
 static SETTINGS: OnceLock<Settings> = OnceLock::new();
@@ -100,16 +97,18 @@ fn uts_field(field: &[u8]) -> String {
 }
 
 fn load(dir: &str) -> Result<Settings, String> {
+    let path = |name: &str| std::path::Path::new(dir).join(name).display().to_string();
     let read = |name: &str| {
-        let path = format!("{dir}/{name}");
+        let path = path(name);
         std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))
     };
-    let conf = Conf::parse(&read("remote.conf")?).map_err(|e| format!("{dir}/remote.conf: {e}"))?;
+    let conf =
+        Conf::parse(&read("remote.conf")?).map_err(|e| format!("{}: {e}", path("remote.conf")))?;
     let token = read("token")?.trim().to_string();
     if token.is_empty() {
-        return Err(format!("{dir}/token is empty"));
+        return Err(format!("{} is empty", path("token")));
     }
-    let ca = format!("{dir}/ca.pem");
+    let ca = path("ca.pem");
     let trust = tls::load_trust(&ca).map_err(|e| format!("{ca}: {e}"))?;
     let mut uts = UserUtsname::new();
     sys_core::uname(&mut uts);
@@ -323,7 +322,7 @@ fn supervise(s: &'static Settings) -> ! {
 }
 
 fn daemon() -> Result<(), String> {
-    let settings: &'static Settings = match SETTINGS.set(load(CONFIG_DIR)?) {
+    let settings: &'static Settings = match SETTINGS.set(load(crate::init_control::PAIRING)?) {
         Ok(()) => SETTINGS.get().expect("just set"),
         Err(_) => return Err("the daemon is already configured".into()),
     };

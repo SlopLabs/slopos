@@ -14,13 +14,12 @@ pub use panic::{PanicQueue, PanicSession};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use slopos_boot_core::disk_id::DiskId;
-use slopos_mm::mmio::MmioRegion;
 use slopos_nvme_core::command::{Command, SQE_BYTES, cns};
 use slopos_nvme_core::completion::CQE_BYTES;
 use slopos_nvme_core::identify::{self, ControllerInfo, NamespaceInfo, trim_ascii};
 use slopos_nvme_core::regs::{self, CC_EN, Cap, Csts, PAGE_SIZE};
-use slopos_ostd::mm::AllocError;
 use slopos_ostd::mm::init::{Initialised, SlotPtr, init_struct_with};
+use slopos_ostd::mm::{AllocError, IoMem};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, Mutex, OnceLock};
 use slopos_ostd::{KArc, KBox, KVec, klog_info, lock_class, write_field, write_init_field};
 
@@ -99,7 +98,7 @@ impl From<InitError> for PciProbeError {
 #[derive(slopos_ostd::SlotFields)]
 pub struct Controller {
     index: usize,
-    regs: MmioRegion,
+    regs: IoMem,
     info: ControllerInfo,
     admin: KArc<AdminQueue>,
     engine: KArc<Engine>,
@@ -158,7 +157,7 @@ impl Controller {
 
 /// Poll the controller's status until `ready` matches `want`.
 #[inline(never)]
-fn wait_ready(regs: &MmioRegion, want: bool, timeout_ms: u32) -> Result<(), InitError> {
+fn wait_ready(regs: &IoMem, want: bool, timeout_ms: u32) -> Result<(), InitError> {
     let mut failed = None;
     let reached = crate::hpet::spin_until(
         &mut || {
@@ -184,7 +183,7 @@ fn wait_ready(regs: &MmioRegion, want: bool, timeout_ms: u32) -> Result<(), Init
 
 /// Bring the controller to disabled, the state it can be configured in.
 #[inline(never)]
-fn disable(regs: &MmioRegion, cap: Cap) -> Result<(), InitError> {
+fn disable(regs: &IoMem, cap: Cap) -> Result<(), InitError> {
     let cc = regs.read::<u32>(regs::CC);
     if cc & CC_EN != 0 {
         // Clearing EN while RDY is still rising is undefined.
@@ -197,7 +196,7 @@ fn disable(regs: &MmioRegion, cap: Cap) -> Result<(), InitError> {
 }
 
 #[inline(never)]
-fn enable(regs: &MmioRegion) -> Result<(), InitError> {
+fn enable(regs: &IoMem) -> Result<(), InitError> {
     // Configured with EN clear, then enabled: CAP may change once CC is
     // written, and so may the timeout it reports.
     regs.write::<u32>(regs::CC, regs::cc_enabled() & !CC_EN);
@@ -220,7 +219,7 @@ fn admin_step<T>(step: &'static str, result: Result<T, AdminError>) -> Result<T,
 #[inline(never)]
 fn create_pair(
     admin: &AdminQueue,
-    regs: &MmioRegion,
+    regs: &IoMem,
     cap: Cap,
     qid: u16,
     depth: u16,
@@ -336,7 +335,7 @@ fn nvme_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProbeError
 }
 
 /// What this driver needs of a controller before touching it.
-fn supported(regs: &MmioRegion, cap: Cap) -> Result<(), InitError> {
+fn supported(regs: &IoMem, cap: Cap) -> Result<(), InitError> {
     if regs::register_span(cap, PANIC_QID + 1) > regs.size() {
         return Err(InitError::Unsupported("doorbells past BAR0"));
     }
@@ -352,7 +351,7 @@ fn supported(regs: &MmioRegion, cap: Cap) -> Result<(), InitError> {
 #[inline(never)]
 fn attach(
     bound: &mut BoundDevice<'_>,
-    regs: &MmioRegion,
+    regs: &IoMem,
     cap: Cap,
     index: usize,
     admin_slot: &KArc<OnceLock<KArc<AdminQueue>>>,
@@ -406,7 +405,7 @@ fn interrupts(
 /// Publish the controller, ask to hear of a poweroff, register its
 /// namespaces, then lend it memory.
 #[inline(never)]
-fn serve(controller: &KArc<Controller>, regs: &MmioRegion) {
+fn serve(controller: &KArc<Controller>, regs: &IoMem) {
     if let Some(slot) = CONTROLLERS.get(controller.index) {
         slot.call_once(|| KArc::clone(controller));
     }
@@ -430,7 +429,7 @@ fn serve(controller: &KArc<Controller>, regs: &MmioRegion) {
 /// Give the disabled controller an admin queue, enable it and identify it.
 #[inline(never)]
 fn configure(
-    regs: &MmioRegion,
+    regs: &IoMem,
     cap: Cap,
     admin_slot: &OnceLock<KArc<AdminQueue>>,
 ) -> Result<(KArc<AdminQueue>, ControllerInfo), InitError> {
@@ -444,7 +443,7 @@ fn configure(
 /// Create the I/O and panic queue pairs and start the engine on the first.
 #[inline(never)]
 fn open_queues(
-    regs: &MmioRegion,
+    regs: &IoMem,
     cap: Cap,
     queues: Queues,
     engine_slot: &OnceLock<KArc<Engine>>,
@@ -510,7 +509,7 @@ fn lend_host_memory(controller: &Controller) {
 }
 
 #[inline(never)]
-fn admin_queue(regs: &MmioRegion, cap: Cap) -> Result<KArc<AdminQueue>, InitError> {
+fn admin_queue(regs: &IoMem, cap: Cap) -> Result<KArc<AdminQueue>, InitError> {
     let depth = queue_depth(cap, ADMIN_DEPTH);
     let ring = Ring::new(regs, cap, ADMIN_QID, depth).ok_or(InitError::NoMemory)?;
     let admin = KArc::try_init(AdminQueue::init(ring)).map_err(|_| InitError::NoMemory)?;
@@ -583,7 +582,7 @@ struct Queues {
 
 struct ControllerParts {
     index: usize,
-    regs: MmioRegion,
+    regs: IoMem,
     info: ControllerInfo,
     admin: KArc<AdminQueue>,
     engine: KArc<Engine>,
@@ -628,7 +627,7 @@ fn new_controller(parts: ControllerParts) -> Result<KArc<Controller>, InitError>
 #[inline(never)]
 fn panic_queue(
     admin: &AdminQueue,
-    regs: &MmioRegion,
+    regs: &IoMem,
     cap: Cap,
     pairs: u32,
     flushes: bool,

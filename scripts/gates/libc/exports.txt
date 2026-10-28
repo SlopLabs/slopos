@@ -736,13 +736,6 @@ sinhf func
 sinhl func
 sinl func
 sleep func
-slopos_futex_wait func
-slopos_futex_wake func
-slopos_get_cpu_count func
-slopos_get_current_cpu func
-slopos_getdents64 func
-slopos_set_cpu_affinity func
-slopos_spawn_path func
 snprintf func
 socket func
 socketpair func

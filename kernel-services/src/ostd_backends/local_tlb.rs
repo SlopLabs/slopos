@@ -9,6 +9,6 @@ pub static LOCAL_TLB_DYN: &dyn LocalTlbFlush = &LOCAL_TLB;
 
 impl LocalTlbFlush for LocalTlbFlushImpl {
     fn invlpg(&self, vaddr: VirtAddr) {
-        slopos_arch::cpu::tlb::invlpg(vaddr.0);
+        slopos_ostd::cpu::x86_64::tlb::invlpg(vaddr.0);
     }
 }

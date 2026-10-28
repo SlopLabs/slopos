@@ -11,11 +11,11 @@ pub use slopos_abi::task::{
     TASK_STACK_SIZE, TASK_UNSAFE_STACK_SIZE, TaskExitReason, TaskExitRecord, TaskFaultReason,
     TaskPriority, TaskStatus,
 };
+pub use slopos_ostd::task::SwitchContext;
 pub use slopos_ostd::task::abi::TASK_UNSAFE_STACK_SP_OFFSET;
 pub use slopos_ostd::task::fpu::{FPU_STATE_SIZE, FXSAVE_AREA_SIZE, FpuState, MXCSR_DEFAULT};
 pub use slopos_ostd::task::kernel_task::{
-    SigHandTable, SignalAction, SignalActionCell, SwitchContext, TaskContext, TaskInner,
-    fpu_reset_in_place,
+    SigHandTable, SignalAction, SignalActionCell, TaskInner, fpu_reset_in_place,
 };
 
 // Declared so `CurrentTask` and the PCR publisher agree on the monomorphisation
@@ -47,33 +47,14 @@ pub fn current_task_diag() -> Option<slopos_ostd::task::TaskDiag> {
     slopos_ostd::task::current_task_diag::<KernelStack, UnsafeStack>()
 }
 
-/// Offset of `fpu_state - context` within `Task`.
-pub const FPU_STATE_OFFSET: usize = 0xC8;
-
-// The real delta is `size_of::<TaskContext>()` (0xC8) plus whatever padding
-// `fpu_state`'s 64-byte alignment needs, so one alignment cycle of slack still
-// fires on a real field inserted between `context` and `fpu_state`.
-const _: () = {
-    let diff = offset_of!(Task, fpu_state) - offset_of!(Task, context);
-    assert!(diff >= FPU_STATE_OFFSET);
-    assert!(diff < FPU_STATE_OFFSET + 64);
-};
-
 // Bounded so the static array fits comfortably in `.bss` and heap callers
 // budget a single-page allocation.
 const _: () = assert!(core::mem::size_of::<Task>() <= 8192);
-
-// No `signal_actions` span razor: the table is no longer a field of `Task`. It
-// lives behind a `KArc<SigHandTable>`, whose own `[SignalActionCell; NSIG]`
-// bounds the index beside the definition, where `NSIG` is in scope.
 
 // `abi: TaskAbi` must be field #0 so OSTD's `TASK_UNSAFE_STACK_SP_OFFSET`,
 // computed inside `TaskAbi`, matches the asm-readable offset of
 // `unsafe_stack_sp` within `Task`.
 const _: () = assert!(offset_of!(Task, abi) == 0);
-
-// No `SwitchContext` razor here: its layout is pinned beside the canonical
-// definition in OSTD, and the alias cannot drift from the type it names.
 
 const _: () = {
     // XSAVE requires 64-byte alignment.
@@ -87,7 +68,7 @@ const _: () = {
 /// Call once from a boot step after `xsave::init()`, to fail early rather than
 /// silently corrupting adjacent task memory.
 pub fn validate_fpu_state_size() {
-    let hw_size = slopos_arch::cpu::xsave::area_size();
+    let hw_size = slopos_ostd::cpu::x86_64::xsave::area_size();
     assert!(
         hw_size <= FPU_STATE_SIZE,
         "XSAVE area size ({} B) exceeds compile-time FPU_STATE_SIZE ({} B) — \

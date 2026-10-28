@@ -360,18 +360,6 @@ const _: () = {
 ///
 /// Assignments must match `IST_CONFIGS` in `boot/src/ist_stacks.rs`;
 /// changing one without the other breaks the IDT/TSS contract.
-///
-/// # Compile-fail examples
-///
-/// ```compile_fail
-/// use slopos_arch::arch::gdt::IstSlot;
-/// let _ = IstSlot::S0;  // does not exist (0 is "no IST")
-/// ```
-///
-/// ```compile_fail
-/// use slopos_arch::arch::gdt::IstSlot;
-/// let _ = IstSlot::S8;  // does not exist (IST has 7 slots)
-/// ```
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum IstSlot {
@@ -428,6 +416,11 @@ impl IstSlot {
         }
     }
 }
+
+const _: () = {
+    assert!(IstSlot::from_index(0).is_none());
+    assert!(IstSlot::from_index(8).is_none());
+};
 
 #[cfg(test)]
 mod tests {

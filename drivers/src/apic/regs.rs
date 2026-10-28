@@ -1,5 +1,5 @@
 //! Local APIC MMIO register offsets and control flags. The IA32_APIC_BASE MSR
-//! definitions live in `slopos_arch::cpu::apic_msr` instead.
+//! definitions live in `slopos_ostd::cpu::x86_64::apic_msr` instead.
 
 pub(crate) const LAPIC_ID: u32 = 0x020;
 pub(crate) const LAPIC_VERSION: u32 = 0x030;

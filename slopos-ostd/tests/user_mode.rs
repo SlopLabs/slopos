@@ -11,7 +11,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_ostd::mm::frame::{
-    AnonymousMeta, FrameAlloc, FrameAllocOptions, MetaSlot, Paddr, init_meta_slots,
+    AnonymousMeta, FrameAlloc, FrameAllocOptions, MetaSlot, init_meta_slots,
 };
 use slopos_ostd::mm::frame_alloc::register_frame_allocator;
 use slopos_ostd::mm::page_property::PageProperty;
@@ -33,7 +33,7 @@ struct BumpAlloc {
 }
 
 impl FrameAlloc for BumpAlloc {
-    fn alloc(&self, opts: FrameAllocOptions) -> Option<Paddr> {
+    fn alloc(&self, opts: FrameAllocOptions) -> Option<PhysAddr> {
         assert_eq!(opts.size_pages, 1);
         let page = self.next_page.fetch_add(1, Ordering::Relaxed);
         if page as usize >= N_PAGES {
@@ -49,7 +49,7 @@ impl FrameAlloc for BumpAlloc {
         Some(paddr)
     }
 
-    fn dealloc(&self, _paddr: Paddr, _size_pages: usize) {}
+    fn dealloc(&self, _paddr: PhysAddr, _size_pages: usize) {}
 }
 
 static BACKING: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());

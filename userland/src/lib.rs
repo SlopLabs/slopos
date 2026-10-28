@@ -16,19 +16,14 @@ pub mod privd;
 pub mod program_registry;
 pub mod readiness;
 pub mod root_layout;
-pub mod selfhost;
-pub mod sessions;
-pub use slopos_rt as ring;
 pub mod runtime;
 pub mod sealed;
 pub mod secret;
+pub mod selfhost;
+pub mod sessions;
 pub mod syscall;
 pub mod tls;
 pub mod tree;
-
-pub use slopos_slibc as slibc;
-
-pub fn init() {}
 
 // Process entry lives in `slopos-crt0`, not here: `crt0.o` carries the naked
 // `_start` that hands the raw initial stack pointer to slibc's

@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::memory_layout_defs::ProcessMemoryLayout;
 use crate::paging_defs::PAGE_SIZE_4KB;
-use slopos_arch::tsc;
+use slopos_ostd::arch::x86_64::tsc;
 
 #[derive(Clone, Copy)]
 pub struct AslrConfig {
@@ -82,7 +82,7 @@ pub fn is_enabled() -> bool {
 }
 
 fn get_random() -> u64 {
-    if let Some(val) = slopos_arch::cpu::rdrand::RdRand::probe().and_then(|rd| rd.next()) {
+    if let Some(val) = slopos_ostd::cpu::x86_64::rdrand::RdRand::probe().and_then(|rd| rd.next()) {
         return val;
     }
     let a = tsc::rdtsc();

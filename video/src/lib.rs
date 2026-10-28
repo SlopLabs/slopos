@@ -1,10 +1,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-use core::ffi::c_int;
 use slopos_abi::FramebufferData;
-use slopos_abi::addr::PhysAddr;
-use slopos_abi::damage::DamageRect;
 use slopos_abi::video_traits::VideoResult;
 use slopos_kernel_services::syscall_services::scanout::{
     self, InstallCtx, ScanoutId, ScanoutProvider,
@@ -27,22 +24,13 @@ pub mod panic_screen;
 pub mod roulette_core;
 pub mod splash;
 
-fn video_fb_flip(
-    shm_phys: PhysAddr,
-    size: usize,
-    damage: *const DamageRect,
-    damage_count: u32,
-) -> c_int {
-    framebuffer::fb_flip_from_shm_damage(shm_phys, size, damage, damage_count)
-}
-
 fn video_roulette_draw(fate: u32) -> VideoResult {
     roulette_core::roulette_draw_kernel(fate)
 }
 
 static VIDEO_SERVICES: VideoServices = VideoServices {
     get_display_info: framebuffer::get_display_info,
-    fb_flip: video_fb_flip,
+    fb_flip: framebuffer::fb_flip_from_shm,
     roulette_draw: video_roulette_draw,
     hw_cursor_available: video_hw_cursor_available,
     cursor_set_image: video_cursor_set_image,
@@ -192,7 +180,7 @@ pub fn show_splash() {
         );
         paint_banner();
     }
-    framebuffer::framebuffer_flush(core::ptr::null(), 0);
+    framebuffer::framebuffer_flush(&[]);
 }
 
 /// Eviction hook: the firmware framebuffer is a passive direct-write backing
@@ -205,7 +193,7 @@ fn firmware_evict() {}
 /// Registered with the arbiter via [`scanout::register_scanout_installer`] so GPU
 /// drivers in `slopos-drivers` can drive it through a fn-pointer.
 fn install_scanout_provider(ctx: &InstallCtx) -> bool {
-    if framebuffer::init_with_display_info(ctx.fb.address, &ctx.fb.info) != 0 {
+    if !framebuffer::init_with_display_info(ctx.fb.address, &ctx.fb.info) {
         klog_warn!("scanout: framebuffer adoption failed; staying on previous backend");
         return false;
     }

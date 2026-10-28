@@ -144,7 +144,7 @@ define_syscall!(syscall_net_addr_ctl
     if len as usize != core::mem::size_of::<UserAddrReq>() {
         return Err(Errno::EINVAL);
     }
-    let user = slopos_mm::user_ptr::UserPtr::<UserAddrReq>::try_new(ptr)
+    let user = slopos_ostd::user::ptr::UserPtr::<UserAddrReq>::try_new(ptr)
         .map_err(|_| Errno::EFAULT)?;
     let req = slopos_mm::user_copy::copy_from_user(user).map_err(|_| Errno::EFAULT)?;
 
@@ -199,7 +199,7 @@ define_syscall!(syscall_net_route_ctl
     if len as usize != core::mem::size_of::<UserRouteReq>() {
         return Err(Errno::EINVAL);
     }
-    let user = slopos_mm::user_ptr::UserPtr::<UserRouteReq>::try_new(ptr)
+    let user = slopos_ostd::user::ptr::UserPtr::<UserRouteReq>::try_new(ptr)
         .map_err(|_| Errno::EFAULT)?;
     let req = slopos_mm::user_copy::copy_from_user(user).map_err(|_| Errno::EFAULT)?;
 
@@ -244,7 +244,7 @@ define_syscall!(syscall_net_resolver_set
     if len as usize != core::mem::size_of::<UserResolverReq>() {
         return Err(Errno::EINVAL);
     }
-    let user = slopos_mm::user_ptr::UserPtr::<UserResolverReq>::try_new(ptr)
+    let user = slopos_ostd::user::ptr::UserPtr::<UserResolverReq>::try_new(ptr)
         .map_err(|_| Errno::EFAULT)?;
     let req = slopos_mm::user_copy::copy_from_user(user).map_err(|_| Errno::EFAULT)?;
 

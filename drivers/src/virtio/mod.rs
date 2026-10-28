@@ -4,11 +4,11 @@ pub mod pci;
 pub mod queue;
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use slopos_mm::mmio::MmioRegion;
 use slopos_ostd::lock_class;
+use slopos_ostd::mm::IoMem;
+use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::sync::WaitAbort;
 use slopos_ostd::sync::WaitQueue;
-use slopos_ostd::sync::lock_tracking::LOCK_LEVEL_RESOURCE;
 
 pub const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 0x01;
 pub const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 0x02;
@@ -70,20 +70,20 @@ pub const COMMON_CFG_QUEUE_USED: usize = 0x30;
 /// Parsed VirtIO PCI capabilities - MMIO regions for device interaction
 #[derive(Clone)]
 pub struct VirtioMmioCaps {
-    pub common_cfg: MmioRegion,
-    pub notify_cfg: MmioRegion,
+    pub common_cfg: IoMem,
+    pub notify_cfg: IoMem,
     pub notify_off_multiplier: u32,
-    pub device_cfg: MmioRegion,
+    pub device_cfg: IoMem,
     pub device_cfg_len: u32,
 }
 
 impl VirtioMmioCaps {
     pub const fn empty() -> Self {
         Self {
-            common_cfg: MmioRegion::empty(),
-            notify_cfg: MmioRegion::empty(),
+            common_cfg: IoMem::empty(),
+            notify_cfg: IoMem::empty(),
             notify_off_multiplier: 0,
-            device_cfg: MmioRegion::empty(),
+            device_cfg: IoMem::empty(),
             device_cfg_len: 0,
         }
     }
@@ -187,12 +187,8 @@ pub enum EdgeWait {
     Aborted,
 }
 
-/// Legacy alias — use [`IrqEdgeEvent`] for new code.
-pub type QueueEvent = IrqEdgeEvent;
-
-/// Active interrupt delivery mechanism for a VirtIO device. At least MSI is
-/// required — legacy polling is not supported, and probe panics if neither
-/// MSI-X nor MSI can be configured.
+/// Active interrupt delivery mechanism for a VirtIO device. Probe panics if
+/// neither MSI-X nor MSI can be configured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptMode {
     /// MSI: single shared vector for all queues.
@@ -230,30 +226,20 @@ impl VirtioMsixState {
             VIRTIO_MSI_NO_VECTOR
         }
     }
-
-    #[inline]
-    pub fn queue_idt_vector(&self, queue_idx: u16) -> Option<u8> {
-        let i = queue_idx as usize;
-        if i < self.num_queues as usize && self.queue_vectors[i] != 0 {
-            Some(self.queue_vectors[i])
-        } else {
-            None
-        }
-    }
 }
 
 #[inline]
-pub fn set_device_status(cfg: &MmioRegion, status: u8) {
+pub fn set_device_status(cfg: &IoMem, status: u8) {
     cfg.write::<u8>(COMMON_CFG_DEVICE_STATUS, status);
 }
 
 #[inline]
-pub fn get_device_status(cfg: &MmioRegion) -> u8 {
+pub fn get_device_status(cfg: &IoMem) -> u8 {
     cfg.read::<u8>(COMMON_CFG_DEVICE_STATUS)
 }
 
 #[inline]
-pub fn reset_device(cfg: &MmioRegion) {
+pub fn reset_device(cfg: &IoMem) {
     set_device_status(cfg, 0);
 }
 

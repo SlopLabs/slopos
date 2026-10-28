@@ -34,7 +34,7 @@ pub use harness::{
     TestRunSummary,
 };
 pub use registry::{TestDesc, TestKind, FLAG_EXPECTED_PANIC, FLAG_EXPLICIT, FLAG_UNCAPTURED};
-pub use result::{TestOutcome, TestResult};
+pub use result::TestResult;
 pub use runner::execute_test;
 pub use slopos_service_core::paste;
 

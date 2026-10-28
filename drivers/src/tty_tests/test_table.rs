@@ -83,3 +83,15 @@ pub fn test_table_with_tty_empty() -> TestResult {
     }
     TestResult::Pass
 }
+
+slopos_testing::stest!(
+    name = test_table_init_allocates_tty0_and_tty1,
+    suite = tty_test_table
+);
+slopos_testing::stest!(
+    name = test_table_tty0_has_index_zero,
+    suite = tty_test_table
+);
+slopos_testing::stest!(name = test_table_tty0_active, suite = tty_test_table);
+slopos_testing::stest!(name = test_table_with_tty_exists, suite = tty_test_table);
+slopos_testing::stest!(name = test_table_with_tty_empty, suite = tty_test_table);

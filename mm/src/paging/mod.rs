@@ -2,15 +2,15 @@
 //! walker plus the translation queries built on it.
 //!
 //! Every write goes through `slopos_mm::kernel_mappings` under the
-//! `KERNEL_VM_SPACE` lock — the single writer of the kernel half, in every
-//! address space, after boot priority memory/7.
+//! `KERNEL_VM_SPACE` lock, the single writer of the kernel half in every
+//! address space.
 
 pub mod page_table_defs;
 pub(crate) mod tables;
 pub mod walker;
 
 pub use crate::error::{MmError, MmResult};
-pub use page_table_defs::{PAGE_TABLE_ENTRIES, PageTableEntry, PageTableLevel};
+pub use page_table_defs::PageTableEntry;
 pub use walker::{WalkResult, walk_phys};
 
 pub use tables::{

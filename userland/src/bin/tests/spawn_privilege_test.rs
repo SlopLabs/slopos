@@ -9,9 +9,8 @@ use slopos_userland as _;
 
 use slopos_abi::caps::{
     ALL as CAP_MASK_ALL, BOOT_ENTRY as CAP_BOOT_ENTRY, FATE as CAP_FATE,
-    NET_ADMIN as CAP_NET_ADMIN, RAW_BLOCK as CAP_RAW_BLOCK, RETIRED as CAP_RETIRED,
-    SCHED_HIGH as CAP_SCHED_HIGH, SET_ID as CAP_SET_ID, SYS_INSPECT as CAP_SYS_INSPECT,
-    UNIVERSAL as CAP_UNIVERSAL,
+    NET_ADMIN as CAP_NET_ADMIN, RAW_BLOCK as CAP_RAW_BLOCK, SCHED_HIGH as CAP_SCHED_HIGH,
+    SET_ID as CAP_SET_ID, SYS_INSPECT as CAP_SYS_INSPECT, UNIVERSAL as CAP_UNIVERSAL,
 };
 use slopos_abi::net::NET_IFINDEX_GLOBAL;
 use slopos_abi::spawn::{
@@ -154,10 +153,8 @@ fn no_preempt_is_eperm() -> bool {
     )
 }
 
-/// Reserved bits fail closed, so a widened flag word can give one a meaning no
-/// deployed caller already assumed. Among them are `0x0040`, the retired
-/// `TASK_FLAG_FPU_INITIALIZED`, and every privilege bit that moved to the
-/// capability mask: retired, not freed.
+/// Undefined bits fail closed, so a widened flag word can give one a meaning no
+/// deployed caller already assumed.
 ///
 /// A request carrying both a reserved bit and `NO_PREEMPT` is answered as
 /// malformed, so probing reserved bits cannot learn from an `EPERM` that a bit
@@ -241,8 +238,8 @@ fn delegation_is_bounded_by_the_spawner() -> bool {
         spawn_asking(1 << 63, None),
         EINVAL,
     ) && expect(
-        "a retired capability bit",
-        spawn_asking(CAP_RETIRED, None),
+        "the first bit past every capability",
+        spawn_asking(CAP_MASK_ALL + 1, None),
         EINVAL,
     ) && expect(
         "an undefined id bit",

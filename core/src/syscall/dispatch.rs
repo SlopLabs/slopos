@@ -3,7 +3,7 @@ use slopos_abi::task::TASK_FLAG_USER_MODE;
 use slopos_ostd::user::context::UserContext;
 use slopos_sched::task_struct::{Current, Task};
 
-use slopos_ostd::authority::{AuthorityDecision, decide};
+use slopos_ostd::authority::mask_permits;
 
 use crate::syscall::common::SyscallEntry;
 use crate::syscall::context::SyscallContext;
@@ -11,36 +11,14 @@ use crate::syscall::handlers::syscall_lookup;
 use crate::syscall::result::SyscallResult;
 use crate::syscall::signal::Delivered;
 
-/// Whether `task` may invoke the operation `entry` classifies.
+/// Whether `task` may invoke the operation `entry` classifies; a refusal is a
+/// silent `EPERM`, since a log line per probe would be the denial of service.
 ///
 /// Returns `true` for every ungated operation without reading anything, so the
 /// common path is one compare on a byte already in cache.
-///
-/// The failure mode is split by kind, deliberately: invoking an operation your
-/// authority does not name is a *program bug* and is loud, because a program
-/// that asks for something it can never have wants to be told. Acting on an
-/// object you were not given is an ordinary `EPERM` and is silent — that one is
-/// an attacker probing, and a log line per probe is the denial-of-service.
 #[inline]
-fn authorize(task: &Task, entry: &SyscallEntry, sysno: u64) -> bool {
-    if !entry.cap.is_gated() {
-        return true;
-    }
-    match decide(slopos_ostd::task::ops::task_caps(task), entry.cap) {
-        AuthorityDecision::Allow => true,
-        AuthorityDecision::WarnAndAllow => {
-            // Also userland-driven: a loop on a syscall it lacks the
-            // capability for would otherwise drive the log at line rate.
-            slopos_ostd::klog_warn_ratelimited!(
-                "AUTHORITY: task {} invoked syscall {} without {} (authority=warn)",
-                task.task_id,
-                sysno,
-                entry.cap.name(),
-            );
-            true
-        }
-        AuthorityDecision::Deny => false,
-    }
+fn authorize(task: &Task, entry: &SyscallEntry) -> bool {
+    !entry.cap.is_gated() || mask_permits(slopos_ostd::task::ops::task_caps(task), entry.cap)
 }
 
 pub fn syscall_handle(user_ctx: &UserContext) {
@@ -68,7 +46,7 @@ pub fn syscall_handle(user_ctx: &UserContext) {
             // check is one compare beside the pointer about to be called — and
             // a handler cannot forget what it does not perform.
             if let Some(entry) = entry
-                && !authorize(task, entry, sysno)
+                && !authorize(task, entry)
             {
                 user_ctx.set_rax(Errno::EPERM.as_u64());
                 crate::syscall::signal::deliver_pending_signal(&current, user_ctx);
@@ -196,7 +174,7 @@ pub fn dispatch_entry(
     let Some(handler) = entry.handler else {
         return SyscallResult::Err(Errno::ENOSYS);
     };
-    if !authorize(task, entry, u64::MAX) {
+    if !authorize(task, entry) {
         let ctx = SyscallContext::from_task_ref(task, frame);
         let result = SyscallResult::Err(Errno::EPERM);
         ctx.write_result(result);

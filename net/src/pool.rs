@@ -10,7 +10,7 @@ use slopos_ostd::lock_class;
 
 use slopos_ostd::KVec;
 use slopos_ostd::mm::frame::{Frame, PacketMeta};
-use slopos_ostd::sync::lock_tracking::LockClassKey;
+use slopos_ostd::sync::LockClassKey;
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 
 /// Usable prefix of each 4 KiB backing frame: max Ethernet frame (1518) plus

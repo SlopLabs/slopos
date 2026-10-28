@@ -187,13 +187,6 @@ impl<const N: usize> ClaimTable<N> {
         }
     }
 
-    pub fn owner(&self, dev_idx: usize) -> Option<&'static str> {
-        match self.slots.get(dev_idx) {
-            Some(ClaimSlot::Claimed { binding, .. }) => Some(binding.name()),
-            _ => None,
-        }
-    }
-
     /// Moving the resource bag is allocation-free (just its `KVec` header), so
     /// this is safe under a claim lock.
     pub fn claim(&mut self, dev_idx: usize, binding: Binding, devres: Devres) {

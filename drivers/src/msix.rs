@@ -2,26 +2,17 @@
 //!
 //! MSI-X extends MSI with a per-entry table stored in BAR memory, supporting up
 //! to 2048 vectors per device with individual per-vector masking.  Register
-//! layout follows PCI Local Bus Spec §6.8.2.
-//!
-//! ```ignore
-//! use slopos_core::irq::{msi_alloc_vector, msi_register_handler};
-//! use slopos_drivers::msix;
-//!
-//! let cap = msix::msix_read_capability(bus, dev, func, cap_offset);
-//! let table = msix::msix_map_table(&device_info, &cap).expect("MSI-X map failed");
-//! let vector = msi_alloc_vector().expect("MSI vector exhausted");
-//! msi_register_handler(vector, my_handler, ctx, bdf);
-//! msix::msix_configure(&table, 0, vector, apic_id).unwrap();
-//! msix::msix_enable(bus, dev, func, &cap);
-//! ```
+//! layout follows PCI Local Bus Spec §6.8.2. Drivers reach it through
+//! [`crate::driver_core::msi`], which allocates the vectors and owns the
+//! bindings.
 
 use crate::msi_common;
 use crate::pci::{PciDeviceInfo, pci_config_read16, pci_config_read32, pci_config_write16};
 use crate::pci_defs::PCI_MAX_BARS;
 use slopos_abi::addr::PhysAddr;
-use slopos_mm::mmio::{MmioRegion, MmioRegionExt};
+use slopos_mm::mmio;
 use slopos_ostd::klog_info;
+use slopos_ostd::mm::IoMem;
 
 const MSIX_CTRL_ENABLE: u16 = 1 << 15;
 
@@ -84,8 +75,8 @@ impl MsixCapability {
 /// The table is read/written via MMIO — not through PCI configuration space.
 #[derive(Debug, Clone)]
 pub struct MsixTable {
-    table: MmioRegion,
-    pba: MmioRegion,
+    table: IoMem,
+    pba: IoMem,
     table_size: u16,
 }
 
@@ -186,7 +177,7 @@ pub fn msix_read_capability(bus: u8, dev: u8, func: u8, cap_offset: u16) -> Msix
 /// # Errors
 ///
 /// Returns [`MsixError::BarNotAvailable`] if the BAR is missing or is I/O space.
-/// Returns [`MsixError::MappingFailed`] if `MmioRegion::map()` fails.
+/// Returns [`MsixError::MappingFailed`] if `mmio::map_uncached()` fails.
 pub fn msix_map_table(
     device: &PciDeviceInfo,
     cap: &MsixCapability,
@@ -207,7 +198,8 @@ pub fn msix_map_table(
         .window(cap.table_offset as u64, table_bytes as u64)
         .ok_or(MsixError::BarNotAvailable)?;
     let table_phys = PhysAddr::new(table_base);
-    let table_region = MmioRegion::map(table_phys, table_bytes).ok_or(MsixError::MappingFailed)?;
+    let table_region =
+        mmio::map_uncached(table_phys, table_bytes).ok_or(MsixError::MappingFailed)?;
 
     let pba_bar_idx = cap.pba_bar as usize;
     if pba_bar_idx >= PCI_MAX_BARS {
@@ -224,7 +216,7 @@ pub fn msix_map_table(
         .window(cap.pba_offset as u64, pba_bytes as u64)
         .ok_or(MsixError::BarNotAvailable)?;
     let pba_phys = PhysAddr::new(pba_base);
-    let pba_region = MmioRegion::map(pba_phys, pba_bytes).ok_or(MsixError::MappingFailed)?;
+    let pba_region = mmio::map_uncached(pba_phys, pba_bytes).ok_or(MsixError::MappingFailed)?;
 
     klog_info!(
         "MSI-X: Mapped table for BDF {}:{}.{}: {} entries, table BAR{} offset 0x{:x}, PBA BAR{} offset 0x{:x}",

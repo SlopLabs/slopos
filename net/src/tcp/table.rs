@@ -22,7 +22,7 @@ use slopos_ostd::sync::{Epoch, LOCK_LEVEL_RESOURCE, RcuCell, SpinLock};
 use super::buffer::TcpBufferPair;
 use super::pcb::{Pcb, PcbState};
 use super::tuple::{TcpError, TcpTuple};
-use crate::timer::NET_TIMER_WHEEL;
+use crate::timer;
 
 pub const NUM_SHARDS: usize = 16;
 
@@ -793,28 +793,28 @@ fn cancel_pcb_timers(pcb: &Pcb) {
         PcbState::Listen(_) => {}
         PcbState::SynSent(s) => {
             if let Some(token) = s.retransmit_token {
-                NET_TIMER_WHEEL.cancel(token);
+                timer::wheel().cancel(token);
             }
         }
         PcbState::SynRecv(s) => {
             if let Some(token) = s.retransmit_token {
-                NET_TIMER_WHEEL.cancel(token);
+                timer::wheel().cancel(token);
             }
         }
         PcbState::Data(d) => {
             if let Some(token) = d.retransmit_token {
-                NET_TIMER_WHEEL.cancel(token);
+                timer::wheel().cancel(token);
             }
             if let Some(token) = d.keepalive_token {
-                NET_TIMER_WHEEL.cancel(token);
+                timer::wheel().cancel(token);
             }
             if let Some(token) = d.fin_wait2_token {
-                NET_TIMER_WHEEL.cancel(token);
+                timer::wheel().cancel(token);
             }
         }
         PcbState::TimeWait(tw) => {
             if let Some(token) = tw.expire_token {
-                NET_TIMER_WHEEL.cancel(token);
+                timer::wheel().cancel(token);
             }
         }
     }

@@ -15,7 +15,6 @@ pub mod numbers;
 pub mod pidfd;
 pub mod process;
 pub mod raw;
-pub mod ring;
 pub mod roulette;
 pub mod signalfd;
 pub mod tty;
@@ -30,13 +29,12 @@ pub use slopos_abi::syscall::{
     UserTaskEntry, UserUtsname,
 };
 pub use slopos_abi::{
-    DamageRect, DisplayInfo, InputEvent, InputEventData, InputEventType, MAX_WINDOW_DAMAGE_REGIONS,
-    MemfdError, PixelFormat, SockAddrIn, UserFsEntry, UserFsList, UserFsStat, WindowInfo,
+    DamageRect, DisplayInfo, InputEvent, InputEventData, InputEventType, MemfdError, PixelFormat,
+    SockAddrIn, UserFsStat,
 };
 
 pub use wrappers::memfd_buf::{CachedShmMapping, ShmBuffer};
 
-pub type UserWindowInfo = WindowInfo;
 pub type RawFd = i32;
 
 /// Owned file descriptor — closes automatically on drop.

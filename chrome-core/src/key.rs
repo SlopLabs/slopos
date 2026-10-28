@@ -47,11 +47,9 @@ impl Key {
     }
 }
 
-/// The text `event` types, from its canonical codepoint alone: the legacy
-/// byte `key_codepoint` falls back to is the console's code for a navigation
-/// key.
+/// The text `event` types.
 pub fn text(event: &InputEvent) -> Option<char> {
-    char::from_u32(event.data.data1 >> 16).filter(|&ch| ch != '\0')
+    char::from_u32(event.key_codepoint()).filter(|&ch| ch != '\0')
 }
 
 /// More keys than a hand holds down at once.
@@ -101,27 +99,17 @@ impl Taken {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use slopos_abi::InputEventType;
+    use slopos_abi::input::KEY_FLAG_IS_REPEAT;
     use slopos_abi::input::keycode::{
         KEY_A, KEY_DELETE, KEY_END, KEY_HOME, KEY_PAGEDOWN, KEY_PAGEUP,
     };
-    use slopos_abi::input::{KEY_FLAG_HAS_CANONICAL, KEY_FLAG_IS_REPEAT};
 
     fn press(keycode: u16, codepoint: char, modifiers: u8, repeat: bool) -> InputEvent {
         let flags = match repeat {
             true => KEY_FLAG_IS_REPEAT,
             false => 0,
         };
-        InputEvent::key_full(
-            InputEventType::KeyPress,
-            0,
-            0,
-            keycode,
-            codepoint as u32,
-            modifiers,
-            flags,
-            0,
-        )
+        InputEvent::key(true, keycode, codepoint as u32, modifiers, flags, 0)
     }
 
     #[test]
@@ -144,23 +132,8 @@ mod tests {
 
     #[test]
     fn a_navigation_key_is_no_text() {
-        for (keycode, legacy) in [
-            (KEY_PAGEUP, 0x80),
-            (KEY_PAGEDOWN, 0x81),
-            (KEY_HOME, 0x86),
-            (KEY_END, 0x87),
-            (KEY_DELETE, 0x88),
-        ] {
-            let event = InputEvent::key_full(
-                InputEventType::KeyPress,
-                0,
-                legacy,
-                keycode,
-                0,
-                0,
-                KEY_FLAG_HAS_CANONICAL,
-                0,
-            );
+        for keycode in [KEY_PAGEUP, KEY_PAGEDOWN, KEY_HOME, KEY_END, KEY_DELETE] {
+            let event = press(keycode, '\0', 0, false);
             assert_eq!(text(&event), None);
             assert_eq!(Key::read(&event), None);
         }

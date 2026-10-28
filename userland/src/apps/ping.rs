@@ -1,9 +1,9 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
-use crate::ring::{Ring, slopfut};
 use crate::syscall::{SockAddrIn, net, process};
 use slopos_abi::signal::{SIGINT, SIGPIPE, sig_bit};
+use slopos_rt::{Ring, slopfut};
 
 struct PingConfig {
     count: Option<u32>,

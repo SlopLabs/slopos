@@ -16,19 +16,18 @@
 # and fails if it grows. Shrinking it is free; each removal should lower
 # BASELINE in the same commit.
 #
-# The baseline is zero, and that is a measurement rather than a target: every
-# contract this gate once counted turned out to be expressible. What retired
-# them was a small set of shapes, and a new one should reach for the same set
-# before asking for an exemption — a capability witness (`&IrqDisabled`,
-# `&BspToken`, `Osxsave`), a validated newtype (`Xcr0Mask`), a linear handle
+# The baseline is zero: every such contract is expressed in a type instead,
+# and a new one should reach for the same shapes before asking for an
+# exemption — a capability witness (`&IrqDisabled`, `&BspToken`,
+# `Osxsave`), a validated newtype (`Xcr0Mask`), a linear handle
 # (`OneShotBuf`), an owning reference (`KArc`), a sealed trait
 # (`ApTrampolineAbi`), a runtime-checked borrow (`PerCpuSlot`), or simply
 # taking a slice instead of a pointer and a length.
 #
 # Raising it is still allowed, because a contract that genuinely cannot be
 # typed on the pinned toolchain is better documented than pushed into an
-# undocumented function. But it is now an argument to make in the commit
-# message, not a budget to spend.
+# undocumented function. But it is an argument to make in the commit message,
+# not a budget to spend.
 
 set -euo pipefail
 

@@ -46,7 +46,7 @@ pub fn tick(cpu_id: usize, now_ms: u64) {
 }
 
 fn runnable_total() -> u32 {
-    (0..slopos_arch::pcr::get_cpu_count())
+    (0..slopos_ostd::cpu::x86_64::pcr::get_cpu_count())
         .filter_map(|cpu_id| per_cpu::with_cpu_scheduler(cpu_id, |sched| sched.runnable_sample()))
         .sum()
 }

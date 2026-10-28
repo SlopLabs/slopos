@@ -1,10 +1,11 @@
 //! The terminal's input as PTY bytes — keys, pointer reports and paste — and
 //! its selection, with no syscalls, wire types or font metrics of its own.
 
-use slopos_abi::input::keycode;
-use slopos_abi::input::{
-    MODIFIER_ALT, MODIFIER_ALTGR, MODIFIER_CTRL, MODIFIER_NUM_LOCK, MODIFIER_SHIFT,
-};
+use slopos_abi::input::keycode::NamedKey;
+use slopos_abi::input::{MODIFIER_CTRL, MODIFIER_SHIFT};
+use slopos_keymap_core::keymap::named_for;
+use slopos_keymap_core::mods_locks_from_raw;
+use slopos_keymap_core::vt;
 use slopos_vt::MouseTracking;
 
 use super::grid::TerminalGrid;
@@ -246,130 +247,6 @@ pub struct KeyPress {
     pub mods: u8,
 }
 
-/// The escape-sequence family a non-text key belongs to, in xterm's PC-style
-/// encoding.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Special {
-    /// `CSI <final>`, `SS3 <final>` under DECCKM, `CSI 1 ; <mod> <final>` when
-    /// modified. Home and End ride it too.
-    Cursor(u8),
-    /// `CSI <n> ~`, `CSI <n> ; <mod> ~` when modified.
-    Tilde(u16),
-    /// F1–F4: `SS3 <final>` unmodified regardless of DECCKM,
-    /// `CSI 1 ; <mod> <final>` when modified.
-    Pf(u8),
-}
-
-/// xterm's modifier parameter: `1 + shift + 2*alt + 4*ctrl`.
-///
-/// AltGr is reported with `MODIFIER_ALT` set too, but it selects a layout
-/// level rather than a chord — counting it would turn `AltGr+2` into a
-/// modified key instead of the `@` the layout resolved.
-fn modifier_param(mods: u8) -> u16 {
-    let mut m = 1u16;
-    if mods & MODIFIER_SHIFT != 0 {
-        m += 1;
-    }
-    if mods & MODIFIER_ALT != 0 && mods & MODIFIER_ALTGR == 0 {
-        m += 2;
-    }
-    if mods & MODIFIER_CTRL != 0 {
-        m += 4;
-    }
-    m
-}
-
-fn alt_chord(mods: u8) -> bool {
-    mods & MODIFIER_ALT != 0 && mods & MODIFIER_ALTGR == 0
-}
-
-fn encode_special(special: Special, mods: u8, app_cursor: bool) -> KeyBytes {
-    let param = modifier_param(mods);
-    let mut out = KeyBytes::empty();
-    out.push(0x1B);
-    match special {
-        Special::Cursor(final_byte) => {
-            if param == 1 {
-                out.push(if app_cursor { b'O' } else { b'[' });
-                out.push(final_byte);
-            } else {
-                out.push(b'[');
-                out.push(b'1');
-                out.push(b';');
-                out.push_num(param);
-                out.push(final_byte);
-            }
-        }
-        Special::Tilde(n) => {
-            out.push(b'[');
-            out.push_num(n);
-            if param != 1 {
-                out.push(b';');
-                out.push_num(param);
-            }
-            out.push(b'~');
-        }
-        Special::Pf(final_byte) => {
-            if param == 1 {
-                out.push(b'O');
-                out.push(final_byte);
-            } else {
-                out.push(b'[');
-                out.push(b'1');
-                out.push(b';');
-                out.push_num(param);
-                out.push(final_byte);
-            }
-        }
-    }
-    out
-}
-
-const PAGE_UP: Special = Special::Tilde(5);
-const PAGE_DOWN: Special = Special::Tilde(6);
-
-/// The family a key that makes no text belongs to.
-fn special_for_keycode(code: u16, mods: u8) -> Option<Special> {
-    // The keymap resolves a keypad key to text when `numlock ^ shift`; the
-    // complement is its navigation meaning.
-    let keypad_nav = (mods & MODIFIER_NUM_LOCK != 0) == (mods & MODIFIER_SHIFT != 0);
-    Some(match code {
-        keycode::KEY_UP => Special::Cursor(b'A'),
-        keycode::KEY_DOWN => Special::Cursor(b'B'),
-        keycode::KEY_RIGHT => Special::Cursor(b'C'),
-        keycode::KEY_LEFT => Special::Cursor(b'D'),
-        keycode::KEY_HOME => Special::Cursor(b'H'),
-        keycode::KEY_END => Special::Cursor(b'F'),
-        keycode::KEY_INSERT => Special::Tilde(2),
-        keycode::KEY_DELETE => Special::Tilde(3),
-        keycode::KEY_PAGEUP => PAGE_UP,
-        keycode::KEY_PAGEDOWN => PAGE_DOWN,
-        keycode::KEY_F1 => Special::Pf(b'P'),
-        keycode::KEY_F2 => Special::Pf(b'Q'),
-        keycode::KEY_F3 => Special::Pf(b'R'),
-        keycode::KEY_F4 => Special::Pf(b'S'),
-        keycode::KEY_F5 => Special::Tilde(15),
-        keycode::KEY_F6 => Special::Tilde(17),
-        keycode::KEY_F7 => Special::Tilde(18),
-        keycode::KEY_F8 => Special::Tilde(19),
-        keycode::KEY_F9 => Special::Tilde(20),
-        keycode::KEY_F10 => Special::Tilde(21),
-        keycode::KEY_F11 => Special::Tilde(23),
-        keycode::KEY_F12 => Special::Tilde(24),
-        keycode::KEY_KP_7 if keypad_nav => Special::Cursor(b'H'),
-        keycode::KEY_KP_8 if keypad_nav => Special::Cursor(b'A'),
-        keycode::KEY_KP_9 if keypad_nav => PAGE_UP,
-        keycode::KEY_KP_4 if keypad_nav => Special::Cursor(b'D'),
-        keycode::KEY_KP_6 if keypad_nav => Special::Cursor(b'C'),
-        keycode::KEY_KP_1 if keypad_nav => Special::Cursor(b'F'),
-        keycode::KEY_KP_2 if keypad_nav => Special::Cursor(b'B'),
-        keycode::KEY_KP_3 if keypad_nav => PAGE_DOWN,
-        keycode::KEY_KP_0 if keypad_nav => Special::Tilde(2),
-        keycode::KEY_KP_DOT if keypad_nav => Special::Tilde(3),
-        _ => return None,
-    })
-}
-
 /// Encode a compositor key press into a master action.
 ///
 /// `app_cursor` is DECCKM: an application that set it expects `SS3 A` rather
@@ -381,33 +258,34 @@ fn special_for_keycode(code: u16, mods: u8) -> Option<Special> {
 /// application.
 pub fn encode_key(key: KeyPress, app_cursor: bool) -> KeyAction {
     const CHORD: u8 = MODIFIER_CTRL | MODIFIER_SHIFT;
-    let special = special_for_keycode(key.keycode, key.mods);
+    let (mods, locks) = mods_locks_from_raw(key.mods);
+    let named = named_for(key.keycode, mods, locks);
     if key.mods & CHORD == CHORD {
         match key.codepoint {
             0x03 => return KeyAction::CopySelection,
             0x16 => return KeyAction::RequestPaste,
             _ => {}
         }
-        match special {
-            Some(PAGE_UP) => return KeyAction::ScrollUp(SCROLLBACK_PAGE_LINES),
-            Some(PAGE_DOWN) => return KeyAction::ScrollDown(SCROLLBACK_PAGE_LINES),
+        match named {
+            Some(NamedKey::PageUp) => return KeyAction::ScrollUp(SCROLLBACK_PAGE_LINES),
+            Some(NamedKey::PageDown) => return KeyAction::ScrollDown(SCROLLBACK_PAGE_LINES),
             _ => {}
         }
     }
 
-    if let Some(special) = special {
-        return KeyAction::ToMaster(encode_special(special, key.mods, app_cursor));
+    if let Some(seq) = named.and_then(|key| vt::sequence(key, mods, app_cursor)) {
+        return KeyAction::ToMaster(KeyBytes::seq(seq.as_bytes()));
     }
 
     let Some(c) = char::from_u32(key.codepoint).filter(|&c| c != '\0') else {
         return KeyAction::None;
     };
     // The keymap makes Tab and Shift+Tab the same 0x09; Shift+Tab is CBT.
-    if c == '\t' && modifier_param(key.mods) == 2 {
+    if c == '\t' && vt::modifier_param(mods) == 2 {
         return KeyAction::ToMaster(KeyBytes::seq(b"\x1b[Z"));
     }
     let bytes = KeyBytes::utf8(c);
-    KeyAction::ToMaster(match alt_chord(key.mods) {
+    KeyAction::ToMaster(match mods.alt_chord() {
         true => bytes.prefixed_esc(),
         false => bytes,
     })
@@ -508,13 +386,14 @@ pub fn encode_mouse(
         }
     };
 
-    if mods & MODIFIER_SHIFT != 0 {
+    let (chord, _) = mods_locks_from_raw(mods);
+    if chord.shift {
         cb += 4;
     }
-    if mods & MODIFIER_ALT != 0 && mods & MODIFIER_ALTGR == 0 {
+    if chord.alt_chord() {
         cb += 8;
     }
-    if mods & MODIFIER_CTRL != 0 {
+    if chord.ctrl {
         cb += 16;
     }
 
@@ -755,6 +634,7 @@ pub fn cell_in_selection(abs_line: u64, col: usize, lo: Anchor, hi: Anchor) -> b
 mod tests {
     use super::*;
     use alloc::vec::Vec;
+    use slopos_abi::input::{MODIFIER_ALT, MODIFIER_ALTGR, MODIFIER_NUM_LOCK, keycode};
 
     const CTRL_SHIFT: u8 = MODIFIER_CTRL | MODIFIER_SHIFT;
 
@@ -944,8 +824,8 @@ mod tests {
         );
     }
 
-    /// An editor needs PgUp/PgDn, so the local scrollback moved to the chord
-    /// that already means "terminal command" here.
+    /// An editor needs PgUp/PgDn, so the local scrollback takes the chord
+    /// that means "terminal command" here.
     #[test]
     fn page_keys_reach_the_application_and_the_chord_scrolls() {
         assert_eq!(

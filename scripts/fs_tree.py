@@ -25,7 +25,6 @@ where the tree goes that the manifest does not name, or that is not the kind
 the manifest names, refuses the install before anything is written.
 
     identity HOST
-    manifest HOST
     installed MANIFESTS NAME GUEST
     exists IMAGE PATH
     read IMAGE PATH
@@ -241,7 +240,7 @@ class Image:
 
 def read_manifest(path):
     """The identity, destination and `(kind, rel)` entries a host manifest
-    records; a manifest written before it named its destination names none."""
+    records."""
     try:
         with open(path) as f:
             lines = f.read().splitlines()
@@ -250,14 +249,11 @@ def read_manifest(path):
     head = lines[0].split(" ", 1) if lines else []
     if len(head) != 2 or head[0] != "identity" or not IDENTITY.fullmatch(head[1]):
         raise Refused(f"{path} is not a manifest")
-    at = None
-    if len(lines) > 1 and lines[1].startswith("at "):
-        at = lines[1][3:]
-        if not safe_abs(at):
-            raise Refused(f"{path}: {lines[1]!r} names no destination")
-        lines = lines[1:]
+    if len(lines) < 2 or not lines[1].startswith("at ") or not safe_abs(lines[1][3:]):
+        raise Refused(f"{path}: its second line names no destination")
+    at = lines[1][3:]
     out = []
-    for line in lines[1:]:
+    for line in lines[2:]:
         kind, size, rel = (line.split(" ", 2) + ["", ""])[:3]
         if kind not in ("d", "f", "l") or not (size == "-" or size.isdigit()) or not safe_rel(rel):
             raise Refused(f"{path}: {line!r} is not a manifest entry")
@@ -271,7 +267,7 @@ def installed(manifests, name, guest):
         recorded, at, _ = read_manifest(os.path.join(manifests, name))
     except Refused:
         return ""
-    return recorded or "" if at in (None, guest) else ""
+    return recorded if at == guest else ""
 
 
 def exists(image, path):
@@ -330,7 +326,7 @@ def plan(image, host, guest, name, owner=(0, 0)):
     tree = walk(host)
     manifest_path = os.path.join(name[0], name[1]) if name else None
     known, at, old = read_manifest(manifest_path) if manifest_path else (None, None, [])
-    if at not in (None, guest):
+    if known is not None and at != guest:
         raise Refused(f"{manifest_path} installed its tree at {at}, not {guest}")
     copy = join(IMAGE_MANIFESTS, name[1]) if name else None
 
@@ -574,6 +570,17 @@ def _self_test(work):
 
     refused("a reinstall at another destination", "/opt/local")
 
+    recorded_at = os.path.join(manifests, "usr_local")
+    with open(recorded_at) as f:
+        whole = f.read()
+    head, _, rest = whole.split("\n", 2)
+    with open(recorded_at, "w") as f:
+        f.write(f"{head}\n{rest}")
+    refused("a manifest that names no destination")
+    assert installed(manifests, "usr_local", "/usr/local") == ""
+    with open(recorded_at, "w") as f:
+        f.write(whole)
+
     guest("write /dev/null /usr/local/bin/new")
     put("bin/new")
     refused("a guest file where the tree adds one")
@@ -678,8 +685,6 @@ def main(argv):
             self_test()
         elif len(argv) == 2 and argv[0] == "identity":
             print(identity(argv[1]))
-        elif len(argv) == 2 and argv[0] == "manifest":
-            print("\n".join(manifest(argv[1])))
         elif len(argv) == 4 and argv[0] == "installed":
             print(installed(argv[1], argv[2], argv[3]))
         elif len(argv) == 3 and argv[0] == "exists":

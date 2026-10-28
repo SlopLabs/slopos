@@ -1,18 +1,17 @@
 //! GDT, TSS and SYSCALL-MSR configuration checks.
 
-use slopos_arch::arch::gdt::IstSlot;
-use slopos_arch::cpu;
-use slopos_arch::cpu::msr::{EFER_SCE, Msr};
-use slopos_arch::get_current_cpu;
 use slopos_hermetic::KernelStackTop;
+use slopos_ostd::arch::x86_64::gdt::IstSlot;
+use slopos_ostd::arch::x86_64::msr::{EFER_SCE, Msr, read_msr};
 use slopos_ostd::cpu::x86_64::interrupts::IrqDisabled;
+use slopos_ostd::cpu::x86_64::pcr::current_cpu_id;
 use slopos_ostd::klog_info;
 use slopos_ostd::test_support::{arch as ts_arch, gdt as ts_gdt, pcr as ts_pcr};
 use slopos_sched::test_fixture::KernelTestScope;
 use slopos_testing::{TestResult, assert_test};
 
-use crate::gdt::{gdt_init, gdt_set_ist, gdt_set_kernel_rsp0, syscall_msr_init};
-use crate::idt::{IdtEntry, idt_get_gate};
+use crate::gdt::{gdt_set_ist, gdt_set_kernel_rsp0, syscall_msr_init};
+use crate::idt::idt_get_gate;
 use crate::ist_stacks::{IST_STACK_COUNT, stack_bounds_for_cpu};
 
 /// `cli` masks only the IRQ-routed slots, so a probe must be a real stack.
@@ -173,7 +172,7 @@ struct Rsp0Probe {
 /// The mask keeps the install and the restore adjacent.
 fn probe_kernel_rsp0() -> Option<Rsp0Probe> {
     let tss_base = live_tss_base()?;
-    let probe = probe_stack_top(get_current_cpu(), RSP0_PROBE_INDEX).as_u64();
+    let probe = probe_stack_top(current_cpu_id(), RSP0_PROBE_INDEX).as_u64();
     IrqDisabled::with(|irq| {
         let pcr_before = ts_pcr::bsp_kernel_rsp_snapshot(irq)?;
         let tss_before = live_tss_rsp0(tss_base);
@@ -241,7 +240,7 @@ const IST_SLOTS: [IstSlot; 7] = [
 
 pub fn test_gdt_set_ist_valid_indices() -> TestResult {
     let mut scope = KernelTestScope::enter();
-    let cpu = get_current_cpu();
+    let cpu = current_cpu_id();
     let Some(tss_base) = live_tss_base() else {
         klog_info!("GDT_TEST: BUG - no TSS loaded");
         return TestResult::Fail;
@@ -297,7 +296,7 @@ pub fn test_gdt_set_ist_index_overflow() -> TestResult {
 }
 
 pub fn test_efer_sce_enabled() -> TestResult {
-    let efer = cpu::read_msr(Msr::EFER);
+    let efer = read_msr(Msr::EFER);
 
     if (efer & EFER_SCE) == 0 {
         klog_info!("GDT_TEST: BUG - EFER.SCE not set, SYSCALL will #UD");
@@ -308,7 +307,7 @@ pub fn test_efer_sce_enabled() -> TestResult {
 }
 
 pub fn test_star_msr_valid() -> TestResult {
-    let star = cpu::read_msr(Msr::STAR);
+    let star = read_msr(Msr::STAR);
 
     // STAR[47:32] is the SYSCALL CS/SS pair, STAR[63:48] the SYSRET base.
     let syscall_cs = ((star >> 32) & 0xFFFF) as u16;
@@ -336,7 +335,7 @@ pub fn test_star_msr_valid() -> TestResult {
 
 /// An LSTAR in the user half would be an arbitrary-code-execution primitive.
 pub fn test_lstar_msr_valid() -> TestResult {
-    let lstar = cpu::read_msr(Msr::LSTAR);
+    let lstar = read_msr(Msr::LSTAR);
 
     if lstar == 0 {
         klog_info!("GDT_TEST: BUG - LSTAR is 0, SYSCALL will crash");
@@ -359,7 +358,7 @@ pub fn test_lstar_msr_valid() -> TestResult {
 }
 
 pub fn test_sfmask_msr_valid() -> TestResult {
-    let sfmask = cpu::read_msr(Msr::SFMASK);
+    let sfmask = read_msr(Msr::SFMASK);
 
     // RFLAGS.IF is bit 9 and RFLAGS.TF is bit 8; syscall entry must mask both.
     let if_masked = (sfmask & (1 << 9)) != 0;
@@ -377,20 +376,7 @@ pub fn test_sfmask_msr_valid() -> TestResult {
 }
 
 pub fn test_double_fault_uses_ist() -> TestResult {
-    let mut entry = IdtEntry {
-        offset_low: 0,
-        selector: 0,
-        ist: 0,
-        type_attr: 0,
-        offset_mid: 0,
-        offset_high: 0,
-        zero: 0,
-    };
-
-    if idt_get_gate(8, &mut entry) != 0 {
-        klog_info!("GDT_TEST: Failed to read IDT entry 8 (Double Fault)");
-        return TestResult::Fail;
-    }
+    let entry = idt_get_gate(8);
 
     if entry.ist == 0 {
         klog_info!("GDT_TEST: BUG - Double fault handler doesn't use IST!");
@@ -402,20 +388,7 @@ pub fn test_double_fault_uses_ist() -> TestResult {
 }
 
 pub fn test_page_fault_handler_valid() -> TestResult {
-    let mut entry = IdtEntry {
-        offset_low: 0,
-        selector: 0,
-        ist: 0,
-        type_attr: 0,
-        offset_mid: 0,
-        offset_high: 0,
-        zero: 0,
-    };
-
-    if idt_get_gate(14, &mut entry) != 0 {
-        klog_info!("GDT_TEST: Failed to read IDT entry 14 (Page Fault)");
-        return TestResult::Fail;
-    }
+    let entry = idt_get_gate(14);
 
     let handler = (entry.offset_low as u64)
         | ((entry.offset_mid as u64) << 16)
@@ -448,20 +421,7 @@ pub fn test_page_fault_handler_valid() -> TestResult {
 }
 
 pub fn test_gp_fault_handler_valid() -> TestResult {
-    let mut entry = IdtEntry {
-        offset_low: 0,
-        selector: 0,
-        ist: 0,
-        type_attr: 0,
-        offset_mid: 0,
-        offset_high: 0,
-        zero: 0,
-    };
-
-    if idt_get_gate(13, &mut entry) != 0 {
-        klog_info!("GDT_TEST: Failed to read IDT entry 13 (GP Fault)");
-        return TestResult::Fail;
-    }
+    let entry = idt_get_gate(13);
 
     let handler = (entry.offset_low as u64)
         | ((entry.offset_mid as u64) << 16)
@@ -483,96 +443,18 @@ pub fn test_gp_fault_handler_valid() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_syscall_idt_entry() -> TestResult {
-    let mut entry = IdtEntry {
-        offset_low: 0,
-        selector: 0,
-        ist: 0,
-        type_attr: 0,
-        offset_mid: 0,
-        offset_high: 0,
-        zero: 0,
-    };
-
-    if idt_get_gate(0x80, &mut entry) != 0 {
-        klog_info!("GDT_TEST: Failed to read IDT entry 0x80 (Syscall)");
-        return TestResult::Fail;
-    }
-
-    let handler = (entry.offset_low as u64)
-        | ((entry.offset_mid as u64) << 16)
-        | ((entry.offset_high as u64) << 32);
-
-    if handler == 0 {
-        klog_info!("GDT_TEST: BUG - INT 0x80 handler is NULL");
-        return TestResult::Fail;
-    }
-
-    // DPL is type_attr[6:5]; a user-reachable gate needs 3.
-    let dpl = (entry.type_attr >> 5) & 0x3;
-    if dpl != 3 {
-        klog_info!(
-            "GDT_TEST: BUG - INT 0x80 DPL is {}, should be 3 for user access",
-            dpl
-        );
-        return TestResult::Fail;
-    }
-
-    TestResult::Pass
-}
-
-pub fn test_gdt_double_init() -> TestResult {
-    let (limit_before, _base_before) = read_gdtr();
-    let cs_before = ts_arch::read_cs();
-    let ss_before = ts_arch::read_ss();
-
-    gdt_init();
-
-    let (limit_after, _base_after) = read_gdtr();
-    let cs_after = ts_arch::read_cs();
-    let ss_after = ts_arch::read_ss();
-
-    if cs_before != cs_after {
-        klog_info!(
-            "GDT_TEST: BUG - CS changed after gdt_init: 0x{:x} -> 0x{:x}",
-            cs_before,
-            cs_after
-        );
-        return TestResult::Fail;
-    }
-
-    if ss_before != ss_after {
-        klog_info!(
-            "GDT_TEST: BUG - SS changed after gdt_init: 0x{:x} -> 0x{:x}",
-            ss_before,
-            ss_after
-        );
-        return TestResult::Fail;
-    }
-
-    if limit_before != limit_after {
-        klog_info!(
-            "GDT_TEST: WARNING - GDT limit changed: {} -> {}",
-            limit_before,
-            limit_after
-        );
-    }
-
-    TestResult::Pass
-}
-
 pub fn test_syscall_msr_double_init() -> TestResult {
-    let efer_before = cpu::read_msr(Msr::EFER);
-    let star_before = cpu::read_msr(Msr::STAR);
-    let lstar_before = cpu::read_msr(Msr::LSTAR);
+    let efer_before = read_msr(Msr::EFER);
+    let star_before = read_msr(Msr::STAR);
+    let lstar_before = read_msr(Msr::LSTAR);
 
     // The BSP brand has already minted and dropped by the time the harness
     // runs, so a fresh BSP-init scope is needed for the `CpuInitWitness`.
     slopos_ostd::sync::run_bsp_init_for_test(|t| syscall_msr_init(t));
 
-    let efer_after = cpu::read_msr(Msr::EFER);
-    let star_after = cpu::read_msr(Msr::STAR);
-    let lstar_after = cpu::read_msr(Msr::LSTAR);
+    let efer_after = read_msr(Msr::EFER);
+    let star_after = read_msr(Msr::STAR);
+    let lstar_after = read_msr(Msr::LSTAR);
 
     if (efer_before & EFER_SCE) != (efer_after & EFER_SCE) {
         klog_info!("GDT_TEST: BUG - EFER.SCE changed after syscall_msr_init");
@@ -674,7 +556,7 @@ pub fn test_gdt_entry_order_matches_selectors() -> TestResult {
 /// In 64-bit mode SYSRET builds CS from `STAR[63:48] + 16` and SS from
 /// `STAR[63:48] + 8`, both with RPL forced to 3.
 pub fn test_star_sysret_selector_calculation() -> TestResult {
-    let star = cpu::read_msr(Msr::STAR);
+    let star = read_msr(Msr::STAR);
     let sysret_base = ((star >> 48) & 0xFFFF) as u16;
 
     let expected_user_cs = sysret_base + 16;
@@ -789,7 +671,7 @@ pub fn test_ist_stacks_have_guard_pages() -> TestResult {
 
 /// Heuristic: no function prologue starts with NUL padding or INT3 filler.
 pub fn test_lstar_points_to_executable_code() -> TestResult {
-    let lstar = cpu::read_msr(Msr::LSTAR);
+    let lstar = read_msr(Msr::LSTAR);
 
     let first_bytes = ts_gdt::read_bytes_at::<4>(lstar);
 
@@ -826,8 +708,6 @@ slopos_testing::stest!(name = test_sfmask_msr_valid, suite = gdt);
 slopos_testing::stest!(name = test_double_fault_uses_ist, suite = gdt);
 slopos_testing::stest!(name = test_page_fault_handler_valid, suite = gdt);
 slopos_testing::stest!(name = test_gp_fault_handler_valid, suite = gdt);
-slopos_testing::stest!(name = test_syscall_idt_entry, suite = gdt);
-slopos_testing::stest!(name = test_gdt_double_init, suite = gdt);
 slopos_testing::stest!(name = test_syscall_msr_double_init, suite = gdt);
 slopos_testing::stest!(name = test_gdt_entry_order_matches_selectors, suite = gdt);
 slopos_testing::stest!(name = test_star_sysret_selector_calculation, suite = gdt);

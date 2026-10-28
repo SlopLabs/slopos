@@ -2,7 +2,6 @@
 //! contiguous physical allocation, mapped into multiple processes via
 //! `mmap(MAP_SHARED)`, and passed between them via `sendmsg(SCM_RIGHTS)`.
 
-use core::ffi::c_int;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use slopos_ostd::lock_class;
 
@@ -11,7 +10,6 @@ use slopos_abi::addr::PhysAddr;
 use slopos_abi::file_ops::{FileKind, FileOps};
 use slopos_abi::fs::{S_IFREG, UserFsStat};
 use slopos_abi::io::{IoBufRead, IoBufWrite};
-use slopos_abi::pixel::PixelFormat;
 use slopos_abi::quota::{CommitPagesAxis, ObjectRow, ResidentPagesAxis};
 use slopos_ostd::handle::{Handle, HandleTable};
 use slopos_ostd::klog_debug;
@@ -49,8 +47,6 @@ pub struct MemfdObject {
     /// Bytes; 0 until ftruncate, then page-aligned.
     size: usize,
     pages: u32,
-    #[allow(dead_code)]
-    format: PixelFormat,
     /// Open fd references: dup, fork and SCM_RIGHTS all increment.
     refcount: u32,
     /// Mapped pages referencing this memfd; pages are freed only once both
@@ -140,7 +136,6 @@ impl Drop for MemfdBacking {
 /// Create a new memfd object. The packed handle is stored in
 /// `OpenFile.handle`; the returned backing's `Drop` is the close.
 pub fn memfd_create(
-    _flags: u32,
     account: AccountId,
 ) -> Option<(
     usize,
@@ -153,7 +148,6 @@ pub fn memfd_create(
             phys_addr: PhysAddr::NULL,
             size: 0,
             pages: 0,
-            format: PixelFormat::Argb8888,
             refcount: 1,
             map_count: 0,
             commit: ChargeSlot::empty(),
@@ -179,24 +173,29 @@ pub fn memfd_create(
 /// Set the size of a memfd; one-shot, refused once the size is non-zero.
 /// Allocates the contiguous physical pages eagerly, promised against
 /// `account`'s commit first and held as `account`'s frames.
-pub fn memfd_ftruncate(handle: usize, size: usize, account: AccountId) -> c_int {
+///
+/// # Errors
+///
+/// `EINVAL` for a size of zero or past the limit or a memfd already sized,
+/// `ENOMEM` when the pages cannot be had, `EBADF` for a stale handle.
+pub fn memfd_ftruncate(handle: usize, size: usize, account: AccountId) -> Result<(), Errno> {
     let h = handle_from_raw(handle);
     if size == 0 || size > MAX_MEMFD_SIZE {
-        return -22; // EINVAL
+        return Err(Errno::EINVAL);
     }
 
     let aligned_size = (size + PAGE_SIZE_4KB as usize - 1) & !(PAGE_SIZE_4KB as usize - 1);
     let page_count = (aligned_size / PAGE_SIZE_4KB as usize) as u32;
 
     let Ok(commit) = try_charge::<CommitPagesAxis>(account, page_count) else {
-        return Errno::ENOMEM.raw();
+        return Err(Errno::ENOMEM);
     };
     let Ok(frames) = try_charge::<ResidentPagesAxis>(account, page_count) else {
-        return Errno::ENOMEM.raw();
+        return Err(Errno::ENOMEM);
     };
     let phys = alloc_kernel_pages(page_count);
     if phys.is_null() {
-        return Errno::ENOMEM.raw();
+        return Err(Errno::ENOMEM);
     }
 
     // Claim one owning MetaSlot ref per backing page so the memfd is the sole
@@ -223,11 +222,11 @@ pub fn memfd_ftruncate(handle: usize, size: usize, account: AccountId) -> c_int 
         for i in claimed..page_count {
             free_page_frame(PhysAddr::new(phys.as_u64() + (i as u64) * PAGE_SIZE_4KB));
         }
-        return Errno::ENOMEM.raw();
+        return Err(Errno::ENOMEM);
     }
 
     let slot = h.slot() as usize;
-    let rc = with_registry(|t| match t.get_mut(h) {
+    let sized = with_registry(|t| match t.get_mut(h) {
         Ok(obj) if obj.size == 0 => {
             obj.phys_addr = phys;
             obj.size = aligned_size;
@@ -238,20 +237,20 @@ pub fn memfd_ftruncate(handle: usize, size: usize, account: AccountId) -> c_int 
             // lock-free reader never sees a sized memfd with a zeroed atomic.
             MEMFD_PHYS[slot].store(phys.as_u64(), Ordering::Release);
             MEMFD_SIZE[slot].store(aligned_size as u32, Ordering::Release);
-            0
+            Ok(())
         }
-        Ok(_) => -22, // already sized (one-shot)
-        Err(_) => -9, // EBADF — stale/invalid
+        Ok(_) => Err(Errno::EINVAL),
+        Err(_) => Err(Errno::EBADF),
     });
 
-    if rc != 0 {
+    if sized.is_err() {
         // The owning refs are already claimed, so unwind through them; never
         // raw-free a page whose MetaSlot we now own.
         for i in 0..page_count {
             release_owned_anon_page(PhysAddr::new(phys.as_u64() + (i as u64) * PAGE_SIZE_4KB));
         }
     }
-    rc
+    sized
 }
 
 /// Lock-free physical address read, for the compositor's fb_flip hot path.
@@ -339,11 +338,6 @@ pub fn memfd_size(handle: usize) -> usize {
 struct MemfdFileOps;
 
 static MEMFD_FILE_OPS: MemfdFileOps = MemfdFileOps;
-
-/// Placeholder for array initialisation; entries are overwritten before use.
-pub fn dummy_file_ops() -> &'static dyn FileOps {
-    &MEMFD_FILE_OPS
-}
 
 impl FileOps for MemfdFileOps {
     fn kind(&self) -> FileKind {

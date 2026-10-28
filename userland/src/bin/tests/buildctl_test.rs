@@ -28,7 +28,7 @@ const SELF_PATH: &str = "/bin/buildctl_test";
 /// `cd`s here once, so every path below stays relative.
 const PROJECT_ROOT: &str = "/var/buildctl";
 
-/// Over 32 bytes, which the old `MAX_NAME_LEN` refused.
+/// Over 32 bytes.
 const LONG_SOURCE: &str = "src/module_with_a_deliberately_long_name_over_thirty_two_bytes.slop";
 const MAIN_SOURCE: &str = "src/main.slop";
 const BROKEN_SOURCE: &str = "src/broken.slop";

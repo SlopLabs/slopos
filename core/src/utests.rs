@@ -1,9 +1,10 @@
 //! Userland test-binary registrations.
 //!
 //! Each [`utest!`](crate::utest) here corresponds to a binary in
-//! `userland/src/bin/tests/`, which must also be listed in the justfile's
-//! `test_userland_bins` to be packaged into `ext2-tests.img`. A test of an
-//! unprivileged gate runs as the session does: `caps = none, uid = 1000`.
+//! `userland/src/bin/tests/`, which must also be listed in
+//! `scripts/lib/base.sh`'s `BASE_TEST_PROGRAMS` to be packaged into the tests
+//! image and base. A test of an unprivileged gate runs as the session does:
+//! `caps = none, uid = 1000`.
 
 use slopos_abi::caps::{DISPLAY_SEAT, INPUT_SEAT, MOUNT, NET_ADMIN};
 

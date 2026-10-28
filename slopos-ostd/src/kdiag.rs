@@ -1,5 +1,4 @@
 use core::arch::asm;
-use core::ffi::c_int;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::arch::x86_64::tsc;
@@ -249,19 +248,14 @@ pub fn kdiag_dump_stack_trace_from_rbp(rbp: u64) {
         return_address: 0,
     }; KDIAG_STACK_TRACE_DEPTH];
 
-    let frame_count = stacktrace::stacktrace_capture_from(
-        rbp,
-        entries.as_mut_ptr(),
-        KDIAG_STACK_TRACE_DEPTH as c_int,
-    );
+    let frame_count = stacktrace::stacktrace_capture_from(rbp, &mut entries);
 
     if frame_count == 0 {
         crate::klog_info!("No stack frames found");
         return;
     }
 
-    for i in 0..frame_count as usize {
-        let entry = &entries[i];
+    for (i, entry) in entries[..frame_count].iter().enumerate() {
         crate::klog_info!(
             "Frame {}: RBP=0x{:x} RIP=0x{:x}",
             i,

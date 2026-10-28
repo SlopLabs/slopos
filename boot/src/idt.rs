@@ -1,9 +1,4 @@
-#![allow(bad_asm_style)]
-
-use core::ffi::c_void;
-use core::sync::atomic::{AtomicU8, Ordering};
-
-use slopos_arch::cpu;
+use slopos_ostd::cpu::x86_64 as cpu;
 pub use slopos_ostd::irq::{
     EXCEPTION_ALIGNMENT_CHECK, EXCEPTION_BOUND_RANGE, EXCEPTION_BREAKPOINT, EXCEPTION_DEBUG,
     EXCEPTION_DEVICE_NOT_AVAIL, EXCEPTION_DIVIDE_ERROR, EXCEPTION_DOUBLE_FAULT,
@@ -11,7 +6,7 @@ pub use slopos_ostd::irq::{
     EXCEPTION_INVALID_TSS, EXCEPTION_MACHINE_CHECK, EXCEPTION_NMI, EXCEPTION_OVERFLOW,
     EXCEPTION_PAGE_FAULT, EXCEPTION_SEGMENT_NOT_PRES, EXCEPTION_SIMD_FP_EXCEPTION,
     EXCEPTION_STACK_FAULT, IRQ_BASE_VECTOR, IdtBuilder, IdtEntry, IstPreemptHold,
-    LAPIC_TIMER_VECTOR, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR, SHUTDOWN_VECTOR, SYSCALL_VECTOR,
+    LAPIC_TIMER_VECTOR, RCU_QS_IPI_VECTOR, RESCHEDULE_IPI_VECTOR, SHUTDOWN_VECTOR,
     TLB_SHOOTDOWN_VECTOR,
 };
 use slopos_ostd::{kdiag_dump_interrupt_frame, klog_debug, klog_info};
@@ -28,37 +23,13 @@ const _: () = {
     assert!(offset_of!(slopos_ostd::irq::InterruptFrame, rflags) == 152);
     assert!(offset_of!(slopos_ostd::irq::InterruptFrame, rsp) == 160);
     assert!(offset_of!(slopos_ostd::irq::InterruptFrame, ss) == 168);
-    // OSTD's `__ostd_user_return` trampoline reads this slot as `gs:[16]`.
-    assert!(slopos_ostd::cpu::x86_64::pcr::offsets::KERNEL_RSP == 16);
 };
 
 static BUILDER: IdtBuilder = IdtBuilder::new();
 
-type ExceptionHandler = fn(*mut slopos_arch::InterruptFrame);
+type ExceptionHandler = fn(*mut slopos_ostd::irq::interrupt_frame::InterruptFrame);
 
-static CURRENT_EXCEPTION_MODE: AtomicU8 = AtomicU8::new(ExceptionMode::Normal as u8);
-
-#[repr(u8)]
-#[derive(Copy, Clone)]
-pub enum ExceptionMode {
-    Normal = 0,
-    Test = 1,
-}
-
-impl ExceptionMode {
-    fn load() -> Self {
-        match CURRENT_EXCEPTION_MODE.load(Ordering::Acquire) {
-            x if x == ExceptionMode::Test as u8 => ExceptionMode::Test,
-            _ => ExceptionMode::Normal,
-        }
-    }
-
-    fn store(self) {
-        CURRENT_EXCEPTION_MODE.store(self as u8, Ordering::Release);
-    }
-}
-
-/// Per-vector handler tables; null encodes "no handler installed".
+/// The per-vector handler table; null encodes "no handler installed".
 ///
 /// Per-slot atomic stores keep the 256-byte fn-pointer array off the stack,
 /// which the kernel's stack-frame budget would otherwise reject.
@@ -69,7 +40,6 @@ mod handler_tables {
 
     const NULL_SLOT: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
     static PANIC: [AtomicPtr<()>; 32] = [NULL_SLOT; 32];
-    static OVERRIDE: [AtomicPtr<()>; 32] = [NULL_SLOT; 32];
 
     pub fn install_panic(vector: u8, handler: ExceptionHandler) {
         PANIC[vector as usize].store(
@@ -80,23 +50,6 @@ mod handler_tables {
 
     pub fn panic_for(vector: u8) -> Option<ExceptionHandler> {
         fn_ptr::decode::<ExceptionHandler>(PANIC[vector as usize].load(Ordering::Acquire))
-    }
-
-    pub fn install_override(vector: u8, handler: Option<ExceptionHandler>) {
-        OVERRIDE[vector as usize].store(
-            fn_ptr::encode::<ExceptionHandler>(handler),
-            Ordering::Release,
-        );
-    }
-
-    pub fn override_for(vector: u8) -> Option<ExceptionHandler> {
-        fn_ptr::decode::<ExceptionHandler>(OVERRIDE[vector as usize].load(Ordering::Acquire))
-    }
-
-    pub fn clear_overrides() {
-        for slot in OVERRIDE.iter() {
-            slot.store(core::ptr::null_mut(), Ordering::Release);
-        }
     }
 }
 
@@ -159,39 +112,11 @@ pub fn idt_init<'b>(_token: &slopos_ostd::sync::BspToken<'b>) {
     klog_debug!("IDT: init start");
     BUILDER.install_default_handlers();
     initialize_handler_tables();
-    klog_debug!("IDT: install_default_handlers + handler tables ready");
+    klog_debug!("IDT: install_default_handlers + handler table ready");
 }
 
-pub fn idt_set_gate_priv(vector: u8, handler: u64, selector: u16, typ: u8, dpl: u8) {
-    BUILDER.set_gate_priv(vector, handler, selector, typ, dpl);
-}
-
-pub fn idt_set_gate(vector: u8, handler: u64, selector: u16, typ: u8) {
-    BUILDER.set_gate(vector, handler, selector, typ);
-}
-
-pub fn idt_get_gate(vector: u8, out_entry: *mut IdtEntry) -> i32 {
-    BUILDER.write_gate_to_caller(vector, out_entry)
-}
-
-pub fn idt_get_gate_opaque(vector: u8, out_entry: *mut c_void) -> i32 {
-    idt_get_gate(vector, out_entry as *mut IdtEntry)
-}
-
-pub fn idt_install_exception_handler(vector: u8, handler: ExceptionHandler) {
-    if vector >= 32 {
-        klog_info!(
-            "IDT: Ignoring handler install for non-exception vector {}",
-            vector
-        );
-        return;
-    }
-    if is_critical_exception_internal(vector) {
-        klog_info!("IDT: Refusing to override critical exception {}", vector);
-        return;
-    }
-    handler_tables::install_override(vector, Some(handler));
-    klog_debug!("IDT: Registered override handler for exception {}", vector);
+pub fn idt_get_gate(vector: u8) -> IdtEntry {
+    BUILDER.get_gate(vector)
 }
 
 /// Bind an IDT entry to an IST slot. `&mut BootCtx<'_, K>` gates the call so
@@ -200,20 +125,9 @@ pub fn idt_install_exception_handler(vector: u8, handler: ExceptionHandler) {
 pub fn idt_set_ist<'b, K: slopos_hermetic::CpuInitKind>(
     _ctx: &mut slopos_hermetic::BootCtx<'b, K>,
     vector: u8,
-    slot: slopos_arch::arch::gdt::IstSlot,
+    slot: slopos_ostd::arch::x86_64::gdt::IstSlot,
 ) {
     BUILDER.set_ist(vector, slot.as_index() & 0x7);
-}
-
-pub fn exception_set_mode(mode: ExceptionMode) {
-    mode.store();
-    if let ExceptionMode::Normal = mode {
-        handler_tables::clear_overrides();
-    }
-}
-
-pub fn exception_is_critical(vector: u8) -> i32 {
-    slopos_arch::arch::exception::exception_is_critical(vector) as i32
 }
 
 /// Load the static IDT on the current CPU. Any `CpuInitWitness` is accepted:
@@ -225,7 +139,7 @@ pub fn idt_load<W: slopos_ostd::sync::CpuInitWitness>(witness: &W) {
 
 fn handle_tlb_shootdown_ipi() {
     let apic_id = slopos_drivers::apic::get_id();
-    if let Some(cpu_idx) = slopos_arch::pcr::cpu_index_from_apic_id(apic_id) {
+    if let Some(cpu_idx) = slopos_ostd::cpu::x86_64::pcr::cpu_index_from_apic_id(apic_id) {
         tlb::handle_shootdown_ipi(cpu_idx);
     } else {
         klog_debug!(
@@ -241,10 +155,10 @@ fn handle_tlb_shootdown_ipi() {
 ///
 /// A *returning* NMI may take no lock, so output goes through the watchdog's
 /// byte-at-a-time emitter. [`nmi_die`] is exempt: nothing resumes there.
-fn nmi_handler(frame: &slopos_arch::InterruptFrame) {
+fn nmi_handler(frame: &slopos_ostd::irq::interrupt_frame::InterruptFrame) {
     use slopos_ostd::watchdog::{self, NmiDisposition};
 
-    let cpu_id = slopos_arch::pcr::get_current_cpu();
+    let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id();
 
     // A peer CPU winning the fatal-panic election makes this NMI its stop
     // broadcast, not a watchdog wedge: stop silently so the owner drives the
@@ -256,13 +170,13 @@ fn nmi_handler(frame: &slopos_arch::InterruptFrame) {
         // on an ack we will never deliver. Set-only — never clears an ack.
         slopos_mm::tlb::force_ack_local_shootdowns(cpu_id);
         slopos_mm::tlb::notify_cpu_offline();
-        slopos_arch::pcr::mark_cpu_offline(cpu_id);
+        slopos_ostd::cpu::x86_64::pcr::mark_cpu_offline(cpu_id);
         slopos_sched::per_cpu::abandon_dispatch_for_dying_cpu(cpu_id);
         slopos_ostd::panic::mark_fatal_abort();
         slopos_ostd::sync::panic_recovery::poison_all_held_locks_no_halt();
         slopos_ostd::panic::mark_cpu_stopped();
-        slopos_arch::cpu::disable_interrupts();
-        slopos_arch::cpu::halt_loop();
+        slopos_ostd::cpu::x86_64::disable_interrupts();
+        slopos_ostd::cpu::x86_64::halt_loop();
     }
 
     // Registers only: the wait-for chain is the watcher's to print, and it runs
@@ -291,7 +205,7 @@ fn nmi_handler(frame: &slopos_arch::InterruptFrame) {
 /// that fault's own `iretq` would unblock NMI while this handler still runs.
 fn nmi_emit_context(
     cpu_id: usize,
-    frame: &slopos_arch::InterruptFrame,
+    frame: &slopos_ostd::irq::interrupt_frame::InterruptFrame,
     disposition: slopos_ostd::watchdog::NmiDisposition,
 ) {
     use slopos_ostd::watchdog::{
@@ -333,7 +247,7 @@ fn nmi_emit_context(
 /// Terminal branch: everything destructive lives here and nowhere else, because
 /// force-releasing locks and latching the validator off are corrections on the
 /// way out rather than diagnostics.
-fn nmi_die(cpu_id: usize, frame: &slopos_arch::InterruptFrame) -> ! {
+fn nmi_die(cpu_id: usize, frame: &slopos_ostd::irq::interrupt_frame::InterruptFrame) -> ! {
     use slopos_ostd::watchdog::{nmi_emit, nmi_emit_dec, nmi_emit_hex, nmi_emit_line};
 
     // Ahead of the backtrace walk below, which can fault and never return.
@@ -342,7 +256,7 @@ fn nmi_die(cpu_id: usize, frame: &slopos_arch::InterruptFrame) -> ! {
     // already in flight to burn its re-sends into a panic.
     slopos_mm::tlb::force_ack_local_shootdowns(cpu_id);
     slopos_mm::tlb::notify_cpu_offline();
-    slopos_arch::pcr::mark_cpu_offline(cpu_id);
+    slopos_ostd::cpu::x86_64::pcr::mark_cpu_offline(cpu_id);
     slopos_sched::per_cpu::abandon_dispatch_for_dying_cpu(cpu_id);
 
     // Each frame is [saved_rbp][return_addr]. The per-read validation cannot
@@ -383,20 +297,16 @@ fn nmi_die(cpu_id: usize, frame: &slopos_arch::InterruptFrame) -> ! {
     crate::panic::panic_abort_recorded("NMI watchdog: CPU made no progress, sustained")
 }
 
-/// `int 0x80` is not a SlopOS syscall ABI — userland enters through `SYSCALL` /
-/// `LSTAR`. The gate stays user-reachable so the trap is answered rather than
-/// escalating.
-fn answer_legacy_syscall(frame_ref: &mut slopos_arch::InterruptFrame) {
-    frame_ref.rax = slopos_abi::syscall::ENOSYS_RETURN;
-}
-
 /// Called from the `common_exception_handler` FFI boundary.
-pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
+pub fn common_exception_handler_impl(
+    frame: *mut slopos_ostd::irq::interrupt_frame::InterruptFrame,
+) {
     // The frame lives for exactly this invocation, so a frame-local is the
     // honest anchor for a borrow of it.
     let mut frame_anchor = ();
-    let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(&mut frame_anchor, frame)
-        .expect("common_exception_handler_impl: null frame ptr");
+    let frame_ref =
+        slopos_ostd::irq::interrupt_frame::InterruptFrame::from_ptr_mut(&mut frame_anchor, frame)
+            .expect("common_exception_handler_impl: null frame ptr");
     let vector = (frame_ref.vector & 0xFF) as u8;
 
     // Every exception vector except #PF runs on a per-CPU IST stack, where
@@ -416,16 +326,11 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     }
 
     let mut irq_nest = IrqNestHold::enter();
-    ist_stacks::ist_record_usage(vector, frame as u64);
+    ist_stacks::ist_check_frame(vector, frame as u64);
 
     #[cfg(feature = "test-hooks")]
     if in_user(frame_ref) && !slopos_ostd::irq::vector_uses_ist(vector) {
         crate::tests::user_trap_stack_tests::on_user_trap();
-    }
-
-    if vector == SYSCALL_VECTOR {
-        answer_legacy_syscall(frame_ref);
-        return;
     }
 
     if vector == TLB_SHOOTDOWN_VECTOR {
@@ -453,7 +358,9 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
         // answer: the TLB ladder would wait on its ack, the lockup detector on
         // a tick that never comes.
         slopos_mm::tlb::notify_cpu_offline();
-        slopos_arch::pcr::mark_cpu_offline(slopos_arch::get_current_cpu());
+        slopos_ostd::cpu::x86_64::pcr::mark_cpu_offline(
+            slopos_ostd::cpu::x86_64::pcr::current_cpu_id(),
+        );
         cpu::disable_interrupts();
         cpu::halt_loop();
     }
@@ -461,7 +368,7 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
     if vector == LAPIC_TIMER_VECTOR {
         // BSP only: `platform::timer_frequency()` reports the 100 Hz of one
         // LAPIC, so every CPU bumping this ran the clock at `cpu_count x 100`.
-        if slopos_arch::pcr::get_current_cpu() == 0 {
+        if slopos_ostd::cpu::x86_64::pcr::current_cpu_id() == 0 {
             slopos_core::irq::increment_timer_ticks();
         }
         // EOI before the handler avoids starving the timer when the handler is
@@ -523,28 +430,15 @@ pub fn common_exception_handler_impl(frame: *mut slopos_arch::InterruptFrame) {
         return;
     }
 
-    let critical = is_critical_exception_internal(vector);
-    let mode = ExceptionMode::load();
-    if critical || !matches!(mode, ExceptionMode::Test) {
-        let name = slopos_arch::arch::exception::get_exception_name(vector);
-        klog_info!("EXCEPTION: Vector {} ({})", vector, name);
-    }
-
-    let mut handler = panic_handler_for(vector);
-    if !critical && matches!(mode, ExceptionMode::Test) {
-        if let Some(override_handler) = handler_tables::override_for(vector) {
-            handler = override_handler;
-        }
-    }
-
-    handler(frame);
+    let name = slopos_ostd::arch::x86_64::exception::get_exception_name(vector);
+    klog_info!("EXCEPTION: Vector {} ({})", vector, name);
+    panic_handler_for(vector)(frame);
 }
 
 fn initialize_handler_tables() {
     for vector in 0u8..32 {
         handler_tables::install_panic(vector, exception_default_panic);
     }
-    handler_tables::clear_overrides();
 
     handler_tables::install_panic(EXCEPTION_DIVIDE_ERROR, exception_fatal);
     // NMI (vector 2) is answered in `common_exception_handler_impl`; no entry.
@@ -637,10 +531,13 @@ pub(crate) fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
 /// the failure tail, which reports the rejection to the Rust caller. A ring-0
 /// #GP is otherwise terminal, and the RIP-range match is exact, so this masks
 /// no other fault.
-fn try_handle_general_protection(frame: *mut slopos_arch::InterruptFrame) -> bool {
+fn try_handle_general_protection(
+    frame: *mut slopos_ostd::irq::interrupt_frame::InterruptFrame,
+) -> bool {
     let mut frame_anchor = ();
-    let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(&mut frame_anchor, frame)
-        .expect("try_handle_general_protection: null frame ptr");
+    let frame_ref =
+        slopos_ostd::irq::interrupt_frame::InterruptFrame::from_ptr_mut(&mut frame_anchor, frame)
+            .expect("try_handle_general_protection: null frame ptr");
 
     if !in_user(frame_ref) && slopos_ostd::task::fpu::is_fpu_xrstor_ip(frame_ref.rip) {
         frame_ref.rip = slopos_ostd::task::fpu::fpu_xrstor_fault_ip();
@@ -660,10 +557,14 @@ enum PageFaultPath {
     User(slopos_sched::task::TaskRef),
 }
 
-fn classify_page_fault(frame: *mut slopos_arch::InterruptFrame, fault_addr: u64) -> PageFaultPath {
+fn classify_page_fault(
+    frame: *mut slopos_ostd::irq::interrupt_frame::InterruptFrame,
+    fault_addr: u64,
+) -> PageFaultPath {
     let mut frame_anchor = ();
-    let frame_ref = slopos_arch::InterruptFrame::from_ptr_mut(&mut frame_anchor, frame)
-        .expect("classify_page_fault: null frame ptr");
+    let frame_ref =
+        slopos_ostd::irq::interrupt_frame::InterruptFrame::from_ptr_mut(&mut frame_anchor, frame)
+            .expect("classify_page_fault: null frame ptr");
 
     // Checked before the IST guard-fault classifier: a probe deliberately reads
     // addresses it cannot prove mapped, guard pages included, and a hit there is
@@ -695,12 +596,16 @@ fn classify_page_fault(frame: *mut slopos_arch::InterruptFrame, fault_addr: u64)
     }
 }
 
-fn handle_page_fault(frame: *mut slopos_arch::InterruptFrame, irq_nest: &mut IrqNestHold) -> bool {
+fn handle_page_fault(
+    frame: *mut slopos_ostd::irq::interrupt_frame::InterruptFrame,
+    irq_nest: &mut IrqNestHold,
+) -> bool {
     // CR2 before anything can nest: a second fault on this CPU overwrites it.
     let fault_addr = cpu::read_cr2();
     let frame_anchor = ();
-    let error_code = slopos_arch::InterruptFrame::from_ptr(&frame_anchor, frame)
-        .map_or(0, |frame_ref| frame_ref.error_code);
+    let error_code =
+        slopos_ostd::irq::interrupt_frame::InterruptFrame::from_ptr(&frame_anchor, frame)
+            .map_or(0, |frame_ref| frame_ref.error_code);
 
     let (vm_handle, tid) = match classify_page_fault(frame, fault_addr) {
         PageFaultPath::Fixed => return true,

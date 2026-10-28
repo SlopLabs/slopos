@@ -764,7 +764,7 @@ pub fn test_partition_unreadable_backup_lba_still_parses_mbr() -> TestResult {
     TestResult::Pass
 }
 
-/// The refusal is the point of the node: ext2 does not zero a freed block, so
+/// The refusal is the point of the node: ext4 does not zero a freed block, so
 /// an unprivileged reader would recover unlinked file contents.
 pub fn test_devfs_block_node_read_requires_entitlement() -> TestResult {
     klog_info!("PART_TEST: devfs block node read entitlement");

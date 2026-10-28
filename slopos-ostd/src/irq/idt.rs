@@ -1,18 +1,14 @@
-//! IDT (Interrupt Descriptor Table) construction surface, the IRET-frame
-//! corruption recovery path, and the IST-vector entry guard.
+//! IDT (Interrupt Descriptor Table) construction surface and the IST-vector
+//! entry guard.
 //!
 //! Inv. 2: kernel-mode CPU state cannot be tampered with by OSTD clients.
-//! Corrupt IRET frames are unrecoverable — [`handle_corrupt_iret_frame`]
-//! dumps and panics.
 
 use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
-use core::mem::{MaybeUninit, size_of};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::mem::size_of;
 
 use crate::cpu::preempt;
-use crate::sync::BspToken;
 
 // Gated on the kernel target rather than `not(test)`: the stubs reference
 // `common_exception_handler` / `isr_iret_frame_corrupt`, which exist only in
@@ -79,8 +75,6 @@ pub const EXCEPTION_CONTROL_PROTECTION: u8 = 21;
 /// Base vector for hardware IRQs; IRQ0 maps here.
 pub const IRQ_BASE_VECTOR: u8 = 32;
 
-pub const SYSCALL_VECTOR: u8 = 0x80;
-
 /// Shutdown IPI: broadcast to park every CPU at power-off.
 pub const SHUTDOWN_VECTOR: u8 = 0xFE;
 
@@ -130,12 +124,12 @@ impl IdtEntry {
         }
     }
 
-    pub const fn format(handler: u64, selector: u16, typ: u8, dpl: u8) -> Self {
+    pub const fn format(handler: u64, selector: u16, typ: u8) -> Self {
         Self {
             offset_low: (handler & 0xFFFF) as u16,
             selector,
             ist: 0,
-            type_attr: typ | 0x80 | ((dpl & 0x3) << 5),
+            type_attr: typ | 0x80,
             offset_mid: ((handler >> 16) & 0xFFFF) as u16,
             offset_high: (handler >> 32) as u32,
             zero: 0,
@@ -175,13 +169,7 @@ impl IdtBuilder {
 
     /// Install a kernel-only (DPL=0) gate.
     pub fn set_gate(&self, vector: u8, handler: u64, selector: u16, typ: u8) {
-        self.set_gate_priv(vector, handler, selector, typ, 0);
-    }
-
-    /// Install a gate with an explicit Descriptor Privilege Level; DPL=3 is
-    /// required for software-int gates reachable from user mode (`int 0x80`).
-    pub fn set_gate_priv(&self, vector: u8, handler: u64, selector: u16, typ: u8, dpl: u8) {
-        let formatted = IdtEntry::format(handler, selector, typ, dpl);
+        let formatted = IdtEntry::format(handler, selector, typ);
         // SAFETY: `entries` is owned by this builder; aliasing is the
         // caller's responsibility (boot is single-threaded). Inv. 2.
         unsafe {
@@ -191,32 +179,15 @@ impl IdtBuilder {
 
     /// Bind a gate to a TSS IST slot (1..=7). Slot 0 = no IST.
     pub fn set_ist(&self, vector: u8, ist_slot: u8) {
-        // SAFETY: see `set_gate_priv`.
+        // SAFETY: see `set_gate`.
         unsafe {
             (*self.entries.get())[vector as usize].ist = ist_slot & 0x7;
         }
     }
 
     pub fn get_gate(&self, vector: u8) -> IdtEntry {
-        // SAFETY: see `set_gate_priv`.
+        // SAFETY: see `set_gate`.
         unsafe { (*self.entries.get())[vector as usize] }
-    }
-
-    /// Copy a gate read-back into a caller-supplied `*mut IdtEntry`.
-    ///
-    /// Returns `0` on success, `-1` if `out_entry` is null. Exists for the
-    /// `idt_get_gate` C-ABI shim, so its callers stay in safe Rust.
-    pub fn write_gate_to_caller(&self, vector: u8, out_entry: *mut IdtEntry) -> i32 {
-        if out_entry.is_null() {
-            return -1;
-        }
-        let entry = self.get_gate(vector);
-        // SAFETY: out_entry is non-null per the guard; the FFI caller's C-ABI
-        // contract states the pointer references a writable `IdtEntry`.
-        unsafe {
-            core::ptr::write(out_entry, entry);
-        }
-        0
     }
 
     /// Issue `lidt`.
@@ -269,13 +240,12 @@ impl Default for IdtBuilder {
 // `msi_vector_table` symbols.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 impl IdtBuilder {
-    /// Install the OSTD-supplied default exception, syscall-trap, IPI,
-    /// LAPIC-timer, IRQ, and MSI gates; boot configures IST slots and loads
-    /// the IDT separately.
+    /// Install the OSTD-supplied default exception, IPI, LAPIC-timer, IRQ,
+    /// and MSI gates; boot configures IST slots and loads the IDT separately.
     ///
-    /// All gates use `KERNEL_CODE`. The syscall trap gate is DPL=3
-    /// (user-reachable); every other gate is DPL=0. Vectors 9 and 15 are
-    /// reserved (Intel SDM); they remain zeroed.
+    /// All gates use `KERNEL_CODE` at DPL=0, so no vector is reachable by a
+    /// user-mode `int n`. Vectors 9 and 15 are reserved (Intel SDM); they
+    /// remain zeroed.
     pub fn install_default_handlers(&self) {
         unsafe extern "C" {
             fn isr0();
@@ -296,7 +266,6 @@ impl IdtBuilder {
             fn isr17();
             fn isr18();
             fn isr19();
-            fn isr128();
             fn isr_reschedule_ipi();
             fn isr_rcu_qs_ipi();
             fn isr_tlb_shootdown();
@@ -380,8 +349,6 @@ impl IdtBuilder {
         self.set_gate(46, fp(irq14), cs, IDT_GATE_INTERRUPT);
         self.set_gate(47, fp(irq15), cs, IDT_GATE_INTERRUPT);
 
-        self.set_gate_priv(SYSCALL_VECTOR, fp(isr128), cs, IDT_GATE_TRAP, 3);
-
         self.set_gate(
             RESCHEDULE_IPI_VECTOR,
             fp(isr_reschedule_ipi),
@@ -409,113 +376,15 @@ impl IdtBuilder {
             IDT_GATE_INTERRUPT,
         );
 
-        // SYSCALL_VECTOR sits inside the MSI range and keeps its DPL=3 trap
-        // gate from above.
         // SAFETY: msi_vector_table is a 176-entry rodata array emitted
         // by handlers.s; the asm guarantees i < MSI_VECTOR_COUNT.
         unsafe {
             for i in 0..MSI_VECTOR_COUNT {
                 let vector = MSI_VECTOR_BASE.wrapping_add(i as u8);
-                if vector == SYSCALL_VECTOR {
-                    continue;
-                }
                 self.set_gate(vector, msi_vector_table[i], cs, IDT_GATE_INTERRUPT);
             }
         }
     }
-}
-
-/// Whether the kernel runs production exception handlers or test-mode
-/// overrides.
-#[repr(u8)]
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum ExceptionMode {
-    Normal = 0,
-    Test = 1,
-}
-
-/// Sink for the IRET-frame-corruption diagnostic. Production wires a
-/// klog-backed implementation; the OSTD-internal default is silent.
-pub trait DiagnosticSink: Send + Sync + 'static {
-    /// Emit one diagnostic line; a raw stream, no formatting allocation.
-    fn emit(&self, line: &str);
-}
-
-struct SilentSink;
-impl DiagnosticSink for SilentSink {
-    #[inline]
-    fn emit(&self, _line: &str) {}
-}
-
-static DEFAULT_SINK: SilentSink = SilentSink;
-
-struct SinkSlot(UnsafeCell<MaybeUninit<&'static dyn DiagnosticSink>>);
-// SAFETY: gated by `SINK_INSTALLED` AcqRel handshake.
-unsafe impl Sync for SinkSlot {}
-
-static SINK_SLOT: SinkSlot = SinkSlot(UnsafeCell::new(MaybeUninit::uninit()));
-static SINK_INSTALLED: AtomicBool = AtomicBool::new(false);
-
-/// One-shot wiring point for the production diagnostic sink; the `BspToken`
-/// witnesses BSP-only init.
-pub fn register_diagnostic_sink<'brand>(
-    _token: &BspToken<'brand>,
-    sink: &'static dyn DiagnosticSink,
-) {
-    let was_installed = SINK_INSTALLED.swap(true, Ordering::AcqRel);
-    assert!(
-        !was_installed,
-        "slopos_ostd::irq::idt::register_diagnostic_sink called twice"
-    );
-    // SAFETY: exclusive transition just established by the swap.
-    unsafe {
-        (*SINK_SLOT.0.get()).write(sink);
-    }
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn reset_for_test() {
-    SINK_INSTALLED.store(false, Ordering::Release);
-}
-
-#[inline]
-fn current_sink() -> &'static dyn DiagnosticSink {
-    if !SINK_INSTALLED.load(Ordering::Acquire) {
-        return &DEFAULT_SINK;
-    }
-    // SAFETY: Acquire-pair with `register_diagnostic_sink` Release.
-    unsafe { *(*SINK_SLOT.0.get()).as_ptr() }
-}
-
-/// Emit the standard IRET-frame corruption banner and panic.
-///
-/// `iret_frame` must point to 5 readable u64s laid out as
-/// `[RIP, CS, RFLAGS, RSP, SS]` (the CPU-pushed portion of an
-/// interrupt frame). The pointer need not be aligned.
-///
-/// # Safety
-///
-/// Caller certifies the 40-byte readability of `iret_frame`. This
-/// function does not return — it panics. Inv. 2.
-pub unsafe fn handle_corrupt_iret_frame(iret_frame: *const u64) -> ! {
-    // SAFETY: caller guarantees iret_frame points to 5 readable u64s.
-    let (rip, cs, rflags, rsp, ss) = unsafe {
-        (
-            core::ptr::read_unaligned(iret_frame),
-            core::ptr::read_unaligned(iret_frame.add(1)),
-            core::ptr::read_unaligned(iret_frame.add(2)),
-            core::ptr::read_unaligned(iret_frame.add(3)),
-            core::ptr::read_unaligned(iret_frame.add(4)),
-        )
-    };
-
-    let sink = current_sink();
-    sink.emit("ISR IRET FRAME CORRUPT (CS expected 0x08 or 0x23)");
-    let _ = (rip, cs, rflags, rsp, ss);
-    // TODO(tech-debt): the frame fields are read and then discarded — the sink
-    // only ever receives the banner, so no field value reaches the log.
-
-    panic!("Unrecoverable IRET frame corruption");
 }
 
 /// Predicate: must the given vector hold off deferred rescheduling?
@@ -605,7 +474,7 @@ mod tests {
     #[test]
     fn idt_entry_format_round_trips_handler() {
         let h: u64 = 0x0000_FFFF_8000_1234;
-        let e = IdtEntry::format(h, 0x08, IDT_GATE_INTERRUPT, 0);
+        let e = IdtEntry::format(h, 0x08, IDT_GATE_INTERRUPT);
         assert_eq!(e.handler(), h);
         let sel = e.selector;
         assert_eq!(sel, 0x08);
@@ -620,14 +489,6 @@ mod tests {
     }
 
     #[test]
-    fn idt_entry_format_encodes_dpl_3() {
-        let e = IdtEntry::format(0x1000, 0x08, IDT_GATE_TRAP, 3);
-        let attr = e.type_attr;
-        assert_eq!((attr >> 5) & 0x3, 3);
-        assert_eq!(attr & 0x80, 0x80);
-    }
-
-    #[test]
     fn builder_set_gate_round_trip() {
         let b = IdtBuilder::new();
         b.set_gate(13, 0xFFFF_8000_DEAD_BEEF, 0x08, IDT_GATE_INTERRUPT);
@@ -635,15 +496,6 @@ mod tests {
         assert_eq!(e.handler(), 0xFFFF_8000_DEAD_BEEF);
         assert_eq!(e.type_attr, IDT_GATE_INTERRUPT | 0x80);
         assert_eq!(e.ist, 0);
-    }
-
-    #[test]
-    fn builder_set_gate_priv_dpl_3() {
-        let b = IdtBuilder::new();
-        b.set_gate_priv(0x80, 0x1234_5678, 0x08, IDT_GATE_TRAP, 3);
-        let e = b.get_gate(0x80);
-        let attr = e.type_attr;
-        assert_eq!((attr >> 5) & 0x3, 3);
     }
 
     #[test]
@@ -707,11 +559,5 @@ mod tests {
             let _h = IstPreemptHold::new(false);
             assert_eq!(p::preempt_count(), 0);
         });
-    }
-
-    #[test]
-    fn exception_mode_eq() {
-        assert_eq!(ExceptionMode::Normal, ExceptionMode::Normal);
-        assert_ne!(ExceptionMode::Normal, ExceptionMode::Test);
     }
 }

@@ -16,7 +16,6 @@ doctest = false
 
 [dependencies]
 slopos-abi = { workspace = true }
-slopos-arch = { workspace = true }
 slopos-core = { workspace = true }
 slopos-kernel-services = { workspace = true }
 slopos-font = { workspace = true, features = ["kernel"] }

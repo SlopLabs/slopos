@@ -1,22 +1,21 @@
 use super::task::{Task, task_find_by_id};
-use core::ffi::c_int;
 use slopos_abi::fate::FateResult;
 use slopos_kernel_services::platform;
 use slopos_ostd::wl_currency::{self, WL_DELTA};
 
-/// Run `f` against a live task, or report -1 if the id no longer resolves.
+/// Run `f` against a live task, `false` if the id no longer resolves.
 ///
 /// A shared borrow: the syscall names an arbitrary id, so the target is very
 /// often a concurrently running task. The fate trio is atomic for that reason.
-fn with_task<F, R>(task_id: u32, f: F) -> c_int
+fn with_task<F, R>(task_id: u32, f: F) -> bool
 where
     F: FnOnce(&Task) -> R,
 {
     let Some(task) = task_find_by_id(task_id) else {
-        return -1;
+        return false;
     };
     f(&task);
-    0
+    true
 }
 pub fn fate_spin() -> FateResult {
     let val = platform::rng_next() as u32;
@@ -25,7 +24,7 @@ pub fn fate_spin() -> FateResult {
         value: val,
     }
 }
-pub fn fate_set_pending(res: FateResult, task_id: u32) -> c_int {
+pub fn fate_set_pending(res: FateResult, task_id: u32) -> bool {
     with_task(task_id, |t| t.set_fate(res.token, res.value))
 }
 pub fn fate_take_pending(task_id: u32) -> Option<FateResult> {
@@ -37,10 +36,7 @@ pub fn fate_take_pending(task_id: u32) -> Option<FateResult> {
     });
     taken
 }
-pub fn fate_apply_outcome(res: *const FateResult, _resolution: u32, award: bool) {
-    if res.is_null() {
-        return;
-    }
+pub fn fate_apply_outcome(award: bool) {
     if award {
         wl_currency::adjust_balance(WL_DELTA);
     } else {

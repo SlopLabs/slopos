@@ -1,6 +1,6 @@
 //! Physical-to-virtual translation for the typed-frame layer.
 //!
-//! Holds one kernel-wide HHDM-style offset converting a frame `Paddr` to
+//! Holds one kernel-wide HHDM-style offset converting a frame `PhysAddr` to
 //! the kernel virtual address of its contents, installed once by the boot
 //! path. Kept independent of `slopos-mm::hhdm` because the dependency
 //! arrow points the other way; the mm-side glue is expected to forward to
@@ -8,7 +8,8 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::mm::frame::Paddr;
+use slopos_abi::addr::PhysAddr;
+
 use crate::sync::BspToken;
 
 /// Sentinel for "offset not yet installed": practical HHDM offsets sit in
@@ -53,7 +54,7 @@ pub fn init_phys_window<'brand>(token: &BspToken<'brand>, window: *mut u8) {
 /// Callers must only pass frame paddrs they own, so the resulting pointer
 /// is non-aliasing within their byte window.
 #[inline]
-pub(crate) fn phys_to_virt(paddr: Paddr) -> *mut u8 {
+pub(crate) fn phys_to_virt(paddr: PhysAddr) -> *mut u8 {
     #[cfg(all(not(target_os = "none"), any(test, feature = "test-helpers")))]
     {
         let window = PHYS_WINDOW.load(Ordering::Acquire);

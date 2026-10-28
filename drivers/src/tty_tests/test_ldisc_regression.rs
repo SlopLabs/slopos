@@ -2095,19 +2095,19 @@ pub fn test_inflight_accounting_round_trip() -> TestResult {
 }
 
 pub fn test_input_event_normal_behavior() -> TestResult {
-    let mut legacy = LineDisc::new();
+    let mut bytes = LineDisc::new();
     let mut typed = LineDisc::new();
-    let mut t = *legacy.termios();
+    let mut t = *bytes.termios();
     t.c_lflag &= !(LocalFlags::ICANON | LocalFlags::ECHO);
-    legacy.set_termios(&t);
+    bytes.set_termios(&t);
     typed.set_termios(&t);
 
-    let _ = legacy.input_char(b'A');
+    let _ = bytes.input_char(b'A');
     let _ = typed.input_char(InputEvent::normal(b'A'));
 
     let mut a = [0u8; 8];
     let mut b = [0u8; 8];
-    let na = legacy.read(&mut a);
+    let na = bytes.read(&mut a);
     let nb = typed.read(&mut b);
     if na != nb || &a[..na] != &b[..nb] {
         klog_info!("TTY_TEST: BUG - normal InputEvent diverged from byte path");
@@ -2449,138 +2449,9 @@ pub fn test_echoed_newline_takes_onlcr() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_mod_reexports_io_functions() -> TestResult {
-    let _: fn(TtyIndex, &mut [u8], bool) -> Result<usize, TtyError> = tty::read;
-    let _: fn(TtyIndex, &[u8], bool) -> Result<usize, TtyError> = tty::write;
-    let _: fn(TtyIndex) -> bool = tty::has_data;
-    let _: fn(TtyIndex) -> Result<usize, TtyError> = tty::bytes_available;
-    let _: fn(TtyIndex) -> Result<usize, TtyError> = tty::output_queued_bytes;
-    TestResult::Pass
-}
-
-pub fn test_mod_reexports_termios_functions() -> TestResult {
-    use slopos_abi::syscall::{UserTermios, UserWinsize};
-    let _: fn(TtyIndex) -> Result<UserTermios, TtyError> = tty::get_termios;
-    let _: fn(TtyIndex, &UserTermios) -> Result<(), TtyError> = tty::set_termios;
-    let _: fn(TtyIndex, &UserTermios) -> Result<(), TtyError> = tty::set_termios_wait;
-    let _: fn(TtyIndex, &UserTermios) -> Result<(), TtyError> = tty::set_termios_flush;
-    let _: fn(TtyIndex) -> Result<bool, TtyError> = tty::is_output_idle;
-    let _: fn(TtyIndex) -> Result<u32, TtyError> = tty::get_ldisc;
-    let _: fn(TtyIndex, u32) -> Result<(), TtyError> = tty::set_ldisc;
-    let _: fn(TtyIndex) -> Result<UserWinsize, TtyError> = tty::get_winsize;
-    let _: fn(TtyIndex, &UserWinsize) -> Result<(), TtyError> = tty::set_winsize;
-    let _: fn(TtyIndex, i32) -> Result<(), TtyError> = tty::tcflush;
-    let _: fn(TtyIndex, i32) -> Result<(), TtyError> = tty::tcsbrk;
-    let _: fn(TtyIndex, i32) -> Result<(), TtyError> = tty::tcxonc;
-    TestResult::Pass
-}
-
-pub fn test_mod_reexports_job_control_functions() -> TestResult {
-    let _: fn(TtyIndex) -> Result<u32, TtyError> = tty::get_foreground_pgrp;
-    let _: fn(TtyIndex, u32) -> Result<(), TtyError> = tty::set_foreground_pgrp;
-    let _: fn(TtyIndex) -> Result<u32, TtyError> = tty::get_session_id;
-    let _: fn(TtyIndex, u32, u32) = tty::attach_session;
-    let _: fn(TtyIndex) = tty::detach_session;
-    TestResult::Pass
-}
-
-pub fn test_mod_reexports_lifecycle_functions() -> TestResult {
-    let _: fn() -> TtyIndex = tty::active_tty;
-    let _: fn(TtyIndex) = tty::set_active_tty;
-    let _: fn(TtyIndex) -> Result<(), TtyError> = tty::switch_active_tty;
-    let _: fn() -> TtyIndex = tty::default_console_tty;
-    let _: fn(TtyIndex) = tty::set_default_console_tty;
-    let _: fn() = tty::init;
-    let _: fn(TtyIndex) -> Result<KArc<dyn FileBacking>, TtyError> = tty::open_tty;
-    let _: fn(TtyIndex) = tty::hangup;
-    let _: fn(TtyIndex) -> bool = tty::is_hung_up;
-    let _: fn(TtyIndex) = tty::vhangup;
-    TestResult::Pass
-}
-
-pub fn test_mod_reexports_poll_functions() -> TestResult {
-    let _: fn(TtyIndex, u16) -> u16 = tty::poll_events;
-    let _: fn(u32) -> Result<(), TtyError> = tty::set_compositor_focus;
-    let _: fn() -> Result<u32, TtyError> = tty::get_compositor_focus;
-    TestResult::Pass
-}
-
-pub fn test_mod_reexports_pty_functions() -> TestResult {
-    let _: fn(TtyIndex) -> bool = tty::is_pty_slave;
-    let _: fn(TtyIndex) -> bool = tty::is_slave_locked;
-    TestResult::Pass
-}
-
-pub fn test_tty_struct_fields_accessible() -> TestResult {
-    use slopos_abi::syscall::UserWinsize;
-    let guard = crate::tty::table::TTY_SLOTS[0].lock();
-    if let Some(tty) = guard.as_ref() {
-        let _ = tty.index;
-        let _ = tty.flags.contains(TtyFlags::HUNG_UP);
-        let _ = tty.flags.contains(TtyFlags::PEER_CLOSED);
-        let _ = tty.flags.contains(TtyFlags::SLAVE_LOCKED);
-        let _ = tty.flags.contains(TtyFlags::PACKET_MODE);
-        let _ = tty.packet_events;
-        let _ = tty.flags.contains(TtyFlags::THROTTLED);
-        let _ = tty.flags.contains(TtyFlags::OUTPUT_STOPPED);
-        let _ = tty.winsize;
-    }
-    TestResult::Pass
-}
-
-pub fn test_tty_error_variants_unchanged() -> TestResult {
-    let errors = [
-        (TtyError::InvalidIndex, -22),
-        (TtyError::NotAllocated, -6),
-        (TtyError::HungUp, -5),
-        (TtyError::WouldBlock, -11),
-        (TtyError::PermissionDenied, -1),
-        (TtyError::InvalidArg, -22),
-        (TtyError::Restart, -512),
-    ];
-    for (err, expected) in &errors {
-        if err.to_errno() != *expected {
-            klog_info!(
-                "TTY_TEST: BUG - {:?}.to_errno() = {} expected {}",
-                err,
-                err.to_errno(),
-                expected
-            );
-            return TestResult::Fail;
-        }
-    }
-    TestResult::Pass
-}
-
-pub fn test_max_ttys_constant() -> TestResult {
-    if tty::MAX_TTYS != 32 {
-        klog_info!(
-            "TTY_TEST: BUG - MAX_TTYS changed from 32 to {}",
-            tty::MAX_TTYS
-        );
-        return TestResult::Fail;
-    }
-    TestResult::Pass
-}
-
-pub fn test_existing_api_smoke_test() -> TestResult {
-    let idx = tty::active_tty();
-    let _ = tty::get_termios(idx);
-    let _ = tty::get_foreground_pgrp(idx);
-    let _ = tty::get_session_id(idx);
-    let _ = tty::get_winsize(idx);
-    let _ = tty::get_ldisc(idx);
-    let _ = tty::is_hung_up(idx);
-    let _ = tty::has_data(idx);
-    let _ = tty::bytes_available(idx);
-    let _ = tty::is_output_idle(idx);
-    let _ = tty::output_queued_bytes(idx);
-    TestResult::Pass
-}
-
 use crate::tty::PostLockWork;
 
-pub fn test_p21_postlockwork_default_is_empty() -> TestResult {
+pub fn test_postlockwork_default_is_empty() -> TestResult {
     let plw = PostLockWork::new();
     if !plw.is_empty() {
         klog_info!("TTY_TEST: BUG - new PostLockWork should be empty");
@@ -2589,7 +2460,7 @@ pub fn test_p21_postlockwork_default_is_empty() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_p21_postlockwork_signal_makes_nonempty() -> TestResult {
+pub fn test_postlockwork_signal_makes_nonempty() -> TestResult {
     let scope = SessionScope::new(42, 42);
     let mut plw = PostLockWork::new();
     plw.add_signal(scope.pgrp.clone(), slopos_abi::signal::SIGINT);
@@ -2602,7 +2473,7 @@ pub fn test_p21_postlockwork_signal_makes_nonempty() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_p21_postlockwork_execute_completes() -> TestResult {
+pub fn test_postlockwork_execute_completes() -> TestResult {
     let scope = SessionScope::new(42, 42);
     let mut plw = PostLockWork::new();
     plw.add_signal(scope.pgrp.clone(), slopos_abi::signal::SIGINT);
@@ -2613,7 +2484,7 @@ pub fn test_p21_postlockwork_execute_completes() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_p21_postlockwork_echo_flush_request() -> TestResult {
+pub fn test_postlockwork_echo_flush_request() -> TestResult {
     let mut plw = PostLockWork::new();
     plw.request_echo_flush(0, WriteNesting::Toplevel);
     if plw.is_empty() {
@@ -2624,7 +2495,7 @@ pub fn test_p21_postlockwork_echo_flush_request() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_p21_postlockwork_packet_event() -> TestResult {
+pub fn test_postlockwork_packet_event() -> TestResult {
     let mut plw = PostLockWork::new();
     plw.add_packet_event(TtyIndex(0), slopos_abi::syscall::TIOCPKT_STOP);
     if plw.is_empty() {
@@ -2635,7 +2506,7 @@ pub fn test_p21_postlockwork_packet_event() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_p21_postlockwork_packet_event_merge() -> TestResult {
+pub fn test_postlockwork_packet_event_merge() -> TestResult {
     let mut plw = PostLockWork::new();
     plw.add_packet_event(TtyIndex(0), slopos_abi::syscall::TIOCPKT_STOP);
     plw.add_packet_event(TtyIndex(0), slopos_abi::syscall::TIOCPKT_FLUSHREAD);
@@ -2647,7 +2518,7 @@ pub fn test_p21_postlockwork_packet_event_merge() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_p21_postlockwork_wake_helpers() -> TestResult {
+pub fn test_postlockwork_wake_helpers() -> TestResult {
     let mut plw = PostLockWork::new();
     plw.wake_output_and_poll(5);
     plw.wake_input_and_poll(3);
@@ -2659,7 +2530,7 @@ pub fn test_p21_postlockwork_wake_helpers() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_p21_postlockwork_zero_pgid_signal_ignored() -> TestResult {
+pub fn test_postlockwork_zero_pgid_signal_ignored() -> TestResult {
     // "No target, no signal" is enforced at resolution time, not inside
     // `add_signal`.
     let s = TtySession::new();
@@ -2675,7 +2546,7 @@ pub fn test_p21_postlockwork_zero_pgid_signal_ignored() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_p21_postlockwork_zero_event_bits_ignored() -> TestResult {
+pub fn test_postlockwork_zero_event_bits_ignored() -> TestResult {
     let mut plw = PostLockWork::new();
     plw.add_packet_event(TtyIndex(0), 0);
     if !plw.is_empty() {
@@ -2685,55 +2556,7 @@ pub fn test_p21_postlockwork_zero_event_bits_ignored() -> TestResult {
     TestResult::Pass
 }
 
-pub fn test_p21_write_path_peer_cache_consolidation() -> TestResult {
-    tty::table::tty_table_init();
-    let (master_idx, _master_backing) =
-        match tty::pty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
-            Ok(pair) => pair,
-            Err(_) => return TestResult::Pass,
-        };
-    let slave_idx = match tty::get_pty_number(master_idx) {
-        Ok(n) => TtyIndex(n as u8),
-        Err(_) => return TestResult::Fail,
-    };
-    tty::pty::set_pty_lock(master_idx, false).ok();
-    let _slave_backing = tty::pty_open_slave(slave_idx).ok();
-    let result = tty::write(slave_idx, b"hello", true);
-    match result {
-        Ok(n) if n > 0 => {}
-        Ok(0) => {}
-        Err(_) => {}
-        _ => {}
-    }
-    TestResult::Pass
-}
-
-pub fn test_p21_forward_ldisc_ops_linedisc() -> TestResult {
-    let ld = LineDisc::new();
-    let canonical = ld.is_canonical();
-    let has = ld.has_data();
-    let avail = ld.bytes_available();
-    let stopped = ld.is_stopped();
-    let full = ld.input_full();
-    if ld.is_canonical() != canonical {
-        return TestResult::Fail;
-    }
-    if ld.has_data() != has {
-        return TestResult::Fail;
-    }
-    if ld.bytes_available() != avail {
-        return TestResult::Fail;
-    }
-    if ld.is_stopped() != stopped {
-        return TestResult::Fail;
-    }
-    if ld.input_full() != full {
-        return TestResult::Fail;
-    }
-    TestResult::Pass
-}
-
-pub fn test_p21_forward_ldisc_ops_rawdisc() -> TestResult {
+pub fn test_rawdisc_new_is_idle() -> TestResult {
     let rd = RawDisc::new();
     if rd.is_canonical() {
         return TestResult::Fail;
@@ -2746,17 +2569,6 @@ pub fn test_p21_forward_ldisc_ops_rawdisc() -> TestResult {
     }
     if rd.input_full() {
         return TestResult::Fail;
-    }
-    TestResult::Pass
-}
-
-pub fn test_p21_existing_api_smoke_read_write() -> TestResult {
-    tty::table::tty_table_init();
-    let idx = TtyIndex(0);
-    let _console_backing = tty::open_tty(idx);
-    let write_result = tty::write(idx, b"phase21test\n", true);
-    if write_result.is_err() {
-        klog_info!("TTY_TEST: write failed: {:?}", write_result);
     }
     TestResult::Pass
 }
@@ -3107,94 +2919,42 @@ slopos_testing::stest!(
     suite = tty_test_ldisc_regression
 );
 slopos_testing::stest!(
-    name = test_mod_reexports_io_functions,
+    name = test_postlockwork_default_is_empty,
     suite = tty_test_ldisc_regression
 );
 slopos_testing::stest!(
-    name = test_mod_reexports_termios_functions,
+    name = test_postlockwork_signal_makes_nonempty,
     suite = tty_test_ldisc_regression
 );
 slopos_testing::stest!(
-    name = test_mod_reexports_job_control_functions,
+    name = test_postlockwork_execute_completes,
     suite = tty_test_ldisc_regression
 );
 slopos_testing::stest!(
-    name = test_mod_reexports_lifecycle_functions,
+    name = test_postlockwork_echo_flush_request,
     suite = tty_test_ldisc_regression
 );
 slopos_testing::stest!(
-    name = test_mod_reexports_poll_functions,
+    name = test_postlockwork_packet_event,
     suite = tty_test_ldisc_regression
 );
 slopos_testing::stest!(
-    name = test_mod_reexports_pty_functions,
+    name = test_postlockwork_packet_event_merge,
     suite = tty_test_ldisc_regression
 );
 slopos_testing::stest!(
-    name = test_tty_struct_fields_accessible,
+    name = test_postlockwork_wake_helpers,
     suite = tty_test_ldisc_regression
 );
 slopos_testing::stest!(
-    name = test_tty_error_variants_unchanged,
+    name = test_postlockwork_zero_pgid_signal_ignored,
     suite = tty_test_ldisc_regression
 );
 slopos_testing::stest!(
-    name = test_max_ttys_constant,
+    name = test_postlockwork_zero_event_bits_ignored,
     suite = tty_test_ldisc_regression
 );
 slopos_testing::stest!(
-    name = test_existing_api_smoke_test,
-    suite = tty_test_ldisc_regression
-);
-slopos_testing::stest!(
-    name = test_p21_postlockwork_default_is_empty,
-    suite = tty_test_ldisc_regression
-);
-slopos_testing::stest!(
-    name = test_p21_postlockwork_signal_makes_nonempty,
-    suite = tty_test_ldisc_regression
-);
-slopos_testing::stest!(
-    name = test_p21_postlockwork_execute_completes,
-    suite = tty_test_ldisc_regression
-);
-slopos_testing::stest!(
-    name = test_p21_postlockwork_echo_flush_request,
-    suite = tty_test_ldisc_regression
-);
-slopos_testing::stest!(
-    name = test_p21_postlockwork_packet_event,
-    suite = tty_test_ldisc_regression
-);
-slopos_testing::stest!(
-    name = test_p21_postlockwork_packet_event_merge,
-    suite = tty_test_ldisc_regression
-);
-slopos_testing::stest!(
-    name = test_p21_postlockwork_wake_helpers,
-    suite = tty_test_ldisc_regression
-);
-slopos_testing::stest!(
-    name = test_p21_postlockwork_zero_pgid_signal_ignored,
-    suite = tty_test_ldisc_regression
-);
-slopos_testing::stest!(
-    name = test_p21_postlockwork_zero_event_bits_ignored,
-    suite = tty_test_ldisc_regression
-);
-slopos_testing::stest!(
-    name = test_p21_write_path_peer_cache_consolidation,
-    suite = tty_test_ldisc_regression
-);
-slopos_testing::stest!(
-    name = test_p21_forward_ldisc_ops_linedisc,
-    suite = tty_test_ldisc_regression
-);
-slopos_testing::stest!(
-    name = test_p21_forward_ldisc_ops_rawdisc,
-    suite = tty_test_ldisc_regression
-);
-slopos_testing::stest!(
-    name = test_p21_existing_api_smoke_read_write,
+    name = test_rawdisc_new_is_idle,
     suite = tty_test_ldisc_regression
 );

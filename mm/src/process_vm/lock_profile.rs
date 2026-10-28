@@ -58,9 +58,9 @@ impl VmLock {
     #[inline(never)]
     fn lock_profiled(&self, location: &'static Location<'static>) -> VmGuard<'_> {
         let site = SITES.site(location);
-        let began = slopos_arch::tsc::rdtsc();
+        let began = slopos_ostd::arch::x86_64::tsc::rdtsc();
         let guard = self.0.lock();
-        let acquired = slopos_arch::tsc::rdtsc();
+        let acquired = slopos_ostd::arch::x86_64::tsc::rdtsc();
         let profile = site.map(|site| {
             site.note_acquire(acquired.saturating_sub(began));
             (site, acquired)
@@ -90,7 +90,7 @@ impl core::ops::DerefMut for VmGuard<'_> {
 impl Drop for VmGuard<'_> {
     fn drop(&mut self) {
         if let Some((site, acquired)) = self.profile {
-            site.note_hold(slopos_arch::tsc::rdtsc().saturating_sub(acquired));
+            site.note_hold(slopos_ostd::arch::x86_64::tsc::rdtsc().saturating_sub(acquired));
         }
     }
 }
