@@ -14,6 +14,7 @@ mod input;
 pub mod layout;
 pub mod node;
 pub mod paint;
+pub mod refusal;
 pub mod run;
 pub mod sender;
 pub mod style;
@@ -33,6 +34,7 @@ pub use node::{
     Action, App, BarSegment, ButtonStyle, ContextMenuAt, ImageData, MenuItem, MenuItemKind, Node,
     SegmentFill, SortIndicator, TableColumn, TableColumnWidth, document_title,
 };
+pub use refusal::Refusal;
 pub use run::run_app;
 pub use sender::AppSender;
 pub use widgets::code_view::{

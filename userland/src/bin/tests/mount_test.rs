@@ -393,9 +393,45 @@ fn dev_shm_is_writable() -> bool {
     true
 }
 
+/// A write through a read-only mount is refused, and the refusal names the
+/// disk, as `statfs` reports the mount.
+fn a_read_only_mount_names_its_refusal() -> bool {
+    use slopos_appkit::Refusal;
+    let _ = fs::create_dir(MOUNT_POINT);
+    if let Err(e) = fs_syscall::mount(
+        b"",
+        MOUNT_POINT.as_bytes(),
+        b"ramfs",
+        slopos_abi::fs::MS_RDONLY,
+    ) {
+        println!("mount_test: a read-only ramfs did not mount: {e}");
+        let _ = fs::remove_dir(MOUNT_POINT);
+        return false;
+    }
+    let probe = format!("{MOUNT_POINT}/probe");
+    let wrote = File::create(&probe);
+    let said = Refusal::changing(std::path::Path::new(&probe));
+    umount_mount_point();
+    let _ = fs::remove_dir(MOUNT_POINT);
+    match wrote {
+        Err(e) if Refusal::is(e.kind()) && said == Refusal::ReadOnlyDisk => true,
+        other => {
+            println!(
+                "mount_test: a create through a read-only mount: {:?}, refused as {said:?}",
+                other.map(drop)
+            );
+            false
+        }
+    }
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
         ("ramfs_mount_roundtrip", ramfs_mount_roundtrip),
+        (
+            "a_read_only_mount_names_its_refusal",
+            a_read_only_mount_names_its_refusal,
+        ),
         ("umount_root_refused", umount_root_refused),
         ("unsupported_fstype_refused", unsupported_fstype_refused),
         (

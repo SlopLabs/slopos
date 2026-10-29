@@ -268,6 +268,27 @@ fn a_first_install_asks_and_grants_what_it_read() -> bool {
     mechanism_refused || fail("a mechanism read an image the person was not shown")
 }
 
+/// Nothing changes an extension's files, not even uid 0, and the refusal
+/// says they are an extension's, as `statfs` reports its activation.
+fn a_refusal_names_an_extension_s_file() -> bool {
+    use slopos_appkit::Refusal;
+    let path = "/opt/ext-first/bin/probe";
+    let wrote = std::fs::OpenOptions::new().write(true).open(path);
+    let (changing, reading) = (
+        Refusal::changing(Path::new(path)),
+        Refusal::reading(Path::new(path)),
+    );
+    match wrote {
+        Err(e) if Refusal::is(e.kind()) && changing == Refusal::Extension => {
+            reading == Refusal::Extension || fail(format!("reading {path} names {reading:?}"))
+        }
+        other => fail(format!(
+            "a write to {path}: {:?}, refused as {changing:?}",
+            other.map(drop)
+        )),
+    }
+}
+
 /// A command line approving less than the image declares is refused, and
 /// nothing goes in.
 fn one_declaring_more_than_its_grant_line_is_refused() -> bool {
@@ -658,6 +679,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "a_first_install_asks_and_grants_what_it_read",
         a_first_install_asks_and_grants_what_it_read,
+    ),
+    (
+        "a_refusal_names_an_extension_s_file",
+        a_refusal_names_an_extension_s_file,
     ),
     (
         "a_person_and_an_extension_share_no_name",

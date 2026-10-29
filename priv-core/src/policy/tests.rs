@@ -755,7 +755,7 @@ fn values_outside_their_grammar_refuse() {
 #[test]
 fn the_shipped_policy_speaks_to_the_person() {
     let policy = Policy::parse(SHIPPED).unwrap();
-    assert_eq!(policy.actions().len(), 33);
+    assert_eq!(policy.actions().len(), 34);
     for action in policy.actions() {
         let name = &action.name;
         assert_eq!(crate::words::describe(&action.describe), Ok(()), "{name}");
@@ -778,7 +778,7 @@ fn the_shipped_policy_speaks_to_the_person() {
         .collect();
     said.sort_unstable();
     said.dedup();
-    assert_eq!(said.len(), 33, "two actions say the same");
+    assert_eq!(said.len(), 34, "two actions say the same");
 }
 
 #[test]
@@ -1063,6 +1063,22 @@ fn the_software_action_installs_as_uid_0_holding_nothing() {
     assert!(action.cwd);
     assert!(action.exclusive_group().is_some());
     assert!(action.accepts(&args_of(&["apps", "builddir/apps", "/usr/local"])));
+}
+
+#[test]
+fn ending_a_task_holds_only_the_signal_right_and_asks_any_person() {
+    let policy = Policy::parse(SHIPPED).unwrap();
+    let action = policy.action("org.slopos.task.end").unwrap();
+    assert_eq!(action.program, "/bin/endtask");
+    assert_eq!(action.caps, caps::PROC_SIGNAL);
+    assert_eq!(action.runs_as, RunsAs::Uid(0));
+    assert_eq!(action.keep, None);
+    let people = one_person();
+    let asked = asks(action.admits(&shell(USER), &people)).map(|(kind, ..)| kind);
+    assert_eq!(asked, Some(Kind::Confirm));
+    let paired = Requester::new(USER, Some(REMOTED), true);
+    assert_eq!(action.admits(&paired, &people), NO);
+    assert!(action.accepts(&args_of(&["42", "terminal", "alice"])));
 }
 
 #[test]

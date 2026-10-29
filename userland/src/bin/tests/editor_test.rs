@@ -353,15 +353,12 @@ fn every_error_says_what_to_do_next() -> bool {
     let path = "/home/user/notes.txt";
     let errors = [
         said::unreadable(path, ErrorKind::NotFound),
-        said::unreadable(path, ErrorKind::PermissionDenied),
         said::unreadable(path, ErrorKind::Other),
-        said::unlisted(path, ErrorKind::PermissionDenied),
         said::unlisted(path, ErrorKind::Other),
         said::folder(path),
         said::too_large(path),
         said::not_text(path),
         said::too_many_lines(path),
-        said::unsaved(path, ErrorKind::PermissionDenied),
         said::unsaved(path, ErrorKind::StorageFull),
         said::unsaved(path, ErrorKind::Other),
         said::open_elsewhere(path),
@@ -389,6 +386,32 @@ fn every_error_says_what_to_do_next() -> bool {
         }
         kept
     })
+}
+
+/// A refusal says what was refused and why, a sentence for each cause; a
+/// save says where else to save as well.
+fn every_refusal_says_what_was_refused_and_why() -> bool {
+    use slopos_appkit::Refusal;
+    use std::collections::BTreeSet;
+    let path = "/home/user/notes.txt";
+    let mut kept = true;
+    let mut said_once = |said: String, sentences: usize, seen: &mut BTreeSet<String>| {
+        let holds = slopos_theme_core::words::sentence(&said, &[]).is_ok()
+            && said.split(". ").count() == sentences;
+        if !holds {
+            eprintln!("editor_test: {said:?}");
+        }
+        kept &= holds;
+        seen.insert(said);
+    };
+    let (mut opened, mut listed, mut saved) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    for refusal in Refusal::ALL {
+        said_once(said::refused_open(path, refusal), 1, &mut opened);
+        said_once(said::refused_listing(path, refusal), 1, &mut listed);
+        said_once(said::refused_save(path, refusal), 2, &mut saved);
+    }
+    // Only permissions refuse a read, so a read names three causes.
+    kept && opened.len() == 3 && listed.len() == 3 && saved.len() == Refusal::ALL.len()
 }
 
 fn every_passing_status_is_a_label() -> bool {
@@ -885,6 +908,10 @@ fn main() {
         (
             "every_error_says_what_to_do_next",
             every_error_says_what_to_do_next,
+        ),
+        (
+            "every_refusal_says_what_was_refused_and_why",
+            every_refusal_says_what_was_refused_and_why,
         ),
         (
             "every_passing_status_is_a_label",

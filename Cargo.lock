@@ -93,6 +93,7 @@ name = "slopos-appkit"
 version = "0.1.0"
 dependencies = [
  "slopos-abi",
+ "slopos-cabi",
  "slopos-font",
  "slopos-gfx",
  "slopos-keymap-core",

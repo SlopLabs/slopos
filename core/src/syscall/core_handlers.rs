@@ -651,3 +651,17 @@ define_syscall!(syscall_caps_drop (ctx, mask: u64) cap(NoneSelf)
     }
     Ok(held)
 });
+
+// A kernel task is `ESRCH`, as `kill` answers.
+define_syscall!(syscall_caps_get (ctx, pid: u64) cap(NoneSelf)
+    -> Result<u64, Errno> {
+    let id = u32::try_from(pid).map_err(|_| Errno::ESRCH)?;
+    if id == 0 || id == INVALID_TASK_ID {
+        return Err(Errno::ESRCH);
+    }
+    let task = slopos_sched::task::task_find_by_id(id).ok_or(Errno::ESRCH)?;
+    if !crate::syscall::signal::signal_may_name(task.flags) {
+        return Err(Errno::ESRCH);
+    }
+    Ok(slopos_ostd::task::ops::task_caps(&task))
+});

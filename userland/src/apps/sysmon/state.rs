@@ -8,9 +8,12 @@ use crate::syscall::{
 use slopos_abi::task::TaskStatus;
 use slopos_cpufreq_core::CoreType;
 
+use slopos_appkit::AppSender;
+
 use super::selection::{self, TaskKey};
 use super::{
-    MAX_CPUS, REFRESH_INTERVAL_MS, is_idle_task, task_name_bytes, task_name_string, task_state,
+    MAX_CPUS, REFRESH_INTERVAL_MS, SysmonMsg, is_idle_task, task_name_bytes, task_name_string,
+    task_state,
 };
 
 /// The most tasks listed; `process_list` gives no more than this.
@@ -95,10 +98,42 @@ pub(crate) struct ContextMenu {
     pub(crate) y: i32,
 }
 
-pub(crate) enum KillOutcome {
-    Sent { name: String },
-    Failed { name: String, errno: i32 },
-    Vanished { name: String },
+pub enum KillOutcome {
+    Sent {
+        name: String,
+    },
+    Failed {
+        name: String,
+    },
+    Vanished {
+        name: String,
+    },
+    /// It holds a capability beyond those every program holds.
+    Powerful {
+        name: String,
+    },
+    /// The system runs it, for itself or for everyone.
+    System {
+        name: String,
+    },
+    /// Who it runs as, or what it holds, could not be read.
+    Unowned {
+        name: String,
+    },
+    /// Refused, and privd could not be asked to end it.
+    Refused {
+        name: String,
+    },
+    /// privd is asking whoever may allow it to be ended.
+    Asking {
+        name: String,
+    },
+    /// privd ran nothing; `why` is its answer, when it gave one.
+    Denied {
+        name: String,
+        why: Option<String>,
+        by_person: bool,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -143,8 +178,12 @@ pub(crate) struct SysmonApp {
     pub(crate) confirm_kill: Option<KillTarget>,
     pub(crate) context_menu: Option<ContextMenu>,
     pub(crate) last_kill: Option<KillOutcome>,
+    /// The task privd is asked to end, until it answers.
+    pub(crate) asking: Option<KillTarget>,
     pub(crate) sorted_indices: [usize; MAX_TASKS],
     pub(crate) self_pid: u32,
+    /// What a thread asking privd answers through.
+    pub(crate) sender: Option<AppSender<SysmonMsg>>,
 }
 
 impl SysmonApp {
@@ -177,8 +216,10 @@ impl SysmonApp {
             confirm_kill: None,
             context_menu: None,
             last_kill: None,
+            asking: None,
             sorted_indices: [0; MAX_TASKS],
             self_pid: crate::syscall::process::getpid(),
+            sender: None,
         };
         app.refresh_data();
         app
@@ -292,8 +333,8 @@ impl SysmonApp {
         self.selected = selection::key_at_row(self.task_slice(), self.order_slice(), row);
     }
 
-    /// Refuses only sysmon itself, which would vanish mid-frame; the kernel
-    /// decides the rest.
+    /// Refuses only sysmon itself, which would vanish mid-frame; the kernel,
+    /// and for a task of another user privd, decide the rest.
     pub(crate) fn is_killable(&self, pid: u32) -> bool {
         pid != self.self_pid
     }

@@ -313,7 +313,7 @@ impl Gate {
 
 /// Why the mechanism was not reached goes to the log.
 fn asked(action: &str, args: &[&str], input: &[u8]) -> Checked {
-    match super::privd(action, args, input) {
+    match crate::privd::run_quietly(action, args, input) {
         Ok(0) => Checked::Passed,
         Ok(_) => Checked::Wrong,
         Err(why) => {

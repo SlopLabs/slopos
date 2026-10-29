@@ -126,6 +126,10 @@ name = "kconsole"
 path = "src/bin/kconsole.rs"
 
 [[bin]]
+name = "endtask"
+path = "src/bin/endtask.rs"
+
+[[bin]]
 name = "prof"
 path = "src/bin/prof.rs"
 

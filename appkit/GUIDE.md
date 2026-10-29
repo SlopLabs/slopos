@@ -187,8 +187,12 @@ shows every component in each of its states. Its pages are
   `scripts/gates/ui-literals.txt` that says why.
 - **One name per app.** The app entry's `name`, the window title and the About
   box all use the same name, and `apps_test` holds each title to its entry.
-- **Errors say what to do next.** A message about a failure is what happened,
-  then what the person can do about it, each a sentence.
+- **Errors say what to do next; refusals say why.** A message about a
+  failure is what happened, then what the person can do about it, each a
+  sentence. A refusal says what was refused and why — the system's own file,
+  an extension's, one that is locked against changes, a disk that can't be
+  written to, or permissions, as `slopos_appkit::Refusal` reads them from the
+  kernel — and offers nothing the person cannot do.
 - **Icons come from the font.** Name a glyph with `Icon::Folder`, `Icon::Trash`
   and so on. The font is Lucide, at `/usr/share/fonts/Lucide.ttf`. To add an
   icon, add a variant that names the codepoint from Lucide's
@@ -201,9 +205,10 @@ terms off any screen where a person must act. Device names, sizes in bytes and
 paths go in captions and in details. Use sentence case everywhere except for
 proper nouns. Buttons and menu items are verbs, with no full stop. An ellipsis
 (`…`, never `...`) marks an item that asks something further. An error says
-what happened and what to do next. Give disk sizes in decimal units (GB, TB),
-as the drive's label does. Give memory and file sizes in binary units, as
-`theme_core::words::Bytes` writes them: `512 bytes`, `1.5 KiB`, `16 GiB`.
+what happened and what to do next; a refusal, what was refused and why. Give
+disk sizes in decimal units (GB, TB), as the drive's label does. Give memory
+and file sizes in binary units, as `theme_core::words::Bytes` writes them:
+`512 bytes`, `1.5 KiB`, `16 GiB`.
 
 The words a screen never says, and what it says in their place, are
 `theme_core::words::GLOSSARY`; `words::label` and `words::sentence` hold a

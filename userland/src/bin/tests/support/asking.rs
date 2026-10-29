@@ -44,6 +44,19 @@ impl Child {
         cwd: &str,
         args: &[&str],
     ) -> Option<Child> {
+        Self::start_holding(path, uid, 0, login, cwd, args)
+    }
+
+    /// [`start`](Self::start), the child holding `caps` beside what every
+    /// program holds.
+    pub fn start_holding(
+        path: &str,
+        uid: u32,
+        caps: u64,
+        login: Option<u32>,
+        cwd: &str,
+        args: &[&str],
+    ) -> Option<Child> {
         let (out, out_end) = fs::pipe2(O_CLOEXEC as u32).ok()?;
         let (stdin, stdin_end) = fs::pipe2(O_CLOEXEC as u32).ok()?;
         let name = path.rsplit('/').next().unwrap_or(path);
@@ -67,7 +80,7 @@ impl Child {
             &actions,
             0,
             Endowment {
-                caps: 0,
+                caps,
                 ids: Some((uid, uid)),
                 groups: Some(&[]),
                 login,
@@ -121,6 +134,18 @@ impl Child {
 }
 
 impl Child {
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub fn running(&mut self) -> bool {
+        if self.reaped {
+            return false;
+        }
+        self.reaped = process::wait_exit_code_nohang(self.pid).is_some();
+        !self.reaped
+    }
+
     /// Its exit status once it exits within `within`; `None` past it.
     pub fn exited_within(mut self, within: Duration) -> Option<i32> {
         let deadline = Instant::now() + within;

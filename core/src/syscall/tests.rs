@@ -8204,6 +8204,67 @@ slopos_testing::stest!(
     suite = syscall_core
 );
 
+/// `caps_get` answers an ordinary caller any user task's mask, which is what
+/// the signal rule weighs, and names no kernel task.
+pub fn test_caps_get_reads_any_user_task() -> TestResult {
+    let _fixture = KernelTestScope::enter();
+
+    let held = CAP_UNIVERSAL | Capability::SysInspect.bit();
+    let plain_id = create_test_user_task();
+    let holder_id = create_test_user_task_holding(held);
+    let outcome = caps_get_body(plain_id, holder_id, held);
+    for id in [plain_id, holder_id] {
+        if id != INVALID_TASK_ID {
+            task_terminate(id);
+        }
+    }
+    return match outcome {
+        Ok(()) => pass!(),
+        Err(msg) => fail!("{}", msg),
+    };
+
+    fn caps_get_body(plain_id: u32, holder_id: u32, held: u64) -> Result<(), &'static str> {
+        use slopos_abi::syscall::SYSCALL_CAPS_GET;
+        let task = task_find_by_id(plain_id).ok_or("failed to create a user task")?;
+        let table = task
+            .process()
+            .as_deref()
+            .and_then(FdTable::of)
+            .ok_or("a user task has no fd table")?;
+        let esrch = slopos_abi::Errno::ESRCH.as_u64();
+        let mut kernel_task = None;
+        slopos_sched::task::task_for_each_active(|task| {
+            let user = task.flags & slopos_abi::task::TASK_FLAG_USER_MODE != 0;
+            if kernel_task.is_none() && !user && !matches!(task.task_id, 0 | INVALID_TASK_ID) {
+                kernel_task = Some(task.task_id);
+            }
+        });
+        let kernel_task = kernel_task.ok_or("no kernel task is running")?;
+        let cases = [
+            (u64::from(holder_id), held),
+            (u64::from(plain_id), CAP_UNIVERSAL),
+            (u64::from(kernel_task), esrch),
+            (0, esrch),
+            (u64::from(INVALID_TASK_ID), esrch),
+            ((1 << 32) | u64::from(holder_id), esrch),
+        ];
+        for (pid, want) in cases {
+            let got = dispatch_gated(&task, table, SYSCALL_CAPS_GET, [pid, 0, 0, 0])
+                .ok_or("could not dispatch the call")?;
+            if got != want {
+                klog_info!("caps_get({:#x}) answered {:#x}, want {:#x}", pid, got, want);
+                return Err("caps_get answered other than the task's mask");
+            }
+        }
+        Ok(())
+    }
+}
+
+slopos_testing::stest!(
+    name = test_caps_get_reads_any_user_task,
+    suite = syscall_core
+);
+
 /// `caps_drop` is total and process-wide: it never fails, takes exactly what
 /// it names from every thread of the process, and a thread registered after
 /// the drop is born without it even if its creator's mask had not yet been

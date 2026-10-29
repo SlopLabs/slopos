@@ -82,6 +82,11 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         desc: "Run the diagnostic console's informational commands",
     },
     ProgramSpec {
+        name: "endtask",
+        path: "/bin/endtask",
+        desc: "End another user's task, once an administrator allows it",
+    },
+    ProgramSpec {
         name: "prof",
         path: "/bin/prof",
         desc: "Start, stop or report the kernel's sampling profiler",

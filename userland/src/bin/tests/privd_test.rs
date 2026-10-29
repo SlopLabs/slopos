@@ -17,16 +17,19 @@ mod asking;
 #[path = "support/sessions.rs"]
 mod sessions;
 
+use slopos_abi::caps;
 use slopos_abi::input::keycode::KEY_ENTER;
-use slopos_abi::syscall::BOOT_FLAG_MEDIUM;
+use slopos_abi::syscall::{BOOT_FLAG_MEDIUM, UserTaskEntry};
+use slopos_abi::task::{MAX_TASKS, SESSION_LOGINS};
 use slopos_priv_core::Refused;
 use slopos_priv_core::consent::{DECLINED_MS, Refusal, UNIDENTIFIED, WRONG_PASSWORD};
 use slopos_priv_core::wire::{self, Exit, Reply, Request};
 use slopos_priv_core::words;
 use slopos_priv_core::{ENV_ACTION, ENV_FD, POLICY, PROGRAM, Policy};
+use slopos_userland::apps::endtask;
 use slopos_userland::init_control::{self, Command as InitCommand};
 use slopos_userland::privd::{Connection, STATUS_REFUSED, request_id};
-use slopos_userland::syscall::core::boot_flag;
+use slopos_userland::syscall::core::{self as sys_core, boot_flag};
 use slopos_userland::syscall::{OwnedFd, RawFd, fs, net, process};
 
 use self::asking::{Asker, Child};
@@ -925,6 +928,14 @@ const CASES: &[(&str, fn() -> bool)] = &[
         output_for_a_terminal_is_relayed,
     ),
     (
+        "a_task_is_ended_only_while_it_is_a_person_s_and_holds_no_power",
+        a_task_is_ended_only_while_it_is_a_person_s_and_holds_no_power,
+    ),
+    (
+        "the_session_is_asked_before_a_task_is_ended",
+        the_session_is_asked_before_a_task_is_ended,
+    ),
+    (
         "the_rescue_shell_is_offered_only_on_the_medium",
         the_rescue_shell_is_offered_only_on_the_medium,
     ),
@@ -943,6 +954,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "the_first_person_s_click_allows_and_escape_denies",
         the_first_person_s_click_allows_and_escape_denies,
+    ),
+    (
+        "the_first_person_s_click_ends_another_user_s_task",
+        the_first_person_s_click_ends_another_user_s_task,
     ),
     (
         "the_dialog_names_the_app_only_from_what_no_process_can_write",
@@ -1123,6 +1138,126 @@ fn alone_beside_another(bob: u32) -> bool {
     true
 }
 
+const END: &str = endtask::ACTION;
+/// A login tag in the range init gives sessions, which no session holds. A
+/// session init starts meanwhile takes a tag past it, so it sits mid-range.
+const NO_ONES_SESSION: u32 = SESSION_LOGINS.start + (SESSION_LOGINS.end - SESSION_LOGINS.start) / 2;
+/// A tag of the system's past every range init gives, so nothing ends what
+/// carries it.
+const THE_SYSTEMS: u32 = 2 * SESSION_LOGINS.end;
+
+/// What the system monitor sends for task `pid`: its id, its name and its
+/// user's name.
+fn end_args(pid: u32) -> [String; 3] {
+    let task = || {
+        let mut tasks = vec![UserTaskEntry::default(); MAX_TASKS];
+        let count = sys_core::process_list(&mut tasks).clamp(0, MAX_TASKS as i64) as usize;
+        tasks[..count].iter().find(|t| t.task_id == pid).copied()
+    };
+    let (name, user) = task().map_or_else(Default::default, |task| {
+        let end = task
+            .name
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(task.name.len());
+        (
+            String::from_utf8_lossy(&task.name[..end]).into_owned(),
+            slopos_userland::accounts::name_of(task.uid).unwrap_or_default(),
+        )
+    });
+    [pid.to_string(), name, user]
+}
+
+/// Root ends a person's task holding nothing, unasked; the mechanism leaves a
+/// task holding a capability, privd, a task of no session's, one running as
+/// uid 0, one no longer what was asked for and one that is gone as they were.
+fn a_task_is_ended_only_while_it_is_a_person_s_and_holds_no_power() -> bool {
+    let Some(mut privd) = connect() else {
+        return false;
+    };
+    let devnull = null();
+    let in_session =
+        |uid, caps| Child::start_holding(SELF, uid, caps, Some(NO_ONES_SESSION), "/", &[LINGER]);
+    let (Some(mut plain), Some(mut powerful), Some(mut unsessioned), Some(mut root)) = (
+        in_session(USER, 0),
+        in_session(USER, caps::SYS_INSPECT),
+        Child::start(SELF, USER, Some(THE_SYSTEMS), "/", &[LINGER]),
+        in_session(0, 0),
+    ) else {
+        note("the tasks to end did not start");
+        return false;
+    };
+    let Ok(privd_pid) = net::peer_cred(privd.raw()).map(|cred| cred.pid as u32) else {
+        note("privd's pid could not be read");
+        return false;
+    };
+    let mut end = |args: &[&str]| exited(&ask(&mut privd, END, args, devnull.raw()));
+    let [pid, name, user] = end_args(plain.pid());
+    let refused: [(Vec<String>, i32); 9] = [
+        (end_args(powerful.pid()).into(), endtask::POWERFUL),
+        (end_args(privd_pid).into(), endtask::POWERFUL),
+        (end_args(unsessioned.pid()).into(), endtask::SYSTEM),
+        (end_args(root.pid()).into(), endtask::SYSTEM),
+        (
+            vec![pid.clone(), "not-its-name".into(), user.clone()],
+            endtask::GONE,
+        ),
+        (
+            vec![pid.clone(), name.clone(), "not-its-user".into()],
+            endtask::GONE,
+        ),
+        (
+            vec!["2147483646".into(), "gone".into(), user.clone()],
+            endtask::GONE,
+        ),
+        (
+            vec!["4294967295".into(), name.clone(), user.clone()],
+            endtask::USAGE,
+        ),
+        (vec![pid.clone(), name.clone()], endtask::USAGE),
+    ];
+    for (args, code) in refused {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let got = end(&args);
+        if got != Some(Exit::Code(code)) {
+            note(&format!("ending {args:?}: {got:?}, want exit {code}"));
+            return false;
+        }
+    }
+    if !(plain.running() && powerful.running() && unsessioned.running() && root.running()) {
+        note("a task the mechanism refused to end ended");
+        return false;
+    }
+    let got = end(&[&pid, &name, &user]);
+    if got != Some(Exit::Code(0)) {
+        note(&format!("ending a person's task holding nothing: {got:?}"));
+        return false;
+    }
+    let killed = 128 + i32::from(slopos_abi::signal::SIGKILL);
+    plain.exited_within(asking::DEADLINE) == Some(killed) || {
+        note("the task the mechanism ended is still running");
+        false
+    }
+}
+
+/// The session's request needs a person, and with no desktop up nobody can
+/// be asked, so the task runs on.
+fn the_session_is_asked_before_a_task_is_ended() -> bool {
+    let Some(mut target) = Child::start(SELF, STRANGER, Some(NO_ONES_SESSION), "/", &[LINGER])
+    else {
+        return false;
+    };
+    let [pid, name, user] = end_args(target.pid());
+    let said = as_person(USER, None).ask(&[END, &pid, &name, &user], None);
+    if !said.ends_with(&Refused::Unreached.to_string()) || !target.running() {
+        note(&format!(
+            "the session ending another user's task unasked: {said}"
+        ));
+        return false;
+    }
+    true
+}
+
 /// With a desktop up, the first person, an administrator without a password,
 /// is asked for a click: Tab and Enter allow, Escape refuses.
 fn the_first_person_s_click_allows_and_escape_denies() -> bool {
@@ -1240,10 +1375,37 @@ fn every_question_reads_whole_at_every_width() -> bool {
 const LOCAL_COPY: &str = "/usr/local/bin/privd-test-probe";
 const LOCAL_APPS: &str = "/usr/local/share/slopos/apps";
 
-fn the_dialog_names_the_app_only_from_what_no_process_can_write() -> bool {
+/// With a desktop up, the first person's click ends a task of another
+/// user's, which nothing they run could signal.
+fn the_first_person_s_click_ends_another_user_s_task() -> bool {
     // The case before ended on a refusal, which declines this uid's next
     // questions for a while.
     std::thread::sleep(Duration::from_millis(DECLINED_MS + 500));
+    let Some(bob) = uid_of(BOB) else {
+        return false;
+    };
+    let Some(target) = Child::start(SELF, bob, Some(NO_ONES_SESSION), "/", &[LINGER]) else {
+        return false;
+    };
+    let [pid, name, user] = end_args(target.pid());
+    let front = sessions::front_tag();
+    let said = as_person(USER, front).ask(&[END, &pid, &name, &user], Some(asking::tab_and_enter));
+    if said != "ran 0" {
+        note(&format!(
+            "the first person's click to end {BOB}'s task: {said}"
+        ));
+        return false;
+    }
+    let killed = 128 + i32::from(slopos_abi::signal::SIGKILL);
+    target.exited_within(asking::DEADLINE) == Some(killed) || {
+        note(&format!(
+            "the task of {BOB}'s the first person allowed ending is still running"
+        ));
+        false
+    }
+}
+
+fn the_dialog_names_the_app_only_from_what_no_process_can_write() -> bool {
     let outcome = named_from_what_no_process_can_write();
     for entry in ["privd-test-base", "privd-test-copy"] {
         let _ = std::fs::remove_file(format!("{LOCAL_APPS}/org.slopos.{entry}.app"));

@@ -226,7 +226,46 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ("the_image_viewer_runs", the_image_viewer_runs),
     ("the_system_monitor_runs", the_system_monitor_runs),
     ("the_terminal_runs", the_terminal_runs),
+    (
+        "a_refusal_names_the_cause_the_kernel_reports",
+        a_refusal_names_the_cause_the_kernel_reports,
+    ),
 ];
+
+/// What the session may not change is told apart by what the kernel says of
+/// the file: the base's, a sealed one, and one its permissions refuse; and a
+/// folder it may not read, by its permissions.
+fn a_refusal_names_the_cause_the_kernel_reports() -> bool {
+    use slopos_appkit::Refusal;
+    let changes = [
+        ("/bin/shell", Refusal::System),
+        ("/etc/passwd", Refusal::Sealed),
+        ("/var/lib/slopos/apps_test_probe", Refusal::Denied),
+    ];
+    for (path, cause) in changes {
+        let wrote = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path);
+        match wrote {
+            Err(e) if Refusal::is(e.kind()) => {}
+            other => return fail(format!("a write to {path}: {other:?}")),
+        }
+        let said = Refusal::changing(Path::new(path));
+        if said != cause {
+            return fail(format!(
+                "changing {path} is refused as {said:?}, want {cause:?}"
+            ));
+        }
+    }
+    match fs::read_dir("/root") {
+        Err(e) if Refusal::is(e.kind()) => {}
+        other => return fail(format!("listing /root: {:?}", other.map(drop))),
+    }
+    let said = Refusal::reading(Path::new("/root"));
+    said == Refusal::Denied || fail(format!("listing /root is refused as {said:?}"))
+}
 
 const TREES: &str = "--trees";
 const WORK: &str = "/var/tmp/apps_test";

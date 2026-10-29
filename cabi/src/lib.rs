@@ -12,6 +12,8 @@ use core::ffi::{CStr, c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use core::ptr::NonNull;
 
 use slopos_abi::errno::Errno;
+use slopos_abi::fs::UserStatfs;
+use slopos_abi::fs::inode_flags_ioctl::FS_IOC_GETFLAGS;
 use slopos_abi::net::AF_UNIX;
 use slopos_abi::syscall::posix::{CLOCK_MONOTONIC, MAP_SHARED, PROT_READ, PROT_WRITE};
 use slopos_abi::syscall::types::{Timespec, UserPollFd};
@@ -30,6 +32,8 @@ mod c {
         pub fn accept(fd: c_int, addr: *mut c_void, len: *mut c_uint) -> c_int;
         pub safe fn close(fd: c_int) -> c_int;
         pub fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
+        pub fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+        pub fn statfs(path: *const c_char, buf: *mut UserStatfs) -> c_int;
         pub fn send(fd: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize;
         pub fn sendmsg(fd: c_int, msg: *const MsgHdr, flags: c_int) -> isize;
         pub fn recvmsg(fd: c_int, msg: *mut MsgHdr, flags: c_int) -> isize;
@@ -120,6 +124,23 @@ pub fn close(fd: i32) -> Result<(), Errno> {
 pub fn fcntl(fd: i32, cmd: i32, arg: i32) -> Result<i32, Errno> {
     // SAFETY: an integer argument is what these commands read.
     check(unsafe { c::fcntl(fd, cmd, arg) })
+}
+
+/// What `statfs` says of the filesystem `path` is on.
+pub fn statfs(path: &CStr) -> Result<UserStatfs, Errno> {
+    let mut stats = UserStatfs::default();
+    // SAFETY: `path` is NUL-terminated and `stats` a whole `struct statfs`,
+    // which the call writes.
+    check(unsafe { c::statfs(path.as_ptr(), &mut stats) })?;
+    Ok(stats)
+}
+
+/// The inode flags of the file `fd` names, as `lsattr` reads them.
+pub fn inode_flags(fd: i32) -> Result<u32, Errno> {
+    let mut flags: c_int = 0;
+    // SAFETY: `FS_IOC_GETFLAGS` writes one `int` through its argument.
+    check(unsafe { c::ioctl(fd, c_ulong::from(FS_IOC_GETFLAGS), &raw mut flags) })?;
+    Ok(flags as u32)
 }
 
 pub fn send(fd: i32, buf: &[u8], flags: i32) -> Result<usize, Errno> {

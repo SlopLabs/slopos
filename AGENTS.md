@@ -780,10 +780,11 @@ alone. Its mechanism is the extension's program, run as the extension's first
 user with no supplementary group, holding what it declares within the grant
 and the base's ceiling, with `PATH` `/bin:/sbin:/opt/<name>/bin`, once the
 file opened just before the start is of the activation its action was read
-from; init hands privd `SetId` beside `DELEGABLE` for that, and `ProcSignal`
-to relay a requester's signals to a mechanism running as another uid
-(`slopos_priv_core::PRIVD_CAPS`); no action names either, and privd signals
-only the mechanisms it started. A mechanism carries its extension's login tag
+from; init hands privd `SetId`, which no action names, beside `DELEGABLE`
+for that (`slopos_priv_core::PRIVD_CAPS`), and `DELEGABLE`'s `ProcSignal`
+relays a requester's signals to a mechanism running as another uid, which
+`ceiling::NEVER` keeps from every extension; privd signals only the
+mechanisms it started. A mechanism carries its extension's login tag
 (`init_control::action_tag`) rather than privd's, which a privd started again
 counts with what its predecessor started, and init ends whatever carries the
 tag of an extension whose actions no longer run, as it ends a service, but not
@@ -842,7 +843,7 @@ constant those calls take. `scripts/check_base_interface.sh` holds that
 surface, as rustdoc's JSON describes `slopos-abi`, to the digest recorded for
 the number in `scripts/gates/base-interface.txt`, so the surface cannot change
 while the number stays. A kernel serves `BASE_INTERFACE_MIN` through
-`BASE_INTERFACE`, both 10, and says so twice: in `sys_info`, which the shell's
+`BASE_INTERFACE`, 10 and 11, and says so twice: in `sys_info`, which the shell's
 `info` prints, and in the ELF note `.note.slopos.base-interface` (owner `SlopOS`,
 type `NT_SLOPOS_BASE_INTERFACE`, `slopos_abi::base_interface`), readable from
 the file without booting it; `link.ld` fails a link that lost it, and
@@ -1018,8 +1019,11 @@ keys, clicks and commands typed at the serial console's shell, waiting on
 PNG of each installer page, the consent dialog, the system menu, the
 question *Power off…* asks, the clock's date, the lock and login screens,
 each app and each catalogue page under
-`builddir/ui-shots/`; nothing compares them. `appkit/GUIDE.md` is what to
-read before writing an app.
+`builddir/ui-shots/`; nothing compares them. An app says why the computer
+refused a file — the base's or the install medium's, an extension's, a sealed
+one, a read-only or write-protected disk, or permissions — from what `statfs`
+and `FS_IOC_GETFLAGS` report (`appkit::Refusal`), never from its path.
+`appkit/GUIDE.md` is what to read before writing an app.
 
 **The compositor's chrome is drawn over the same tokens.** Frames and the dock
 paint every frame and stay hand-drawn: a frame is rounded at all four corners
@@ -2102,7 +2106,8 @@ id is inherited and set once at login. Init gives each session one of its
 own (`slopos_abi::task::SESSION_LOGINS`), remoted another (`REMOTE`) and each
 extension service its own (`init_control::service_tag`), so a session's
 processes are found, and ended, whatever uid they run as, and `login_tag()`
-tells a process its own. The ext4 reserve is the
+tells a process its own. `caps_get(pid)` tells anyone what a task holds, as
+Linux's `capget` does. The ext4 reserve is the
 superblock's `s_def_resuid` and `s_def_resgid`, uid 0's. A pty's slave
 belongs to whoever opened its master, mode 0620, as Linux's devpts gives it,
 judged on the slave an open takes. An `AF_UNIX` name is an inode of type
@@ -2657,6 +2662,22 @@ command with whatever input the person's shell and what it starts give it, as
 sudo's timestamp lets them run anything. A requester already holding the
 ceiling runs the command itself, handing on its whole mask, which in a rescue
 shell is everything. `priv_test` grades it.
+
+**A task of another user is ended through privd.** The kernel lets a person
+signal only a task of their own uid that holds nothing they lack.
+`/bin/endtask PID NAME USER` (privd's `org.slopos.task.end`, `allow root` and
+`allow admin confirm`, run as uid 0 holding `ProcSignal`, which waives both
+halves of that rule) ends only a task of a person's session
+(`SESSION_LOGINS`) that runs as a person (`PERSON_UIDS`), holds no more
+than every program holds (`caps_get`) and still runs under the name and user
+the person was shown. It refuses one holding any other capability — init, privd,
+a compositor, a command `priv` runs, a mechanism privd starts with
+capabilities — and whatever the system runs, by its login tag or uid: a
+mechanism holding nothing, a password check, remoted, an extension's
+service. A task's capabilities only shrink, its login tag never changes and
+its id is never given again, so what it checked is what the signal reaches.
+The System Monitor asks for it when the kernel refuses an end that rule
+allows, and otherwise says why it cannot; `privd_test` grades both.
 
 ### Licensing discipline
 

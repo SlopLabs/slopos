@@ -75,6 +75,7 @@ pub const MECHANISM_LANG: &str = "C.UTF-8";
 
 /// All an action may name.
 pub const DELEGABLE: u64 = caps::POWER
+    | caps::PROC_SIGNAL
     | caps::MOUNT
     | caps::RAW_BLOCK
     | caps::NET_ADMIN
@@ -98,11 +99,11 @@ pub const REQUESTER_CEILING: u64 = caps::MOUNT
     | caps::CLOCK
     | caps::DAC_OVERRIDE;
 
-/// What init hands privd: what an action may name, and what no action names:
-/// `SetId` to start a mechanism as an extension's user or as its requester,
-/// and `ProcSignal` to relay its requester's signals to one, which runs as
-/// another uid.
-pub const PRIVD_CAPS: u64 = DELEGABLE | caps::SET_ID | caps::PROC_SIGNAL;
+/// What init hands privd: what an action may name, among it `ProcSignal`,
+/// which relays a requester's signals to a mechanism running as another uid,
+/// and what no action names: `SetId`, to start a mechanism as an extension's
+/// user or as its requester.
+pub const PRIVD_CAPS: u64 = DELEGABLE | caps::SET_ID;
 
 /// Every capability, by the name `slopos_ostd::authority::Capability` gives
 /// it.

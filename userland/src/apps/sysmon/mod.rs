@@ -1,9 +1,11 @@
+use std::io::Write;
 use std::sync::OnceLock;
 
 use slopos_abi::PAGE_SIZE;
 use slopos_net_core::{Ipv4, Mac};
 use slopos_slibc::mem::malloc::heap_stats;
 
+use crate::apps::endtask::{self, Endable};
 use crate::syscall::process as sys_proc;
 use slopos_abi::errno::Errno;
 use slopos_abi::signal::SIGKILL;
@@ -11,8 +13,8 @@ use slopos_abi::task::TaskStatus;
 use slopos_appkit::theme::space;
 use slopos_appkit::theme::words::Bytes;
 use slopos_appkit::{
-    Action, App, Button, ButtonRow, ContextMenuAt, Dialog, Key, MenuItem, MenuItemKind, Modifiers,
-    NamedKey, Node, Page, PropertyList, Section, SortIndicator, StatusBar, TableColumn,
+    Action, App, AppSender, Button, ButtonRow, ContextMenuAt, Dialog, Key, MenuItem, MenuItemKind,
+    Modifiers, NamedKey, Node, Page, PropertyList, Section, SortIndicator, StatusBar, TableColumn,
     TableColumnWidth, Text, Tone, WindowSpec, column,
 };
 
@@ -21,7 +23,9 @@ pub mod selection;
 mod state;
 
 pub(crate) use format::*;
-pub(crate) use state::{ContextMenu, KillOutcome, SortColumn, SysmonApp, Tab};
+use selection::TaskKey;
+pub use state::KillOutcome;
+pub(crate) use state::{ContextMenu, KillTarget, SortColumn, SysmonApp, Tab};
 
 const MENU_KILL: usize = 0;
 
@@ -38,6 +42,20 @@ pub enum SysmonMsg {
     CloseMenu,
     Kill,
     Cancel,
+    /// What came of asking privd to end a task.
+    Asked {
+        key: TaskKey,
+        asked: Asked,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum Asked {
+    Ran(i32),
+    NotRun {
+        why: Option<String>,
+        by_person: bool,
+    },
 }
 
 impl App for SysmonApp {
@@ -100,10 +118,10 @@ impl App for SysmonApp {
             }
             SysmonMsg::MenuAction(item) => {
                 let menu = self.context_menu.take();
-                if item == MENU_KILL {
-                    self.confirm_kill = menu
-                        .map(|m| m.target)
-                        .filter(|target| self.is_killable(target.pid()));
+                if item == MENU_KILL
+                    && let Some(menu) = menu
+                {
+                    self.choose_to_end(menu.target);
                 }
                 Action::Rebuild
             }
@@ -113,16 +131,8 @@ impl App for SysmonApp {
             }
             SysmonMsg::Kill => {
                 // A refresh since the dialog opened may have recycled the id.
-                self.last_kill = match self.pending_kill_target() {
-                    Some(target) => {
-                        let name = target.name.clone();
-                        let rc = sys_proc::kill(target.pid(), SIGKILL);
-                        Some(if rc < 0 {
-                            KillOutcome::Failed { name, errno: rc }
-                        } else {
-                            KillOutcome::Sent { name }
-                        })
-                    }
+                self.last_kill = match self.pending_kill_target().cloned() {
+                    Some(target) => self.end(target),
                     None => self.confirm_kill.as_ref().map(|t| KillOutcome::Vanished {
                         name: t.name.clone(),
                     }),
@@ -135,7 +145,32 @@ impl App for SysmonApp {
                 self.confirm_kill = None;
                 Action::Rebuild
             }
+            SysmonMsg::Asked { key, asked } => {
+                let Some(target) = self.asking.take_if(|target| target.key == key) else {
+                    return Action::None;
+                };
+                let name = target.name;
+                self.last_kill = Some(match asked {
+                    Asked::Ran(0) => KillOutcome::Sent { name },
+                    Asked::Ran(endtask::GONE) => KillOutcome::Vanished { name },
+                    Asked::Ran(endtask::POWERFUL) => KillOutcome::Powerful { name },
+                    Asked::Ran(endtask::SYSTEM) => KillOutcome::System { name },
+                    Asked::Ran(_) => KillOutcome::Failed { name },
+                    Asked::NotRun { why, by_person } => KillOutcome::Denied {
+                        name,
+                        why,
+                        by_person,
+                    },
+                });
+                self.refresh_data();
+                Action::Rebuild
+            }
         }
+    }
+
+    fn on_start(&mut self, sender: AppSender<SysmonMsg>) -> Action {
+        self.sender = Some(sender);
+        Action::None
     }
 
     fn on_key(&mut self, key: Key, _modifiers: Modifiers) -> Action {
@@ -143,10 +178,9 @@ impl App for SysmonApp {
             return Action::None;
         }
         self.context_menu = None;
-        self.last_kill = None;
-        self.confirm_kill = self
-            .target_for_selection()
-            .filter(|target| self.is_killable(target.pid()));
+        if let Some(target) = self.target_for_selection() {
+            self.choose_to_end(target);
+        }
         Action::Rebuild
     }
 
@@ -178,6 +212,97 @@ impl SysmonApp {
     fn dismiss_transients(&mut self) {
         self.confirm_kill = None;
         self.context_menu = None;
+    }
+
+    /// Confirm here a task the kernel lets this process end, or one root may
+    /// have privd end unasked; for any other, privd's question is the
+    /// confirmation.
+    fn choose_to_end(&mut self, target: KillTarget) {
+        self.last_kill = None;
+        self.confirm_kill = None;
+        if !self.is_killable(target.pid()) || self.asking.is_some() {
+            return;
+        }
+        match sys_proc::kill(target.pid(), 0) {
+            0 => self.confirm_kill = Some(target),
+            rc if rc == Errno::EPERM.raw() && sys_proc::getuid() == 0 => {
+                match endtask::endable(target.pid()) {
+                    Endable::Yes { name, .. } if name == target.name => {
+                        self.confirm_kill = Some(target);
+                    }
+                    endable => self.last_kill = Some(not_ended(target.name, endable)),
+                }
+            }
+            rc => self.last_kill = self.refused(target, rc),
+        }
+    }
+
+    /// `None` while privd is asked.
+    fn end(&mut self, target: KillTarget) -> Option<KillOutcome> {
+        match sys_proc::kill(target.pid(), SIGKILL) {
+            0 => Some(KillOutcome::Sent { name: target.name }),
+            rc => self.refused(target, rc),
+        }
+    }
+
+    /// What follows the kernel refusing `target` with `rc`: a task of another
+    /// person's session that holds no powers is privd's to end once someone
+    /// allows it, and `None` while privd is asked.
+    fn refused(&mut self, target: KillTarget, rc: i32) -> Option<KillOutcome> {
+        let name = target.name.clone();
+        if rc == Errno::ESRCH.raw() {
+            return Some(match endtask::endable(target.pid()) {
+                Endable::System => KillOutcome::System { name },
+                _ => KillOutcome::Vanished { name },
+            });
+        }
+        if rc != Errno::EPERM.raw() {
+            return Some(KillOutcome::Failed { name });
+        }
+        match endtask::endable(target.pid()) {
+            Endable::Yes { name: now, user } if now == name => self.ask_to_end(target, user),
+            endable => Some(not_ended(name, endable)),
+        }
+    }
+
+    /// On a thread of its own, since privd answers once someone has.
+    fn ask_to_end(&mut self, target: KillTarget, user: String) -> Option<KillOutcome> {
+        let refused = KillOutcome::Refused {
+            name: target.name.clone(),
+        };
+        let Some(sender) = self.sender.clone() else {
+            return Some(refused);
+        };
+        let (key, pid, name) = (target.key, target.pid().to_string(), target.name.clone());
+        let spawned = std::thread::Builder::new()
+            .name("sysmon-end".into())
+            .spawn(move || {
+                let asked =
+                    match crate::privd::run_quietly(endtask::ACTION, &[&pid, &name, &user], b"") {
+                        Ok(code) => Asked::Ran(code),
+                        Err(not) => {
+                            // Not `eprintln!`, whose panic would end the window.
+                            let _ = writeln!(
+                                std::io::stderr(),
+                                "sysmon: {}: {}",
+                                endtask::ACTION,
+                                not.reason
+                            );
+                            Asked::NotRun {
+                                why: not.from_privd.then_some(not.reason),
+                                by_person: not.by_person,
+                            }
+                        }
+                    };
+                sender.send(SysmonMsg::Asked { key, asked });
+            });
+        match spawned {
+            Ok(_) => {
+                self.asking = Some(target);
+                None
+            }
+            Err(_) => Some(refused),
+        }
     }
 
     fn view_overview(&self) -> Node<SysmonMsg> {
@@ -359,28 +484,10 @@ impl SysmonApp {
     }
 
     fn view_status_line(&self) -> Node<SysmonMsg> {
-        let (text, tone) = match &self.last_kill {
-            Some(KillOutcome::Sent { name }) => (format!("Ended “{name}”."), Tone::Success),
-            Some(KillOutcome::Failed { name, errno }) if *errno == Errno::EPERM.raw() => (
-                format!(
-                    "Couldn't end “{name}”, because you aren't allowed to. Ask an administrator to end it."
-                ),
-                Tone::Danger,
-            ),
-            Some(KillOutcome::Failed { name, errno }) if *errno == Errno::ESRCH.raw() => {
-                (format!("“{name}” had already ended."), Tone::Warning)
-            }
-            Some(KillOutcome::Failed { name, .. }) => {
-                (format!("Couldn't end “{name}”. Try again."), Tone::Danger)
-            }
-            Some(KillOutcome::Vanished { name }) => {
-                (format!("“{name}” had already ended."), Tone::Warning)
-            }
-            None => (
-                String::from("Right-click a task, or choose it and press Delete, to end it."),
-                Tone::Secondary,
-            ),
-        };
+        let asking = self.asking.as_ref().map(|target| KillOutcome::Asking {
+            name: target.name.clone(),
+        });
+        let (text, tone) = status_line(asking.as_ref().or(self.last_kill.as_ref()));
         StatusBar::new(text).tone(tone).into()
     }
 
@@ -560,6 +667,68 @@ fn load_tone(pct: u32) -> Tone {
 
 fn cell(text: &str) -> Node<SysmonMsg> {
     Text::new(text).into()
+}
+
+/// What the status bar says of the last task ended, or of how to end one.
+pub fn status_line(outcome: Option<&KillOutcome>) -> (String, Tone) {
+    match outcome {
+        Some(KillOutcome::Sent { name }) => (format!("Ended “{name}”."), Tone::Success),
+        Some(KillOutcome::Failed { name }) => {
+            (format!("Couldn't end “{name}”. Try again."), Tone::Danger)
+        }
+        Some(KillOutcome::Vanished { name }) => (
+            format!("The task “{name}” had already ended."),
+            Tone::Warning,
+        ),
+        Some(KillOutcome::Powerful { name }) => (
+            format!("Couldn't end “{name}”, because it holds powers over the computer."),
+            Tone::Danger,
+        ),
+        Some(KillOutcome::System { name }) => (
+            format!("Couldn't end “{name}”, because the system runs it."),
+            Tone::Danger,
+        ),
+        Some(KillOutcome::Unowned { name }) => (
+            format!("Couldn't end “{name}”, because its user couldn't be found."),
+            Tone::Danger,
+        ),
+        Some(KillOutcome::Refused { name }) => (
+            format!("Couldn't end “{name}”, because you don't have permission to."),
+            Tone::Danger,
+        ),
+        Some(KillOutcome::Asking { name }) => (
+            format!("Waiting for permission to end “{name}”."),
+            Tone::Secondary,
+        ),
+        Some(KillOutcome::Denied {
+            name,
+            why,
+            by_person,
+        }) => (
+            match why {
+                Some(why) => format!("Couldn't end “{name}”. {why}"),
+                None => format!("Couldn't end “{name}”. Try again."),
+            },
+            match by_person {
+                true => Tone::Secondary,
+                false => Tone::Danger,
+            },
+        ),
+        None => (
+            String::from("Right-click a task, or choose it and press Delete, to end it."),
+            Tone::Secondary,
+        ),
+    }
+}
+
+/// Why `name`, which privd will not be asked to end, was not ended.
+fn not_ended(name: String, endable: Endable) -> KillOutcome {
+    match endable {
+        Endable::Yes { .. } | Endable::Gone => KillOutcome::Vanished { name },
+        Endable::Powerful => KillOutcome::Powerful { name },
+        Endable::System => KillOutcome::System { name },
+        Endable::Unknown => KillOutcome::Unowned { name },
+    }
 }
 
 pub fn sysmon_main() -> ! {

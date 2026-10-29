@@ -321,6 +321,16 @@ action org.slopos.prof
   allow    paired
   describe "measure where the computer spends its time"
 
+action org.slopos.task.end
+  program  /bin/endtask
+  args     *
+  caps     ProcSignal
+  uid      0
+  allow    root
+  allow    admin confirm
+  describe "end another user's task"
+  detail   "Anything it hasn't saved will be lost."
+
 action org.slopos.console.keymap
   program  /bin/keymap
   args     *
@@ -369,7 +379,7 @@ action org.slopos.install
 action org.slopos.rescue
   program  /bin/shell
   args     --rescue
-  caps     Power Mount RawBlock NetAdmin ConsoleConfig SysInspect Clock Seal BootEntry DacOverride BaseUpdate ExtensionUpdate
+  caps     Power ProcSignal Mount RawBlock NetAdmin ConsoleConfig SysInspect Clock Seal BootEntry DacOverride BaseUpdate ExtensionUpdate
   uid      0
   medium
   allow    root

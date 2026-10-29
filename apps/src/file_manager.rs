@@ -10,10 +10,12 @@ use slopos_appkit::theme::words::Bytes;
 use slopos_appkit::theme::{space, stroke};
 use slopos_appkit::{
     Action, App, Button, CrossAxisAlignment, EdgeInsets, EmptyState, Icon, IconButton, Key, List,
-    ListRow, Modifiers, NamedKey, Node, SIDEBAR_WIDTH, Sidebar, StatusBar, TableColumn,
+    ListRow, Modifiers, NamedKey, Node, Refusal, SIDEBAR_WIDTH, Sidebar, StatusBar, TableColumn,
     TableColumnWidth, Text, TextAlignment, TextRole, Tone, Toolbar, WindowSpec, column,
     document_title, row,
 };
+
+use crate::refused;
 
 pub const NAME: &str = "Files";
 
@@ -319,9 +321,9 @@ impl FileManagerApp {
     fn unreadable(&self, kind: ErrorKind) -> Node<FileMsg> {
         let name = self.folder_name();
         let (title, body) = match kind {
-            ErrorKind::PermissionDenied => (
+            kind if Refusal::is(kind) => (
                 "You can't open this folder",
-                format!("{name} belongs to someone else. Ask them to share it with you."),
+                refused::to_open(&name, Refusal::reading(&self.path)),
             ),
             ErrorKind::NotFound => (
                 "This folder isn't there",
@@ -337,14 +339,11 @@ impl FileManagerApp {
                 format!("Something went wrong reading {name}. Try again."),
             ),
         };
-        let action = match (kind, self.back.is_empty()) {
-            (ErrorKind::PermissionDenied | ErrorKind::NotFound, false) => {
-                Button::new("Go back").on_press(FileMsg::Back)
-            }
-            (ErrorKind::PermissionDenied | ErrorKind::NotFound, true) => {
-                Button::new("Open Computer").on_press(FileMsg::Root)
-            }
-            _ => Button::new("Try again").on_press(FileMsg::Reload),
+        let elsewhere = Refusal::is(kind) || kind == ErrorKind::NotFound;
+        let action = match (elsewhere, self.back.is_empty()) {
+            (true, false) => Button::new("Go back").on_press(FileMsg::Back),
+            (true, true) => Button::new("Open Computer").on_press(FileMsg::Root),
+            (false, _) => Button::new("Try again").on_press(FileMsg::Reload),
         };
         EmptyState::new(Icon::CircleAlert, title)
             .body(body)

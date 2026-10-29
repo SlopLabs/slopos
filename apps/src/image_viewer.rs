@@ -6,10 +6,12 @@ use std::path::Path;
 
 use slopos_appkit::widgets::picture::scaled;
 use slopos_appkit::{
-    Action, App, EmptyState, Icon, ImageData, Node, PictureInput, StatusBar, Surface, WindowSpec,
-    column, document_title,
+    Action, App, EmptyState, Icon, ImageData, Node, PictureInput, Refusal, StatusBar, Surface,
+    WindowSpec, column, document_title,
 };
 use slopos_image::{DecodeOptions, ImageError, PngError};
+
+use crate::refused;
 
 pub const NAME: &str = "Image Viewer";
 
@@ -22,15 +24,16 @@ struct Unshown {
     body: String,
 }
 
-fn unshown(name: &str, error: &ImageError) -> Unshown {
+fn unshown(path: &str, error: &ImageError) -> Unshown {
+    let name = file_name(path);
     let (title, body) = match error {
         ImageError::Io(e) if e.kind() == ErrorKind::NotFound => (
             "This picture isn't there",
             format!("{name} was moved or deleted. Open it again from where it is now."),
         ),
-        ImageError::Io(e) if e.kind() == ErrorKind::PermissionDenied => (
+        ImageError::Io(e) if Refusal::is(e.kind()) => (
             "You can't open this picture",
-            format!("{name} belongs to someone else. Ask them to share it with you."),
+            refused::to_open(name, Refusal::reading(Path::new(path))),
         ),
         ImageError::Io(_) => (
             "This picture couldn't be read",
@@ -86,7 +89,7 @@ impl ImageViewer {
         let loaded = slopos_image::load_path(&path, DecodeOptions::default())
             .map_err(|e| {
                 eprintln!("image_viewer: {path}: {e}");
-                unshown(file_name(&path), &e)
+                unshown(&path, &e)
             })
             .and_then(|image| {
                 ImageData::new(image.width, image.height, image.pixels).ok_or_else(|| Unshown {

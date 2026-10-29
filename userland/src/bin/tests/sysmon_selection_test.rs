@@ -62,7 +62,58 @@ fn test_table_index_and_display_row_are_distinct() -> bool {
     index_of(key, &tasks) == Some(2) && row_of(key, &tasks, &order) == Some(0)
 }
 
+/// Whatever comes of ending a task is said as a sentence, and each refusal
+/// says its own cause.
+fn test_every_ending_is_said_as_a_sentence() -> bool {
+    use slopos_appkit::theme::words::sentence;
+    use slopos_userland::apps::sysmon::{KillOutcome, status_line};
+    let name = || String::from("terminal");
+    let refusals = [
+        KillOutcome::Powerful { name: name() },
+        KillOutcome::System { name: name() },
+        KillOutcome::Unowned { name: name() },
+        KillOutcome::Refused { name: name() },
+    ];
+    let rest = [
+        KillOutcome::Sent { name: name() },
+        KillOutcome::Failed { name: name() },
+        KillOutcome::Vanished { name: name() },
+        KillOutcome::Asking { name: name() },
+        KillOutcome::Denied {
+            name: name(),
+            why: Some(String::from("You didn't allow this.")),
+            by_person: true,
+        },
+        KillOutcome::Denied {
+            name: name(),
+            why: None,
+            by_person: false,
+        },
+    ];
+    let said = |outcome: Option<&KillOutcome>| status_line(outcome).0;
+    let mut refused: Vec<String> = refusals.iter().map(|o| said(Some(o))).collect();
+    let every = refused
+        .iter()
+        .cloned()
+        .chain(rest.iter().map(|o| said(Some(o))))
+        .chain([said(None)]);
+    let mut kept = true;
+    for line in every {
+        if sentence(&line, &[]).is_err() {
+            eprintln!("sysmon_selection_test: {line:?}");
+            kept = false;
+        }
+    }
+    refused.sort_unstable();
+    refused.dedup();
+    kept && refused.len() == refusals.len()
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
+    (
+        "every_ending_is_said_as_a_sentence",
+        test_every_ending_is_said_as_a_sentence,
+    ),
     (
         "selection_follows_task_across_resort",
         test_selection_follows_task_across_resort,

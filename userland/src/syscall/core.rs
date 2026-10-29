@@ -217,3 +217,13 @@ pub fn kconsole(key: u8) -> i64 {
 pub fn caps_drop(mask: u64) -> u64 {
     unsafe { syscall1(SYSCALL_CAPS_DROP, mask) }
 }
+
+/// The capability mask task `pid` holds.
+pub fn caps_get(pid: u32) -> super::error::SyscallResult<u64> {
+    let raw = unsafe { syscall1(SYSCALL_CAPS_GET, u64::from(pid)) } as i64;
+    if raw < 0 {
+        Err(super::error::SyscallError::from_errno((-raw) as i32))
+    } else {
+        Ok(raw as u64)
+    }
+}

@@ -1,14 +1,18 @@
 //! What the editor tells the person: a passing status as a label, and when
-//! something goes wrong, what happened, then what to do about it.
+//! something goes wrong, what happened, then what to do about it, or for a
+//! refusal what was refused and why.
 
 use std::io::ErrorKind;
+use std::path::Path;
 
+use slopos_appkit::Refusal;
 use slopos_appkit::theme::words::Bytes;
 use slopos_editor_core::document::file_name;
 
 use super::Overwrite;
 use super::commands::Command;
 use super::files::MAX_FILE_BYTES;
+use crate::refused;
 
 macro_rules! name {
     () => {
@@ -28,21 +32,24 @@ pub fn unreadable(path: &str, kind: ErrorKind) -> String {
     let name = file_name(path);
     match kind {
         ErrorKind::NotFound => format!("Couldn't find {name}. Check its name, then open it again."),
-        ErrorKind::PermissionDenied => {
-            format!("You can't open {name}. Ask whoever owns it to share it with you.")
-        }
+        kind if Refusal::is(kind) => refused_open(path, Refusal::reading(Path::new(path))),
         _ => format!("Couldn't read {name}. Try again."),
     }
 }
 
+pub fn refused_open(path: &str, refusal: Refusal) -> String {
+    refused::to_open(file_name(path), refusal)
+}
+
 pub fn unlisted(path: &str, kind: ErrorKind) -> String {
-    let name = file_name(path);
     match kind {
-        ErrorKind::PermissionDenied => {
-            format!("You can't open the folder {name}. Ask whoever owns it to share it with you.")
-        }
-        _ => format!("Couldn't open the folder {name}. Try again."),
+        kind if Refusal::is(kind) => refused_listing(path, Refusal::reading(Path::new(path))),
+        _ => format!("Couldn't open the folder {}. Try again.", file_name(path)),
     }
+}
+
+pub fn refused_listing(path: &str, refusal: Refusal) -> String {
+    refused::to_open(&format!("the folder {}", file_name(path)), refusal)
 }
 
 pub fn folder(path: &str) -> String {
@@ -78,10 +85,7 @@ pub fn too_many_lines(path: &str) -> String {
 pub fn unsaved(path: &str, kind: ErrorKind) -> String {
     let save_as = choose(Command::SaveAs);
     match kind {
-        ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem => format!(
-            "You can't save in the folder {} is in. Choose {save_as} to save it somewhere you can.",
-            file_name(path)
-        ),
+        kind if Refusal::is(kind) => refused_save(path, Refusal::changing(Path::new(path))),
         ErrorKind::StorageFull | ErrorKind::QuotaExceeded => format!(
             "There's no room to save {}. Free some space, then save again.",
             file_name(path)
@@ -91,6 +95,21 @@ pub fn unsaved(path: &str, kind: ErrorKind) -> String {
             file_name(path)
         ),
     }
+}
+
+pub fn refused_save(path: &str, refusal: Refusal) -> String {
+    let because = match refusal {
+        Refusal::System => "its folder is part of the system",
+        Refusal::Extension => "its folder is part of an extension",
+        Refusal::ReadOnlyDisk => "its folder is on a disk that can't be written to",
+        Refusal::Sealed => "it's locked against changes",
+        Refusal::Denied => "you don't have permission to save it in its folder",
+    };
+    format!(
+        "Can't save {}, because {because}. Choose {} to save it somewhere else.",
+        file_name(path),
+        choose(Command::SaveAs)
+    )
 }
 
 pub fn open_elsewhere(path: &str) -> String {

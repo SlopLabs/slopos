@@ -352,6 +352,9 @@ pub struct NotRun {
     pub reason: String,
     /// The person at the machine answered privd's question so.
     pub by_person: bool,
+    /// `reason` is privd's answer, a sentence to whoever asked, rather than
+    /// why privd could not be asked.
+    pub from_privd: bool,
 }
 
 impl From<String> for NotRun {
@@ -359,6 +362,7 @@ impl From<String> for NotRun {
         NotRun {
             reason,
             by_person: false,
+            from_privd: false,
         }
     }
 }
@@ -398,7 +402,11 @@ pub fn run_feeding(
             Some(Reply::Exited(Exit::Code(code))) => return Ok(code),
             Some(Reply::Exited(Exit::Signal(signal))) => return Ok(128 + i32::from(signal)),
             Some(Reply::Denied { reason, by_person }) => {
-                return Err(NotRun { reason, by_person });
+                return Err(NotRun {
+                    reason,
+                    by_person,
+                    from_privd: true,
+                });
             }
             Some(Reply::Prompt { .. }) => {
                 return Err(String::from("privd asked for a terminal").into());
@@ -406,6 +414,14 @@ pub fn run_feeding(
             None => return Err(String::from("privd closed the connection").into()),
         }
     }
+}
+
+/// `action`'s mechanism, `input` on its standard input, its output discarded
+/// and its errors on ours; its status once it has run.
+pub fn run_quietly(action: &str, args: &[&str], input: &[u8]) -> Result<i32, NotRun> {
+    let null = fs::open_cstr(c"/dev/null", O_RDWR | O_CLOEXEC as u32)
+        .map_err(|e| NotRun::from(format!("/dev/null: {e}")))?;
+    run_feeding(action, args, input, null.raw(), 2)
 }
 
 /// A fresh id, so no reply left on an inherited connection passes as this

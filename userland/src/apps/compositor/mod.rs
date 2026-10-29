@@ -1308,20 +1308,12 @@ fn init(command: Command) -> Result<(), Undone> {
 }
 
 fn power(action: &str, arg: &str) -> Result<(), Undone> {
-    match privd(action, &[arg], b"") {
+    match crate::privd::run_quietly(action, &[arg], b"") {
         Ok(0) => Ok(()),
         Ok(code) => Err(Undone::Failed(format!("{action} exited {code}"))),
         Err(not) if not.by_person => Err(Undone::Refused),
         Err(not) => Err(Undone::Failed(format!("{action}: {not}"))),
     }
-}
-
-/// privd's `action`, `input` on its standard input, its output discarded and
-/// its errors on ours; its status once it has run.
-fn privd(action: &str, args: &[&str], input: &[u8]) -> Result<i32, crate::privd::NotRun> {
-    let null = crate::syscall::fs::open_cstr(c"/dev/null", slopos_abi::fs::O_RDWR)
-        .map_err(|e| crate::privd::NotRun::from(format!("/dev/null: {e}")))?;
-    crate::privd::run_feeding(action, args, input, null.raw(), 2)
 }
 
 /// Ask init on a thread of its own, which init answers once it has acted.
