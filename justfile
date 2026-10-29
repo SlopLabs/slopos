@@ -451,7 +451,7 @@ boot-live: iso
 ui_shots_width  := env("UI_SHOTS_WIDTH", "1280")
 ui_shots_height := env("UI_SHOTS_HEIGHT", "800")
 
-[doc("Render the app icons the system and the apps ship from appkit's template, at 64 and 128 px; `just test-host` holds them to it")]
+[doc("Render the app icons the system and the apps ship, white glyphs on appkit's app tile, at 64 and 128 px; `just test-host` holds them to it")]
 icons:
     {{cargo}} +{{rust_channel}} run -q -p slopos-icons
 

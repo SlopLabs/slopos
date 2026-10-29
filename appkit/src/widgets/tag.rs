@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use slopos_theme_core::{TextRole, Tone, space, stroke};
+use slopos_theme_core::{TextRole, Tone, space, stroke, with_alpha};
 
 use crate::constraints::{BoxConstraints, Size};
 use crate::event::{EventResponse, MessageSink, WidgetEvent};
@@ -12,8 +12,10 @@ const ROLE: TextRole = TextRole::Caption;
 const PAD_X: i32 = space::SM;
 /// A line of body text, so a row of text holding a tag keeps its height.
 const HEIGHT: i32 = TextRole::Body.style().line_height;
+/// Kept low so the word in the same tone still reads 4.5:1 on it.
+const TINT: u8 = 0x1a;
+const EDGE: u8 = 0x59;
 
-/// A word in a pill edged and inked in its tone.
 pub struct TagWidget {
     core: WidgetCore,
     text: String,
@@ -49,7 +51,8 @@ impl Widget for TagWidget {
         let rect = self.layout_rect();
         let ink = ctx.theme().ink(self.tone);
         let r = rect.height / 2;
-        ctx.draw_rounded_rect(rect, r, stroke::EDGE, ink);
+        ctx.fill_rounded_rect(rect, r, with_alpha(ink, TINT));
+        ctx.draw_rounded_rect(rect, r, stroke::EDGE, with_alpha(ink, EDGE));
         let top = ui::centred_top(rect.y, rect.height, ROLE);
         let room = rect.width - PAD_X * 2;
         let cut = ctx.draw_text_fitted(rect.x + PAD_X, top, &self.text, ROLE, room, ink);

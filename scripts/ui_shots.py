@@ -21,7 +21,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 from qmp import Qmp, axis, button, key  # noqa: E402
 
-SCENES = ("installer", "chrome", "apps", "gallery")
+SCENES = ("installer", "chrome", "desktop", "apps", "gallery")
 APPS = (
     ("terminal", "terminal", "org.slopos.terminal"),
     ("system-monitor", "sysmon", "org.slopos.sysmon"),
@@ -191,10 +191,13 @@ class Guest:
         for ch in text:
             self.press(QCODES.get(ch, ch))
 
-    def click(self, x, y):
+    def point(self, x, y):
         ax = x * TABLET_MAX // max(1, self.width - 1)
         ay = y * TABLET_MAX // max(1, self.height - 1)
         self.qmp.send(axis("abs", "x", ax), axis("abs", "y", ay))
+
+    def click(self, x, y):
+        self.point(x, y)
         self.qmp.send(button(True))
         self.qmp.send(button(False))
 
@@ -287,6 +290,23 @@ def chrome(g):
     g.settle(60)
 
 
+def desktop(g):
+    """Two windows, the one behind without focus, and the pointer on the
+    dock's middle icon, which grows and names its app."""
+    pids = []
+    for command, app_id in (("file_manager", "org.slopos.files"), ("sysmon", "org.slopos.sysmon")):
+        g.drain()
+        g.serial(f"{command} & echo UI-JOB: $!\n")
+        pids.append(g.wait_line(r"UI-JOB: (\d+)", 30).group(1))
+        g.wait_line(rf"COMPOSITOR: shown {re.escape(app_id)}", 300)
+    g.point(g.width // 2, g.height - 44)
+    g.shot("desktop", timeout=30)
+    for pid in pids:
+        g.serial(f"kill {pid}\n")
+        time.sleep(1)
+    time.sleep(1)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--iso", required=True)
@@ -316,6 +336,8 @@ def main():
         close_installer(g)
         if "chrome" in scenes:
             chrome(g)
+        if "desktop" in scenes:
+            desktop(g)
         if "apps" in scenes:
             for name, command, app_id in APPS:
                 run_app(g, name, command, app_id)

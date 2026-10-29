@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Renders the app icons the system and the apps ship from appkit's template, and holds the shipped ones to it"
+description = "Renders the app icons the system and the apps ship, white glyphs on appkit's app tile, and holds the shipped ones to it"
 
 [lints]
 workspace = true

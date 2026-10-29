@@ -6,7 +6,7 @@ use slopos_appkit::text::ui;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
 use slopos_gfx::rounded::Rounded;
 use slopos_image::Image;
-use slopos_theme_core::{Icon, TextRole, radius, space, stroke};
+use slopos_theme_core::{AppTile, Icon, TextRole, radius, space, stroke, with_alpha};
 
 use super::window_info::WindowInfo;
 use crate::app_entry::AppEntry;
@@ -16,19 +16,23 @@ const MAX_ENTRIES: usize = 16;
 
 const ICON: i32 = 48;
 const ICON_GAP: i32 = space::SM;
-const PILL_PADDING_X: i32 = space::MD;
-const PILL_PADDING_Y: i32 = 6;
-const BOTTOM_MARGIN: i32 = space::XS;
-const SEPARATOR_WIDTH: i32 = 2;
+const PILL_PADDING_X: i32 = space::SM;
+const PILL_PADDING_TOP: i32 = space::SM;
+const PILL_PADDING_BOTTOM: i32 = space::MD;
+const BOTTOM_MARGIN: i32 = space::SM;
 const SEPARATOR_HEIGHT: i32 = 32;
 const SEPARATOR_MARGIN: i32 = space::SM;
-const SEPARATOR_SPAN: i32 = SEPARATOR_MARGIN + SEPARATOR_WIDTH + SEPARATOR_MARGIN;
+const SEPARATOR_SPAN: i32 = SEPARATOR_MARGIN + stroke::EDGE + SEPARATOR_MARGIN;
 const DOT: i32 = 4;
-const DOT_GAP: i32 = 3;
 const LABEL: TextRole = TextRole::Label;
+const ICON_SHADOW_SPREAD: i32 = 6;
+const ICON_SHADOW_DROP: i32 = 2;
+const ICON_SHADOW_ALPHA: u8 = 0x60;
+/// Out of 255 of text.
+const SEPARATOR_ALPHA: u8 = 0x2e;
 
 /// What the dock takes from the bottom of the screen, its dots included.
-pub const DOCK_HEIGHT: i32 = ICON + 2 * PILL_PADDING_Y + BOTTOM_MARGIN + DOT + DOT_GAP;
+pub const DOCK_HEIGHT: i32 = ICON + PILL_PADDING_TOP + PILL_PADDING_BOTTOM + BOTTOM_MARGIN;
 
 const MAGNIFY_REACH_X: i32 = 120;
 const MAGNIFY_REACH_Y: i32 = 80;
@@ -69,14 +73,14 @@ impl DockEntry {
     fn new(name: String, exec: String, app_id: String, pinned: bool, icon: Option<Image>) -> Self {
         let has_icon = icon.is_some();
         let picture = icon.unwrap_or_else(|| {
-            let tint = slopos_theme_core::series_of(match app_id.is_empty() {
+            let tile = AppTile::of(match app_id.is_empty() {
                 true => &name,
                 false => &app_id,
             });
             Image {
                 width: PICTURE_PX,
                 height: PICTURE_PX,
-                pixels: app_icon::render(PICTURE_PX, tint, Icon::AppWindow),
+                pixels: app_icon::render(PICTURE_PX, tile, Icon::AppWindow),
             }
         });
         Self {
@@ -124,15 +128,9 @@ impl Layout {
         })
     }
 
-    /// Every pixel the dock draws, its dots and its label included.
+    /// Every pixel the dock draws, its shadow and its label included.
     fn bounds(&self, entries: &[DockEntry]) -> DamageRect {
-        let pill = self.pill;
-        let dock = DamageRect {
-            x0: pill.x,
-            y0: pill.y,
-            x1: pill.x + pill.w - 1,
-            y1: pill.y + pill.h + DOT_GAP + DOT,
-        };
+        let dock = panel_reach(&self.pill);
         match self.label(entries) {
             Some((_, shape)) => dock.union(&label_reach(&shape)),
             None => dock,
@@ -245,8 +243,8 @@ impl Dock {
         };
 
         let mut sizes = [ICON; MAX_ENTRIES];
-        let pill_bottom = screen_height as i32 - BOTTOM_MARGIN - DOT - DOT_GAP;
-        let resting_top = pill_bottom - ICON - 2 * PILL_PADDING_Y;
+        let pill_bottom = screen_height as i32 - BOTTOM_MARGIN;
+        let resting_top = pill_bottom - ICON - PILL_PADDING_TOP - PILL_PADDING_BOTTOM;
         if cursor_y >= resting_top - MAGNIFY_REACH_Y && cursor_y <= screen_height as i32 {
             let resting_w = (0..count).map(|i| gap_before(i) + ICON).sum::<i32>()
                 + ICON_GAP * (count as i32 - 1).max(0);
@@ -265,10 +263,11 @@ impl Dock {
         let content_w = (0..count).map(|i| gap_before(i) + sizes[i]).sum::<i32>()
             + ICON_GAP * (count as i32 - 1).max(0);
         let pill_w = content_w + 2 * PILL_PADDING_X;
-        let pill_h = sizes[..count].iter().copied().max().unwrap_or(0) + 2 * PILL_PADDING_Y;
+        let tallest = sizes[..count].iter().copied().max().unwrap_or(0);
+        let pill_h = tallest + PILL_PADDING_TOP + PILL_PADDING_BOTTOM;
         let pill_x = (screen_width as i32 - pill_w) / 2;
         let pill_y = pill_bottom - pill_h;
-        let icons_bottom = pill_y + pill_h - PILL_PADDING_Y;
+        let icons_bottom = pill_y + pill_h - PILL_PADDING_BOTTOM;
 
         let mut icons = [IconLayout::default(); MAX_ENTRIES];
         let mut separator_x = None;
@@ -294,7 +293,7 @@ impl Dock {
 
         Layout {
             icons,
-            pill: Rounded::new(pill_x, pill_y, pill_w, pill_h, radius::CARD),
+            pill: Rounded::new(pill_x, pill_y, pill_w, pill_h, radius::PANEL),
             separator_x,
             icons_bottom,
             hovered,
@@ -319,28 +318,39 @@ impl Dock {
         let theme = slopos_theme_core::current();
         let layout = self.layout(screen_width, screen_height, cursor_x, cursor_y);
         let pill = layout.pill;
-        pill.draw(buf, clip, theme.chrome);
+        let shadow = theme.shadow_raised;
+        panel_caster(&pill).draw_shadow_around(buf, shadow.spread, clip, &pill, shadow.color);
+        pill.grown(1).stroke(buf, 1, clip, theme.rim_dark);
+        pill.draw(buf, clip, theme.glass);
+        pill.top_rim(buf, clip, theme.rim_light, pill.radius);
 
         if let Some(x) = layout.separator_x {
             let y = layout.icons_bottom - (ICON + SEPARATOR_HEIGHT) / 2;
-            gfx::fill_rect_clipped(
+            gfx::fill_rect_blended_clipped(
                 buf,
                 x,
                 y,
-                SEPARATOR_WIDTH,
+                stroke::EDGE,
                 SEPARATOR_HEIGHT,
-                theme.border,
+                with_alpha(theme.text, SEPARATOR_ALPHA),
                 clip,
             );
         }
 
         for (entry, l) in self.entries.iter().zip(&layout.icons) {
+            let left = l.center_x - l.size / 2;
+            let tile = app_icon::outline(l.size);
+            let shape = Rounded::new(left, l.top_y, l.size, l.size, tile.radius);
+            let mut caster = shape;
+            caster.y += ICON_SHADOW_DROP;
+            let ink = with_alpha(theme.shade, ICON_SHADOW_ALPHA);
+            caster.draw_shadow(buf, ICON_SHADOW_SPREAD, clip, &shape.bands()[1], ink);
             let icon = entry.picture();
             if let Some(bitmap) = BitmapRef::new(icon.width, icon.height, &icon.pixels) {
                 slopos_gfx::image::draw_image_clipped(
                     buf,
                     bitmap,
-                    l.center_x - l.size / 2,
+                    left,
                     l.top_y,
                     l.size,
                     l.size,
@@ -350,7 +360,7 @@ impl Dock {
                 );
             }
             if entry.running {
-                let y = pill.y + pill.h + DOT_GAP;
+                let y = layout.icons_bottom + (PILL_PADDING_BOTTOM - DOT) / 2;
                 Rounded::circle(l.center_x - DOT / 2, y, DOT).draw(buf, clip, theme.text);
             }
         }
@@ -386,6 +396,19 @@ impl Dock {
     pub fn entry(&self, index: usize) -> Option<&DockEntry> {
         self.entries.get(index)
     }
+}
+
+fn panel_caster(pill: &Rounded) -> Rounded {
+    let mut caster = *pill;
+    caster.y += slopos_theme_core::current().shadow_raised.offset_y;
+    caster
+}
+
+fn panel_reach(pill: &Rounded) -> DamageRect {
+    let spread = slopos_theme_core::current().shadow_raised.spread;
+    pill.grown(1)
+        .bounds()
+        .union(&panel_caster(pill).grown(spread).bounds())
 }
 
 /// An app's name centred on `center_x` above `above`, as appkit's tooltip

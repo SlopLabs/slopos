@@ -936,11 +936,19 @@ program holding more than they do.
 
 **The desktop draws with one theme.** `theme-core`, host-tested under `just
 test-host`, holds the tokens appkit and the compositor read: colour roles in
-one dark table with hover and pressed derived from them, a categorical
-`series`, text roles, a 4 px spacing scale with named insets, edge widths,
-radii and shadows. Its tests hold body and secondary text to WCAG's 4.5:1 on every
-surface they sit on, hovered and selected rows included, status tones on
-plain surfaces, and edges, focus and disabled text to 3:1. appkit hands its
+one dark graphite table with hover and pressed derived from them, every
+status hue twice — a light ink for text on a surface (`Accent`, `Danger`…)
+and a deep fill for white text on it (`AccentFill`, `DangerFill`…, which a
+`Tone` names by `Tone::fill`), a fill lighting under the pointer and
+darkening while pressed — a categorical `series` of fills, the app tiles,
+the glass, rims, wallpaper and shadows of the chrome, text roles, a 4 px
+spacing scale with named insets, edge widths and radii. Every control is
+filled — a secondary button in `control`, a field sunken inside a quiet
+`edge` — so no control reads as an outline. Its tests hold body and
+secondary text to WCAG's 4.5:1 on every surface they sit on, hovered and
+selected rows included, status inks on plain surfaces, white on every fill
+in every state, and edges, focus, disabled text and an app icon's glyph to
+3:1. appkit hands its
 widgets the theme through `ctx` (`StyleSheet::theme`), and an app names a
 `Tone`, a `Surface` or a `SegmentFill::Series`, never a colour, a code
 view's syntax spans aside, or reads `theme::current()` when it draws itself,
@@ -1018,7 +1026,8 @@ keys, clicks and commands typed at the serial console's shell, waiting on
 `COMPOSITOR: shown <app id>` and on the screen holding still, and saves a
 PNG of each installer page, the consent dialog, the system menu, the
 question *Power off…* asks, the clock's date, the lock and login screens,
-each app and each catalogue page under
+the desktop with two windows and the pointer on the dock, each app and each
+catalogue page under
 `builddir/ui-shots/`; nothing compares them. An app says why the computer
 refused a file — the base's or the install medium's, an extension's, a sealed
 one, a read-only or write-protected disk, or permissions — from what `statfs`
@@ -1026,14 +1035,20 @@ and `FS_IOC_GETFLAGS` report (`appkit::Refusal`), never from its path.
 `appkit/GUIDE.md` is what to read before writing an app.
 
 **The compositor's chrome is drawn over the same tokens.** Frames and the dock
-paint every frame and stay hand-drawn: a frame is rounded at all four corners
+paint every frame and stay hand-drawn: the desktop is the theme's wallpaper,
+a gradient with a soft light from above, drawn at the screen's size and
+dithered (`compositor::wallpaper`; `SLOPOS_WALLPAPER` names a picture to
+cover it instead); a frame is rounded at all four corners
 at the window radius, its edge's coverage taken from `gfx::rounded`'s signed
-distance, and square once maximized; its shadow follows the rounded rect,
-reaches as far whatever has focus and is half as dark without it; overlapping
-shadows darken each other; and the close, minimise and zoom buttons are discs
-that are grey on a window without focus and show their colours and glyphs
-while the pointer is over the group; a window that does not resize has a
-grey zoom button with no glyph that does nothing. Zoom fills the area
+distance, and square once maximized; a dark hairline just outside it parts it
+from what is behind and a light one along its top catches the light; its
+shadow follows the rounded rect, reaches as far whatever has focus and is half
+as dark without it, and a resize takes a press only 8 px past the frame;
+overlapping shadows darken each other; and the close, minimise and zoom
+buttons are discs in the status inks with a dark glyph, grey on a window
+without focus, showing their glyphs while the pointer is over the group; a
+window that does not resize has a grey zoom button with no glyph that does
+nothing. Zoom fills the area
 between the menu bar and the dock, or, for a window whose limits keep it
 from filling it exactly, gives it the nearest size they allow, centred and
 kept a normal window; zoom again restores it while it is maximized,
@@ -1076,16 +1091,26 @@ each that ends something asks first, Cancel focused. Log out and Restart
 desktop are init's to carry out, and Restart and Power off privd's
 `org.slopos.power.reboot` and `.poweroff`; one that does not happen, unless
 the person answered privd's question so, says so in the question's place, and
-why goes to the log. An app's icon is appkit's template (`appkit::app_icon`):
-a rounded square in the theme's series colour with a glyph of the icon font on
-it, which `just icons` (`tools/icons`) renders, failing without the icon
-font, into the icons the system and the apps ship, at 64 px and as `<id>@2x.png` at 128 px, and whose host test
-holds them to it. The dock draws the 64 px icon, never drawing past it, since
-its filter samples two pixels a side; the 128 px one waits for a scale factor.
-It draws an app that ships none on the template, tinted by its app id, a
-window with no app id as an entry of its own tinted by the title it first
-had, a hover
-label as appkit draws a tooltip, and a dot under each app that runs.
+why goes to the log. Every app icon is one white glyph on appkit's tile
+(`appkit::app_icon`): a rounded square in one of the theme's `AppTile` hues,
+lit one step from its top-left corner and nothing more — no sheen, rim, glow
+or shadow of its own, as GNOME's and Apple's app icon guidance ask, since the
+dock casts the shadow. `just icons` (`tools/icons`) draws the shipped apps'
+glyphs on it by one set of rules (`tools/icons/src/art.rs`: a few filled
+geometric shapes on the 64 grid, never thinner than its weight, inside a
+keyline of one area, depth only by a shape behind at 60% white and by detail
+cut out of a white shape), at 64 px and as `<id>@2x.png` at 128 px, and its
+host test holds the shipped icons to it and to those rules. The dock is a
+pane of glass floating above the bottom of the screen, with the same rims and
+a shadow that leaves the glass clear; it draws the 64 px icon, never drawing
+past it, since its filter samples two pixels a side, each with a soft shadow
+of its own; the 128 px one waits for a scale factor. It draws an app that
+ships none as a glyph of the icon font on the tile its app id is given
+(`AppTile::of`), a window with no app id as an entry of its own tinted by the
+title it first had, a hover label as appkit draws a tooltip, and on the glass
+under each app that runs a dot. The menu bar is glass too, and its system
+menu opens from SlopOS's mark, the smiling screen of its logo on a tile in
+the accent.
 
 **The guest installs what it builds.** `/bin/bootctl` (privd's
 `org.slopos.boot.*` and `org.slopos.base.*` actions, run as uid 0 with

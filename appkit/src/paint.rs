@@ -98,6 +98,13 @@ impl<'a, 'b> PaintContext<'a, 'b> {
         outline.stroke(self.buffer, width, &clip, color);
     }
 
+    pub fn draw_top_rim(&mut self, rect: Rect, radius: i32) {
+        let clip = self.clip.to_damage_rect();
+        let shape = Rounded::new(rect.x, rect.y, rect.width, rect.height, radius);
+        let fade = (rect.height / 2).min(2 * radius).max(1);
+        shape.top_rim(self.buffer, &clip, self.style.theme.rim_light, fade);
+    }
+
     pub fn fill_circle(&mut self, x: i32, y: i32, diameter: i32, color: Color32) {
         let clip = self.clip.to_damage_rect();
         Rounded::circle(x, y, diameter).draw(self.buffer, &clip, color);

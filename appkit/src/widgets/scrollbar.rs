@@ -1,5 +1,6 @@
-//! The scrollbar every scrolling view draws and takes the pointer with: a
-//! sunken track down its right edge, and a thumb as long as the share shown.
+//! The scrollbar every scrolling view draws and takes the pointer with.
+
+use slopos_theme_core::State;
 
 use crate::constraints::Rect;
 use crate::paint::PaintContext;
@@ -64,18 +65,18 @@ impl Bar {
         top as i64 * self.span / usable as i64
     }
 
-    /// Lit while `held` or while the pointer rests on the thumb of `owner`.
     pub(crate) fn paint(&self, ctx: &mut PaintContext, owner: WidgetId, held: bool) {
         let theme = ctx.theme();
         let lit = held || ctx.lit(owner) == Some(THUMB);
         let (t, b) = (self.track, self.thumb);
-        ctx.fill_rect(t.x, t.y, t.width, t.height, theme.surface_sunken);
+        ctx.fill_rounded_rect(t, t.width / 2, theme.overlay(State::Hover));
         let ink = if lit {
             theme.border_strong
         } else {
-            theme.border
+            theme.neutral_fill
         };
-        ctx.fill_rect(b.x, b.y, b.width, b.height, ink);
+        let thumb = Rect::new(b.x + 1, b.y + 1, b.width - 2, b.height - 2);
+        ctx.fill_rounded_rect(thumb, thumb.width / 2, ink);
     }
 }
 

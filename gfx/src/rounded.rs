@@ -176,6 +176,16 @@ impl Rounded {
     /// The band `width` px wide just inside the outline, in `color` within
     /// `clip`.
     pub fn stroke<C: Canvas>(&self, canvas: &mut C, width: i32, clip: &DamageRect, color: Color32) {
+        self.stroke_with(canvas, width, clip, |_, _| color);
+    }
+
+    pub fn stroke_with<C: Canvas>(
+        &self,
+        canvas: &mut C,
+        width: i32,
+        clip: &DamageRect,
+        ink: impl Fn(i32, i32) -> Color32,
+    ) {
         let inner = Rounded::new(
             self.x + width,
             self.y + width,
@@ -213,10 +223,27 @@ impl Rounded {
             for y in part.y0.max(clip.y0)..=part.y1.min(clip.y1) {
                 for x in part.x0.max(clip.x0)..=part.x1.min(clip.x1) {
                     let covered = self.coverage(x, y).saturating_sub(inner.coverage(x, y));
-                    put_pixel_coverage(canvas, x, y, color, covered);
+                    put_pixel_coverage(canvas, x, y, ink(x, y), covered);
                 }
             }
         }
+    }
+
+    /// Fades from `color` at the top edge to nothing `fade` px below it.
+    pub fn top_rim<C: Canvas>(&self, canvas: &mut C, clip: &DamageRect, color: Color32, fade: i32) {
+        if fade <= 0 {
+            return;
+        }
+        let clip = DamageRect {
+            y1: clip.y1.min(self.y + fade - 1),
+            ..*clip
+        };
+        let alpha = i32::from(color.alpha());
+        self.stroke_with(canvas, 1, &clip, |_, y| {
+            let left = (fade - (y - self.y)).clamp(0, fade);
+            let a = (alpha * left / fade) as u8;
+            Color32::new(color.red(), color.green(), color.blue(), a)
+        });
     }
 
     /// The shadow the shape casts `spread` px past its outline, `color` at
@@ -236,6 +263,29 @@ impl Rounded {
                 if !under.contains(x, y) {
                     put_pixel_coverage(canvas, x, y, color, self.shadow(spread, x, y));
                 }
+            }
+        }
+    }
+
+    /// Leaves the shadow out from under `pane`, which is translucent.
+    pub fn draw_shadow_around<C: Canvas>(
+        &self,
+        canvas: &mut C,
+        spread: i32,
+        clip: &DamageRect,
+        pane: &Rounded,
+        color: Color32,
+    ) {
+        let area = self.grown(spread).bounds();
+        let whole = pane.bands()[1];
+        for y in area.y0.max(clip.y0)..=area.y1.min(clip.y1) {
+            for x in area.x0.max(clip.x0)..=area.x1.min(clip.x1) {
+                if whole.contains(x, y) {
+                    continue;
+                }
+                let open = 255 - u32::from(pane.coverage(x, y));
+                let dark = u32::from(self.shadow(spread, x, y)) * open / 255;
+                put_pixel_coverage(canvas, x, y, color, dark as u8);
             }
         }
     }

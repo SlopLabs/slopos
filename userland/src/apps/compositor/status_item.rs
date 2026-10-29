@@ -3,13 +3,14 @@
 
 use std::sync::OnceLock;
 
+use slopos_abi::draw::Color32;
 use slopos_appkit::text::{icons, ui};
 use slopos_chrome_core::clock::WallTime;
 use slopos_chrome_core::indicator::indicator_for;
 use slopos_chrome_core::netstate::NetIndicatorState;
 use slopos_chrome_core::status::{BAR_HEIGHT, StatusItemSpec, StatusKind, StatusSlot};
 use slopos_gfx::rounded::Rounded;
-use slopos_theme_core::{ColorRole, State, TextRole, radius, space};
+use slopos_theme_core::{State, TextRole, radius, space};
 
 use crate::gfx::{DamageRect, DrawBuffer};
 
@@ -96,15 +97,12 @@ impl StatusItems {
 
     pub fn draw(&self, buf: &mut DrawBuffer, slot: &StatusSlot, hovered: bool, clip: &DamageRect) {
         let theme = slopos_theme_core::current();
-        let hover = theme.state(ColorRole::Chrome, State::Hover);
         if hovered {
             let r = hover_rect(slot);
             let (w, h) = (r.x1 - r.x0 + 1, r.y1 - r.y0 + 1);
-            Rounded::new(r.x0, r.y0, w, h, radius::CONTROL).draw(buf, clip, hover);
+            let lit = theme.overlay(State::Pressed);
+            Rounded::new(r.x0, r.y0, w, h, radius::CONTROL).draw(buf, clip, lit);
         }
-        // Text is anti-aliased towards the colour it is given, which a
-        // highlight must be or the text's edges punch it back out.
-        let text_bg = if hovered { hover } else { theme.chrome };
 
         match slot.kind {
             StatusKind::Clock => ui::draw(
@@ -114,7 +112,7 @@ impl StatusItems {
                 &self.clock,
                 ROLE,
                 theme.text,
-                text_bg,
+                Color32::TRANSPARENT,
                 clip,
             ),
             StatusKind::Network => {

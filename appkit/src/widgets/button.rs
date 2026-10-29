@@ -2,7 +2,7 @@ use std::any::Any;
 use std::cell::Cell;
 
 use slopos_abi::draw::Color32;
-use slopos_theme_core::{ColorRole, State, TextRole, Theme, inset, radius, stroke};
+use slopos_theme_core::{ColorRole, State, TextRole, Theme, inset, radius, with_alpha};
 
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent};
@@ -151,40 +151,30 @@ impl ButtonWidget {
     }
 }
 
-/// Fill, ink and edge.
 fn button_colors(
     theme: &Theme,
     style: ButtonStyle,
     enabled: bool,
     state: State,
-) -> (Color32, Color32, Option<Color32>) {
+) -> (Color32, Color32) {
     if !enabled {
-        let edge = match style {
-            ButtonStyle::Destructive => theme.danger,
-            _ => theme.text_disabled,
-        };
-        return (theme.surface_raised, theme.text_disabled, Some(edge));
+        return (with_alpha(theme.shade, DISABLED_SHADE), theme.text_disabled);
     }
     match style {
         ButtonStyle::Primary => (
-            theme.state(ColorRole::Accent, state),
+            theme.state(ColorRole::AccentFill, state),
             theme.text_on_accent,
-            None,
         ),
         ButtonStyle::Destructive => (
-            theme.state(ColorRole::Danger, state),
+            theme.state(ColorRole::DangerFill, state),
             theme.text_on_accent,
-            None,
         ),
-        // A secondary button's fill is barely off its surround, so the edge
-        // is what says it is a control rather than a label.
-        ButtonStyle::Secondary => (
-            theme.state(ColorRole::SurfaceRaised, state),
-            theme.text,
-            Some(theme.border_strong),
-        ),
+        ButtonStyle::Secondary => (theme.state(ColorRole::Control, state), theme.text),
     }
 }
+
+/// Darker than the surface, so disabled text keeps 3:1 on it.
+const DISABLED_SHADE: u8 = 0x26;
 
 impl Widget for ButtonWidget {
     fn core(&self) -> &WidgetCore {
@@ -205,10 +195,10 @@ impl Widget for ButtonWidget {
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
         let state = self.press.state(self.id(), ctx);
-        let (bg, fg, edge) = button_colors(ctx.theme(), self.style, self.enabled, state);
+        let (bg, fg) = button_colors(ctx.theme(), self.style, self.enabled, state);
         ctx.fill_rounded_rect(rect, radius::CONTROL, bg);
-        if let Some(edge) = edge {
-            ctx.draw_rounded_rect(rect, radius::CONTROL, stroke::EDGE, edge);
+        if self.enabled && state != State::Pressed {
+            ctx.draw_top_rim(rect, radius::CONTROL);
         }
 
         let room = rect.width - inset::CONTROL.horizontal();

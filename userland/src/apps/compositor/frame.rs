@@ -15,10 +15,9 @@ fn shadow_token() -> Shadow {
     slopos_theme_core::current().shadow_window
 }
 
-/// How far past a frame a press takes its edge for a resize: as far as its
-/// shadow reaches.
-pub fn resize_reach() -> i32 {
-    shadow_token().spread
+/// Shorter than the shadow: a press further out belongs to what is beneath.
+pub const fn resize_reach() -> i32 {
+    8
 }
 
 pub fn outline(w: &WindowInfo) -> Rounded {
@@ -173,4 +172,20 @@ pub fn draw_window_shadow(
             buf.write_encoded_at(off, EncodedPixel(pixel));
         }
     }
+}
+
+pub fn draw_outer_rim(buf: &mut DrawBuffer, w: &WindowInfo, clip: &DamageRect) {
+    if w.state == WindowState::Maximized {
+        return;
+    }
+    let ring = outline(w).grown(1);
+    ring.stroke(buf, 1, clip, slopos_theme_core::current().rim_dark);
+}
+
+pub fn draw_inner_rim(buf: &mut DrawBuffer, w: &WindowInfo, clip: &DamageRect) {
+    if w.state == WindowState::Maximized {
+        return;
+    }
+    let light = slopos_theme_core::current().rim_light;
+    outline(w).top_rim(buf, clip, light, TITLE_BAR_HEIGHT);
 }

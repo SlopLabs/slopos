@@ -1,4 +1,4 @@
-use slopos_abi::draw::{Canvas, Color32};
+use slopos_abi::draw::Color32;
 use slopos_abi::pixel::PixelFormat;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
 use slopos_gfx::rounded::Rounded;
@@ -25,8 +25,7 @@ use super::surface_cache::ClientSurfaceCache;
 use super::window_info::{WindowInfo, WindowState};
 use slopos_chrome_core::status::BAR_HEIGHT;
 
-const DEFAULT_WALLPAPER: &str = "/usr/share/slopos/wallpapers/default.png";
-const WALLPAPER_SCREEN_DIVISOR: u32 = 3;
+const WALLPAPER_VAR: &str = "SLOPOS_WALLPAPER";
 
 /// virtio-gpu's cursor size.
 pub const HW_CURSOR_DIM: u32 = 64;
@@ -87,14 +86,11 @@ impl WallpaperCache {
     fn ensure_cache(&mut self, buf: &mut DrawBuffer) -> bool {
         if !self.load_attempted {
             self.load_attempted = true;
-            let path =
-                std::env::var("SLOPOS_WALLPAPER").unwrap_or_else(|_| DEFAULT_WALLPAPER.into());
-            self.source = slopos_image::load_path(path, DecodeOptions::default()).ok();
+            self.source = std::env::var(WALLPAPER_VAR)
+                .ok()
+                .and_then(|path| slopos_image::load_path(path, DecodeOptions::default()).ok());
         }
 
-        let Some(source) = self.source.as_ref() else {
-            return false;
-        };
         let width = buf.width();
         let height = buf.height();
         let pitch = buf.pitch();
@@ -123,27 +119,23 @@ impl WallpaperCache {
             return false;
         };
         cache_buf.set_pixel_format(format);
-        cache_buf.clear_canvas(format.encode(desktop()));
-        let Some(bitmap) = BitmapRef::new(source.width, source.height, &source.pixels) else {
-            self.cache.clear();
-            return false;
-        };
-        let (logo_w, logo_h) = slopos_gfx::image::integer_scale_to_fit(
-            source.width,
-            source.height,
-            width / WALLPAPER_SCREEN_DIVISOR,
-            height / WALLPAPER_SCREEN_DIVISOR,
-        );
-        slopos_gfx::image::draw_image(
-            &mut cache_buf,
-            bitmap,
-            (width as i32 - logo_w as i32) / 2,
-            (height as i32 - logo_h as i32) / 2,
-            logo_w as i32,
-            logo_h as i32,
-            ImageFit::Stretch,
-            ImageSampling::Nearest,
-        );
+        super::wallpaper::paint(&mut cache_buf, &slopos_theme_core::current().wallpaper);
+        if let Some(source) = self.source.as_ref()
+            && let Some(bitmap) = BitmapRef::new(source.width, source.height, &source.pixels)
+        {
+            let (w, h) = (width as i32, height as i32);
+            let sampling = ImageSampling::for_resize(source.width, source.height, w, h);
+            slopos_gfx::image::draw_image(
+                &mut cache_buf,
+                bitmap,
+                0,
+                0,
+                w,
+                h,
+                ImageFit::Cover,
+                sampling,
+            );
+        }
 
         self.cache_width = width;
         self.cache_height = height;
@@ -154,9 +146,8 @@ impl WallpaperCache {
     }
 }
 
-/// Behind the wallpaper and every window.
 fn desktop() -> Color32 {
-    slopos_theme_core::current().surface_sunken
+    slopos_theme_core::current().wallpaper.bottom
 }
 
 pub struct Renderer {
@@ -267,6 +258,9 @@ impl Renderer {
                     draw_window_shadow(buf, &caster, color, rect);
                 }
             }
+            for rect in shadow_vis[k].rects() {
+                frame::draw_outer_rim(buf, w, rect);
+            }
             if content_vis[k].is_empty() {
                 continue;
             }
@@ -284,6 +278,7 @@ impl Renderer {
                     !w.fixed_size,
                     rect,
                 );
+                frame::draw_inner_rim(buf, w, rect);
                 buf.set_scissor(None);
             }
         }

@@ -69,21 +69,20 @@ pub(crate) struct RowState {
     pub cursor: bool,
 }
 
-/// What `state` paints under the row at `rect`: the selection's wash and
-/// edge, accent while its view has focus, or the hover's wash; and the focus
-/// ring on the row the keyboard is on.
 pub(crate) fn paint_row(ctx: &mut PaintContext, rect: Rect, state: RowState) {
     let theme = ctx.theme();
-    let (x, y, w, h) = (rect.x, rect.y, rect.width, rect.height);
-    if state.selected {
-        ctx.fill_rect_blended(x, y, w, h, theme.selection);
-        let edge = match state.focused {
-            true => theme.accent,
-            false => theme.text_disabled,
-        };
-        ctx.fill_rect(x, y, INDICATOR, h, edge);
-    } else if state.hovered {
-        ctx.fill_rect_blended(x, y, w, h, theme.overlay(State::Hover));
+    let wash = match (state.selected, state.focused, state.hovered) {
+        (true, true, _) => Some(theme.selection),
+        (true, false, _) => Some(theme.overlay(State::Pressed)),
+        (false, _, true) => Some(theme.overlay(State::Hover)),
+        (false, _, false) => None,
+    };
+    if let Some(wash) = wash {
+        ctx.fill_rounded_rect(rect, radius::CONTROL, wash);
+    }
+    if state.selected && state.focused {
+        let bar = Rect::new(rect.x, rect.y + rect.height / 4, INDICATOR, rect.height / 2);
+        ctx.fill_rounded_rect(bar, INDICATOR / 2, theme.accent);
     }
     if state.focused && state.cursor {
         ctx.draw_inner_focus_ring(rect);

@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use slopos_theme_core::{TextRole, Tone, space};
+use slopos_theme_core::{TextRole, Tone, radius, space, stroke};
 
 use crate::constraints::{BoxConstraints, Rect, Size};
 use crate::event::{EventResponse, MessageSink, WidgetEvent};
@@ -69,13 +69,9 @@ impl Widget for ProgressBarWidget {
         let rect = self.layout_rect();
 
         let theme = ctx.theme();
-        ctx.fill_rect(
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height,
-            theme.surface_sunken,
-        );
+        let r = radius::CONTROL;
+        ctx.fill_rounded_rect(rect, r, theme.surface_sunken);
+        ctx.draw_rounded_rect(rect, r, stroke::EDGE, theme.border);
 
         let (at, len) = match self.value {
             Some(value) => (0, rect.width * value as i32 / 100),
@@ -91,16 +87,10 @@ impl Widget for ProgressBarWidget {
         };
         self.cut.set(label(ctx, theme.text));
         ctx.with_viewport(filled, |ctx| {
-            ctx.fill_rect(
-                filled.x,
-                filled.y,
-                filled.width,
-                filled.height,
-                theme.ink(self.tone),
-            );
+            ctx.fill_rounded_rect(rect, r, theme.filled(self.tone));
+            ctx.draw_top_rim(rect, r);
             label(ctx, theme.text_on_accent);
         });
-        ctx.draw_rect(rect.x, rect.y, rect.width, rect.height, theme.border);
     }
 
     fn event(&mut self, _event: &WidgetEvent, _sink: &mut MessageSink) -> EventResponse {

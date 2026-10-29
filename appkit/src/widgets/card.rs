@@ -31,6 +31,9 @@ impl Frame {
         let theme = ctx.theme();
         ctx.fill_rounded_rect(rect, self.radius, theme.fill(self.surface));
         ctx.draw_rounded_rect(rect, self.radius, stroke::EDGE, theme.border);
+        if self.shadow {
+            ctx.draw_top_rim(rect, self.radius);
+        }
     }
 }
 

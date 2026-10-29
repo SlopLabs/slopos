@@ -6,7 +6,7 @@ use slopos_abi::draw::Color32;
 use slopos_appkit::text::ui;
 use slopos_gfx::canvas_ops::line_aa;
 use slopos_gfx::rounded::Rounded;
-use slopos_theme_core::{TextRole, Theme};
+use slopos_theme_core::{TextRole, Theme, with_alpha};
 
 use super::frame::{TITLE_BAR_HEIGHT, resize_reach};
 use super::input::ResizeEdge;
@@ -45,6 +45,9 @@ impl WindowButton {
 
 const BUTTON_RADIUS: i32 = 6;
 const BUTTON_CY: i32 = TITLE_BAR_HEIGHT / 2;
+/// Out of 255 of `shade`: a dark glyph reads on all three bright discs.
+const BUTTON_EDGE: u8 = 0x40;
+const GLYPH_INK: u8 = 0xa6;
 /// Where the pointer shows the buttons' glyphs, from the frame's top-left.
 const GROUP: DamageRect = DamageRect {
     x0: 6,
@@ -99,8 +102,8 @@ pub fn buttons_group(frame_x: i32, frame_y: i32) -> DamageRect {
     }
 }
 
-/// The edge `(px, py)` takes for a resize: in the shadow outside the frame,
-/// a corner before an edge. `window_y` is the content's top.
+/// The edge `(px, py)` takes for a resize: just outside the frame, a corner
+/// before an edge. `window_y` is the content's top.
 pub fn hit_test_resize_edge(
     window_x: i32,
     window_y: i32,
@@ -199,12 +202,21 @@ fn draw_buttons(
         let enabled = zooms || button != WindowButton::Zoom;
         let color = match enabled && (focused || hovered) {
             true => button.color(theme),
-            false => theme.border_strong,
+            false => theme.neutral_fill,
         };
         let (cx, r) = (outline.x + button.centre_x(), BUTTON_RADIUS);
-        Rounded::circle(cx - r, cy - r, 2 * r + 1).draw(buf, clip, color);
+        let disc = Rounded::circle(cx - r, cy - r, 2 * r + 1);
+        disc.draw(buf, clip, color);
+        disc.stroke(buf, 1, clip, with_alpha(theme.shade, BUTTON_EDGE));
         if enabled && hovered {
-            draw_glyph(buf, button, cx, cy, theme.text_on_accent, clip);
+            draw_glyph(
+                buf,
+                button,
+                cx,
+                cy,
+                with_alpha(theme.shade, GLYPH_INK),
+                clip,
+            );
         }
     }
 }

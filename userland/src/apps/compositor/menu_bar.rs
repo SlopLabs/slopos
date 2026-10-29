@@ -1,13 +1,14 @@
 //! The menu bar: the system menu's mark and the focused app's name on the
 //! left, the status items on the right; the hover registry damages a hover.
 
+use slopos_abi::draw::Color32;
 use slopos_appkit::text::ui;
 use slopos_chrome_core::clock::WallTime;
 use slopos_chrome_core::status::{
     BAR_HEIGHT, BAR_PADDING_X, StatusLayout, hit_status_item, layout_status_items,
 };
 use slopos_gfx::rounded::Rounded;
-use slopos_theme_core::{TextRole, space, with_alpha};
+use slopos_theme_core::{TextRole, space};
 
 use super::hover::HOVER_STATUS_ITEM_BASE;
 use super::popover::Panel;
@@ -16,10 +17,8 @@ use crate::gfx::{self, DamageRect, DrawBuffer};
 
 const NAME: TextRole = TextRole::Heading;
 const NAME_MAX_WIDTH: i32 = 200;
-const MARK_SIZE: i32 = 8;
+const MARK_SIZE: i32 = 16;
 const MARK_GAP: i32 = space::SM;
-/// Over the wallpaper, so a little of it shows through.
-const OPACITY: u8 = 0xcc;
 
 /// One per item, or the one spanning rect a change of layout gives.
 pub const MAX_BAR_DAMAGE: usize = STATUS_ITEM_COUNT;
@@ -79,18 +78,13 @@ impl MenuBar {
     ) {
         let theme = slopos_theme_core::current();
         let sw = screen_width as i32;
-        let fill = with_alpha(theme.chrome, OPACITY);
-        gfx::fill_rect_blended_clipped(buf, 0, 0, sw, BAR_HEIGHT, fill, clip);
-        gfx::fill_rect_clipped(buf, 0, BAR_HEIGHT, sw, 1, theme.border, clip);
-
-        let mark = Rounded::circle(BAR_PADDING_X, (BAR_HEIGHT - MARK_SIZE) / 2, MARK_SIZE);
-        mark.draw(buf, clip, theme.accent);
+        gfx::fill_rect_blended_clipped(buf, 0, 0, sw, BAR_HEIGHT, theme.glass, clip);
+        gfx::fill_rect_blended_clipped(buf, 0, BAR_HEIGHT, sw, 1, theme.rim_dark, clip);
+        draw_mark(buf, clip);
 
         let layout = self.layout(screen_width, cursor_x, cursor_y);
         let budget = Self::name_budget(&layout);
         if budget > 0 && !app_name.is_empty() {
-            // Its edges are anti-aliased towards the bar's own colour rather
-            // than whatever the wallpaper put behind it.
             ui::draw_elided(
                 buf,
                 NAME_X,
@@ -99,7 +93,7 @@ impl MenuBar {
                 NAME,
                 budget,
                 theme.text,
-                theme.chrome,
+                Color32::TRANSPARENT,
                 clip,
             );
         }
@@ -212,6 +206,23 @@ impl MenuBar {
         self.last_leftmost = leftmost;
         self.last_revision = self.items.revisions();
         count
+    }
+}
+
+/// The smiling screen of SlopOS's logo.
+fn draw_mark(buf: &mut DrawBuffer, clip: &DamageRect) {
+    let theme = slopos_theme_core::current();
+    let (x, y) = (BAR_PADDING_X, (BAR_HEIGHT - MARK_SIZE) / 2);
+    Rounded::new(x, y, MARK_SIZE, MARK_SIZE, MARK_SIZE / 4).draw(buf, clip, theme.accent_fill);
+    const FACE: [(i32, i32, i32, i32); 5] = [
+        (5, 5, 2, 2),
+        (9, 5, 2, 2),
+        (4, 9, 1, 1),
+        (5, 10, 6, 1),
+        (11, 9, 1, 1),
+    ];
+    for (fx, fy, fw, fh) in FACE {
+        gfx::fill_rect_clipped(buf, x + fx, y + fy, fw, fh, theme.text_on_accent, clip);
     }
 }
 

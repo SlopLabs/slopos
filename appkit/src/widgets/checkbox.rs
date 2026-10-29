@@ -72,15 +72,16 @@ impl Widget for CheckboxWidget {
 
         if self.checked {
             let fill = match self.enabled {
-                true => theme.state(ColorRole::Accent, state),
+                true => theme.state(ColorRole::AccentFill, state),
                 false => theme.text_disabled,
             };
             ctx.fill_rounded_rect(boxed, r, fill);
+            if self.enabled {
+                ctx.draw_top_rim(boxed, r);
+            }
             ctx.draw_icon(Icon::Check, boxed.x, boxed.y, side, theme.text_on_accent);
         } else {
-            if state != State::Normal {
-                ctx.fill_rounded_rect(boxed, r, theme.overlay(state));
-            }
+            ctx.fill_rounded_rect(boxed, r, theme.state(ColorRole::SurfaceSunken, state));
             let edge = match self.enabled {
                 true => theme.border_strong,
                 false => theme.text_disabled,

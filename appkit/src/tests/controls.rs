@@ -700,7 +700,7 @@ pub(super) fn test_a_sideways_turn_passes_a_view_that_scrolls_down() {
 pub(super) fn test_indeterminate_progress_paints_its_block() {
     use crate::widgets::progress_bar::ProgressBarWidget;
     let style = StyleSheet::current();
-    let color = style.theme.success;
+    let color = style.theme.filled(Tone::Success);
     let mut bar = ProgressBarWidget::new(None, String::new(), Tone::Success);
     let (width, height) = (200usize, 40usize);
     lay_out(
@@ -810,7 +810,12 @@ pub(super) fn test_partition_bar_labels_fit_whole_in_a_readable_ink() {
     let ink = fill(theme.text_on_accent);
     for (band, n) in [(&first, 4), (&second, 5)] {
         assert!(band.contains(&ink), "series {n}");
-        assert!(band.iter().all(|&p| luma(p) <= luma(fill(theme.series(n)))));
+        let (a, b) = (luma(fill(theme.series(n))), luma(ink));
+        let (lo, hi) = (a.min(b), a.max(b));
+        assert!(
+            band.iter().all(|&p| (lo..=hi).contains(&luma(p))),
+            "series {n}"
+        );
     }
     assert!(
         third.iter().all(|&p| p == fill(theme.series(0))),

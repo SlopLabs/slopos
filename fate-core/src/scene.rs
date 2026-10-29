@@ -25,7 +25,7 @@ use crate::wheel::{self, POCKETS};
 /// How much of the theme's secondary text a pocket's number shows, out of
 /// 255, which holds it to 4.5:1 on black, and how far towards
 /// [`splash::lit`] the light passing lifts it.
-const NUMERAL: u8 = 164;
+const NUMERAL: u8 = 172;
 const NUMERAL_LIFT: u8 = 170;
 
 /// The screen-sized buffer `/bin/roulette` presents from: four bytes a pixel.

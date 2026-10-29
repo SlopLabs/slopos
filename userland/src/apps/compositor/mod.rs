@@ -23,6 +23,7 @@ mod renderer;
 mod status_item;
 mod surface_cache;
 pub mod views;
+mod wallpaper;
 pub mod window_info;
 
 use crate::gfx::DamageRect;

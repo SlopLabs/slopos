@@ -174,7 +174,7 @@ impl Widget for LineEditWidget {
         } else if self.focused {
             theme.focus
         } else {
-            theme.border_strong
+            theme.edge
         };
         let lit = ctx.lit(self.id()).is_some();
         super::field_frame(ctx, rect, self.focused, lit, edge);

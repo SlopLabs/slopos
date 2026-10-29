@@ -81,16 +81,19 @@ fn status_tones_read_on_plain_surfaces() {
     }
 }
 
+const FILLS: [ColorRole; 6] = [
+    ColorRole::AccentFill,
+    ColorRole::DangerFill,
+    ColorRole::WarningFill,
+    ColorRole::SuccessFill,
+    ColorRole::InfoFill,
+    ColorRole::NeutralFill,
+];
+
 #[test]
 fn text_on_accent_reads_on_every_fill_in_every_state() {
     let t = &DARK;
-    for role in [
-        ColorRole::Accent,
-        ColorRole::Danger,
-        ColorRole::Warning,
-        ColorRole::Success,
-        ColorRole::Info,
-    ] {
+    for role in FILLS {
         for state in [State::Normal, State::Hover, State::Pressed] {
             let what = std::format!("on {role:?} {state:?}");
             assert_floor(t.text_on_accent, t.state(role, state), TEXT, &what);
@@ -107,7 +110,7 @@ fn text_on_accent_reads_on_every_fill_in_every_state() {
         Tone::Info,
     ] {
         let what = std::format!("on a {tone:?} progress fill");
-        assert_floor(t.text_on_accent, t.ink(tone), TEXT, &what);
+        assert_floor(t.text_on_accent, t.filled(tone), TEXT, &what);
     }
     for (n, fill) in t.series.iter().enumerate() {
         assert_floor(
@@ -117,6 +120,65 @@ fn text_on_accent_reads_on_every_fill_in_every_state() {
             &std::format!("on series {n}"),
         );
     }
+}
+
+#[test]
+fn a_tone_s_fill_is_darker_than_its_ink() {
+    let t = &DARK;
+    for tone in [
+        Tone::Accent,
+        Tone::Danger,
+        Tone::Warning,
+        Tone::Success,
+        Tone::Info,
+    ] {
+        let (ink, fill) = (t.ink(tone), t.filled(tone));
+        assert!(
+            super::contrast::luminance(fill) < super::contrast::luminance(ink),
+            "{tone:?}: {fill:?} is not darker than {ink:?}"
+        );
+    }
+}
+
+#[test]
+fn text_reads_on_a_secondary_control_in_every_state() {
+    let t = &DARK;
+    for state in [State::Normal, State::Hover, State::Pressed] {
+        let fill = t.state(ColorRole::Control, state);
+        assert_floor(t.text, fill, TEXT, &std::format!("on a control {state:?}"));
+    }
+}
+
+/// A glyph is not text: 1.4.11's 3:1 floor.
+#[test]
+fn an_app_glyph_reads_on_every_tile_and_its_lit_corner() {
+    let t = &DARK;
+    for tile in AppTile::ALL {
+        let (base, lit) = t.app_tile(tile);
+        assert!(
+            super::contrast::luminance(lit) > super::contrast::luminance(base),
+            "{tile:?}"
+        );
+        for (end, fill) in [("base", base), ("lit", lit)] {
+            let what = std::format!("a glyph on {tile:?}'s {end}");
+            assert_floor(t.text_on_accent, fill, NON_TEXT, &what);
+        }
+    }
+}
+
+#[test]
+fn an_app_without_an_icon_keeps_its_tile_and_graphite_is_never_given() {
+    assert_eq!(
+        AppTile::of("org.example.app"),
+        AppTile::of("org.example.app")
+    );
+    let given: Vec<AppTile> = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]
+        .iter()
+        .map(|id| AppTile::of(id))
+        .collect();
+    assert!(!given.contains(&AppTile::Graphite));
+    let distinct = AppTile::ALL.iter().filter(|t| given.contains(t)).count();
+    assert!(distinct >= 4, "{given:?}");
 }
 
 #[test]
@@ -164,13 +226,7 @@ fn chrome_is_the_surface_so_frame_and_content_read_as_one() {
 #[test]
 fn states_move_visibly_away_from_the_base_and_keep_its_alpha() {
     let t = &DARK;
-    for role in PLAIN.into_iter().chain([
-        ColorRole::Accent,
-        ColorRole::Danger,
-        ColorRole::Warning,
-        ColorRole::Success,
-        ColorRole::Info,
-    ]) {
+    for role in PLAIN.into_iter().chain(FILLS).chain([ColorRole::Control]) {
         let normal = t.state(role, State::Normal);
         let hover = t.state(role, State::Hover);
         let pressed = t.state(role, State::Pressed);
@@ -184,6 +240,16 @@ fn states_move_visibly_away_from_the_base_and_keep_its_alpha() {
     }
     let selection = t.state(ColorRole::Selection, State::Hover);
     assert_eq!(selection.alpha(), t.selection.alpha());
+}
+
+#[test]
+fn a_pressed_fill_is_darker_and_a_hovered_one_lighter() {
+    let t = &DARK;
+    for role in FILLS {
+        let l = |state| super::contrast::luminance(t.state(role, state));
+        assert!(l(State::Hover) > l(State::Normal), "{role:?} hovered");
+        assert!(l(State::Pressed) < l(State::Normal), "{role:?} pressed");
+    }
 }
 
 #[test]
@@ -211,6 +277,8 @@ fn series_hues_are_distinct() {
 fn tones_and_surfaces_name_their_roles() {
     assert_eq!(DARK.ink(Tone::Normal), DARK.text);
     assert_eq!(DARK.ink(Tone::Danger), DARK.danger);
+    assert_eq!(DARK.filled(Tone::Danger), DARK.danger_fill);
+    assert_eq!(DARK.filled(Tone::Secondary), DARK.neutral_fill);
     assert_eq!(DARK.fill(Surface::Sunken), DARK.surface_sunken);
     assert_eq!(DARK.fill(Surface::Chrome), DARK.chrome);
 }
