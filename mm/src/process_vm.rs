@@ -469,6 +469,21 @@ pub fn process_vm_get_vm_space(
     guard.vm_space.as_ref().cloned()
 }
 
+/// 0 without an address space.
+pub fn process_vm_resident_pages(process: ProcessId) -> u32 {
+    let Some(slot) = find_slot_for_pid(process) else {
+        return 0;
+    };
+    let guard = PROCESS_VMS[slot].lock();
+    if guard.process_id != process.id() {
+        return 0;
+    }
+    guard
+        .vm_space
+        .as_ref()
+        .map_or(0, |vm_space| vm_space.resident_pages())
+}
+
 /// The most pages the process has had resident at once, `ru_maxrss`'s source.
 pub fn process_vm_peak_resident_pages(process: ProcessId) -> u32 {
     let Some(slot) = find_slot_for_pid(process) else {

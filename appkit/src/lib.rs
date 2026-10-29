@@ -26,9 +26,10 @@ pub mod tree;
 pub mod widgets;
 
 pub use components::{
-    Button, ButtonRow, Dialog, Disclosure, EmptyState, IconButton, List, ListRow, Notice, Page,
-    PropertyList, RowButton, SIDEBAR_WIDTH, SearchField, Section, Sidebar, StatusBar, Tag, Text,
-    Toolbar, WindowSpec, Wrap, column, row,
+    Button, ButtonRow, Dialog, Disclosure, EmptyState, Graph, GraphKey, GraphSeries, GraphSize,
+    IconButton, List, ListRow, Notice, Page, PropertyList, RowButton, SIDEBAR_WIDE_WIDTH,
+    SIDEBAR_WIDTH, SearchField, Section, Sidebar, StatusBar, Tag, Text, Toolbar, WindowSpec, Wrap,
+    column, row,
 };
 pub use node::{
     Action, App, BarSegment, ButtonStyle, ContextMenuAt, ImageData, MenuItem, MenuItemKind, Node,
@@ -42,6 +43,7 @@ pub use widgets::code_view::{
 };
 pub use widgets::drag_handle::DragInput;
 pub use widgets::editor_tabs::{EditorTab, TabInput};
+pub use widgets::graph::nice_ceiling;
 pub use widgets::icon_button::ICON_BUTTON_SIDE;
 pub use widgets::line_edit::{LineEditInput, LineInput};
 pub use widgets::menu_bar::MenuBarInput;

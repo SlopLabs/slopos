@@ -8265,6 +8265,68 @@ slopos_testing::stest!(
     suite = syscall_core
 );
 
+pub fn test_process_memory_reports_the_caller() -> TestResult {
+    let _fixture = KernelTestScope::enter();
+
+    let task_id = create_test_user_task();
+    let outcome = process_memory_body(task_id);
+    if task_id != INVALID_TASK_ID {
+        task_terminate(task_id);
+    }
+    return match outcome {
+        Ok(()) => pass!(),
+        Err(msg) => fail!("{}", msg),
+    };
+
+    fn process_memory_body(task_id: u32) -> Result<(), &'static str> {
+        use slopos_abi::syscall::{SYSCALL_PROCESS_MEMORY, UserProcessMemory};
+        const ENTRY: u64 = core::mem::size_of::<UserProcessMemory>() as u64;
+        const ENTRIES: u64 = 4096 / ENTRY;
+
+        let task = task_find_by_id(task_id).ok_or("failed to create a user task")?;
+        let table = task
+            .process()
+            .as_deref()
+            .and_then(FdTable::of)
+            .ok_or("a user task has no fd table")?;
+        let buf = map_user_rw_page(table).ok_or("could not map a user page")?;
+        let count = dispatch_gated(&task, table, SYSCALL_PROCESS_MEMORY, [buf, ENTRIES, 0, 0])
+            .ok_or("could not dispatch the call")?;
+        if count == 0 || count >= ENTRIES {
+            klog_info!("process_memory answered {:#x}", count);
+            return Err("process_memory listed no process, or filled the page");
+        }
+        let mut entries = slopos_ostd::KVec::<UserProcessMemory>::new();
+        for i in 0..count {
+            let entry: UserProcessMemory =
+                user_copy_in(table, buf + i * ENTRY).ok_or("could not read an entry back")?;
+            if entries
+                .iter()
+                .any(|seen| seen.process_id == entry.process_id)
+            {
+                return Err("process_memory listed a process twice");
+            }
+            entries.push(entry).map_err(|_| "entry alloc")?;
+        }
+        let caller = entries
+            .iter()
+            .find(|entry| entry.process_id == task.process_id)
+            .ok_or("process_memory did not list the caller")?;
+        if caller.resident_pages == 0 {
+            return Err("the caller's mapped page is not resident");
+        }
+        if caller.peak_resident_pages < caller.resident_pages {
+            return Err("the peak is below what is resident now");
+        }
+        Ok(())
+    }
+}
+
+slopos_testing::stest!(
+    name = test_process_memory_reports_the_caller,
+    suite = syscall_core
+);
+
 /// `caps_drop` is total and process-wide: it never fails, takes exactly what
 /// it names from every thread of the process, and a thread registered after
 /// the drop is born without it even if its creator's mask had not yet been

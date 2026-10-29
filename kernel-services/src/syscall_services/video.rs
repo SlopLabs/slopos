@@ -2,6 +2,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use slopos_abi::addr::PhysAddr;
 use slopos_abi::damage::DamageRect;
+use slopos_abi::syscall::UserDisplayStats;
 use slopos_abi::DisplayInfo;
 
 use super::scanout::Present;
@@ -28,6 +29,7 @@ slopos_service_core::define_service! {
         @no_wrapper cursor_set_image(image: *const u8, len: usize, hot_x: u32, hot_y: u32) -> bool;
         cursor_move(x: u32, y: u32) -> bool;
         set_display_mode(width: u32, height: u32) -> bool;
+        display_stats() -> UserDisplayStats;
     }
 }
 

@@ -12,13 +12,12 @@ use slopos_abi::fs::O_RDONLY;
 use slopos_abi::syscall::O_CLOEXEC;
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 
-use slopos_boot_core::disk_id::{self, Bus};
 use slopos_boot_core::gpt::{self, Geometry, Header, Location, Partition, Piece};
 use slopos_boot_core::install::Region;
 use slopos_boot_core::layout;
 use slopos_boot_core::{Guid, install};
 use slopos_installer_core::{
-    Contents, Layout, MbrPartition, NoTable, Refusal, disk_size, name_of, short, type_name,
+    Contents, Layout, MbrPartition, NoTable, Refusal, disk_size, name_of, type_name,
 };
 
 use super::engine::Events;
@@ -49,7 +48,6 @@ const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
 const FAT_LABEL_AT: usize = 71;
 /// How much of a disk's start must read zero for it to count as blank.
 const BLANK_PROBE_BYTES: usize = 1 << 20;
-const BY_ID: &str = "/dev/disk/by-id";
 
 /// Why the whole disk `node` is never offered: it refuses writes, or it is
 /// the medium whose GPT disk GUID is `medium`.
@@ -58,29 +56,6 @@ pub fn not_offered(node: &str, medium: Option<Guid>) -> Option<Refusal> {
         return Some(Refusal::ReadOnly);
     }
     (medium.is_some() && disk_guid_of(node) == medium).then_some(Refusal::Medium)
-}
-
-/// What `/dev/disk/by-id` says of the whole disk `node`: its bus and what
-/// its maker calls it.
-pub fn by_id(node: &str) -> (Option<Bus>, Option<String>) {
-    let target = format!("../../{}", short(node));
-    let names: Vec<String> = std::fs::read_dir(BY_ID)
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            std::fs::read_link(entry.path()).is_ok_and(|link| link.as_os_str() == target.as_str())
-        })
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .collect();
-    let Some(described) = disk_id::describe(names.iter().map(String::as_str)) else {
-        return (None, None);
-    };
-    let words: Vec<&str> = described.model().collect();
-    (
-        Some(described.bus),
-        (!words.is_empty()).then(|| words.join(" ")),
-    )
 }
 
 #[derive(Clone, PartialEq)]

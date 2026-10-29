@@ -93,8 +93,10 @@ last resort.
 | `Notice` | Something the person must know before going on. Its tone picks its icon: info, success, warning, danger. It can carry one action. |
 | `ButtonRow` | The buttons that end a page or a dialog. `.back()` and `.aside()` go on the left, and `.cancel()`, `.confirm()` and `.destructive()` on the right, in the order you add them; the one that finishes goes last. In a `Page`'s or a dialog's footer, Enter presses the confirming button and Escape presses back or cancel. Enter never reaches a destructive button through the footer: only one that has focus takes it. Left and Right move focus along the row. |
 | `Button` | A single button outside a row. A button is secondary unless you call `.primary()` or `.destructive()`. |
-| `List`, `ListRow` | Rows the person chooses from, such as disks, places or results. The whole list is one tab stop and the arrows move the choice. Enter opens the chosen row when the list has something to open, and otherwise reaches the page's `ButtonRow`. A row that cannot be chosen is built with `.disabled(reason)`, and the reason is shown in place of its detail. A row for a person leads with `.avatar()`. |
-| `Sidebar` | The places an app moves between, down its left side: a `List`, optionally in sections. `Sidebar::empty(reason)` says why there are none, as when a filter matches nothing. |
+| `List`, `ListRow` | Rows the person chooses from, such as disks, places or results. The whole list is one tab stop and the arrows move the choice. Enter opens the chosen row when the list has something to open, and otherwise reaches the page's `ButtonRow`. A row that cannot be chosen is built with `.disabled(reason)`, and the reason is shown in place of its detail. A row for a person leads with `.avatar()`, and a row for a resource that changes, such as a processor or a disk, with `.graph(graph)`: a thumbnail of the graph, as tall as the row's text. |
+| `Sidebar` | The places an app moves between, down its left side: a `List`, optionally in sections. `Sidebar::empty(reason)` says why there are none, as when a filter matches nothing. `.wide()` makes it `SIDEBAR_WIDE_WIDTH` across, for rows led by a graph. |
+| `Graph` | Samples over time, the newest at the right edge, such as a minute of processor load. `Graph::new(label, window)` takes what it plots, its accessible name, and how many samples span its width; `.line(values, series)` adds a solid series filled beneath, `.dashed(values, series)` a dashed one, `.max()` the value at its top, `.elapsed()` the samples taken so far, which its time grid moves with, and `.small()` makes it one of a grid. It draws no text: caption its scale beside it. |
+| `GraphKey` | A short stretch of a series' line before the figure it stands for, on a text row aligned by baseline. `.dashed()` for a dashed series. |
 | `Toolbar`, `IconButton` | Tools across the top of a view. An icon button's label is its tooltip, so always give it a label. |
 | `SearchField` | A field that filters what the view shows. `.placeholder()` says what it finds, *Search* unless told, `.count()` how many matched, and `.invalid(true)` edges it in the danger tone when nothing did. `.tab_stop(false)` keeps a palette's field out of the tab order, so Tab reaches the app as a key. |
 | `StatusBar` | The line along a view's foot that says how things stand. `.tone()` colours what it says, as `Danger` for a failure, and `.end()` adds what it always shows at its right, such as a caret's line and column. It is `StatusBar::HEIGHT` tall whatever it says. |
@@ -105,6 +107,15 @@ last resort.
 | `Text` | Any text. `.role()` sets its size: `Display` for a page that is one number, `Title`, `Heading`, `Body`, `Label`, `Caption`, or `Mono` for code and command lines, set in the cells a code view's columns are; `Hero` is the lock screen's clock and nothing else. `.tone()` sets its colour. `.wrap()` breaks prose at spaces, and `.wrap_anywhere()` breaks a path or command line anywhere so that none of it is lost. |
 | `Node::Icon` | A glyph of the icon font, at the size of a text role and in a tone. |
 | `Node::Avatar` | A person: the initial of their name in a circle of the colour their name picks. |
+
+A share, such as processor load or memory in use, is graphed on a fixed
+scale, `.max(100)` over percentages, so its height means the same from one
+minute to the next. A rate, such as bytes a second over a network or to a
+disk, has no top of its own: give the graph `nice_ceiling(highest, 1000)`, or
+base 1024 for sizes, and caption the top with that value, so the scale moves in
+steps of 1, 2 and 5 a person reads at a glance. A graph of two series draws the
+second `.dashed()` in the same hue and keys each with a `GraphKey` of its
+kind, so colour is never the only way to tell them apart.
 
 The controls (`Node::LineEdit`, `Node::Checkbox`, `Node::Slider`,
 `Node::ProgressBar`, `Node::PartitionBar`) and the containers (`Node::VStack`,

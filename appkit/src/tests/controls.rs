@@ -6,7 +6,7 @@ use slopos_gfx::DrawBuffer;
 use slopos_theme_core::Tone;
 
 use super::{FixedSizeWidget, key};
-use crate::components::{ListRow, Text};
+use crate::components::{Graph, ListRow, Text};
 use crate::constraints::{BoxConstraints, CrossAxisAlignment, Rect, Size};
 use crate::event::{MessageSink, NamedKey, PointerButton, WidgetEvent};
 use crate::focus::FocusManager;
@@ -17,6 +17,7 @@ use crate::sender::AppSender;
 use crate::style::StyleSheet;
 use crate::traits::{FocusPolicy, MeasureCtx, Widget, WidgetId, measure_widget, place_widget};
 use crate::widgets::button::ButtonWidget;
+use crate::widgets::graph::{GraphWidget, nice_ceiling};
 use crate::widgets::list::ListWidget;
 use crate::widgets::partition_bar::{MIN_SEGMENT_WIDTH, PartitionBarWidget, segment_widths};
 use crate::widgets::progress_bar::sweep;
@@ -445,6 +446,170 @@ pub(super) fn test_indeterminate_progress_sweeps_to_and_fro() {
     }
     assert_eq!(sweep(2, 700), (0, 1));
     assert_eq!(sweep(0, 700), (0, 0));
+}
+
+pub(super) fn test_nice_ceiling_steps_one_two_five_within_each_unit() {
+    const KIB: u64 = 1024;
+    let cases = [
+        (0, 1024, 1),
+        (1, 1024, 1),
+        (3, 1024, 5),
+        (500, 1024, 500),
+        (501, 1024, KIB),
+        (600, 1024, KIB),
+        (KIB, 1024, KIB),
+        (KIB + 1, 1024, 2 * KIB),
+        (1500, 1024, 2 * KIB),
+        (3 * MIB + 1, 1024, 5 * MIB),
+        (600 * MIB, 1024, GIB),
+        (60, 1000, 100),
+        (61, 1000, 100),
+        (101, 1000, 200),
+        (999, 1000, 1000),
+        (1001, 1000, 2000),
+        (250_000, 1000, 500_000),
+    ];
+    for (value, base, ceiling) in cases {
+        assert_eq!(nice_ceiling(value, base), ceiling, "{value} in base {base}");
+    }
+    assert_eq!(nice_ceiling(u64::MAX, 1000), u64::MAX);
+    assert_eq!(nice_ceiling(1_000_000_000_000, 1000), 1_000_000_000_000);
+}
+
+fn holds(data: &[u8], width: usize, x: i32, y: i32, color: Color32) -> bool {
+    let want = PixelFormat::Argb8888.encode(color).to_u32();
+    let got = pixel(data, width, x, y);
+    (0..3).all(|i| ((want >> (i * 8)) & 0xff).abs_diff((got >> (i * 8)) & 0xff) <= 2)
+}
+
+fn paint_alone(widget: &dyn Widget, width: usize, height: usize) -> Vec<u8> {
+    let style = StyleSheet::current();
+    let mut data = vec![0u8; width * height * 4];
+    {
+        let mut buffer =
+            DrawBuffer::new(&mut data, width as u32, height as u32, width * 4, 4).unwrap();
+        let mut ctx = PaintContext::new(&mut buffer, &style);
+        widget.paint(&mut ctx);
+    }
+    data
+}
+
+// Plot 198 × 118 inside the edge: half of `max` is rows 59–60.
+pub(super) fn test_a_graph_draws_its_last_value_at_the_right_edge() {
+    const TOP: u64 = 1_000_000_000_000;
+    let theme = StyleSheet::current().theme;
+    let ink = theme.series_ink(3);
+    let (width, height) = (200usize, 140usize);
+    let paint = |values: Vec<u64>| {
+        let mut widget = GraphWidget::new(Graph::new("Load", 11).line(values, 3).max(TOP));
+        let size = lay_out(
+            &mut widget,
+            BoxConstraints::loose(Size::new(width as i32, height as i32)),
+            (0, 0),
+        );
+        assert_eq!(size, Size::new(200, 120));
+        paint_alone(&widget, width, height)
+    };
+
+    let half = paint(vec![TOP / 2; 11]);
+    assert!(holds(&half, width, 198, 59, ink) && holds(&half, width, 198, 60, ink));
+    assert!(!holds(&half, width, 198, 56, ink) && !holds(&half, width, 198, 63, ink));
+    assert!(holds(&half, width, 199, 59, theme.edge));
+
+    let mut spike = vec![0; 10];
+    spike.push(TOP * 3);
+    let spike = paint(spike);
+    assert!(holds(&spike, width, 198, 1, ink));
+    assert!(holds(&spike, width, 198, 0, theme.edge));
+    assert!(!holds(&spike, width, 100, 59, ink));
+}
+
+pub(super) fn test_a_graph_line_keeps_to_its_column() {
+    let ink = StyleSheet::current().theme.series_ink(1);
+    let mut values = vec![0; 5];
+    values.push(100);
+    values.extend([0; 5]);
+    let mut widget = GraphWidget::new(Graph::new("Rise", 11).line(values, 1).max(100));
+    let (width, height) = (200usize, 140usize);
+    lay_out(
+        &mut widget,
+        BoxConstraints::loose(Size::new(width as i32, height as i32)),
+        (0, 0),
+    );
+    let data = paint_alone(&widget, width, height);
+    // Peak at x 100, rise from x 80.2: column 90 is mid-rise, near y 57.
+    assert!(holds(&data, width, 90, 57, ink));
+    assert!(!holds(&data, width, 90, 20, ink), "drawn up to the peak");
+    assert!(!holds(&data, width, 90, 100, ink), "drawn down to the foot");
+}
+
+pub(super) fn test_a_dashed_series_leaves_gaps_counted_from_the_right() {
+    let theme = StyleSheet::current().theme;
+    let ink = theme.series_ink(6);
+    let graph = Graph::new("Sent", 11).dashed(vec![50; 11], 6).max(100);
+    let mut widget = GraphWidget::new(graph);
+    let width = 200usize;
+    lay_out(
+        &mut widget,
+        BoxConstraints::loose(Size::new(width as i32, 140)),
+        (0, 0),
+    );
+    let data = paint_alone(&widget, width, 140);
+    for x in (187..=190).chain(195..=198) {
+        assert!(holds(&data, width, x, 59, ink), "column {x} is a dash");
+    }
+    for x in 191..=194 {
+        assert!(!holds(&data, width, x, 59, ink), "column {x} is a gap");
+    }
+    assert!(
+        holds(&data, width, 196, 100, theme.surface_sunken),
+        "a dashed series is not filled"
+    );
+}
+
+pub(super) fn test_a_list_row_s_graph_leads_its_text() {
+    let style = StyleSheet::current();
+    let edge = style.theme.edge;
+    let graph = Graph::new("CPU", 30).line(vec![40; 30], 0).max(100);
+    let rows = vec![
+        ListRow::new("CPU").detail("12%").graph(graph),
+        ListRow::new("Disk").icon(slopos_theme_core::Icon::HardDrive),
+    ];
+    let mut list = ListWidget::new(vec![(String::new(), rows)], Some(0), None, None);
+    let (width, height) = (300usize, 200usize);
+    lay_out(
+        &mut list,
+        BoxConstraints::loose(Size::new(width as i32, height as i32)),
+        (0, 0),
+    );
+    let mut data = vec![0u8; width * height * 4];
+    let mut runs = Vec::new();
+    {
+        let mut buffer =
+            DrawBuffer::new(&mut data, width as u32, height as u32, width * 4, 4).unwrap();
+        let mut ctx = PaintContext::recording(&mut buffer, &style, &mut runs);
+        list.paint(&mut ctx);
+    }
+    let row_h = ListWidget::row_height(1);
+    let mid = row_h / 2;
+    let left = (0..width as i32)
+        .find(|&x| holds(&data, width, x, mid, edge))
+        .expect("the thumbnail's edge");
+    let right = left + 63;
+    assert!(holds(&data, width, right, mid, edge));
+    let tall: Vec<i32> = (0..row_h)
+        .filter(|&y| holds(&data, width, left, y, edge))
+        .collect();
+    let (top, bottom) = (tall[0], *tall.last().unwrap());
+    assert!(left > 0 && bottom < row_h - 1, "{left} {top} {bottom}");
+    assert_eq!(top, slopos_theme_core::space::SM);
+    assert!((left..=right).all(|x| holds(&data, width, x, top, edge)));
+    let run = |text: &str| runs.iter().find(|r| r.text == text).expect(text);
+    assert_eq!(bottom + 1 - top, row_h - top * 2);
+    for text in ["CPU", "12%", "Disk"] {
+        assert!(run(text).x > right, "{text} starts at {}", run(text).x);
+    }
+    assert_eq!(run("Disk").x, run("CPU").x);
 }
 
 #[derive(Debug, PartialEq)]

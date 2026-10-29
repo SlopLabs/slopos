@@ -1,11 +1,10 @@
-//! A task's identity, so a selection names a task rather than a row of a
-//! table that re-sorts on every refresh.
-
 use slopos_abi::syscall::types::UserTaskEntry;
+
+use super::monitor::Process;
 
 /// Ids recycle; the creation time, which the kernel never rewrites, keeps the
 /// pair distinct across a recycle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TaskKey {
     pub pid: u32,
     pub started_ms: u64,
@@ -18,24 +17,19 @@ impl TaskKey {
             started_ms: task.creation_time_ms,
         }
     }
-
-    pub fn matches(&self, task: &UserTaskEntry) -> bool {
-        *self == Self::of(task)
-    }
 }
 
-/// `order` holds indices into `tasks`, in display order.
-pub fn row_of(key: TaskKey, tasks: &[UserTaskEntry], order: &[usize]) -> Option<usize> {
+pub fn row_of(key: TaskKey, processes: &[Process], order: &[usize]) -> Option<usize> {
     order
         .iter()
-        .position(|&idx| tasks.get(idx).is_some_and(|t| key.matches(t)))
+        .position(|&idx| processes.get(idx).is_some_and(|p| p.key == key))
 }
 
-pub fn key_at_row(tasks: &[UserTaskEntry], order: &[usize], row: usize) -> Option<TaskKey> {
+pub fn key_at_row(processes: &[Process], order: &[usize], row: usize) -> Option<TaskKey> {
     let idx = *order.get(row)?;
-    tasks.get(idx).map(TaskKey::of)
+    processes.get(idx).map(|p| p.key)
 }
 
-pub fn index_of(key: TaskKey, tasks: &[UserTaskEntry]) -> Option<usize> {
-    tasks.iter().position(|t| key.matches(t))
+pub fn index_of(key: TaskKey, processes: &[Process]) -> Option<usize> {
+    processes.iter().position(|p| p.key == key)
 }

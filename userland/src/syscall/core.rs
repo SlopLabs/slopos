@@ -154,6 +154,33 @@ pub fn process_list(buf: &mut [UserTaskEntry]) -> i64 {
 }
 
 #[inline(always)]
+pub fn process_memory(buf: &mut [UserProcessMemory]) -> i64 {
+    unsafe {
+        syscall2(
+            SYSCALL_PROCESS_MEMORY,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        ) as i64
+    }
+}
+
+#[inline(always)]
+pub fn block_stats(buf: &mut [UserBlockStats]) -> i64 {
+    unsafe {
+        syscall2(
+            SYSCALL_BLOCK_STATS,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        ) as i64
+    }
+}
+
+#[inline(always)]
+pub fn display_stats(out: &mut UserDisplayStats) -> i64 {
+    unsafe { syscall1(SYSCALL_DISPLAY_STATS, out as *mut _ as u64) as i64 }
+}
+
+#[inline(always)]
 pub fn cpu_info(info: &mut UserCpuInfo) -> i64 {
     unsafe { syscall1(SYSCALL_CPU_INFO, info as *mut _ as u64) as i64 }
 }

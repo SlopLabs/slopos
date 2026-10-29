@@ -33,7 +33,7 @@ pub const SYSCALL_TABLE_SIZE: usize = (SYSCALL_LINUX_MAX as usize) + 1;
 pub const SYSCALL_PRIVATE_BASE: u64 = 1024;
 
 /// Size of the private dispatch table.
-pub const SYSCALL_PRIVATE_TABLE_SIZE: usize = 51;
+pub const SYSCALL_PRIVATE_TABLE_SIZE: usize = 54;
 
 /// One past the last private number.
 pub const SYSCALL_PRIVATE_END: u64 = SYSCALL_PRIVATE_BASE + (SYSCALL_PRIVATE_TABLE_SIZE as u64);
@@ -934,6 +934,15 @@ pub const SYSCALL_LOGIN_TAG: u64 = SYSCALL_PRIVATE_BASE + 49;
 /// process's sets. `ESRCH` for no such task and for a kernel task.
 pub const SYSCALL_CAPS_GET: u64 = SYSCALL_PRIVATE_BASE + 50;
 
+/// `process_memory(out: *mut UserProcessMemory, max) -> entries written`
+pub const SYSCALL_PROCESS_MEMORY: u64 = SYSCALL_PRIVATE_BASE + 51;
+
+/// `block_stats(out: *mut UserBlockStats, max) -> entries written`
+pub const SYSCALL_BLOCK_STATS: u64 = SYSCALL_PRIVATE_BASE + 52;
+
+/// `display_stats(out: *mut UserDisplayStats) -> 0`
+pub const SYSCALL_DISPLAY_STATS: u64 = SYSCALL_PRIVATE_BASE + 53;
+
 /// The largest UEFI variable value `efivar_get` and `efivar_set` move in one
 /// call.
 pub const EFIVAR_DATA_MAX: usize = 4096;
@@ -979,6 +988,6 @@ const _: () = assert!(SYSCALL_PRIVATE_BASE > SYSCALL_LINUX_MAX);
 const _: () = assert!(SYSCALL_PRIVATE_BASE & 0x4000_0000 == 0);
 
 const _: () = assert!(
-    SYSCALL_CAPS_GET < SYSCALL_PRIVATE_END,
+    SYSCALL_DISPLAY_STATS < SYSCALL_PRIVATE_END,
     "private syscall range is full; raise SYSCALL_PRIVATE_TABLE_SIZE",
 );

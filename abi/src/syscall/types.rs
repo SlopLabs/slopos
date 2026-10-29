@@ -345,6 +345,71 @@ pub struct UserCpuPerf {
     pub therm_status: u64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UserProcessMemory {
+    /// `UserTaskEntry::process_id`, not the leader's task id.
+    pub process_id: u32,
+    pub _pad: u32,
+    pub resident_pages: u64,
+    pub peak_resident_pages: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<UserProcessMemory>() == 24);
+
+pub const BLOCK_TRANSPORT_NVME: u8 = 1;
+pub const BLOCK_TRANSPORT_VIRTIO: u8 = 2;
+pub const BLOCK_TRANSPORT_USB: u8 = 3;
+
+pub const BLOCK_STATS_READ_ONLY: u8 = 1 << 0;
+pub const BLOCK_STATS_REMOVABLE: u8 = 1 << 1;
+
+/// A whole disk; its counters run from its registration.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UserBlockStats {
+    pub name: [u8; 16],
+    pub capacity_bytes: u64,
+    pub logical_block_size: u32,
+    /// `BLOCK_TRANSPORT_*`.
+    pub transport: u8,
+    /// `BLOCK_STATS_*`.
+    pub flags: u8,
+    pub _pad: [u8; 2],
+    pub read_bytes: u64,
+    pub write_bytes: u64,
+    pub read_requests: u64,
+    pub write_requests: u64,
+    pub flushes: u64,
+    /// Wall time with a request in flight, as Linux's `io_ticks`.
+    pub busy_ns: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<UserBlockStats>() == 80);
+
+pub const DISPLAY_ADAPTER_NONE: u32 = 0;
+pub const DISPLAY_ADAPTER_FIRMWARE: u32 = 1;
+pub const DISPLAY_ADAPTER_VIRTIO_GPU: u32 = 2;
+pub const DISPLAY_ADAPTER_INTEL_XE: u32 = 3;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UserDisplayStats {
+    /// `DISPLAY_ADAPTER_*`.
+    pub adapter: u32,
+    pub width: u32,
+    pub height: u32,
+    pub bytes_per_pixel: u32,
+    pub scanout_bytes: u64,
+    pub frames: u64,
+    pub bytes_copied: u64,
+    pub copy_ns: u64,
+    /// Time in the adapter's present hook.
+    pub present_ns: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<UserDisplayStats>() == 56);
+
 /// `prof_ctl` operations.
 /// Zero every sample table and start sampling.
 pub const PROF_OP_START: u64 = 1;

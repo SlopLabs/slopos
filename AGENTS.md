@@ -1747,6 +1747,31 @@ sampling profiler on a
 running system; its report carries each CPU's busy share and effective clock
 over the span.
 
+**The System Monitor graphs the last minute.** `/bin/sysmon` (`apps::sysmon`)
+samples the kernel once a second into a pure `Monitor` (`monitor.rs`, which a
+test feeds samples of its own) of sixty-sample histories, and shows two tabs:
+Performance, a wide `Sidebar` of resources each led by its graph's thumbnail —
+CPU, memory, every disk, every network adapter and the GPU — beside the chosen
+one's page of graphs, figures and details, and Processes, every process with
+its threads folded in, named by its first thread's id as `getpid` names it
+(the kernel's process ids number another space), filtered by name, user or
+id and ended through the kill and privd flow above. `sysmon --page
+cpu|memory|disk|network|gpu|processes` opens on a page, which `just ui-shots`
+photographs. Shares are graphed 0–100%, rates to a `nice_ceiling` with a
+floor. It graphs counters three unprivileged calls keep. `process_memory`
+gives each live process once: the user pages its address space holds now
+(`VmSpace::resident_pages`) and its peak. `block_stats` gives
+each whole disk in registration order: name, capacity, logical block size,
+transport (NVMe, virtio or USB, as its name spells), read-only and removable
+flags, and since registration the bytes and requests it served each way, the
+flushes it sent and its busy time — Linux's `io_ticks`, wall time with any of
+its requests in flight, an async write until its completion. `EngineDisk`
+counts them itself, apart from `slopos_fs::blockdev::stats`, which tests
+reset. `display_stats` names what drives the scanout (the arbiter's
+`ScanoutId`), its geometry and size, and since boot the compositor's presents
+the adapter took (not the suppressed), the bytes copied into the scanout, the
+time copying and the time in the adapter's present hook.
+
 **A machine on the LAN is driven from this host.** `/bin/remoted`, which init
 starts when the base carries `/usr/share/slopos/remote/remote.conf`, dials out
 — nothing on SlopOS listens — to `scripts/remote.py serve`, the broker, on one

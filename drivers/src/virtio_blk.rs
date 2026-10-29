@@ -362,8 +362,7 @@ fn virtio_blk_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
 
     let (capacity, block_size) = start_queue(&engine, caps, features, msix_state)?;
     let flushes = features & VIRTIO_BLK_F_FLUSH != 0;
-    let disk = identified_disk(engine, block_size, capacity, flushes);
-    let name = register(disk)?;
+    let name = register(engine, block_size, capacity, flushes)?;
     klog_info!("virtio-blk: {} irq {:?}", name, irq_mode);
     #[cfg(feature = "test-hooks")]
     test_hooks::record_msix(name, msix_for_tests);
@@ -385,7 +384,13 @@ fn identified_disk(
 }
 
 #[inline(never)]
-fn register(disk: EngineDisk) -> Result<DiskName, PciProbeError> {
+fn register(
+    engine: KArc<Engine>,
+    block_size: u32,
+    capacity: u64,
+    flushes: bool,
+) -> Result<DiskName, PciProbeError> {
+    let disk = identified_disk(engine, block_size, capacity, flushes);
     let name = DiskName::virtio(NEXT_DISK.fetch_add(1, Ordering::Relaxed));
     klog_info!(
         "virtio-blk: {} ready, {} MB in {}-byte blocks",

@@ -2,8 +2,11 @@
 //! logical blocks one namespace of an [`Engine`] serves. A span that starts or
 //! ends inside a block is completed through a read-modify-write of that block.
 
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
 use slopos_boot_core::disk_id::DiskId;
 use slopos_fs::blockdev::{BlockDevice, BlockDeviceError, WriteTicket, stats};
+use slopos_kernel_services::clock::monotonic_ns;
 use slopos_ostd::KArc;
 
 use super::engine::{BlkError, Engine, Namespace, SegCursor};
@@ -15,6 +18,100 @@ pub struct EngineDisk {
     flushes: bool,
     write_protected: bool,
     id: Option<KArc<DiskId>>,
+    counters: Counters,
+}
+
+/// Counted here, apart from the machine-wide [`stats`], which tests reset.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DiskActivity {
+    pub read_bytes: u64,
+    pub write_bytes: u64,
+    pub read_requests: u64,
+    pub write_requests: u64,
+    pub flushes: u64,
+    pub busy_ns: u64,
+}
+
+/// `busy_ns` is Linux's `io_ticks`: each start or end folds the span since the
+/// last into it when a request was in flight.
+struct Counters {
+    read_bytes: AtomicU64,
+    write_bytes: AtomicU64,
+    read_requests: AtomicU64,
+    write_requests: AtomicU64,
+    flushes: AtomicU64,
+    in_flight: AtomicU32,
+    stamp: AtomicU64,
+    busy_ns: AtomicU64,
+}
+
+impl Counters {
+    const fn new() -> Self {
+        Self {
+            read_bytes: AtomicU64::new(0),
+            write_bytes: AtomicU64::new(0),
+            read_requests: AtomicU64::new(0),
+            write_requests: AtomicU64::new(0),
+            flushes: AtomicU64::new(0),
+            in_flight: AtomicU32::new(0),
+            stamp: AtomicU64::new(0),
+            busy_ns: AtomicU64::new(0),
+        }
+    }
+
+    /// Of two racing events, the compare-exchange lets one fold a span.
+    fn advance(&self, now: u64, busy: bool) {
+        let stamp = self.stamp.load(Ordering::Relaxed);
+        if now > stamp
+            && self
+                .stamp
+                .compare_exchange(stamp, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            && busy
+        {
+            self.busy_ns.fetch_add(now - stamp, Ordering::Relaxed);
+        }
+    }
+
+    fn start(&self) {
+        let busy = self.in_flight.load(Ordering::Relaxed) > 0;
+        self.advance(monotonic_ns(), busy);
+        self.in_flight.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn end(&self) {
+        self.advance(monotonic_ns(), true);
+        self.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn read(&self, bytes: usize) {
+        self.read_requests.fetch_add(1, Ordering::Relaxed);
+        self.read_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    fn write(&self, bytes: usize) {
+        self.write_requests.fetch_add(1, Ordering::Relaxed);
+        self.write_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    fn flush(&self) {
+        self.flushes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> DiskActivity {
+        let mut busy_ns = self.busy_ns.load(Ordering::Relaxed);
+        if self.in_flight.load(Ordering::Relaxed) > 0 {
+            busy_ns += monotonic_ns().saturating_sub(self.stamp.load(Ordering::Relaxed));
+        }
+        DiskActivity {
+            read_bytes: self.read_bytes.load(Ordering::Relaxed),
+            write_bytes: self.write_bytes.load(Ordering::Relaxed),
+            read_requests: self.read_requests.load(Ordering::Relaxed),
+            write_requests: self.write_requests.load(Ordering::Relaxed),
+            flushes: self.flushes.load(Ordering::Relaxed),
+            busy_ns,
+        }
+    }
 }
 
 fn total_seg_len(segs: &[&[u8]]) -> Result<usize, BlkError> {
@@ -44,6 +141,7 @@ impl EngineDisk {
             flushes,
             write_protected: false,
             id: None,
+            counters: Counters::new(),
         }
     }
 
@@ -68,6 +166,10 @@ impl EngineDisk {
 
     pub fn namespace(&self) -> Namespace {
         self.ns
+    }
+
+    pub fn activity(&self) -> DiskActivity {
+        self.counters.snapshot()
     }
 
     fn block(&self) -> u64 {
@@ -144,6 +246,7 @@ impl EngineDisk {
             self.engine
                 .read_partial(self.ns, at, bsize, 0, &mut buf[pos..])?;
         }
+        self.counters.read(buf.len());
         Ok(())
     }
 
@@ -208,6 +311,7 @@ impl EngineDisk {
             self.engine
                 .read_modify_write(self.ns, at, bsize, 0, left, &mut cur)?;
         }
+        self.counters.write(total);
         Ok(())
     }
 
@@ -225,9 +329,9 @@ impl EngineDisk {
             return self.write_span(offset, segs).map(|()| None);
         }
         self.check_span(offset, total)?;
-        self.engine
-            .submit_write(self.ns, offset, segs, total)
-            .map(Some)
+        let slot = self.engine.submit_write(self.ns, offset, segs, total)?;
+        self.counters.write(total);
+        Ok(Some(slot))
     }
 }
 
@@ -240,32 +344,44 @@ fn note_read_cycles(began: u64) {
 
 impl BlockDevice for EngineDisk {
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError> {
-        self.read_span(offset, buffer).map_err(Into::into)
+        self.counters.start();
+        let read = self.read_span(offset, buffer);
+        self.counters.end();
+        read.map_err(Into::into)
     }
 
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
-        self.write_span(offset, &[buffer]).map_err(Into::into)
+        self.write_vectored(offset, &[buffer])
     }
 
     /// Gathered into one request, so a run of contiguous kernel buffers costs
     /// one device request per largest transfer rather than one per buffer.
     fn write_vectored(&self, offset: u64, segs: &[&[u8]]) -> Result<(), BlockDeviceError> {
-        self.write_span(offset, segs).map_err(Into::into)
+        self.counters.start();
+        let written = self.write_span(offset, segs);
+        self.counters.end();
+        written.map_err(Into::into)
     }
 
+    /// In flight until `complete_write`.
     fn submit_write(&self, offset: u64, segs: &[&[u8]]) -> Result<WriteTicket, BlockDeviceError> {
         let began = slopos_ostd::arch::x86_64::tsc::rdtsc();
-        match self.submit_write_span(offset, segs)? {
-            Some(idx) => Ok(WriteTicket::new(idx as u64, began)),
-            None => Ok(WriteTicket::new(WriteTicket::DONE, began)),
+        self.counters.start();
+        let submitted = self.submit_write_span(offset, segs);
+        if !matches!(submitted, Ok(Some(_))) {
+            self.counters.end();
         }
+        let tag = submitted?.map_or(WriteTicket::DONE, |slot| slot as u64);
+        Ok(WriteTicket::new(tag, began))
     }
 
     fn complete_write(&self, ticket: WriteTicket) -> Result<(), BlockDeviceError> {
         if ticket.tag() == WriteTicket::DONE {
             return Ok(());
         }
-        self.engine.complete(ticket.tag() as usize, &mut [])?;
+        let completed = self.engine.complete(ticket.tag() as usize, &mut []);
+        self.counters.end();
+        completed?;
         stats::note_request_cycles(
             true,
             slopos_ostd::arch::x86_64::tsc::rdtsc().saturating_sub(ticket.began()),
@@ -296,6 +412,12 @@ impl BlockDevice for EngineDisk {
         if !self.flushes {
             return Ok(());
         }
-        self.engine.flush(self.ns).map_err(Into::into)
+        self.counters.start();
+        let flushed = self.engine.flush(self.ns);
+        self.counters.end();
+        if flushed.is_ok() {
+            self.counters.flush();
+        }
+        flushed.map_err(Into::into)
     }
 }

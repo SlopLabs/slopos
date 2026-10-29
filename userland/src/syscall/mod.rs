@@ -25,8 +25,8 @@ pub use error::{SyscallError, SyscallResult};
 pub use numbers::*;
 
 pub use slopos_abi::syscall::{
-    Timespec, UserCpuInfo, UserCpuPerf, UserCpuPerfInfo, UserPerCpuStats, UserSysInfo,
-    UserTaskEntry, UserUtsname,
+    Timespec, UserBlockStats, UserCpuInfo, UserCpuPerf, UserCpuPerfInfo, UserDisplayStats,
+    UserPerCpuStats, UserProcessMemory, UserSysInfo, UserTaskEntry, UserUtsname,
 };
 pub use slopos_abi::{
     DamageRect, DisplayInfo, InputEvent, InputEventData, InputEventType, MemfdError, PixelFormat,

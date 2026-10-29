@@ -170,7 +170,7 @@ pub struct Found {
 
 impl Found {
     fn probe(node: String, medium: Guid) -> Found {
-        let (bus, model) = disk::by_id(&node);
+        let (bus, model) = crate::disk_names::by_id(&node);
         Found {
             state: State::read(&node, medium),
             node,

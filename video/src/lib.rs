@@ -29,6 +29,7 @@ static VIDEO_SERVICES: VideoServices = VideoServices {
     cursor_set_image: video_cursor_set_image,
     cursor_move: video_cursor_move,
     set_display_mode: video_set_display_mode,
+    display_stats: framebuffer::display_stats,
 };
 
 // Boot registers the driver's functions behind this fn-pointer indirection, so

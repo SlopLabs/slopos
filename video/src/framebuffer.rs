@@ -1,9 +1,16 @@
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use slopos_ostd::lock_class;
 
 use slopos_abi::addr::{PhysAddr, VirtAddr};
 use slopos_abi::damage::DamageRect;
+use slopos_abi::syscall::{
+    DISPLAY_ADAPTER_FIRMWARE, DISPLAY_ADAPTER_INTEL_XE, DISPLAY_ADAPTER_NONE,
+    DISPLAY_ADAPTER_VIRTIO_GPU, UserDisplayStats,
+};
 use slopos_abi::{DisplayInfo, PixelFormat};
-use slopos_kernel_services::syscall_services::scanout::{FlushFn, Present};
+use slopos_kernel_services::clock::monotonic_ns;
+use slopos_kernel_services::syscall_services::scanout::{self, FlushFn, Present, ScanoutId};
 use slopos_mm::hhdm::PhysAddrHhdm;
 use slopos_ostd::seat::{self, SeatId, SeatKind};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
@@ -12,6 +19,20 @@ use slopos_ostd::{klog_debug, klog_warn};
 const MIN_FRAMEBUFFER_WIDTH: u32 = 320;
 const MIN_FRAMEBUFFER_HEIGHT: u32 = 240;
 const MAX_BUFFER_SIZE: u32 = 64 * 1024 * 1024;
+
+struct PresentCounters {
+    frames: AtomicU64,
+    bytes_copied: AtomicU64,
+    copy_ns: AtomicU64,
+    present_ns: AtomicU64,
+}
+
+static PRESENTS: PresentCounters = PresentCounters {
+    frames: AtomicU64::new(0),
+    bytes_copied: AtomicU64::new(0),
+    copy_ns: AtomicU64::new(0),
+    present_ns: AtomicU64::new(0),
+};
 
 #[derive(Copy, Clone)]
 pub(crate) struct FbState {
@@ -166,6 +187,30 @@ pub fn get_display_info() -> Option<DisplayInfo> {
     FRAMEBUFFER.lock().fb.map(|fb| fb.info)
 }
 
+pub fn display_stats() -> UserDisplayStats {
+    let adapter = match scanout::SCANOUT.current().map(|provider| provider.id) {
+        None => DISPLAY_ADAPTER_NONE,
+        Some(ScanoutId::FirmwareFb) => DISPLAY_ADAPTER_FIRMWARE,
+        Some(ScanoutId::VirtioGpu) => DISPLAY_ADAPTER_VIRTIO_GPU,
+        Some(ScanoutId::IntelXe) => DISPLAY_ADAPTER_INTEL_XE,
+    };
+    let mut stats = UserDisplayStats {
+        adapter,
+        frames: PRESENTS.frames.load(Ordering::Relaxed),
+        bytes_copied: PRESENTS.bytes_copied.load(Ordering::Relaxed),
+        copy_ns: PRESENTS.copy_ns.load(Ordering::Relaxed),
+        present_ns: PRESENTS.present_ns.load(Ordering::Relaxed),
+        ..UserDisplayStats::default()
+    };
+    if let Some(info) = get_display_info() {
+        stats.width = info.width;
+        stats.height = info.height;
+        stats.bytes_per_pixel = u32::from(info.bytes_per_pixel());
+        stats.scanout_bytes = info.buffer_size() as u64;
+    }
+    stats
+}
+
 pub fn get_fb_base_ptr() -> Option<*mut u8> {
     FRAMEBUFFER.lock().fb.map(|fb| fb.base_ptr())
 }
@@ -197,6 +242,27 @@ pub fn framebuffer_flush(damage: &[DamageRect]) -> Present {
         Some(cb) => cb(damage),
         None => Present::Shown,
     }
+}
+
+fn present(damage: &[DamageRect]) -> Present {
+    let start = monotonic_ns();
+    let presented = framebuffer_flush(damage);
+    PRESENTS
+        .present_ns
+        .fetch_add(monotonic_ns().saturating_sub(start), Ordering::Relaxed);
+    if presented != Present::Suppressed {
+        PRESENTS.frames.fetch_add(1, Ordering::Relaxed);
+    }
+    presented
+}
+
+fn note_copy(start_ns: u64, bytes: usize) {
+    PRESENTS
+        .copy_ns
+        .fetch_add(monotonic_ns().saturating_sub(start_ns), Ordering::Relaxed);
+    PRESENTS
+        .bytes_copied
+        .fetch_add(bytes as u64, Ordering::Relaxed);
 }
 
 /// [`framebuffer_flush`] of the whole frame for a panic, skipped while the
@@ -327,18 +393,21 @@ pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize, damage: &[DamageRect]) 
         let Some(dst_ptr) = fb.checked_ptr(0, copy_size) else {
             return Present::Failed;
         };
+        let copy_start = monotonic_ns();
         let t0 = slopos_ostd::arch::x86_64::tsc::rdtsc();
         slopos_ostd::util::ptr_buf::copy_bytes(dst_ptr, shm_ptr, copy_size);
         crate::blit_census::record(t0, slopos_ostd::arch::x86_64::tsc::rdtsc(), copy_size);
+        note_copy(copy_start, copy_size);
         if log_came_up() {
             return Present::Suppressed;
         }
-        return framebuffer_flush(&[]);
+        return present(&[]);
     }
 
     let damage = &damage[..damage.len().min(slopos_abi::damage::MAX_DAMAGE_REGIONS)];
     let mut any_failed = false;
     let mut blit_bytes = 0usize;
+    let copy_start = monotonic_ns();
     let t0 = slopos_ostd::arch::x86_64::tsc::rdtsc();
     for rect in damage {
         if !rect.is_valid() {
@@ -351,9 +420,10 @@ pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize, damage: &[DamageRect]) 
         }
     }
     crate::blit_census::record(t0, slopos_ostd::arch::x86_64::tsc::rdtsc(), blit_bytes);
+    note_copy(copy_start, blit_bytes);
     if log_came_up() {
         return Present::Suppressed;
     }
-    let flush = framebuffer_flush(damage);
+    let flush = present(damage);
     if any_failed { Present::Failed } else { flush }
 }

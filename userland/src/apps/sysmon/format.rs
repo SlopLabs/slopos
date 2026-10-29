@@ -1,4 +1,5 @@
 use slopos_abi::task::{TaskPriority, TaskStatus};
+use slopos_appkit::theme::words::Bytes;
 
 use crate::syscall::UserTaskEntry;
 
@@ -15,9 +16,13 @@ pub(crate) fn task_name_string(task: &UserTaskEntry) -> String {
     String::from_utf8_lossy(task_name_bytes(task)).into_owned()
 }
 
-/// Its name and its place in the order the overview's rows and the State
-/// column keep. No wildcard arm, so a new [`TaskStatus`] is a build error
-/// until it has both.
+pub(crate) fn c_text(bytes: &[u8]) -> String {
+    let end = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+/// The most active first; no wildcard arm, so a new [`TaskStatus`] must be
+/// placed here.
 pub(crate) fn task_state(state: TaskStatus) -> (usize, &'static str) {
     match state {
         TaskStatus::Running => (0, "Running"),
@@ -27,16 +32,6 @@ pub(crate) fn task_state(state: TaskStatus) -> (usize, &'static str) {
         TaskStatus::Zombie => (4, "Ending"),
         TaskStatus::Terminated => (5, "Ended"),
         TaskStatus::Invalid => (6, "Unknown"),
-    }
-}
-
-pub(crate) fn priority_label(priority: u8) -> &'static str {
-    match TaskPriority::from_u8(priority) {
-        TaskPriority::High => "High",
-        TaskPriority::KernelIo => "Above normal",
-        TaskPriority::Normal => "Normal",
-        TaskPriority::Low => "Low",
-        TaskPriority::Idle => "Idle",
     }
 }
 
@@ -59,38 +54,51 @@ pub(crate) fn padded_text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[start..end]).into_owned()
 }
 
-pub(crate) fn format_uptime(ms: u64) -> String {
-    let total_sec = ms / 1000;
-    let days = total_sec / 86_400;
-    let rem = total_sec % 86_400;
-    let h = rem / 3600;
-    let m = (rem % 3600) / 60;
-    let s = rem % 60;
-    format!("{}d {:02}:{:02}:{:02}", days, h, m, s)
+pub(crate) fn duration(ms: u64) -> String {
+    let secs = ms / 1000;
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    let clock = format!("{}:{:02}:{:02}", rem / 3600, (rem % 3600) / 60, rem % 60);
+    match days {
+        0 => clock,
+        1 => format!("1 day, {clock}"),
+        n => format!("{n} days, {clock}"),
+    }
 }
 
-pub(crate) fn format_runtime(us: u64) -> String {
+pub(crate) fn cpu_time(us: u64) -> String {
     let total_cs = us / 10_000;
     let cs = total_cs % 100;
     let total_sec = total_cs / 100;
     let h = total_sec / 3600;
     let m = (total_sec % 3600) / 60;
     let s = total_sec % 60;
-    if h == 0 {
-        format!("{:02}:{:02}.{:02}", m, s, cs)
-    } else {
-        format!("{}:{:02}:{:02}.{:02}", h, m, s, cs)
+    match h {
+        0 => format!("{m:02}:{s:02}.{cs:02}"),
+        _ => format!("{h}:{m:02}:{s:02}.{cs:02}"),
     }
 }
 
-pub(crate) fn format_pct(pct_x10: u32) -> String {
-    format!("{}.{}%", pct_x10 / 10, pct_x10 % 10)
+pub(crate) fn percent(permille: u64) -> String {
+    format!("{}%", (permille + 5) / 10)
 }
 
-pub(crate) fn format_number(n: u64) -> String {
+pub(crate) fn percent_tenths(permille: u32) -> String {
+    format!("{}.{}%", permille / 10, permille % 10)
+}
+
+pub(crate) fn rate(bytes_per_second: u64) -> String {
+    format!("{}/s", Bytes(bytes_per_second))
+}
+
+pub(crate) fn ghz(mhz: u64) -> String {
+    let centi = (mhz + 5) / 10;
+    format!("{}.{:02} GHz", centi / 100, centi % 100)
+}
+
+pub(crate) fn number(n: u64) -> String {
     let digits = n.to_string();
     let len = digits.len();
-    let mut out = String::with_capacity(len + ((len.saturating_sub(1)) / 3));
+    let mut out = String::with_capacity(len + len.saturating_sub(1) / 3);
     for (i, ch) in digits.chars().enumerate() {
         if i > 0 && (len - i) % 3 == 0 {
             out.push(',');
@@ -100,51 +108,36 @@ pub(crate) fn format_number(n: u64) -> String {
     out
 }
 
-pub(crate) fn format_cpu_features(features: u64) -> String {
+pub(crate) fn count(n: u64, one: &str, many: &str) -> String {
+    match n {
+        1 => format!("1 {one}"),
+        n => format!("{} {many}", number(n)),
+    }
+}
+
+pub(crate) fn cpu_features(features: u64) -> String {
     let ecx = features as u32;
     let edx = (features >> 32) as u32;
-    let mut parts: String = String::new();
-    let mut push_part = |part: &str| {
-        if !parts.is_empty() {
-            parts.push(' ');
-        }
-        parts.push_str(part);
-    };
-    if edx & (1 << 25) != 0 {
-        push_part("SSE");
+    let named: [(bool, &str); 11] = [
+        (edx & (1 << 25) != 0, "SSE"),
+        (edx & (1 << 26) != 0, "SSE2"),
+        (ecx & (1 << 0) != 0, "SSE3"),
+        (ecx & (1 << 9) != 0, "SSSE3"),
+        (ecx & (1 << 19) != 0, "SSE4.1"),
+        (ecx & (1 << 20) != 0, "SSE4.2"),
+        (ecx & (1 << 28) != 0, "AVX"),
+        (ecx & (1 << 26) != 0, "XSAVE"),
+        (ecx & (1 << 21) != 0, "x2APIC"),
+        (edx & (1 << 9) != 0, "APIC"),
+        (edx & (1 << 4) != 0, "TSC"),
+    ];
+    let parts: Vec<&str> = named
+        .iter()
+        .filter(|(held, _)| *held)
+        .map(|(_, name)| *name)
+        .collect();
+    match parts.is_empty() {
+        true => format!("0x{features:016x}"),
+        false => parts.join(" "),
     }
-    if edx & (1 << 26) != 0 {
-        push_part("SSE2");
-    }
-    if ecx & (1 << 0) != 0 {
-        push_part("SSE3");
-    }
-    if ecx & (1 << 9) != 0 {
-        push_part("SSSE3");
-    }
-    if ecx & (1 << 19) != 0 {
-        push_part("SSE4.1");
-    }
-    if ecx & (1 << 20) != 0 {
-        push_part("SSE4.2");
-    }
-    if ecx & (1 << 28) != 0 {
-        push_part("AVX");
-    }
-    if ecx & (1 << 26) != 0 {
-        push_part("XSAVE");
-    }
-    if ecx & (1 << 21) != 0 {
-        push_part("x2APIC");
-    }
-    if edx & (1 << 9) != 0 {
-        push_part("APIC");
-    }
-    if edx & (1 << 4) != 0 {
-        push_part("TSC");
-    }
-    if parts.is_empty() {
-        return format!("0x{:016x}", features);
-    }
-    parts
 }

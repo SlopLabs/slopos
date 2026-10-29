@@ -69,6 +69,10 @@ root slopos_abi::syscall::test_report::*
 root slopos_abi::syscall::types::BOOT_FLAG_*
 root slopos_abi::syscall::types::CPU_PERF_*
 root slopos_abi::syscall::types::PROF_*
+# block_stats's transports and flags; display_stats's adapters.
+root slopos_abi::syscall::types::BLOCK_TRANSPORT_*
+root slopos_abi::syscall::types::BLOCK_STATS_*
+root slopos_abi::syscall::types::DISPLAY_ADAPTER_*
 # process_list's state, block_reason and priority bytes, its entry bound, and
 # the ids that mean "none" there and in net_query's socket owners.
 root slopos_abi::task::TaskStatus
@@ -94,3 +98,4 @@ interface 8 f8a199522ffd881dbe97123d4e873c8b3338af17ed943c8f47f0fce2b8469097
 interface 9 8cdf3e3f163853973b864a916963d002f2efe55a8f65caf20e062d575eb11b2e
 interface 10 b080ae677942152163ca6d5c2cb74bc2b92383489c10528d21e4a9207090865a
 interface 11 f657b7ccd820e252a47954fe434f375957ffb52adb153f2bcdb64da684369803
+interface 12 6e24dbac1b584a2a56930c0a37da392544ce594af3744e1a5e4ef79353678010

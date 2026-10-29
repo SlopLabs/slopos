@@ -25,6 +25,11 @@ SCENES = ("installer", "chrome", "desktop", "apps", "gallery")
 APPS = (
     ("terminal", "terminal", "org.slopos.terminal"),
     ("system-monitor", "sysmon", "org.slopos.sysmon"),
+    ("system-monitor-memory", "sysmon --page memory", "org.slopos.sysmon"),
+    ("system-monitor-disk", "sysmon --page disk", "org.slopos.sysmon"),
+    ("system-monitor-network", "sysmon --page network", "org.slopos.sysmon"),
+    ("system-monitor-gpu", "sysmon --page gpu", "org.slopos.sysmon"),
+    ("system-monitor-processes", "sysmon --page processes", "org.slopos.sysmon"),
     ("editor", "editor", "org.slopos.editor"),
     ("files", "file_manager", "org.slopos.files"),
     ("image-viewer", "image_viewer /usr/share/slopos/wallpapers/default.png", "org.slopos.image-viewer"),

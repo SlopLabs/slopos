@@ -1,83 +1,37 @@
 use core::cmp::Ordering;
+use std::collections::HashMap;
 
-use crate::apps::cpufreq::sample::Usage;
-use crate::syscall::{
-    UserCpuInfo, UserCpuPerf, UserCpuPerfInfo, UserPerCpuStats, UserSysInfo, UserTaskEntry,
-    core as sys_core,
-};
-use slopos_abi::task::TaskStatus;
-use slopos_cpufreq_core::CoreType;
+use slopos_appkit::{AppSender, LineInput};
 
-use slopos_appkit::AppSender;
-
+use super::SysmonMsg;
+use super::monitor::{Monitor, Process};
+use super::sample::{Models, Sample};
 use super::selection::{self, TaskKey};
-use super::{
-    MAX_CPUS, REFRESH_INTERVAL_MS, SysmonMsg, is_idle_task, task_name_bytes, task_name_string,
-    task_state,
-};
 
-/// The most tasks listed; `process_list` gives no more than this.
-pub(crate) const MAX_TASKS: usize = 256;
-
-/// Read from `net_query`, so sysmon and `ip` agree on what "up" means.
-#[derive(Clone, Copy)]
-pub(crate) struct NetSummary {
-    pub(crate) oper_state: u8,
-    pub(crate) mac: [u8; 6],
-    pub(crate) addr: [u8; 4],
-    pub(crate) prefix_len: u8,
-    pub(crate) rx_bytes: u64,
-    pub(crate) rx_packets: u64,
-    pub(crate) tx_bytes: u64,
-    pub(crate) tx_packets: u64,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tab {
+    Performance,
+    Processes,
 }
 
-impl NetSummary {
-    /// The first non-loopback interface, and the first global address on it;
-    /// `None` when there is none, and an error when the query failed.
-    fn fetch() -> Result<Option<Self>, ()> {
-        use slopos_abi::net::{
-            NET_ADDR_SCOPE_GLOBAL, NET_IFINDEX_NONE, NET_IFKIND_LOOPBACK, NET_Q_ADDRS,
-            NET_Q_IFACES, UserAddr, UserIface,
-        };
-        let ifaces =
-            crate::net_query::fetch::<UserIface>(NET_Q_IFACES, NET_IFINDEX_NONE).map_err(|_| ())?;
-        let Some(iface) = ifaces
-            .records
-            .iter()
-            .find(|i| i.kind != NET_IFKIND_LOOPBACK)
-        else {
-            return Ok(None);
-        };
+impl Tab {
+    pub(crate) const ALL: [Tab; 2] = [Tab::Performance, Tab::Processes];
 
-        let mut out = Self {
-            oper_state: iface.oper_state,
-            mac: iface.mac,
-            addr: [0; 4],
-            prefix_len: 0,
-            rx_bytes: iface.rx_bytes,
-            rx_packets: iface.rx_packets,
-            tx_bytes: iface.tx_bytes,
-            tx_packets: iface.tx_packets,
-        };
-        if let Ok(addrs) = crate::net_query::fetch::<UserAddr>(NET_Q_ADDRS, iface.ifindex)
-            && let Some(addr) = addrs
-                .records
-                .iter()
-                .find(|a| a.scope == NET_ADDR_SCOPE_GLOBAL as u8)
-        {
-            out.addr = addr.addr;
-            out.prefix_len = addr.prefix_len;
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Tab::Performance => "Performance",
+            Tab::Processes => "Processes",
         }
-        Ok(Some(out))
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum Tab {
-    Overview,
-    Processes,
-    Hardware,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resource {
+    Cpu,
+    Memory,
+    Disk(String),
+    Adapter(u32),
+    Gpu,
 }
 
 #[derive(Clone, PartialEq)]
@@ -136,189 +90,174 @@ pub enum KillOutcome {
     },
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SortColumn {
-    Pid,
     Name,
-    State,
-    CpuPct,
-    Priority,
+    User,
     Cpu,
-    Runtime,
+    Memory,
+    Threads,
+    CpuTime,
+    Pid,
 }
 
-pub(crate) struct SysmonApp {
-    pub(crate) active_tab: Tab,
-    pub(crate) sys_info: UserSysInfo,
-    pub(crate) cpu_info: UserCpuInfo,
-    pub(crate) tasks: [UserTaskEntry; MAX_TASKS],
-    pub(crate) task_count: usize,
-    pub(crate) percpu: [UserPerCpuStats; MAX_CPUS],
-    pub(crate) cpu_count: usize,
-    pub(crate) net: Result<Option<NetSummary>, ()>,
-    pub(crate) prev_tasks: [UserTaskEntry; MAX_TASKS],
-    pub(crate) prev_task_count: usize,
-    pub(crate) prev_percpu: [UserPerCpuStats; MAX_CPUS],
-    pub(crate) task_cpu_pct: [u32; MAX_TASKS],
-    pub(crate) cpu_usage_pct: [u32; MAX_CPUS],
-    pub(crate) perf_info: UserCpuPerfInfo,
-    pub(crate) perf: [UserCpuPerf; MAX_CPUS],
-    pub(crate) perf_count: usize,
-    pub(crate) prev_perf: [UserCpuPerf; MAX_CPUS],
-    pub(crate) prev_perf_count: usize,
-    /// By `percpu` index, empty where the part reports no kind of core.
-    pub(crate) cpu_type: [&'static str; MAX_CPUS],
-    /// By `percpu` index: the busy-weighted clock since the last refresh.
-    pub(crate) cpu_eff_mhz: [Option<u64>; MAX_CPUS],
-    /// A task, not a row: the table re-sorts on every refresh.
+impl SortColumn {
+    fn descends_first(self) -> bool {
+        matches!(
+            self,
+            SortColumn::Cpu | SortColumn::Memory | SortColumn::Threads | SortColumn::CpuTime
+        )
+    }
+}
+
+pub struct SysmonApp {
+    pub(crate) monitor: Monitor,
+    models: Models,
+    users: HashMap<u32, String>,
+    pub tab: Tab,
+    pub resource: Resource,
+    pub(crate) width: i32,
+    pub(crate) filter: LineInput,
+    pub(crate) filter_focused: bool,
+    pub(crate) order: Vec<usize>,
+    /// A process, not a row: the table re-sorts every refresh.
     pub(crate) selected: Option<TaskKey>,
     pub(crate) sort_column: SortColumn,
     pub(crate) sort_ascending: bool,
-    pub(crate) last_refresh_ms: u64,
     pub(crate) confirm_kill: Option<KillTarget>,
     pub(crate) context_menu: Option<ContextMenu>,
     pub(crate) last_kill: Option<KillOutcome>,
     /// The task privd is asked to end, until it answers.
     pub(crate) asking: Option<KillTarget>,
-    pub(crate) sorted_indices: [usize; MAX_TASKS],
     pub(crate) self_pid: u32,
     /// What a thread asking privd answers through.
     pub(crate) sender: Option<AppSender<SysmonMsg>>,
 }
 
+pub(crate) const SYSTEM_USER: &str = "System";
+
 impl SysmonApp {
-    pub(crate) fn new() -> Self {
+    /// Two readings a moment apart, so the first frame has figures.
+    pub fn new() -> Self {
+        let mut app = Self::from_monitor(Monitor::default());
+        app.refresh();
+        std::thread::sleep(std::time::Duration::from_millis(FIRST_INTERVAL_MS));
+        app.refresh();
+        app
+    }
+
+    pub fn from_monitor(monitor: Monitor) -> Self {
         let mut app = Self {
-            active_tab: Tab::Overview,
-            sys_info: UserSysInfo::default(),
-            cpu_info: UserCpuInfo::default(),
-            tasks: [UserTaskEntry::default(); MAX_TASKS],
-            task_count: 0,
-            percpu: [UserPerCpuStats::default(); MAX_CPUS],
-            cpu_count: 0,
-            net: Ok(None),
-            prev_tasks: [UserTaskEntry::default(); MAX_TASKS],
-            prev_task_count: 0,
-            prev_percpu: [UserPerCpuStats::default(); MAX_CPUS],
-            task_cpu_pct: [0; MAX_TASKS],
-            cpu_usage_pct: [0; MAX_CPUS],
-            perf_info: UserCpuPerfInfo::default(),
-            perf: [UserCpuPerf::default(); MAX_CPUS],
-            perf_count: 0,
-            prev_perf: [UserCpuPerf::default(); MAX_CPUS],
-            prev_perf_count: 0,
-            cpu_type: [""; MAX_CPUS],
-            cpu_eff_mhz: [None; MAX_CPUS],
+            monitor,
+            models: Models::new(),
+            users: HashMap::new(),
+            tab: Tab::Performance,
+            resource: Resource::Cpu,
+            width: super::WIDTH,
+            filter: LineInput::new(),
+            filter_focused: false,
+            order: Vec::new(),
             selected: None,
-            sort_column: SortColumn::CpuPct,
+            sort_column: SortColumn::Cpu,
             sort_ascending: false,
-            last_refresh_ms: 0,
             confirm_kill: None,
             context_menu: None,
             last_kill: None,
             asking: None,
-            sorted_indices: [0; MAX_TASKS],
             self_pid: crate::syscall::process::getpid(),
             sender: None,
         };
-        app.refresh_data();
+        app.settle();
         app
     }
 
-    pub(crate) fn refresh_data(&mut self) {
-        let now_ms = sys_core::get_time_ms();
-        let elapsed_ms = if self.last_refresh_ms == 0 {
-            REFRESH_INTERVAL_MS
-        } else {
-            now_ms.saturating_sub(self.last_refresh_ms).max(1)
-        };
-        self.last_refresh_ms = now_ms;
+    pub(crate) fn refresh(&mut self) {
+        self.monitor.record(Sample::take(&mut self.models));
+        self.settle();
+    }
 
-        let _ = sys_core::sys_info(&mut self.sys_info);
-
-        let raw_count = sys_core::process_list(&mut self.tasks);
-        let raw_count = if raw_count <= 0 {
-            0
-        } else {
-            (raw_count as usize).min(MAX_TASKS)
-        };
-
-        // Each CPU's bar shows idleness; `idle/N` rows would fill the table.
-        let mut kept = 0;
-        for i in 0..raw_count {
-            if !is_idle_task(&self.tasks[i]) {
-                if kept != i {
-                    self.tasks[kept] = self.tasks[i];
-                }
-                kept += 1;
+    fn settle(&mut self) {
+        for process in &self.monitor.processes {
+            if !process.kernel {
+                self.users.entry(process.uid).or_insert_with(|| {
+                    crate::accounts::name_of(process.uid).unwrap_or_else(|| process.uid.to_string())
+                });
             }
         }
-        self.task_count = kept;
-
-        let cpu_count = sys_core::percpu_stats(&mut self.percpu);
-        self.cpu_count = if cpu_count <= 0 {
-            0
-        } else {
-            (cpu_count as usize).min(MAX_CPUS)
-        };
-
-        let perf_count = sys_core::cpu_perf(Some(&mut self.perf_info), &mut self.perf);
-        self.perf_count = if perf_count <= 0 {
-            0
-        } else {
-            (perf_count as usize).min(MAX_CPUS)
-        };
-
-        if self.cpu_info.cpu_count == 0 {
-            let _ = sys_core::cpu_info(&mut self.cpu_info);
+        if !self.resources().contains(&self.resource) {
+            self.resource = Resource::Cpu;
         }
-
-        self.net = NetSummary::fetch();
-
-        self.compute_cpu_usage();
-        self.compute_cpu_freq();
-        self.compute_task_cpu(elapsed_ms);
-
-        self.prev_task_count = self.task_count;
-        self.prev_tasks[..self.task_count].copy_from_slice(&self.tasks[..self.task_count]);
-        self.prev_percpu[..self.cpu_count].copy_from_slice(&self.percpu[..self.cpu_count]);
-        self.prev_perf_count = self.perf_count;
-        self.prev_perf[..self.perf_count].copy_from_slice(&self.perf[..self.perf_count]);
-
-        self.sort_tasks();
-
+        self.reorder();
         if self.selected.is_some_and(|key| self.row_of(key).is_none()) {
             self.selected = None;
         }
-
         // A target that exited designates nothing, rather than whatever
         // inherits its number.
         if self
             .confirm_kill
             .as_ref()
-            .is_some_and(|t| self.live_target(t).is_none())
+            .is_some_and(|t| self.live(t).is_none())
         {
             self.confirm_kill = None;
         }
         if self
             .context_menu
             .as_ref()
-            .is_some_and(|m| self.live_target(&m.target).is_none())
+            .is_some_and(|m| self.live(&m.target).is_none())
         {
             self.context_menu = None;
         }
     }
 
-    fn live_target(&self, target: &KillTarget) -> Option<usize> {
-        selection::index_of(target.key, self.task_slice())
+    pub fn resources(&self) -> Vec<Resource> {
+        let mut out = vec![Resource::Cpu, Resource::Memory];
+        out.extend(
+            self.monitor
+                .disks
+                .iter()
+                .map(|d| Resource::Disk(d.name.clone())),
+        );
+        out.extend(
+            self.monitor
+                .adapters
+                .iter()
+                .map(|a| Resource::Adapter(a.ifindex)),
+        );
+        if self.monitor.display.is_some() {
+            out.push(Resource::Gpu);
+        }
+        out
     }
 
-    fn task_slice(&self) -> &[UserTaskEntry] {
-        &self.tasks[..self.task_count]
+    pub(crate) fn open(&mut self, page: &str) {
+        let first = |pick: fn(&Resource) -> bool| self.resources().into_iter().find(pick);
+        let resource = match page {
+            "memory" => Some(Resource::Memory),
+            "disk" => first(|r| matches!(r, Resource::Disk(_))),
+            "network" => first(|r| matches!(r, Resource::Adapter(_))),
+            "gpu" => first(|r| *r == Resource::Gpu),
+            _ => None,
+        };
+        self.tab = match page {
+            "processes" => Tab::Processes,
+            _ => Tab::Performance,
+        };
+        self.resource = resource.unwrap_or(Resource::Cpu);
     }
 
-    fn order_slice(&self) -> &[usize] {
-        &self.sorted_indices[..self.task_count]
+    pub(crate) fn user_of(&self, process: &Process) -> &str {
+        match process.kernel {
+            true => SYSTEM_USER,
+            false => self.users.get(&process.uid).map_or("", String::as_str),
+        }
+    }
+
+    pub(crate) fn processes(&self) -> &[Process] {
+        &self.monitor.processes
+    }
+
+    fn live(&self, target: &KillTarget) -> Option<usize> {
+        selection::index_of(target.key, self.processes())
     }
 
     pub(crate) fn selected_row(&self) -> Option<usize> {
@@ -326,11 +265,11 @@ impl SysmonApp {
     }
 
     fn row_of(&self, key: TaskKey) -> Option<usize> {
-        selection::row_of(key, self.task_slice(), self.order_slice())
+        selection::row_of(key, self.processes(), &self.order)
     }
 
     pub(crate) fn select_row(&mut self, row: usize) {
-        self.selected = selection::key_at_row(self.task_slice(), self.order_slice(), row);
+        self.selected = selection::key_at_row(self.processes(), &self.order, row);
     }
 
     /// Refuses only sysmon itself, which would vanish mid-frame; the kernel,
@@ -340,172 +279,76 @@ impl SysmonApp {
     }
 
     pub(crate) fn target_for_row(&self, row: usize) -> Option<KillTarget> {
-        let idx = self.sorted_task_index(row)?;
-        let task = self.tasks.get(idx)?;
+        let process = self.processes().get(*self.order.get(row)?)?;
         Some(KillTarget {
-            key: TaskKey::of(task),
-            name: task_name_string(task),
+            key: process.key,
+            name: process.name.clone(),
         })
     }
 
     pub(crate) fn target_for_selection(&self) -> Option<KillTarget> {
-        let idx = selection::index_of(self.selected?, self.task_slice())?;
-        let task = self.tasks.get(idx)?;
+        let process = self.processes().get(self.live_key(self.selected?)?)?;
         Some(KillTarget {
-            key: TaskKey::of(task),
-            name: task_name_string(task),
+            key: process.key,
+            name: process.name.clone(),
         })
+    }
+
+    fn live_key(&self, key: TaskKey) -> Option<usize> {
+        selection::index_of(key, self.processes())
     }
 
     pub(crate) fn pending_kill_target(&self) -> Option<&KillTarget> {
         let target = self.confirm_kill.as_ref()?;
-        self.live_target(target).map(|_| target)
+        self.live(target).map(|_| target)
     }
 
-    fn compute_cpu_usage(&mut self) {
-        for i in 0..self.cpu_count {
-            let cpu_id = self.percpu[i].cpu_id;
-            let mut prev = None;
-            for j in 0..self.cpu_count {
-                if self.prev_percpu[j].cpu_id == cpu_id {
-                    prev = Some(self.prev_percpu[j]);
-                    break;
-                }
-            }
+    fn kept(&self, process: &Process) -> bool {
+        let wanted = self.filter.text.trim().to_lowercase();
+        wanted.is_empty()
+            || process.name.to_lowercase().contains(&wanted)
+            || self.user_of(process).to_lowercase().contains(&wanted)
+            || process.key.pid.to_string().contains(&wanted)
+    }
 
-            let usage = if let Some(prev_cpu) = prev {
-                let new_ticks = self.percpu[i].total_ticks;
-                let old_ticks = prev_cpu.total_ticks;
-                let new_idle = self.percpu[i].idle_ticks;
-                let old_idle = prev_cpu.idle_ticks;
-
-                let delta_ticks = new_ticks.saturating_sub(old_ticks);
-                let delta_idle = new_idle.saturating_sub(old_idle);
-                if delta_ticks == 0 {
-                    0
-                } else {
-                    let active = delta_ticks.saturating_sub(delta_idle);
-                    ((active.saturating_mul(100)) / delta_ticks).min(100) as u32
-                }
+    pub(crate) fn reorder(&mut self) {
+        let processes = self.processes();
+        let mut order: Vec<usize> = (0..processes.len())
+            .filter(|&i| self.kept(&processes[i]))
+            .collect();
+        order.sort_by(|&a, &b| {
+            let ord = self.compare(&processes[a], &processes[b]);
+            let ord = if self.sort_ascending {
+                ord
             } else {
-                0
+                ord.reverse()
             };
-
-            self.cpu_usage_pct[i] = usage;
-        }
+            ord.then_with(|| processes[a].key.pid.cmp(&processes[b].key.pid))
+        });
+        self.order = order;
     }
 
-    fn compute_cpu_freq(&mut self) {
-        let current = &self.perf[..self.perf_count];
-        let previous = &self.prev_perf[..self.prev_perf_count];
-        for i in 0..self.cpu_count {
-            let id = self.percpu[i].cpu_id;
-            let now = current.iter().find(|c| c.cpu == id && c.online != 0);
-            let before = previous.iter().find(|c| c.cpu == id && c.online != 0);
-            self.cpu_type[i] = now.map_or("", |cpu| match CoreType::from_raw(cpu.core_type) {
-                CoreType::Core => "performance core",
-                CoreType::Atom => "efficiency core",
-                CoreType::Unreported | CoreType::Other(_) => "",
-            });
-            self.cpu_eff_mhz[i] = now
-                .zip(before)
-                .and_then(|(now, before)| Usage::of_samples(before, now).eff_mhz(&self.perf_info));
-        }
-    }
-
-    fn compute_task_cpu(&mut self, elapsed_ms: u64) {
-        self.task_cpu_pct.fill(0);
-
-        let cpu_div = self.cpu_count.max(1) as u64;
-        let denom = elapsed_ms.saturating_mul(1000).saturating_mul(cpu_div);
-        if denom == 0 {
-            return;
-        }
-
-        for i in 0..self.task_count {
-            let tid = self.tasks[i].task_id;
-            let mut prev_runtime = None;
-
-            for j in 0..self.prev_task_count {
-                if self.prev_tasks[j].task_id == tid {
-                    prev_runtime = Some(self.prev_tasks[j].total_runtime_us);
-                    break;
-                }
-            }
-
-            if let Some(old_runtime) = prev_runtime {
-                let delta_us = self.tasks[i].total_runtime_us.saturating_sub(old_runtime);
-                let pct_x10 = (delta_us.saturating_mul(1000) / denom).min(1000) as u32;
-                self.task_cpu_pct[i] = pct_x10;
-            }
-        }
-    }
-
-    fn sort_tasks(&mut self) {
-        for i in 0..self.task_count {
-            self.sorted_indices[i] = i;
-        }
-
-        for i in 1..self.task_count {
-            let key = self.sorted_indices[i];
-            let mut j = i;
-            while j > 0 {
-                let prev = self.sorted_indices[j - 1];
-                let ord = self.compare_task_indices(key, prev);
-                let should_shift = if self.sort_ascending {
-                    ord == Ordering::Less
-                } else {
-                    ord == Ordering::Greater
-                };
-                if !should_shift {
-                    break;
-                }
-                self.sorted_indices[j] = self.sorted_indices[j - 1];
-                j -= 1;
-            }
-            self.sorted_indices[j] = key;
-        }
-    }
-
-    fn compare_task_indices(&self, a_idx: usize, b_idx: usize) -> Ordering {
-        let a = &self.tasks[a_idx];
-        let b = &self.tasks[b_idx];
+    fn compare(&self, a: &Process, b: &Process) -> Ordering {
         match self.sort_column {
-            SortColumn::Pid => a.task_id.cmp(&b.task_id),
-            SortColumn::Name => task_name_bytes(a).cmp(task_name_bytes(b)),
-            SortColumn::State => state_place(a).cmp(&state_place(b)),
-            SortColumn::CpuPct => self.task_cpu_pct[a_idx].cmp(&self.task_cpu_pct[b_idx]),
-            SortColumn::Priority => a.priority.cmp(&b.priority),
-            SortColumn::Cpu => a.last_cpu.cmp(&b.last_cpu),
-            SortColumn::Runtime => a.total_runtime_us.cmp(&b.total_runtime_us),
+            SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            SortColumn::User => self.user_of(a).cmp(self.user_of(b)),
+            SortColumn::Cpu => a.cpu.cmp(&b.cpu),
+            SortColumn::Memory => a.memory.cmp(&b.memory),
+            SortColumn::Threads => a.threads.cmp(&b.threads),
+            SortColumn::CpuTime => a.cpu_time_us.cmp(&b.cpu_time_us),
+            SortColumn::Pid => a.key.pid.cmp(&b.key.pid),
         }
     }
 
-    pub(crate) fn cycle_sort_for_column(&mut self, col: SortColumn) {
-        if self.sort_column == col {
+    pub(crate) fn sort_by(&mut self, column: SortColumn) {
+        if self.sort_column == column {
             self.sort_ascending = !self.sort_ascending;
         } else {
-            self.sort_column = col;
-            self.sort_ascending = match col {
-                SortColumn::CpuPct | SortColumn::Runtime => false,
-                SortColumn::Pid
-                | SortColumn::Name
-                | SortColumn::State
-                | SortColumn::Priority
-                | SortColumn::Cpu => true,
-            };
+            self.sort_column = column;
+            self.sort_ascending = !column.descends_first();
         }
-        self.sort_tasks();
-    }
-
-    pub(crate) fn sorted_task_index(&self, row: usize) -> Option<usize> {
-        if row >= self.task_count {
-            return None;
-        }
-        Some(self.sorted_indices[row])
+        self.reorder();
     }
 }
 
-fn state_place(task: &UserTaskEntry) -> usize {
-    task_state(TaskStatus::from_u8(task.state)).0
-}
+const FIRST_INTERVAL_MS: u64 = 250;

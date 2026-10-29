@@ -5,9 +5,9 @@ use slopos_theme_core::words::Bytes;
 use slopos_theme_core::{Icon, TextRole, Tone, space};
 
 use crate::components::{
-    Button, ButtonRow, Dialog, Disclosure, EmptyState, IconButton, List, ListRow, Notice, Page,
-    PropertyList, SearchField, Section, Sidebar, StatusBar, Tag, Text, Toolbar, WindowSpec, column,
-    row,
+    Button, ButtonRow, Dialog, Disclosure, EmptyState, Graph, GraphKey, IconButton, List, ListRow,
+    Notice, Page, PropertyList, SearchField, Section, Sidebar, StatusBar, Tag, Text, Toolbar,
+    WindowSpec, column, row,
 };
 use crate::constraints::{CrossAxisAlignment, Length, Orientation, TextAlignment};
 use crate::node::{
@@ -42,6 +42,7 @@ pub enum Msg {
     Place(usize),
     Person(usize),
     Found(usize),
+    Resource(usize),
     File(usize),
     Sort(usize),
     Tree(TreeInput),
@@ -57,7 +58,7 @@ pub enum Msg {
 }
 
 /// The pages, by the name `--page` takes.
-pub const PAGES: [&str; 13] = [
+pub const PAGES: [&str; 14] = [
     "text",
     "buttons",
     "fields",
@@ -71,13 +72,14 @@ pub const PAGES: [&str; 13] = [
     "empty",
     "icons",
     "dialog",
+    "graphs",
 ];
 
 const STRUCTURE: usize = 6;
 const FEEDBACK: usize = 9;
 const DIALOG: usize = 12;
 
-const TITLES: [&str; 13] = [
+const TITLES: [&str; 14] = [
     "Text",
     "Buttons",
     "Fields",
@@ -91,9 +93,10 @@ const TITLES: [&str; 13] = [
     "Empty states",
     "Icons",
     "Dialogs",
+    "Graphs",
 ];
 
-const ABOUT: [&str; 13] = [
+const ABOUT: [&str; 14] = [
     "Text takes a role for its size and a tone for its ink, and wraps or ends in an ellipsis.",
     "A row of buttons ends a page: going back on the left, finishing on the right.",
     "Fields share one frame, which thickens and takes the focus colour while typed into.",
@@ -107,6 +110,7 @@ const ABOUT: [&str; 13] = [
     "What a view says when it has nothing to show.",
     "Every glyph of the icon font that has a name here.",
     "A question over the page, answered by the row of buttons at its foot.",
+    "Samples over time, scaled to a fixed or a 1-2-5 top, with keys that do not rely on colour.",
 ];
 
 const FILES: [(&str, u64, &str); 5] = [
@@ -177,6 +181,7 @@ pub struct Catalogue {
     place: Option<usize>,
     person: Option<usize>,
     found: Option<usize>,
+    resource: Option<usize>,
     file: Option<usize>,
     descending: bool,
     folder_open: bool,
@@ -213,6 +218,7 @@ impl Catalogue {
             place: Some(1),
             person: Some(0),
             found: Some(0),
+            resource: Some(0),
             file: Some(1),
             descending: false,
             folder_open: true,
@@ -250,7 +256,8 @@ impl Catalogue {
             9 => self.feedback(),
             10 => self.empty(),
             11 => self.icons(),
-            _ => self.dialogs(),
+            12 => self.dialogs(),
+            _ => self.graphs(),
         };
         let mut page = Page::new(TITLES[index])
             .subtitle(ABOUT[index])
@@ -1013,6 +1020,138 @@ impl Catalogue {
         )
     }
 
+    fn graphs(&self) -> Node<Msg> {
+        let caption = |words: &str| -> Node<Msg> {
+            Text::new(words)
+                .role(TextRole::Caption)
+                .tone(Tone::Secondary)
+                .into()
+        };
+        let scale = |top: &str, bottom: &str, graph: Graph| -> Node<Msg> {
+            column(
+                space::XS,
+                vec![
+                    row(
+                        0,
+                        vec![
+                            caption(top),
+                            Node::Spacer { size: Length::FILL },
+                            caption("100%"),
+                        ],
+                    ),
+                    graph.into(),
+                    row(
+                        0,
+                        vec![
+                            caption(bottom),
+                            Node::Spacer { size: Length::FILL },
+                            caption("0"),
+                        ],
+                    ),
+                ],
+            )
+        };
+        let key = |key: GraphKey, words: &str| -> Node<Msg> {
+            Node::HStack {
+                children: vec![key.into(), Text::new(words).into()],
+                spacing: space::SM,
+                align: CrossAxisAlignment::Baseline,
+            }
+        };
+        let received = wave(GRAPH_WINDOW, 3, 900);
+        let sent = wave(GRAPH_WINDOW, 7, 300);
+        let top = crate::widgets::graph::nice_ceiling(
+            received.iter().chain(&sent).copied().max().unwrap_or(0),
+            1000,
+        );
+        let mut small = (0..4).map(|cpu| Node::Expand {
+            weight: 1,
+            child: Box::new(
+                Graph::new(format!("CPU {cpu}"), GRAPH_WINDOW)
+                    .line(wave(GRAPH_WINDOW, cpu + 2, 100), 0)
+                    .max(100)
+                    .small()
+                    .into(),
+            ),
+        });
+        let mut pair = || -> Node<Msg> { row(space::SM, small.by_ref().take(2).collect()) };
+        let resources = vec![
+            ListRow::new("CPU").detail("12%").graph(
+                Graph::new("CPU", GRAPH_WINDOW)
+                    .line(wave(GRAPH_WINDOW, 2, 100), 0)
+                    .max(100),
+            ),
+            ListRow::new("Memory").detail("2.1 of 8 GiB (26%)").graph(
+                Graph::new("Memory", GRAPH_WINDOW)
+                    .line(vec![26; GRAPH_WINDOW], 4)
+                    .max(100),
+            ),
+            ListRow::new("Ethernet")
+                .detail("R 900 kB/s · S 300 kB/s")
+                .graph(
+                    Graph::new("Ethernet", GRAPH_WINDOW)
+                        .line(received.clone(), 6)
+                        .dashed(sent.clone(), 6)
+                        .max(top),
+                ),
+            ListRow::new("Disk 0")
+                .detail("Not sampled")
+                .icon(Icon::HardDrive),
+        ];
+        Self::sections(vec![
+            Section::new(
+                "Percent",
+                scale(
+                    "Utilisation",
+                    "60 seconds",
+                    Graph::new("CPU utilisation", GRAPH_WINDOW)
+                        .line(wave(GRAPH_WINDOW, 2, 100), 0)
+                        .max(100)
+                        .elapsed(GRAPH_ELAPSED),
+                ),
+            )
+            .into(),
+            Section::new(
+                "Two series",
+                column(
+                    space::SM,
+                    vec![
+                        Graph::new("Ethernet throughput", GRAPH_WINDOW)
+                            .line(received, 6)
+                            .dashed(sent, 6)
+                            .max(top)
+                            .elapsed(GRAPH_ELAPSED)
+                            .into(),
+                        key(GraphKey::new(6), "Received 900 kB/s"),
+                        key(GraphKey::new(6).dashed(), "Sent 300 kB/s"),
+                    ],
+                ),
+            )
+            .into(),
+            Section::new("Small", column(space::SM, vec![pair(), pair()])).into(),
+            Section::new(
+                "In a wide sidebar",
+                Self::tall(
+                    GRAPH_SIDEBAR_HEIGHT,
+                    Node::HStack {
+                        children: vec![
+                            Sidebar::new(
+                                List::new(resources)
+                                    .selected(self.resource)
+                                    .on_select(Msg::Resource),
+                            )
+                            .wide()
+                            .into(),
+                        ],
+                        spacing: 0,
+                        align: CrossAxisAlignment::Stretch,
+                    },
+                ),
+            )
+            .into(),
+        ])
+    }
+
     fn dialog_node(&self) -> Node<Msg> {
         Dialog::new("Erase this disk?")
             .content(Text::new("Everything on KINGSTON SNV3S1000G will be deleted.").wrap())
@@ -1119,6 +1258,26 @@ fn edit((line, focused): &mut (LineInput, bool), input: LineEditInput) {
     }
 }
 
+fn wave(len: usize, period: usize, top: u64) -> Vec<u64> {
+    let quarter = period as u64;
+    (0..len as u64)
+        .map(|i| {
+            let phase = i % (quarter * 4);
+            let level = match phase / quarter {
+                0 => phase,
+                1 => quarter * 2 - phase,
+                2 => 0,
+                _ => phase - quarter * 3,
+            };
+            top / 8 + level * (top * 3 / 4) / quarter
+        })
+        .collect()
+}
+
+const GRAPH_WINDOW: usize = 60;
+const GRAPH_ELAPSED: u64 = 137;
+const GRAPH_SIDEBAR_HEIGHT: i32 = 280;
+
 const EMPTY_HEIGHT: i32 = 360;
 const SEARCH_WIDTH: i32 = 220;
 const SIZE_COLUMN: i32 = 96;
@@ -1190,6 +1349,7 @@ impl App for Catalogue {
             Msg::Place(row) => self.place = Some(row),
             Msg::Person(row) => self.person = Some(row),
             Msg::Found(row) => self.found = Some(row),
+            Msg::Resource(row) => self.resource = Some(row),
             Msg::File(row) => self.file = Some(row),
             Msg::Sort(_) => {
                 self.descending = !self.descending;

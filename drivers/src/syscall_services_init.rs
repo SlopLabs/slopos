@@ -1,11 +1,12 @@
 use slopos_abi::syscall::TtyIndex;
+use slopos_kernel_services::syscall_services::block::{BlockServices, register_block_services};
 use slopos_kernel_services::syscall_services::input::{InputServices, register_input_services};
 use slopos_kernel_services::syscall_services::keymap::{KeymapServices, register_keymap_services};
 use slopos_kernel_services::syscall_services::tty::{TtyServices, register_tty_services};
 use slopos_ostd::KArc;
 use slopos_ostd::process::quota::FileBacking;
 
-use crate::{input_event, keyboard, tty};
+use crate::{block, input_event, keyboard, tty};
 
 static INPUT_SERVICES: InputServices = InputServices {
     drain_batch: input_event::input_drain_batch,
@@ -127,8 +128,14 @@ static KEYMAP_SERVICES: KeymapServices = KeymapServices {
     current_name: keyboard::layout_name,
 };
 
+static BLOCK_SERVICES: BlockServices = BlockServices {
+    disk_count: block::disk_count,
+    disk_stats: block::disk_stats,
+};
+
 pub fn init_syscall_services() {
     register_input_services(&INPUT_SERVICES);
     register_tty_services(&TTY_SERVICES);
     register_keymap_services(&KEYMAP_SERVICES);
+    register_block_services(&BLOCK_SERVICES);
 }

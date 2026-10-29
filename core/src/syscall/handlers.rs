@@ -6,12 +6,12 @@ use slopos_ostd::authority::Capability;
 
 use crate::syscall::common::SyscallEntry;
 pub use crate::syscall::core_handlers::{
-    syscall_caps_drop, syscall_caps_get, syscall_clock_gettime, syscall_clock_settime,
-    syscall_cpu_info, syscall_cpu_perf, syscall_cpu_perf_ctl, syscall_efivar_get,
-    syscall_efivar_set, syscall_exit, syscall_exit_group, syscall_kconsole, syscall_klog_write,
-    syscall_login_tag, syscall_nanosleep, syscall_percpu_stats, syscall_process_list,
-    syscall_prof_ctl, syscall_reboot, syscall_sched_yield, syscall_sys_info, syscall_sysinfo,
-    syscall_uname,
+    syscall_block_stats, syscall_caps_drop, syscall_caps_get, syscall_clock_gettime,
+    syscall_clock_settime, syscall_cpu_info, syscall_cpu_perf, syscall_cpu_perf_ctl,
+    syscall_display_stats, syscall_efivar_get, syscall_efivar_set, syscall_exit,
+    syscall_exit_group, syscall_kconsole, syscall_klog_write, syscall_login_tag, syscall_nanosleep,
+    syscall_percpu_stats, syscall_process_list, syscall_process_memory, syscall_prof_ctl,
+    syscall_reboot, syscall_sched_yield, syscall_sys_info, syscall_sysinfo, syscall_uname,
 };
 use crate::syscall::cred_handlers::{
     syscall_getegid, syscall_geteuid, syscall_getgid, syscall_getgroups, syscall_getresgid,
@@ -314,6 +314,9 @@ static SYSCALL_PRIVATE_TABLE: [SyscallEntry; SYSCALL_PRIVATE_TABLE_SIZE] = sysca
     [SYSCALL_SEAT_SWITCH]        => syscall_seat_switch,        "seat_switch";
     [SYSCALL_LOGIN_TAG]          => syscall_login_tag,          "login_tag";
     [SYSCALL_CAPS_GET]           => syscall_caps_get,           "caps_get";
+    [SYSCALL_PROCESS_MEMORY]     => syscall_process_memory,     "process_memory";
+    [SYSCALL_BLOCK_STATS]        => syscall_block_stats,        "block_stats";
+    [SYSCALL_DISPLAY_STATS]      => syscall_display_stats,      "display_stats";
 };
 
 /// The entry for `sysno`, or `None` when nothing is registered there.
@@ -367,7 +370,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 196;
+pub const SYSCALL_ENTRY_COUNT: usize = 199;
 
 /// The recorded shape of the classification.
 ///
@@ -377,7 +380,7 @@ pub const SYSCALL_ENTRY_COUNT: usize = 196;
 /// construction and the assert below holds it there.
 const CAP_COUNTS: [(Capability, usize); Capability::ALL.len()] = [
     (Capability::Unimplemented, 0),
-    (Capability::NoneSelf, 73),
+    (Capability::NoneSelf, 76),
     (Capability::NoneFd, 80),
     (Capability::NoneRelation, 13),
     (Capability::Power, 4),

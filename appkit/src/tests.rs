@@ -1997,6 +1997,26 @@ pub fn cases() -> &'static [(&'static str, fn())] {
             controls::test_partition_bar_paints_fills_hatch_and_highlight,
         ),
         (
+            "nice_ceiling_steps_one_two_five_within_each_unit",
+            controls::test_nice_ceiling_steps_one_two_five_within_each_unit,
+        ),
+        (
+            "a_graph_draws_its_last_value_at_the_right_edge",
+            controls::test_a_graph_draws_its_last_value_at_the_right_edge,
+        ),
+        (
+            "a_graph_line_keeps_to_its_column",
+            controls::test_a_graph_line_keeps_to_its_column,
+        ),
+        (
+            "a_dashed_series_leaves_gaps_counted_from_the_right",
+            controls::test_a_dashed_series_leaves_gaps_counted_from_the_right,
+        ),
+        (
+            "a_list_row_s_graph_leads_its_text",
+            controls::test_a_list_row_s_graph_leads_its_text,
+        ),
+        (
             "audit_finds_text_past_its_widget",
             components::test_audit_finds_text_past_its_widget,
         ),

@@ -186,8 +186,9 @@ impl Widget for TabBarWidget {
         }
 
         if self.focused {
-            let tab_row = Rect::new(rect.x, rect.y, rect.width, tab_height);
-            ctx.draw_inner_focus_ring(tab_row);
+            // Clear of the indicator, which is focus-coloured and ring-thick.
+            let tabs = Rect::new(rect.x, rect.y, rect.width, tab_height - super::INDICATOR);
+            ctx.draw_inner_focus_ring(tabs);
         }
     }
 

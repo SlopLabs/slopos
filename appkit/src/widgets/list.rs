@@ -86,12 +86,21 @@ impl ListWidget {
     }
 
     fn icon_room(&self) -> i32 {
-        let lead = match self.rows.iter().any(|r| r.avatar) {
-            true => super::avatar::ROW.0,
-            false if self.rows.iter().any(|r| r.icon.is_some()) => TITLE.style().icon,
-            false => return 0,
-        };
-        lead + space::SM
+        let leads = self.rows.iter().map(|r| {
+            if r.graph.is_some() {
+                super::graph::THUMBNAIL_WIDTH
+            } else if r.avatar {
+                super::avatar::ROW.0
+            } else if r.icon.is_some() {
+                TITLE.style().icon
+            } else {
+                0
+            }
+        });
+        match leads.max().unwrap_or(0) {
+            0 => 0,
+            lead => lead + space::SM,
+        }
     }
 
     fn trailing_room(row: &ListRow) -> i32 {
@@ -261,7 +270,13 @@ impl Widget for ListWidget {
             let (ink, quiet) = Self::inks(theme, row.enabled());
             let mut x = rect.x + PAD;
             let top = rect.y + PAD;
-            if row.avatar {
+            if let Some(graph) = &row.graph {
+                let lines = placed.lines.len() as i32;
+                let h = TITLE.style().line_height + DETAIL.style().line_height * lines;
+                let at = Rect::new(x, top, super::graph::THUMBNAIL_WIDTH, h);
+                super::graph::paint_plot(ctx, at, graph, super::graph::Plot::Thumbnail);
+                x += self.icon_room();
+            } else if row.avatar {
                 let top = top + (TITLE.style().line_height - super::avatar::ROW.0) / 2;
                 super::avatar::paint(ctx, &row.title, x, top, super::avatar::ROW);
                 x += self.icon_room();

@@ -226,6 +226,8 @@ pub struct Theme {
     pub neutral_fill: Color32,
     pub control: Color32,
     pub series: [Color32; SERIES],
+    /// Light line inks, each paired with its `series` fill.
+    pub series_ink: [Color32; SERIES],
     /// What hover and pressed mix over a surface, as libadwaita lays
     /// `currentColor` over a widget.
     state_ink: Color32,
@@ -330,6 +332,10 @@ impl Theme {
     /// The `n`th categorical colour, repeating past [`SERIES`].
     pub const fn series(&self, n: usize) -> Color32 {
         self.series[n % SERIES]
+    }
+
+    pub const fn series_ink(&self, n: usize) -> Color32 {
+        self.series_ink[n % SERIES]
     }
 
     /// `(base, lit)`: the bottom-right and top-left ends of the gradient.

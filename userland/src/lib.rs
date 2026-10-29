@@ -5,6 +5,7 @@ pub mod apps;
 pub mod base_image;
 pub mod base_watch;
 pub mod boot_disk;
+pub mod disk_names;
 pub mod gfx;
 pub mod held;
 pub mod init_control;

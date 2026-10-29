@@ -8,6 +8,7 @@ pub mod dialog;
 pub mod disclosure;
 pub mod drag_handle;
 pub mod editor_tabs;
+pub mod graph;
 pub mod icon;
 pub mod icon_button;
 pub mod image;

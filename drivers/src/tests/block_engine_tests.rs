@@ -5,7 +5,7 @@
 //!
 //! | bytes            | test                             |
 //! |------------------|----------------------------------|
-//! | 1 MiB            | multi-block read and write       |
+//! | 1 MiB            | multi-block I/O; stats read      |
 //! | 1.5 MiB          | one request over one page        |
 //! | 1.95 MiB         | flush                            |
 //! | 2.25 MiB         | vectored write                   |
@@ -17,6 +17,10 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
+use slopos_abi::syscall::{
+    BLOCK_STATS_REMOVABLE, BLOCK_TRANSPORT_NVME, BLOCK_TRANSPORT_USB, BLOCK_TRANSPORT_VIRTIO,
+    UserBlockStats,
+};
 use slopos_abi::task::TaskPriority;
 use slopos_core::tests::helpers::{kill_task, mark_current_killed};
 use slopos_fs::blockdev::{BlockDevice, BlockDeviceError, stats};
@@ -430,6 +434,75 @@ fn counters_per_request(name: &[u8]) -> TestResult {
     pass!()
 }
 on_scratch!(counters_per_request => test_block_counters_virtio, test_block_counters_nvme, test_block_counters_nvme_4k, test_block_counters_usb);
+
+fn block_stats_of(name: &[u8]) -> Result<UserBlockStats, TestResult> {
+    let mut all = KVec::filled(UserBlockStats::default(), block::disk_count())
+        .map_err(|_| fail!("stats alloc"))?;
+    let count = block::disk_stats(all.as_mut_slice());
+    all.iter()
+        .take(count)
+        .find(|entry| {
+            let len = entry
+                .name
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(entry.name.len());
+            entry.name[..len] == *name
+        })
+        .copied()
+        .ok_or_else(|| fail!("block_stats has no entry for {}", show(name)))
+}
+
+fn block_stats_count_reads(name: &[u8]) -> TestResult {
+    let index = SCRATCH_DISKS.iter().position(|d| *d == name).unwrap_or(0);
+    let transport = [
+        BLOCK_TRANSPORT_VIRTIO,
+        BLOCK_TRANSPORT_NVME,
+        BLOCK_TRANSPORT_NVME,
+        BLOCK_TRANSPORT_USB,
+    ][index];
+    let disk = match scratch(name) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    const SPAN: usize = 64 * 1024;
+    let mut buf = assert_ok!(KVec::<u8>::zeroed(SPAN), "read buffer");
+    let before = match block_stats_of(name) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    assert_test!(disk.read_at(1 << 20, &mut buf).is_ok(), "the read");
+    let after = match block_stats_of(name) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    assert_test!(
+        after.read_bytes - before.read_bytes >= SPAN as u64,
+        "the read's bytes must be counted"
+    );
+    assert_test!(
+        after.read_requests > before.read_requests,
+        "the read must be counted as a request"
+    );
+    assert_test!(
+        after.busy_ns > before.busy_ns,
+        "the disk must have been busy while it read"
+    );
+    assert_eq_test!(after.transport, transport, "the bus its name stands for");
+    assert_eq_test!(
+        after.flags & BLOCK_STATS_REMOVABLE != 0,
+        transport == BLOCK_TRANSPORT_USB,
+        "only a USB disk is removable"
+    );
+    assert_eq_test!(after.capacity_bytes, disk.capacity(), "its capacity");
+    assert_eq_test!(
+        after.logical_block_size,
+        disk.logical_block_size(),
+        "its logical block size"
+    );
+    pass!()
+}
+on_scratch!(block_stats_count_reads => test_block_stats_count_reads_virtio, test_block_stats_count_reads_nvme, test_block_stats_count_reads_nvme_4k, test_block_stats_count_reads_usb);
 
 /// Which scratch disk a spawned writer thread targets.
 static THREAD_DISK: AtomicUsize = AtomicUsize::new(0);

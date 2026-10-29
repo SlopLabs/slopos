@@ -546,6 +546,7 @@ pub struct ListRow {
     pub detail_tail: bool,
     pub trailing: String,
     pub disabled_reason: Option<String>,
+    pub graph: Option<Graph>,
 }
 
 impl ListRow {
@@ -596,8 +597,115 @@ impl ListRow {
         self
     }
 
+    pub fn graph(mut self, graph: Graph) -> Self {
+        self.graph = Some(graph);
+        self
+    }
+
     pub fn enabled(&self) -> bool {
         self.disabled_reason.is_none()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum GraphSize {
+    #[default]
+    Large,
+    Small,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GraphSeries {
+    pub values: Vec<u64>,
+    pub series: usize,
+    pub dashed: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Graph {
+    pub label: String,
+    pub series: Vec<GraphSeries>,
+    /// The value at the top edge; 0 draws an empty plot.
+    pub max: u64,
+    /// Samples spanning the width, the last at the right edge.
+    pub window: usize,
+    /// Samples taken so far, which the time grid moves with.
+    pub elapsed: u64,
+    pub size: GraphSize,
+}
+
+impl Graph {
+    pub fn new(label: impl Into<String>, window: usize) -> Self {
+        Self {
+            label: label.into(),
+            window,
+            ..Self::default()
+        }
+    }
+
+    pub fn line(mut self, values: Vec<u64>, series: usize) -> Self {
+        self.series.push(GraphSeries {
+            values,
+            series,
+            dashed: false,
+        });
+        self
+    }
+
+    pub fn dashed(mut self, values: Vec<u64>, series: usize) -> Self {
+        self.series.push(GraphSeries {
+            values,
+            series,
+            dashed: true,
+        });
+        self
+    }
+
+    pub fn max(mut self, max: u64) -> Self {
+        self.max = max;
+        self
+    }
+
+    pub fn elapsed(mut self, samples: u64) -> Self {
+        self.elapsed = samples;
+        self
+    }
+
+    pub fn small(mut self) -> Self {
+        self.size = GraphSize::Small;
+        self
+    }
+}
+
+impl<M> From<Graph> for Node<M> {
+    fn from(graph: Graph) -> Self {
+        Node::Graph(graph)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GraphKey {
+    pub series: usize,
+    pub dashed: bool,
+}
+
+impl GraphKey {
+    pub fn new(series: usize) -> Self {
+        Self {
+            series,
+            dashed: false,
+        }
+    }
+
+    pub fn dashed(mut self) -> Self {
+        self.dashed = true;
+        self
+    }
+}
+
+impl<M> From<GraphKey> for Node<M> {
+    fn from(key: GraphKey) -> Self {
+        Node::GraphKey(key)
     }
 }
 
@@ -659,12 +767,14 @@ impl<M> From<List<M>> for Node<M> {
 /// The places an app moves between, down its side.
 pub struct Sidebar<M> {
     content: Node<M>,
+    width: i32,
 }
 
 impl<M> Sidebar<M> {
     pub fn new(list: List<M>) -> Self {
         Self {
             content: list.into(),
+            width: SIDEBAR_WIDTH,
         }
     }
 
@@ -676,7 +786,13 @@ impl<M> Sidebar<M> {
                 .tone(Tone::Secondary)
                 .wrap()
                 .into(),
+            width: SIDEBAR_WIDTH,
         }
+    }
+
+    pub fn wide(mut self) -> Self {
+        self.width = SIDEBAR_WIDE_WIDTH;
+        self
     }
 }
 
@@ -685,7 +801,7 @@ impl<M> From<Sidebar<M>> for Node<M> {
         Node::Background {
             surface: Surface::Sunken,
             child: Box::new(Node::SizedBox {
-                width: Some(Length::Px(SIDEBAR_WIDTH)),
+                width: Some(Length::Px(sidebar.width)),
                 height: None,
                 child: Box::new(padded(
                     EdgeInsets::all(space::SM),
@@ -702,6 +818,7 @@ impl<M> From<Sidebar<M>> for Node<M> {
 }
 
 pub const SIDEBAR_WIDTH: i32 = 200;
+pub const SIDEBAR_WIDE_WIDTH: i32 = 248;
 
 /// A control that shows only an icon; its label is its tooltip and what a
 /// screen reader would say.

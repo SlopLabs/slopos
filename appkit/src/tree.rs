@@ -208,6 +208,8 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             segments.clone(),
             *highlight,
         )),
+        Node::Graph(graph) => Box::new(widgets::graph::GraphWidget::new(graph.clone())),
+        Node::GraphKey(key) => Box::new(widgets::graph::GraphKeyWidget::new(*key)),
         Node::VStack {
             children,
             spacing,

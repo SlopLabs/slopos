@@ -273,6 +273,22 @@ fn series_hues_are_distinct() {
     }
 }
 
+/// WCAG 1.4.11: a graph's line is the only mark of its data.
+#[test]
+fn series_inks_reach_three_to_one_on_every_plain_surface() {
+    let t = &DARK;
+    for n in 0..SERIES {
+        for role in [
+            ColorRole::Surface,
+            ColorRole::SurfaceSunken,
+            ColorRole::SurfaceRaised,
+        ] {
+            let what = std::format!("series ink {n} on {role:?}");
+            assert_floor(t.series_ink(n), t.color(role), NON_TEXT, &what);
+        }
+    }
+}
+
 #[test]
 fn tones_and_surfaces_name_their_roles() {
     assert_eq!(DARK.ink(Tone::Normal), DARK.text);

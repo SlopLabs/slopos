@@ -665,3 +665,95 @@ define_syscall!(syscall_caps_get (ctx, pid: u64) cap(NoneSelf)
     }
     Ok(slopos_ostd::task::ops::task_caps(&task))
 });
+
+define_syscall!(syscall_process_memory
+    (ctx, out: UserSlice<slopos_abi::syscall::UserProcessMemory>) cap(NoneSelf)
+    -> Result<u64, Errno>
+{
+    use slopos_abi::syscall::UserProcessMemory;
+    use slopos_abi::task::MAX_PROCESSES;
+    use slopos_mm::process_vm::{process_vm_peak_resident_pages, process_vm_resident_pages};
+    use slopos_ostd::KVec;
+    use slopos_ostd::process::ProcessId;
+
+    let max_entries = out.len().min(MAX_PROCESSES);
+    let mut entries =
+        KVec::<UserProcessMemory>::with_capacity(max_entries).map_err(|_| Errno::ENOMEM)?;
+    let mut listed = [0u64; MAX_PROCESSES / 64 + 1];
+    slopos_sched::task::task_try_for_each_enumerable(|task| {
+        if entries.len() == max_entries {
+            return ControlFlow::Break(());
+        }
+        let Some(process) = task.process().as_deref().and_then(ProcessId::of) else {
+            return ControlFlow::Continue(());
+        };
+        let id = process.id() as usize;
+        let bit = 1u64 << (id % 64);
+        let Some(word) = listed.get_mut(id / 64).filter(|word| **word & bit == 0) else {
+            return ControlFlow::Continue(());
+        };
+        *word |= bit;
+        let resident = process_vm_resident_pages(process);
+        let entry = UserProcessMemory {
+            process_id: process.id(),
+            _pad: 0,
+            resident_pages: u64::from(resident),
+            peak_resident_pages: u64::from(process_vm_peak_resident_pages(process).max(resident)),
+        };
+        match entries.push(entry) {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(_) => ControlFlow::Break(()),
+        }
+    });
+
+    for (i, entry) in entries.iter().enumerate() {
+        let dst_addr = out
+            .base_u64()
+            .wrapping_add((i * core::mem::size_of::<UserProcessMemory>()) as u64);
+        let user_ptr = slopos_ostd::user::ptr::UserPtr::<UserProcessMemory>::try_new(dst_addr)
+            .map_err(|_| Errno::EFAULT)?;
+        copy_to_user(user_ptr, entry).map_err(|_| Errno::EFAULT)?;
+    }
+    Ok(entries.len() as u64)
+});
+
+// Copied out first: a user fault must not land under the registry's lock.
+define_syscall!(syscall_block_stats
+    (ctx, out: UserSlice<slopos_abi::syscall::UserBlockStats>) cap(NoneSelf)
+    -> Result<u64, Errno>
+{
+    use slopos_abi::syscall::UserBlockStats;
+    use slopos_kernel_services::syscall_services::block;
+    use slopos_ostd::KVec;
+
+    if !block::is_block_initialized() {
+        return Ok(0);
+    }
+    let wanted = out.len().min(block::disk_count());
+    let mut disks =
+        KVec::filled(UserBlockStats::default(), wanted).map_err(|_| Errno::ENOMEM)?;
+    let count = block::disk_stats(disks.as_mut_slice());
+    for (i, disk) in disks.iter().take(count).enumerate() {
+        let dst_addr = out
+            .base_u64()
+            .wrapping_add((i * core::mem::size_of::<UserBlockStats>()) as u64);
+        let user_ptr = slopos_ostd::user::ptr::UserPtr::<UserBlockStats>::try_new(dst_addr)
+            .map_err(|_| Errno::EFAULT)?;
+        copy_to_user(user_ptr, disk).map_err(|_| Errno::EFAULT)?;
+    }
+    Ok(count as u64)
+});
+
+define_syscall!(syscall_display_stats
+    (ctx, out: UserPtr<slopos_abi::syscall::UserDisplayStats>) cap(NoneSelf)
+    -> Result<(), Errno>
+{
+    use slopos_kernel_services::syscall_services::video;
+
+    let stats = if video::is_video_initialized() {
+        video::display_stats()
+    } else {
+        slopos_abi::syscall::UserDisplayStats::default()
+    };
+    copy_to_user(out.inner(), &stats).map_err(|_| Errno::EFAULT)
+});

@@ -5,7 +5,8 @@ use std::sync::Arc;
 use slopos_theme_core::{EdgeInsets, Icon, Surface, TextRole, Tone};
 
 use super::components::{
-    Button, ButtonRow, Disclosure, IconButton, List, PropertyList, Tag, Text, WindowSpec,
+    Button, ButtonRow, Disclosure, Graph, GraphKey, IconButton, List, PropertyList, Tag, Text,
+    WindowSpec,
 };
 use super::constraints::{CrossAxisAlignment, ImageScale, Length, Orientation, Rect};
 use super::event::{Key, Modifiers};
@@ -159,6 +160,8 @@ pub enum Node<M> {
         segments: Vec<BarSegment>,
         highlight: Option<usize>,
     },
+    Graph(Graph),
+    GraphKey(GraphKey),
     ButtonRow(ButtonRow<M>),
     PropertyList(PropertyList<M>),
     List(List<M>),

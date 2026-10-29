@@ -19,10 +19,14 @@ pub mod engine;
 
 mod disk;
 
-pub use disk::EngineDisk;
+pub use disk::{DiskActivity, EngineDisk};
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use slopos_abi::syscall::{
+    BLOCK_STATS_READ_ONLY, BLOCK_STATS_REMOVABLE, BLOCK_TRANSPORT_NVME, BLOCK_TRANSPORT_USB,
+    BLOCK_TRANSPORT_VIRTIO, UserBlockStats,
+};
 use slopos_boot_core::Guid;
 use slopos_boot_core::disk_id::DiskId;
 use slopos_fs::blockdev::{BlockDevice, BlockDeviceError, WriteTicket};
@@ -44,6 +48,8 @@ const MAX_DISKS: usize = 32;
 pub struct DiskName {
     buf: [u8; DEV_NAME_MAX],
     len: usize,
+    /// `BLOCK_TRANSPORT_*`.
+    transport: u8,
 }
 
 impl core::fmt::Display for DiskName {
@@ -53,10 +59,11 @@ impl core::fmt::Display for DiskName {
 }
 
 impl DiskName {
-    fn empty() -> Self {
+    fn empty(transport: u8) -> Self {
         Self {
             buf: [0; DEV_NAME_MAX],
             len: 0,
+            transport,
         }
     }
 
@@ -86,15 +93,15 @@ impl DiskName {
 
     /// `vd` and the `index`-th letter name: `a`..`z`, then `aa`, `ab`, …
     pub fn virtio(index: usize) -> Self {
-        Self::lettered(b"vd", index)
+        Self::lettered(b"vd", BLOCK_TRANSPORT_VIRTIO, index)
     }
 
     /// A USB disk's: `sd` and the `index`-th letter name.
     pub fn scsi(index: usize) -> Self {
-        Self::lettered(b"sd", index)
+        Self::lettered(b"sd", BLOCK_TRANSPORT_USB, index)
     }
 
-    fn lettered(prefix: &[u8], index: usize) -> Self {
+    fn lettered(prefix: &[u8], transport: u8, index: usize) -> Self {
         let mut letters = [0u8; 8];
         let mut at = letters.len();
         let mut n = index + 1;
@@ -104,14 +111,14 @@ impl DiskName {
             letters[at] = b'a' + (n % 26) as u8;
             n /= 26;
         }
-        let mut name = Self::empty();
+        let mut name = Self::empty(transport);
         name.push(prefix);
         name.push(&letters[at..]);
         name
     }
 
     pub fn nvme(controller: u32, nsid: u32) -> Self {
-        let mut name = Self::empty();
+        let mut name = Self::empty(BLOCK_TRANSPORT_NVME);
         name.push(b"nvme");
         name.push_decimal(controller);
         name.push(b"n");
@@ -207,6 +214,35 @@ impl Disk {
 
     fn written(&self) -> bool {
         self.whole.writer || self.partitions.iter().any(|p| p.holders.writer)
+    }
+
+    fn stats(&self) -> UserBlockStats {
+        let mut name = [0u8; 16];
+        let bytes = self.name.as_bytes();
+        let len = bytes.len().min(name.len());
+        name[..len].copy_from_slice(&bytes[..len]);
+        let mut flags = 0;
+        if self.device.write_protected() {
+            flags |= BLOCK_STATS_READ_ONLY;
+        }
+        if self.removable {
+            flags |= BLOCK_STATS_REMOVABLE;
+        }
+        let activity = self.device.activity();
+        UserBlockStats {
+            name,
+            capacity_bytes: self.device.capacity(),
+            logical_block_size: self.device.logical_block_size(),
+            transport: self.name.transport,
+            flags,
+            _pad: [0; 2],
+            read_bytes: activity.read_bytes,
+            write_bytes: activity.write_bytes,
+            read_requests: activity.read_requests,
+            write_requests: activity.write_requests,
+            flushes: activity.flushes,
+            busy_ns: activity.busy_ns,
+        }
     }
 }
 
@@ -528,6 +564,14 @@ fn finish_scan(
 
 pub fn disk_count() -> usize {
     disks().len()
+}
+
+pub fn disk_stats(out: &mut [UserBlockStats]) -> usize {
+    let disks = disks();
+    for (slot, disk) in out.iter_mut().zip(disks.iter()) {
+        *slot = disk.stats();
+    }
+    out.len().min(disks.len())
 }
 
 /// The `index`-th disk registered, in probe order.
