@@ -34,6 +34,7 @@ members = [
   "keymap-core",
   "chrome-core",
   "fate-core",
+  "splash-core",
   "theme-core",
   "net-core",
   "nvme-core",
@@ -133,6 +134,7 @@ slopos-terminal-core = { path = "terminal-core" }
 slopos-keymap-core = { path = "keymap-core" }
 slopos-chrome-core = { path = "chrome-core" }
 slopos-fate-core = { path = "fate-core" }
+slopos-splash-core = { path = "splash-core" }
 slopos-theme-core = { path = "theme-core" }
 slopos-net-core = { path = "net-core" }
 slopos-nvme-core = { path = "nvme-core" }

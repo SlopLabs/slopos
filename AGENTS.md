@@ -1354,21 +1354,40 @@ slibc as an rlib with the feature off, and `userland/userland.ld` discards
 
 `just boot-live` and `just boot-log` boot `builddir/slop.iso` with `BOOT_CMDLINE` as its command line — `root=initramfs` unless it says otherwise — plus `boot.debug=on` under `DEBUG=1` and `roulette=skip` under `ROULETTE=0`; `VIDEO=0` makes `just boot` and `just boot-live` serial-only.
 
+**The boot is one screen.** From the firmware's logo to the desktop the
+screen is black with one mark on it, and says nothing a person must read:
+`slopos-splash-core`, host-tested under `just test-host`, is a ring of twelve
+round-capped segments on a clock's hours, the logo (`assets/logo.png`, pixel
+for pixel, scaled by a whole number) near the foot of the screen, and where
+both sit, by the screen's size alone. It measures with integers alone, since
+the kernel is built soft-float, and inks with the theme's text over black.
+The kernel's splash (`video/src/splash.rs`) lights the segments clockwise as
+boot steps complete, repainting only those that change; the boot log is
+behind ESC. A Limine configuration without a menu — the ISO's, the QEMU boot
+disk's — is `quiet`, so Limine prints nothing, on screen or serial, but a
+failure; an install's five-second menu still shows.
+
 **The Wheel of Fate is a program; the kernel only keeps the score.**
 `roulette` picks the fate and hands `/bin/roulette` a token, and
 `roulette_result` takes the token back and, for an even fate under
 `BOOT_FLAG_FATE_REBOOT`, restarts the machine. Everything between is the
 program's, and none of it can change the outcome: `slopos-fate-core`,
-host-tested under `just test-host`, lands the fate in a pocket of its parity,
-times the spin by the clock rather than by frames drawn — a slow machine shows
-fewer frames of the same seven seconds, never a longer spin — and paints each
-frame into a memfd the size of the screen, rewriting only what turns (the band
-of pockets, the pegs, the numbers and the flapper) over a pixmap of what does
-not. `/bin/roulette` presents each frame's damage with `fb_flip` from the
-virtcon seat and sleeps between frames; a present refused for longer than a
-GPU takes over one frame is the kernel log on screen, and the spin stands still
-until ESC dismisses it, since `fb_flip` ends ESC's hold on the log only for the
-compositor's seat. The kernel draws nothing: `roulette_draw` answers `ENOSYS`.
+host-tested under `just test-host`, plays it on the splash's own ring, whose
+first frame is the splash's last. The segments are pockets numbered as a
+clock's hours, so odd and even alternate; the lit ring dims but for the top
+segment, a light runs from there five turns and more, slowing at a steady
+rate, each segment it leaves dimming as a lamp does, and stops on a pocket of
+the fate's parity, which takes the theme's success or danger while its number
+fills the ring and one line under it says what follows; then everything fades
+to black. The spin is timed by the clock rather than by frames drawn — a slow
+machine shows fewer frames of the same seven seconds, never a longer spin —
+and each frame is painted into a memfd the size of the screen, rewriting only
+the segments, numbers and words whose ink changed. `/bin/roulette` presents
+each frame's damage with `fb_flip` from the virtcon seat and sleeps between
+frames; a present refused for longer than a GPU takes over one frame is the
+kernel log on screen, and the spin stands still until ESC dismisses it, since
+`fb_flip` ends ESC's hold on the log only for the compositor's seat. The
+kernel draws nothing for it: `roulette_draw` answers `ENOSYS`.
 
 **Every disk goes through the block layer.** `drivers/src/block` is what a
 block driver registers its disks with: their Linux names (`vda` in virtio
@@ -2019,7 +2038,7 @@ Write code that does not need comments. Most comments are useless: they restate 
 - Exempt from the above: `# Safety` sections, `///` public API docs, and register-contract notes in assembly. These are contracts, not commentary.
 
 ### Unsafe-code surface
-**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `boot-core`, `core`, `cpufreq-core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `kernel-services`, `hid-core`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `rtl8168-core`, `sched`, `service-core`, `signalfd`, `usb-core`, `verity-core`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `apps/`, `cabi/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`, `tree-core/`, `remote-core/`) are out of scope for this discipline.
+**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `boot-core`, `core`, `cpufreq-core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `kernel-services`, `hid-core`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `rtl8168-core`, `sched`, `service-core`, `signalfd`, `splash-core`, `theme-core`, `usb-core`, `verity-core`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `apps/`, `cabi/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`, `tree-core/`, `remote-core/`) are out of scope for this discipline.
 
 `forbid` is necessary but not sufficient: rustc drops any `unsafe_code` diagnostic whose primary span satisfies `in_external_macro`, so a macro defined in another crate expands `unsafe` into a forbid crate silently, and the call site holds no keyword for a source scan to find. `scripts/check_unsafe_expansion.sh` is what closes that — see below.
 

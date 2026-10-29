@@ -3,7 +3,7 @@ name = "slopos-fate-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The Wheel of Fate as data and pixels: its pockets, where a fate lands, the spin's timeline and the frames /bin/roulette presents, host-testable"
+description = "The Wheel of Fate as data and pixels: its pockets, where a fate lands, the light's run round the boot ring and the frames /bin/roulette presents, host-testable"
 
 [lints]
 workspace = true
@@ -17,5 +17,6 @@ doctest = false
 [dependencies]
 slopos-abi = { workspace = true }
 slopos-font = { workspace = true }
+slopos-splash-core = { workspace = true }
 slopos-theme-core = { workspace = true }
 libm = { workspace = true }

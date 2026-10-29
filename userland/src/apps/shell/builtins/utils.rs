@@ -39,7 +39,7 @@ pub fn cmd_roulette(_argc: i32, _argv: &[&[u8]]) -> i32 {
     let spin = roulette::spin();
     thread::sleep(Duration::from_millis(200));
 
-    let number = wheel::landing(spin as u32).number();
+    let number = wheel::number(wheel::landing(spin as u32));
     let mut line = [0u8; 64];
     shell_write(verdict(number, &mut line).as_bytes());
     shell_write(NL.as_bytes());

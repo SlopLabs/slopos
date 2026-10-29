@@ -51,7 +51,7 @@ fn slots_boot_their_kernels_on_both_bases_and_nothing_names_a_default() {
          module_path: {boot}:/boot/base/previous.img\n    module_string: initramfs-previous\n"
     );
     let expected = format!(
-        "timeout: 0\nserial: yes\nverbose: yes\n\
+        "timeout: 0\nquiet: yes\nserial: yes\n\
          /slopos-a\n    protocol: limine\n    path: {boot}:/boot/a/kernel.elf\n    \
          cmdline: tests=on root=auto slot=a\n{bases}    resolution: 1920x1080\n\
          /slopos-b\n    protocol: limine\n    path: {boot}:/boot/b/kernel.elf\n    \

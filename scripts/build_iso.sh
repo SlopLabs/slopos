@@ -69,7 +69,7 @@ fi
 
 CONF="$ISO_ROOT/boot/limine.conf"
 {
-    printf 'timeout: 0\nserial: yes\nverbose: yes\n\n'
+    printf 'timeout: 0\nquiet: yes\nserial: yes\n\n'
     printf '/SlopOS Kernel\n'
     printf '    protocol: limine\n'
     printf '    path: boot():/boot/kernel.elf\n'

@@ -1,0 +1,22 @@
+[package]
+name = "slopos-splash-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The boot screen as data and pixels: the ring the kernel's splash fills and the Wheel of Fate runs its light round, where it and the logo sit on a screen, drawn the same by both, host-testable"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+doctest = false
+
+[dependencies]
+slopos-abi = { workspace = true }
+slopos-theme-core = { workspace = true }
+
+[dev-dependencies]
+slopos-image = { workspace = true }

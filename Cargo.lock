@@ -266,6 +266,7 @@ dependencies = [
  "libm",
  "slopos-abi",
  "slopos-font",
+ "slopos-splash-core",
  "slopos-theme-core",
 ]
 
@@ -561,6 +562,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "slopos-splash-core"
+version = "0.1.0"
+dependencies = [
+ "slopos-abi",
+ "slopos-image",
+ "slopos-theme-core",
+]
+
+[[package]]
 name = "slopos-terminal-core"
 version = "0.1.0"
 dependencies = [
@@ -660,6 +670,7 @@ dependencies = [
  "slopos-mm",
  "slopos-ostd",
  "slopos-sched",
+ "slopos-splash-core",
 ]
 
 [[package]]

@@ -30,8 +30,7 @@ impl GraphicsContext {
         self.fb.height()
     }
 
-    /// Present the whole frame: kernel-side draws (splash, roulette, the
-    /// kernel log) have no damage list.
+    /// Present the whole frame: the kernel log repaints all of it.
     pub fn flush(&self) -> Present {
         framebuffer::framebuffer_flush(&[])
     }

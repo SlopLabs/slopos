@@ -288,14 +288,14 @@ fn boot_init_prepare_progress() {
     BOOT_DONE_STEPS.store(0, Ordering::Relaxed);
 }
 
-fn boot_init_report_progress(step: &BootInitStep) {
+fn boot_init_report_progress() {
     let total = BOOT_TOTAL_STEPS.load(Ordering::Relaxed);
     if total == 0 {
         return;
     }
     let done = BOOT_DONE_STEPS.fetch_add(1, Ordering::Relaxed) + 1;
-    let progress = ((done * 100) / total).min(100) as i32;
-    let _ = splash::splash_report_progress(progress, step.name);
+    let progress = ((done * 100) / total).min(100) as u32;
+    let _ = splash::splash_report_progress(progress);
 }
 
 fn boot_run_step<'b>(
@@ -313,12 +313,12 @@ fn boot_run_step<'b>(
         boot_init_report_failure(phase_name, Some(step.name));
         if optional {
             boot_info("Optional boot step failed, continuing...");
-            boot_init_report_progress(step);
+            boot_init_report_progress();
             return 0;
         }
         panic!("Boot init step failed");
     }
-    boot_init_report_progress(step);
+    boot_init_report_progress();
     0
 }
 

@@ -1,10 +1,11 @@
 //! `/bin/roulette`: the Wheel of Fate.
 //!
 //! The kernel picks the fate (`roulette`) and acts on it (`roulette_result`);
-//! this program only shows it. It draws the wheel into a memfd the size of the
-//! screen and presents each frame's damage with `fb_flip` from the virtcon
-//! seat, which outranks the compositor's, pacing frames by the clock: a slow
-//! machine shows fewer frames of the same seven seconds.
+//! this program only shows it, on the boot splash's own ring. It draws into a
+//! memfd the size of the screen and presents each frame's damage with
+//! `fb_flip` from the virtcon seat, which outranks the compositor's, pacing
+//! frames by the clock: a slow machine shows fewer frames of the same seven
+//! seconds.
 
 use std::time::{Duration, Instant};
 
@@ -101,7 +102,6 @@ fn spin_on_screen(fate: u32, info: &DisplayInfo, started: Instant) -> Outcome {
         slopos_appkit::text::load_font("sans"),
         slopos_appkit::text::load_font("sans-semibold"),
     );
-    let mut scene = Scene::new(layout, info.format, fate, fonts);
     let mut screen = Screen {
         px: buffer.as_mut_slice(),
         width: info.width as i32,
@@ -109,6 +109,7 @@ fn spin_on_screen(fate: u32, info: &DisplayInfo, started: Instant) -> Outcome {
         pitch: info.pitch as usize,
         format: info.format,
     };
+    let mut scene = Scene::new(layout, &screen, fate, fonts);
     scene.paint_all(&mut screen);
     let mut stats = Stats::default();
     loop {
@@ -126,7 +127,7 @@ fn spin_on_screen(fate: u32, info: &DisplayInfo, started: Instant) -> Outcome {
         "{}x{}, wheel radius {}, on screen {} ms after start",
         info.width,
         info.height,
-        layout.radius,
+        layout.boot.dial.radius,
         started.elapsed().as_millis()
     );
 
@@ -173,7 +174,7 @@ fn spin_on_screen(fate: u32, info: &DisplayInfo, started: Instant) -> Outcome {
 
 /// No screen to draw on: say it on the console instead.
 fn spin_in_words(fate: u32) {
-    let number = slopos_fate_core::wheel::landing(fate).number();
+    let number = slopos_fate_core::wheel::number(slopos_fate_core::wheel::landing(fate));
     let mut buf = [0u8; 64];
     eprintln!("{}: {}", scene::words::TITLE, scene::words::RULE);
     std::thread::sleep(Duration::from_millis(600));

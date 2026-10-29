@@ -31,6 +31,8 @@ pub enum MenuEntry<'a> {
 }
 
 pub struct Config<'a> {
+    /// Seconds the menu shows; with none, Limine prints nothing but a
+    /// failure, so the firmware's logo stays until the kernel's splash.
     pub timeout: u32,
     pub serial: bool,
     pub boot_partition: Guid,
@@ -146,8 +148,10 @@ impl Config<'_> {
             }
         }
         writeln!(out, "timeout: {}", self.timeout)?;
+        if self.timeout == 0 {
+            writeln!(out, "quiet: yes")?;
+        }
         writeln!(out, "serial: {}", if self.serial { "yes" } else { "no" })?;
-        writeln!(out, "verbose: yes")?;
         for entry in self.entries {
             match *entry {
                 MenuEntry::Slot { slot, cmdline } => self.slot_entry(out, slot, cmdline)?,
