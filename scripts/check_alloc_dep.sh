@@ -24,7 +24,7 @@ gate_parse_args check_alloc_dep "$@"
 # What both passes skip, the manifest's and the sources': slopos-ostd, the
 # sanctioned allocation surface, and the userland crates, the host-testable
 # `*-core` ones among them, which the kernel does not link.
-USERLAND_CRATES='userland|terminal-core|shell-core|editor-core|http-core|tls-core|fat-core|tree-core|extension-core|accounts-core|remote-core|installer-core|priv-core|chrome-core|slibc|slop-protocol|image|slopos-ostd'
+USERLAND_CRATES='userland|terminal-core|shell-core|editor-core|http-core|tls-core|fat-core|tree-core|extension-core|accounts-core|remote-core|installer-core|priv-core|chrome-core|fate-core|slibc|slop-protocol|image|slopos-ostd'
 USERLAND_RE="^(${USERLAND_CRATES})\$"
 
 # Findings carry a `<tag>\t` prefix so the self-test can count each pass

@@ -472,6 +472,7 @@ slopos-cpufreq-core = { workspace = true }
 slopos-fat-core = { workspace = true }
 slopos-tree-core = { workspace = true }
 slopos-extension-core = { workspace = true, features = ["std"] }
+slopos-fate-core = { workspace = true }
 slopos-keymap-core = { workspace = true }
 slopos-gfx = { workspace = true }
 slopos-net-core = { workspace = true }

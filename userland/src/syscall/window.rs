@@ -8,8 +8,8 @@ pub use slopos_abi::window::{SEAT_COMPOSITOR_PRIMARY, SEAT_VIRTCON};
 
 /// Take the framebuffer seat, returning a non-duplicable descriptor naming it.
 ///
-/// Must be held before `fb_flip`, the cursor calls, `set_display_mode` or
-/// `roulette_draw` will act. `-EBUSY` when a seat of equal or higher rank is
+/// Must be held before `fb_flip`, the cursor calls or `set_display_mode`
+/// will act. `-EBUSY` when a seat of equal or higher rank is
 /// held by a live task. The fd is neither inherited across `fork` nor kept
 /// across `exec`.
 #[inline(always)]

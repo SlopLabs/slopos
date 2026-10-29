@@ -74,8 +74,8 @@ pub use crate::syscall::test_handlers::{
 pub use crate::syscall::ui_handlers::{
     syscall_clipboard_copy, syscall_clipboard_paste, syscall_cursor_move, syscall_cursor_set_image,
     syscall_fb_flip, syscall_fb_info, syscall_getrandom, syscall_input_poll_batch,
-    syscall_input_sink_acquire, syscall_roulette_draw, syscall_roulette_result,
-    syscall_roulette_spin, syscall_screen_acquire, syscall_seat_switch, syscall_set_display_mode,
+    syscall_input_sink_acquire, syscall_roulette_result, syscall_roulette_spin,
+    syscall_screen_acquire, syscall_seat_switch, syscall_set_display_mode,
 };
 
 /// Build a dispatch table; unregistered slots stay `Unimplemented`.
@@ -296,7 +296,6 @@ static SYSCALL_PRIVATE_TABLE: [SyscallEntry; SYSCALL_PRIVATE_TABLE_SIZE] = sysca
     [SYSCALL_RING_REGISTER]      => syscall_ring_register,      "ring_register";
     [SYSCALL_ROULETTE]           => syscall_roulette_spin,      "roulette";
     [SYSCALL_ROULETTE_RESULT]    => syscall_roulette_result,    "roulette_result";
-    [SYSCALL_ROULETTE_DRAW]      => syscall_roulette_draw,      "roulette_draw";
     [SYSCALL_TEST_REPORT]        => syscall_test_report,        "test_report";
     [SYSCALL_RUN_USERLAND_TESTS] => syscall_run_userland_tests, "run_userland_tests";
     [SYSCALL_TEST_PANIC]         => syscall_test_panic,         "test_panic";
@@ -368,7 +367,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 197;
+pub const SYSCALL_ENTRY_COUNT: usize = 196;
 
 /// The recorded shape of the classification.
 ///
@@ -379,7 +378,7 @@ pub const SYSCALL_ENTRY_COUNT: usize = 197;
 const CAP_COUNTS: [(Capability, usize); Capability::ALL.len()] = [
     (Capability::Unimplemented, 0),
     (Capability::NoneSelf, 73),
-    (Capability::NoneFd, 81),
+    (Capability::NoneFd, 80),
     (Capability::NoneRelation, 13),
     (Capability::Power, 4),
     (Capability::ProcSignal, 0),

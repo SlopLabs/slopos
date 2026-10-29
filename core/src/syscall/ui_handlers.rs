@@ -348,26 +348,6 @@ define_syscall!(syscall_set_display_mode
     Ok(())
 });
 
-define_syscall!(syscall_roulette_draw
-    (ctx, fate: u32)
-    cap(NoneFd)
-    -> Result<(), Errno>
-{
-    if !seat_held_by(SeatKind::Screen, ctx.task_id()) {
-        return Err(Errno::EPERM);
-    }
-    use slopos_kernel_services::kernel_vm_space::kernel_vm_space;
-    // Resolved before the switch away so the restore below names the caller
-    // rather than re-reading an id afterwards.
-    let caller = ctx.require_process()?.process();
-    kernel_vm_space().lock().activate_kernel_master();
-    let result = video::roulette_draw(fate);
-    if let Some(caller) = caller {
-        let _ = slopos_mm::process_vm::process_vm_activate(caller);
-    }
-    result.map_err(|_| Errno::EINVAL)
-});
-
 define_syscall!(syscall_roulette_spin (ctx)
     cap(Fate)
     requires(task_id: task_id)

@@ -1354,6 +1354,22 @@ slibc as an rlib with the feature off, and `userland/userland.ld` discards
 
 `just boot-live` and `just boot-log` boot `builddir/slop.iso` with `BOOT_CMDLINE` as its command line — `root=initramfs` unless it says otherwise — plus `boot.debug=on` under `DEBUG=1` and `roulette=skip` under `ROULETTE=0`; `VIDEO=0` makes `just boot` and `just boot-live` serial-only.
 
+**The Wheel of Fate is a program; the kernel only keeps the score.**
+`roulette` picks the fate and hands `/bin/roulette` a token, and
+`roulette_result` takes the token back and, for an even fate under
+`BOOT_FLAG_FATE_REBOOT`, restarts the machine. Everything between is the
+program's, and none of it can change the outcome: `slopos-fate-core`,
+host-tested under `just test-host`, lands the fate in a pocket of its parity,
+times the spin by the clock rather than by frames drawn — a slow machine shows
+fewer frames of the same seven seconds, never a longer spin — and paints each
+frame into a memfd the size of the screen, rewriting only what turns (the band
+of pockets, the pegs, the numbers and the flapper) over a pixmap of what does
+not. `/bin/roulette` presents each frame's damage with `fb_flip` from the
+virtcon seat and sleeps between frames; a present refused for longer than a
+GPU takes over one frame is the kernel log on screen, and the spin stands still
+until ESC dismisses it, since `fb_flip` ends ESC's hold on the log only for the
+compositor's seat. The kernel draws nothing: `roulette_draw` answers `ENOSYS`.
+
 **Every disk goes through the block layer.** `drivers/src/block` is what a
 block driver registers its disks with: their Linux names (`vda` in virtio
 probe order, `nvme<C>n<N>` for namespace `N` of the `C`-th NVMe controller,

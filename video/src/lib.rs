@@ -2,7 +2,6 @@
 #![forbid(unsafe_code)]
 
 use slopos_abi::FramebufferData;
-use slopos_abi::video_traits::VideoResult;
 use slopos_kernel_services::syscall_services::scanout::{
     self, InstallCtx, ScanoutId, ScanoutProvider,
 };
@@ -21,17 +20,11 @@ pub mod framebuffer;
 pub mod graphics;
 pub mod kernel_font;
 pub mod panic_screen;
-pub mod roulette_core;
 pub mod splash;
-
-fn video_roulette_draw(fate: u32) -> VideoResult {
-    roulette_core::roulette_draw_kernel(fate)
-}
 
 static VIDEO_SERVICES: VideoServices = VideoServices {
     get_display_info: framebuffer::get_display_info,
     fb_flip: framebuffer::fb_flip_from_shm,
-    roulette_draw: video_roulette_draw,
     hw_cursor_available: video_hw_cursor_available,
     cursor_set_image: video_cursor_set_image,
     cursor_move: video_cursor_move,

@@ -5,6 +5,7 @@ use slopos_abi::damage::DamageRect;
 use slopos_abi::{DisplayInfo, PixelFormat};
 use slopos_kernel_services::syscall_services::scanout::{FlushFn, Present};
 use slopos_mm::hhdm::PhysAddrHhdm;
+use slopos_ostd::seat::{self, SeatId, SeatKind};
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{klog_debug, klog_warn};
 
@@ -270,6 +271,17 @@ pub fn release_compositor_fb() {
 static COMPOSITOR_FB_ACQUIRED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+/// Whether the kernel log came up while a frame was being copied, which then
+/// drew over it: the log repaints on its next tick and the frame counts as
+/// not shown, so its damage stays pending.
+fn log_came_up() -> bool {
+    if !slopos_ostd::fblog::is_active() {
+        return false;
+    }
+    slopos_ostd::fblog::request_repaint();
+    true
+}
+
 /// Copy the compositor's frame at `shm_phys` to the framebuffer — `damage`
 /// alone, or all of it when `damage` is empty — and present it.
 pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize, damage: &[DamageRect]) -> Present {
@@ -281,7 +293,11 @@ pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize, damage: &[DamageRect]) 
 
     if !COMPOSITOR_FB_ACQUIRED.swap(true, core::sync::atomic::Ordering::Relaxed) {
         slopos_drivers::tty::vconsole::compositor_acquire_fb();
-        // Boot is over: ESC stops toggling the log and goes back to userland.
+    }
+    // Boot is over once the desktop presents: ESC stops toggling the log and
+    // goes back to userland. The Wheel of Fate presents from the virtcon seat
+    // before that, and leaves the log to ESC.
+    if seat::held_seat(SeatKind::Screen) == Some(SeatId::CompositorPrimary) {
         slopos_ostd::fblog::notify_desktop_presented();
     }
 
@@ -314,6 +330,9 @@ pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize, damage: &[DamageRect]) 
         let t0 = slopos_ostd::arch::x86_64::tsc::rdtsc();
         slopos_ostd::util::ptr_buf::copy_bytes(dst_ptr, shm_ptr, copy_size);
         crate::blit_census::record(t0, slopos_ostd::arch::x86_64::tsc::rdtsc(), copy_size);
+        if log_came_up() {
+            return Present::Suppressed;
+        }
         return framebuffer_flush(&[]);
     }
 
@@ -332,6 +351,9 @@ pub fn fb_flip_from_shm(shm_phys: PhysAddr, size: usize, damage: &[DamageRect]) 
         }
     }
     crate::blit_census::record(t0, slopos_ostd::arch::x86_64::tsc::rdtsc(), blit_bytes);
+    if log_came_up() {
+        return Present::Suppressed;
+    }
     let flush = framebuffer_flush(damage);
     if any_failed { Present::Failed } else { flush }
 }

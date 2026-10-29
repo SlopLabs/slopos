@@ -32,29 +32,23 @@ pub fn cmd_random(argc: i32, argv: &[&[u8]]) -> i32 {
 }
 
 pub fn cmd_roulette(_argc: i32, _argv: &[&[u8]]) -> i32 {
-    shell_write(b"=== WHEEL OF FATE ===\n");
-    shell_write(b"Spinning...\n");
+    use slopos_fate_core::scene::{verdict, words};
+    use slopos_fate_core::wheel;
 
+    shell_write(format!("{}: {}\n{}\n", words::TITLE, words::RULE, words::SPINNING).as_bytes());
     let spin = roulette::spin();
-    let fate = spin as u32;
-
     thread::sleep(Duration::from_millis(200));
 
-    shell_write(b"Fate number: ");
-    write_u64(fate as u64);
+    let number = wheel::landing(spin as u32).number();
+    let mut line = [0u8; 64];
+    shell_write(verdict(number, &mut line).as_bytes());
     shell_write(NL.as_bytes());
-
-    let is_win = (fate & 1) == 1;
-
-    if is_win {
-        shell_write(b"The Wheel smiles upon you. W +10\n");
-    } else {
-        shell_write(b"The Wheel demands its toll. Rebooting...\n");
+    if !wheel::starts(number) {
+        shell_write(format!("{}\n", words::RESTARTING).as_bytes());
     }
 
-    // On loss the kernel reboots -- this call may not return.
+    // On a loss the kernel restarts the computer: this may not return.
     roulette::result(spin);
-
     0
 }
 

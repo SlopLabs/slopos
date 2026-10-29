@@ -14,8 +14,3 @@ pub fn result(fate_packed: u64) {
         syscall1(SYSCALL_ROULETTE_RESULT, fate_packed);
     }
 }
-
-#[inline(always)]
-pub fn draw(fate: u32) -> i64 {
-    unsafe { syscall1(SYSCALL_ROULETTE_DRAW, fate as u64) as i64 }
-}

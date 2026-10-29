@@ -260,6 +260,16 @@ name = "slopos-fat-core"
 version = "0.1.0"
 
 [[package]]
+name = "slopos-fate-core"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "slopos-abi",
+ "slopos-font",
+ "slopos-theme-core",
+]
+
+[[package]]
 name = "slopos-font"
 version = "0.1.0"
 dependencies = [
@@ -606,6 +616,7 @@ dependencies = [
  "slopos-ext4-core",
  "slopos-extension-core",
  "slopos-fat-core",
+ "slopos-fate-core",
  "slopos-font",
  "slopos-gfx",
  "slopos-http-core",

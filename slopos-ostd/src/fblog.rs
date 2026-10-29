@@ -233,6 +233,12 @@ pub fn take_force_full_present() -> bool {
     FORCE_FULL_PRESENT.swap(false, Ordering::Relaxed)
 }
 
+/// Have the renderer repaint the whole log on its next tick, changed or not:
+/// a present that was already copying when the log came up drew over it.
+pub fn request_repaint() {
+    RENDER_DIRTY.store(true, Ordering::Relaxed);
+}
+
 /// Consume the "an ESC toggle happened, repaint now" request, from the
 /// renderer.
 pub fn take_render_dirty() -> bool {

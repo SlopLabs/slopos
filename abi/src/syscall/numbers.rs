@@ -778,7 +778,9 @@ pub const SYSCALL_ROULETTE: u64 = SYSCALL_PRIVATE_BASE + 30;
 /// spin `token` names.
 pub const SYSCALL_ROULETTE_RESULT: u64 = SYSCALL_PRIVATE_BASE + 31;
 
-/// `roulette_draw(fate: u32)` — draw the wheel for a fate.
+/// `roulette_draw(fate: u32)` — retired: answers `ENOSYS`. `/bin/roulette`
+/// draws the wheel itself and presents it with `fb_flip`; the slot stays so a
+/// base that still calls it boots, without the drawing.
 pub const SYSCALL_ROULETTE_DRAW: u64 = SYSCALL_PRIVATE_BASE + 32;
 
 /// `test_report(status, name: *const u8, name_len, msg: *const u8, msg_len)` —
