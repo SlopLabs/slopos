@@ -55,21 +55,7 @@ pub fn capitalised(text: &str) -> String {
 /// A disk's size in decimal units, as its label gives it: `1 TB`, `34.4 GB`,
 /// `512 MB`.
 pub fn disk_size(bytes: u64) -> String {
-    const UNITS: [&str; 6] = ["bytes", "kB", "MB", "GB", "TB", "PB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 999.5 && unit + 1 < UNITS.len() {
-        value /= 1000.0;
-        unit += 1;
-    }
-    let said = match (unit, value >= 100.0) {
-        (0, _) if bytes == 1 => return "1 byte".into(),
-        (0, _) => format!("{bytes}"),
-        (_, true) => format!("{value:.0}"),
-        (_, false) => format!("{value:.1}"),
-    };
-    let said = said.strip_suffix(".0").unwrap_or(&said);
-    format!("{said} {}", UNITS[unit])
+    format!("{}", slopos_theme_core::words::Decimal(bytes))
 }
 
 /// A size as the installer reads one, in the decimal units it shows sizes

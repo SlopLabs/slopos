@@ -14,7 +14,7 @@ use slopos_abi::input::keycode::{
 use slopos_abi::input::{MODIFIER_ALT, MODIFIER_CTRL};
 use slopos_appkit::Rect;
 use slopos_appkit::traits::Role;
-use slopos_chrome_core::clock::WallTime;
+use slopos_chrome_core::clock::{Hours, WallTime};
 use slopos_chrome_core::gate::{self as model, Asks, Checked, Focus, Target};
 use slopos_chrome_core::key::Key;
 
@@ -51,6 +51,7 @@ pub struct Gate {
     overlay: Overlay,
     screen: Rect,
     minute: Option<i64>,
+    hours: Hours,
     /// What the mechanism privd ran answered, while it runs.
     asking: Option<Receiver<Checked>>,
     /// When a login passed, while that person's desktop starts.
@@ -60,6 +61,13 @@ pub struct Gate {
 }
 
 impl Gate {
+    pub fn set_hours(&mut self, hours: Hours) {
+        if self.hours != hours {
+            self.hours = hours;
+            self.minute = None;
+        }
+    }
+
     pub fn new(kind: Kind) -> Gate {
         let (model, shown) = match kind {
             Kind::Greeter => (model::Gate::login(people()), true),
@@ -71,6 +79,7 @@ impl Gate {
             overlay: Overlay::new(),
             screen: Rect::new(0, 0, 0, 0),
             minute: None,
+            hours: Hours::TwentyFour,
             asking: None,
             started: None,
             ctrl: false,
@@ -105,7 +114,9 @@ impl Gate {
             self.overlay.hide();
             return self.overlay.take_damage();
         }
-        let now = sys_core::realtime_secs().and_then(WallTime::from_unix);
+        let now = sys_core::realtime_secs()
+            .and_then(WallTime::from_unix)
+            .map(|t| t.counted(self.hours));
         let minute = now.map(|t| t.minute());
         if self.overlay.stale() || self.screen != screen || self.minute != minute {
             let role = match self.model.focus() {

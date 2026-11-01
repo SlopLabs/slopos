@@ -755,7 +755,7 @@ fn values_outside_their_grammar_refuse() {
 #[test]
 fn the_shipped_policy_speaks_to_the_person() {
     let policy = Policy::parse(SHIPPED).unwrap();
-    assert_eq!(policy.actions().len(), 34);
+    assert_eq!(policy.actions().len(), 36);
     for action in policy.actions() {
         let name = &action.name;
         assert_eq!(crate::words::describe(&action.describe), Ok(()), "{name}");
@@ -778,7 +778,7 @@ fn the_shipped_policy_speaks_to_the_person() {
         .collect();
     said.sort_unstable();
     said.dedup();
-    assert_eq!(said.len(), 34, "two actions say the same");
+    assert_eq!(said.len(), 36, "two actions say the same");
 }
 
 #[test]
@@ -1103,6 +1103,7 @@ fn the_shipped_policy_reads_a_standard_user_s_requests_as_an_administrator_s_to_
             "org.slopos.power.reboot",
             "org.slopos.boot.reboot",
             "org.slopos.console.keymap",
+            "org.slopos.accounts.list",
         ];
         match action.name.as_str() {
             name if unasked.contains(&name) => assert_eq!(verdict, Verdict::Run, "{name}"),

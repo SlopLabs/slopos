@@ -1,8 +1,8 @@
-//! `/bin/users` — the people the machine knows. Anyone may list them;
+//! `/bin/users` — the people the computer knows. Anyone may list them;
 //! changing them is privd's: `org.slopos.accounts.password` changes the
 //! requester's own password, asking the current one first, and
 //! `org.slopos.accounts.manage` adds, removes and renames people, sets a
-//! person's password and changes who administers the machine, for root, an
+//! person's password and changes who administers the computer, for root, an
 //! administrator, or a person an administrator's password answers for. The
 //! add that makes a second person hands `/usr/local` to the system. Init
 //! runs `users sync` at every boot, holding `Seal`, which writes the user
@@ -13,10 +13,9 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, lchown};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use slopos_abi::fs::{ADMIN_GROUP, OWNERS_RECORD, SESSION_HOME};
+use slopos_abi::fs::{OWNERS_RECORD, SESSION_HOME};
 use slopos_accounts_core::{Accounts, Person};
 use slopos_priv_core::{ENV_ACTION, ENV_UID};
-use slopos_slibc_core::passwd::{BASE_GROUP, Group, lines};
 
 use crate::accounts::{self, Store};
 use crate::privd::{self, Input};
@@ -24,8 +23,8 @@ use crate::root_layout::{self, LOCAL, Owners};
 use crate::secret;
 use crate::syscall::core as sys_core;
 
-const USAGE: &str = "usage: users [list]
-       users add <name> [--admin] [--keep-autologin]
+const USAGE: &str = "usage: users [list [--porcelain]]
+       users add <name> [--admin] [--password] [--adder-password] [--keep-autologin]
        users remove <name> [--home]
        users rename <name> <new name>
        users passwd [<name>]
@@ -36,12 +35,13 @@ const USAGE: &str = "usage: users [list]
 
 const OWN_PASSWORD: &str = "org.slopos.accounts.password";
 const MANAGE: &str = "org.slopos.accounts.manage";
+const LIST: &str = "org.slopos.accounts.list";
 /// What a wrong password costs its typist beside the hash, one at a time,
 /// since privd runs the accounts' mechanisms one after another.
 const WRONG_PASSWORD_DELAY: Duration = Duration::from_secs(2);
 
 enum Request {
-    List,
+    List { porcelain: bool },
     Sync,
     OwnPassword,
     Manage(Change),
@@ -51,6 +51,11 @@ enum Change {
     Add {
         name: String,
         admin: bool,
+        /// Their password, typed twice on standard input.
+        password: bool,
+        /// The adder's own first, typed twice ahead of theirs, which an
+        /// administrator with none sets before adding anyone.
+        adder_password: bool,
         keep_autologin: bool,
     },
     Remove {
@@ -84,14 +89,25 @@ fn parse(args: &[String]) -> Result<Request, String> {
         Ok(seen)
     };
     let change = match words.as_slice() {
-        [] | ["list"] => return Ok(Request::List),
+        [] | ["list"] => return Ok(Request::List { porcelain: false }),
+        ["list", "--porcelain"] => return Ok(Request::List { porcelain: true }),
         ["sync"] => return Ok(Request::Sync),
         ["passwd"] => return Ok(Request::OwnPassword),
         ["add", name, rest @ ..] => {
-            let seen = flags(rest, &["--admin", "--keep-autologin"])?;
+            let seen = flags(
+                rest,
+                &[
+                    "--admin",
+                    "--password",
+                    "--adder-password",
+                    "--keep-autologin",
+                ],
+            )?;
             Change::Add {
                 name: name.to_string(),
                 admin: seen.iter().any(|f| f == "--admin"),
+                password: seen.iter().any(|f| f == "--password"),
+                adder_password: seen.iter().any(|f| f == "--adder-password"),
                 keep_autologin: seen.iter().any(|f| f == "--keep-autologin"),
             }
         }
@@ -124,7 +140,8 @@ fn parse(args: &[String]) -> Result<Request, String> {
 impl Request {
     fn action(&self) -> Option<&'static str> {
         match self {
-            Request::List | Request::Sync => None,
+            Request::List { porcelain: true } => Some(LIST),
+            Request::List { porcelain: false } | Request::Sync => None,
             Request::OwnPassword => Some(OWN_PASSWORD),
             Request::Manage(_) => Some(MANAGE),
         }
@@ -145,8 +162,8 @@ fn administers(accounts: &Accounts, uid: u32) -> Result<(), String> {
     match accounts.by_uid(uid) {
         _ if uid == 0 => Ok(()),
         Some(person) if person.admin => Ok(()),
-        Some(person) => Err(format!("{} does not administer this machine", person.name)),
-        None => Err(format!("uid {uid} is nobody this machine knows")),
+        Some(person) => Err(format!("{} does not administer this computer", person.name)),
+        None => Err(format!("uid {uid} is nobody this computer knows")),
     }
 }
 
@@ -253,16 +270,45 @@ fn typed(accounts: &Accounts, uid: u32, request: &Request) -> Result<Typed, Stri
                 administers(accounts, uid)?;
             }
             match change {
-                Change::Add { .. } => {
+                Change::Add {
+                    name,
+                    password,
+                    adder_password,
+                    ..
+                } => {
                     let adder = accounts
                         .by_uid(uid)
                         .filter(|p| p.admin && p.password.is_none());
+                    // Piped lines follow the arguments, never a record their
+                    // sender may not have seen.
+                    match (adder, *adder_password) {
+                        (None, true) => {
+                            return Err(
+                                "--adder-password: only an administrator with no password sets one here"
+                                    .into(),
+                            );
+                        }
+                        (Some(adder), false) if !crate::syscall::fs::isatty(0) => {
+                            return Err(format!(
+                                "{} has no password and sets one first: give it with --adder-password",
+                                adder.name
+                            ));
+                        }
+                        _ => {}
+                    }
+                    let _quiet = match adder.is_some() || *password {
+                        true => secret::quiet()?,
+                        false => None,
+                    };
                     if let Some(adder) = adder {
                         println!(
-                            "{} has no password, which an administrator of a shared machine needs",
+                            "{} has no password, which an administrator of a shared computer needs",
                             adder.name
                         );
                         typed.adder = Some(new_password(&adder.name)?);
+                    }
+                    if *password {
+                        typed.password = Some(new_password(name)?);
                     }
                 }
                 Change::Password(name) => {
@@ -384,6 +430,7 @@ fn manage(
             name,
             admin,
             keep_autologin,
+            ..
         } => {
             free(accounts, &name)?;
             if let Some(adder) = accounts.by_uid(uid).map(|p| p.name.clone())
@@ -392,6 +439,9 @@ fn manage(
                 accounts.set_password(&adder, typed.adder)?;
             }
             let given = accounts.add(&name, admin)?;
+            if typed.password.is_some() {
+                accounts.set_password(&name, typed.password)?;
+            }
             let person = accounts.person(&name).ok_or("the person just added")?;
             make_home(person)?;
             let home = PathBuf::from(&person.home);
@@ -431,8 +481,8 @@ fn manage(
                 .set_admin(&name, admin)
                 .map_err(|e| format!("{name}: {e}"))?;
             match admin {
-                true => format!("{name} administers this machine"),
-                false => format!("{name} no longer administers this machine"),
+                true => format!("{name} administers this computer"),
+                false => format!("{name} no longer administers this computer"),
             }
         }
         Change::Autologin(name) => {
@@ -463,9 +513,21 @@ fn sync() -> Result<String, String> {
     store.record(&Accounts::one_person())?;
     store.sync()?;
     Ok(
-        "user is this machine's first administrator, with no password, logged in by the desktop"
+        "user is this computer's first administrator, with no password, logged in by the desktop"
             .into(),
     )
+}
+
+/// Every person as [`slopos_accounts_core::listing`] writes them for the
+/// requester, from the record alone.
+fn porcelain() -> Result<String, String> {
+    let viewer = requester()?;
+    match Store::read(Path::new("/")).recorded()? {
+        Some(accounts) => Ok(slopos_accounts_core::listing::render(&accounts, viewer)
+            .trim_end()
+            .to_string()),
+        None => Err("there is no accounts record to list".into()),
+    }
 }
 
 /// Every person, from the record when this process may read it and from the
@@ -495,14 +557,11 @@ fn list() -> Result<String, String> {
             .collect::<Vec<_>>()
             .join("\n"));
     }
-    let group = accounts::database("/etc/group", BASE_GROUP);
-    let admins = lines(&group)
-        .filter_map(Group::parse)
-        .find(|g| g.name == ADMIN_GROUP.as_bytes());
+    let admins = accounts::admins();
     Ok(accounts::people()
         .iter()
         .map(|p| {
-            let admin = admins.as_ref().is_some_and(|g| g.lists(p.name.as_bytes()));
+            let admin = admins.contains(&p.name);
             row(&p.name, p.uid, admin, &p.home)
         })
         .collect::<Vec<_>>()
@@ -519,7 +578,8 @@ fn run(args: &[String]) -> Result<String, String> {
     privd::elevate(request.action(), &privd::own_args(), Input::Terminal);
     secret::claim_terminal();
     match request {
-        Request::List => list(),
+        Request::List { porcelain: true } => porcelain(),
+        Request::List { porcelain: false } => list(),
         Request::Sync => sync(),
         request => change(request),
     }

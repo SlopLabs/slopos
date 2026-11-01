@@ -13,7 +13,7 @@ use crate::iface::{self, AddrOrigin, AddrScope, IfaceAddr, IfaceKind};
 use crate::ingress;
 use crate::neighbor::NEIGHBOR_CACHE;
 use crate::netdev::{DEVICE_REGISTRY, NetDevice};
-use crate::route::{self, ROUTE_TABLE, RouteEntry};
+use crate::route::{self, Added, ROUTE_TABLE, RouteEntry};
 use crate::socket;
 use crate::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_SYN, TcpHeader};
 use crate::tests::env_wait::errno_i32;
@@ -252,13 +252,14 @@ fn arm_addressing(dev: DevIndex) -> Result<(), ScopeError> {
 
     // `ROUTE_TABLE.add` rather than `route::add`: the fixture posts no netmon
     // event on the way in.
-    if !ROUTE_TABLE.add(RouteEntry {
+    if ROUTE_TABLE.add(RouteEntry {
         prefix: Ipv4Addr(TEST_LOCAL_IP).masked(TEST_PREFIX_LEN),
         prefix_len: TEST_PREFIX_LEN,
         gateway: Ipv4Addr::UNSPECIFIED,
         dev,
         metric: 0,
-    }) {
+    }) != Added::New
+    {
         return Err(ScopeError::NoRoute);
     }
 

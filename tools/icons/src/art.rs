@@ -21,6 +21,7 @@ pub enum Art {
     Terminal,
     Installer,
     Sysmon,
+    Settings,
 }
 
 struct Layer(Shape, f32);
@@ -34,6 +35,7 @@ impl Art {
             Art::Terminal => AppTile::Graphite,
             Art::Installer => AppTile::Teal,
             Art::Sysmon => AppTile::Green,
+            Art::Settings => AppTile::Graphite,
         }
     }
 
@@ -104,6 +106,28 @@ impl Art {
                 let area = polygon(&outline).and(rrect(13.0, 17.0, 51.0, 46.0, ROUND));
                 vec![Layer(area, BEHIND), Layer(polyline(&points, WEIGHT), 1.0)]
             }
+            Art::Settings => {
+                const TEETH: usize = 8;
+                let at = |radius: f32, along: f32, across: f32| {
+                    let (sin, cos) = along.sin_cos();
+                    (
+                        32.0 + cos * radius - sin * across,
+                        32.0 + sin * radius + cos * across,
+                    )
+                };
+                let gear = (0..TEETH).fold(circle(32.0, 32.0, 12.5), |gear, k| {
+                    let along = k as f32 * std::f32::consts::TAU / TEETH as f32;
+                    let tooth = polygon(&[
+                        at(10.0, along, 3.5),
+                        at(16.0, along, 3.0),
+                        at(16.0, along, -3.0),
+                        at(10.0, along, -3.5),
+                    ])
+                    .grow(1.0);
+                    gear.union(tooth)
+                });
+                vec![Layer(gear.minus(circle(32.0, 32.0, 5.0)), 1.0)]
+            }
         }
     }
 }
@@ -125,20 +149,21 @@ mod tests {
     const PORTRAIT: (f32, f32, f32, f32) = (17.0, 12.0, 47.0, 52.0);
     const SQUARE: (f32, f32, f32, f32) = (15.0, 15.0, 49.0, 49.0);
 
-    const ALL: [Art; 6] = [
+    const ALL: [Art; 7] = [
         Art::Files,
         Art::Editor,
         Art::ImageViewer,
         Art::Terminal,
         Art::Installer,
         Art::Sysmon,
+        Art::Settings,
     ];
 
     fn keyline(art: Art) -> (f32, f32, f32, f32) {
         match art {
             Art::Files | Art::ImageViewer | Art::Terminal | Art::Sysmon => LANDSCAPE,
             Art::Editor => PORTRAIT,
-            Art::Installer => SQUARE,
+            Art::Installer | Art::Settings => SQUARE,
         }
     }
 

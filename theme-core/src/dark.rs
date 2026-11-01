@@ -1,6 +1,6 @@
 use slopos_abi::draw::Color32;
 
-use super::{Shadow, Theme, Wallpaper};
+use super::{Shadow, Theme};
 
 const SURFACE: Color32 = Color32::rgb(0x23, 0x25, 0x2b);
 const TEXT: Color32 = Color32::rgb(0xe9, 0xeb, 0xef);
@@ -65,11 +65,7 @@ pub(crate) static DARK: Theme = Theme {
     rim_light: Color32::new(0xff, 0xff, 0xff, 0x14),
     rim_dark: Color32::new(0x00, 0x00, 0x00, 0x99),
     glass: Color32::new(0x16, 0x18, 0x1c, 0xd9),
-    wallpaper: Wallpaper {
-        top: Color32::rgb(0x1c, 0x23, 0x33),
-        bottom: Color32::rgb(0x0c, 0x0e, 0x12),
-        light: Color32::new(0x5c, 0x86, 0xd6, 0x48),
-    },
+    wallpaper: super::gradient::GRAPHITE,
     app_tiles: [
         Color32::rgb(0x2f, 0x6e, 0xe6),
         Color32::rgb(0x1a, 0x91, 0x50),

@@ -273,6 +273,15 @@ action org.slopos.accounts.password
   describe "change your password"
   verb     "Change"
 
+action org.slopos.accounts.list
+  program  /bin/users
+  args     list --porcelain
+  caps
+  uid      0
+  allow    root
+  allow    user
+  describe "see who uses this computer and how each of them logs in"
+
 action org.slopos.accounts.manage
   program  /bin/users
   args     add *
@@ -340,7 +349,8 @@ action org.slopos.console.keymap
   allow    user alone
   allow    admin
   allow    paired
-  describe "change the keyboard layout"
+  describe "change the computer's keyboard layout"
+  detail   "The login screen uses it, and so does everyone who hasn't chosen a layout of their own."
   verb     "Change"
 
 action org.slopos.net.toggle
@@ -361,6 +371,23 @@ action org.slopos.net.configure
   allow    root
   allow    admin confirm
   describe "change the network settings"
+  verb     "Change"
+
+action org.slopos.network.settings
+  program  /bin/netctl
+  args     set *
+  args     dns *
+  args     networking *
+  args     forget *
+  args     apply *
+  args     load
+  caps     NetAdmin
+  uid      0
+  exclusive network
+  allow    root
+  allow    admin confirm
+  describe "change the network settings this computer keeps"
+  detail   "They take effect now and every time the computer starts."
   verb     "Change"
 
 action org.slopos.install

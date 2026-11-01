@@ -71,12 +71,14 @@ impl Drop for Quiet {
     }
 }
 
-/// A line typed after `prompt`, which goes to standard error; `None` at the
-/// end of input.
+/// A line typed after `prompt`, which goes to standard error when standard
+/// input is a terminal; `None` at the end of input.
 pub fn read(prompt: &str) -> Result<Option<Secret>, String> {
     let quiet = quiet()?;
-    eprint!("{prompt}");
-    let _ = std::io::stderr().flush();
+    if fs::isatty(0) {
+        eprint!("{prompt}");
+        let _ = std::io::stderr().flush();
+    }
     let mut line = Secret(String::new());
     let read = std::io::stdin().lock().read_line(&mut line.0);
     if quiet.is_some() {

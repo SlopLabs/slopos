@@ -322,10 +322,22 @@ fn an_administrator_sets_a_password_to_add_someone() -> bool {
     if untyped.ok() || uid_of(THIRD).is_some() {
         return fail(format!("added with no password typed: {}", untyped.shown()));
     }
-    let typed = mechanism(
+    let unnamed = mechanism(
         MANAGE,
         uid,
         &["add", THIRD, "--keep-autologin"],
+        "first secret\nfirst secret\n",
+    );
+    if unnamed.ok() || uid_of(THIRD).is_some() {
+        return fail(format!(
+            "lines no argument named were taken as {NAME}'s: {}",
+            unnamed.shown()
+        ));
+    }
+    let typed = mechanism(
+        MANAGE,
+        uid,
+        &["add", THIRD, "--adder-password", "--keep-autologin"],
         "first secret\nfirst secret\n",
     );
     let removed = asked(&["remove", THIRD, "--home"], "");

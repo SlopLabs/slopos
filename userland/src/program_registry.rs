@@ -29,7 +29,7 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
     ProgramSpec {
         name: "users",
         path: "/bin/users",
-        desc: "List the people this machine knows, and add or change them",
+        desc: "List the people this computer knows, and add or change them",
     },
     ProgramSpec {
         name: "priv",
@@ -57,6 +57,11 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         desc: "System Monitor",
     },
     ProgramSpec {
+        name: "settings",
+        path: "/bin/settings",
+        desc: "Settings",
+    },
+    ProgramSpec {
         name: "nmap",
         path: "/bin/nmap",
         desc: "Scan network for hosts",
@@ -65,6 +70,16 @@ const PROGRAM_REGISTRY: &[ProgramSpec] = &[
         name: "ip",
         path: "/bin/ip",
         desc: "Show and configure networking",
+    },
+    ProgramSpec {
+        name: "netctl",
+        path: "/bin/netctl",
+        desc: "Show and change the network settings kept for every start",
+    },
+    ProgramSpec {
+        name: "prefs",
+        path: "/bin/prefs",
+        desc: "Show and change your preferences: background, clock and keyboard",
     },
     ProgramSpec {
         name: "ss",

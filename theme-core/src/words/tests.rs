@@ -88,3 +88,24 @@ fn a_size_says_its_unit_and_one_decimal_at_most() {
         assert_eq!(format!("{}", Bytes(bytes)), said, "{bytes}");
     }
 }
+
+#[test]
+fn a_disk_s_size_is_said_in_decimal_units() {
+    for (bytes, said) in [
+        (1, "1 byte"),
+        (999, "999 bytes"),
+        (1000, "1 kB"),
+        (1_000_204_886_016, "1 TB"),
+        (16 << 30, "17.2 GB"),
+        (512_000_000, "512 MB"),
+        (2_500_000_000, "2.5 GB"),
+        (100 << 20, "105 MB"),
+        (999_600_000_000, "1 TB"),
+        (999_950_000, "1 GB"),
+        (999_400_000, "999 MB"),
+        (99_960_000, "100 MB"),
+        (u64::MAX, "18447 PB"),
+    ] {
+        assert_eq!(format!("{}", Decimal(bytes)), said, "{bytes}");
+    }
+}

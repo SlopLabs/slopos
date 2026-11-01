@@ -196,7 +196,8 @@ fn runs_base(fd: &OwnedFd) -> bool {
 }
 
 /// A person may restart, end and lock their own session, bring the login
-/// screen in front, and their compositor say it locked; anything else is uid
+/// screen in front, have the layout wanted loaded, and their compositor say
+/// it locked; anything else is uid
 /// 0 running a base program's, as privd's `root` principal is: `SO_PEERCRED`
 /// names no capability, and uid 0 alone is no authority. Only a console
 /// login hands init a descriptor.
@@ -216,6 +217,7 @@ fn judge(uid: u32, base: bool, line: &[u8], handed: bool) -> Result<Command, Str
             | Command::Greeter
             | Command::Lock
             | Command::Locked(_)
+            | Command::Keymap
     );
     let allowed = (uid == 0 && base) || (PERSON_UIDS.contains(&uid) && own);
     if !allowed {

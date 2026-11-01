@@ -33,6 +33,7 @@ const APPS: &[(&str, &str)] = &[
     ("/usr/local/bin/editor", "org.slopos.editor"),
     ("/usr/local/bin/file_manager", "org.slopos.files"),
     ("/usr/local/bin/image_viewer", "org.slopos.image-viewer"),
+    ("/bin/settings", "org.slopos.settings"),
     ("/bin/sysmon", "org.slopos.sysmon"),
     ("/bin/terminal", "org.slopos.terminal"),
 ];

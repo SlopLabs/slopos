@@ -1,0 +1,25 @@
+[package]
+name = "slopos-settings-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Settings app's pages as data and views — what each shows, holds and asks the system to do — host-tested apart from the window that runs them"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+doctest = false
+
+[dependencies]
+slopos-abi = { workspace = true }
+slopos-accounts-core = { workspace = true }
+slopos-appkit = { workspace = true }
+slopos-net-core = { workspace = true }
+slopos-settings-core = { workspace = true }
+slopos-theme-core = { workspace = true }
+
+[dev-dependencies]
+slopos-gfx = { workspace = true }

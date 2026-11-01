@@ -8,6 +8,7 @@ macro_rules! log {
 mod confirm;
 pub mod consent;
 pub mod decorations;
+mod desktop_prefs;
 pub mod dock;
 mod frame;
 mod gate;
@@ -70,6 +71,7 @@ struct WindowManager {
 
     input: InputHandler,
     renderer: Renderer,
+    prefs: desktop_prefs::DesktopPrefs,
     hover_registry: HoverRegistry,
     surface_cache: ClientSurfaceCache,
 
@@ -142,13 +144,17 @@ impl WindowManager {
             false => ProtocolBridge::new().map(Box::new),
         };
         let (undone_tx, undone) = std::sync::mpsc::channel();
+        let prefs = desktop_prefs::DesktopPrefs::load(gate.greeter());
+        let mut gate = gate;
+        gate.set_hours(prefs.hours);
         Self {
             windows: [WindowInfo::default(); MAX_WINDOWS],
             window_count: 0,
             prev_windows: [WindowInfo::default(); MAX_WINDOWS],
             prev_window_count: 0,
             input: InputHandler::new(),
-            renderer: Renderer::new(),
+            renderer: Renderer::new(prefs.background.clone()),
+            prefs,
             hover_registry: HoverRegistry::new(),
             surface_cache: ClientSurfaceCache::new(),
             menu_bar: MenuBar::new(),
@@ -954,7 +960,20 @@ impl WindowManager {
         }
         wm.add_overlay_damage(screen);
 
-        let now = sys_core::realtime_secs().and_then(WallTime::from_unix);
+        let changed = wm.prefs.poll();
+        if changed.background {
+            wm.renderer.choose_background(wm.prefs.background.clone());
+            wm.force_full_redraw = true;
+        }
+        if changed.hours {
+            wm.gate.set_hours(wm.prefs.hours);
+        }
+        if wm.renderer.settle_background() {
+            wm.force_full_redraw = true;
+        }
+        let now = sys_core::realtime_secs()
+            .and_then(WallTime::from_unix)
+            .map(|t| t.counted(wm.prefs.hours));
         let mut bar_damage = [DamageRect::invalid(); menu_bar::MAX_BAR_DAMAGE];
         let bar_damage_count = wm
             .menu_bar

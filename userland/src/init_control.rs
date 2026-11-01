@@ -286,6 +286,9 @@ pub enum Command {
     Lock,
     /// The desktop's compositor says it locked or unlocked.
     Locked(bool),
+    /// Load the keyboard layout wanted now: the person's whose desktop is in
+    /// front, else the computer's.
+    Keymap,
 }
 
 impl Command {
@@ -301,6 +304,7 @@ impl Command {
             Command::Lock => "lock",
             Command::Locked(true) => "locked",
             Command::Locked(false) => "unlocked",
+            Command::Keymap => "keymap",
         }
     }
 
@@ -339,6 +343,7 @@ impl Command {
             ["lock"] => Command::Lock,
             ["locked"] => Command::Locked(true),
             ["unlocked"] => Command::Locked(false),
+            ["keymap"] => Command::Keymap,
             _ => return None,
         })
     }

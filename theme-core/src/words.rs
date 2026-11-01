@@ -131,5 +131,34 @@ impl core::fmt::Display for Bytes {
     }
 }
 
+/// A size in decimal units as a disk's label gives one: `1 byte`,
+/// `999 bytes`, `17.2 GB`, `512 MB`, `1 TB`; one decimal below 100 of a
+/// unit and none above.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Decimal(pub u64);
+
+impl core::fmt::Display for Decimal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        const UNITS: [&str; 5] = ["kB", "MB", "GB", "TB", "PB"];
+        match self.0 {
+            1 => return f.write_str("1 byte"),
+            n if n < 1000 => return write!(f, "{n} bytes"),
+            _ => {}
+        }
+        let bytes = u128::from(self.0);
+        let (mut per, mut unit) = (1000u128, 0);
+        while bytes * 2 >= 1999 * per && unit + 1 < UNITS.len() {
+            per *= 1000;
+            unit += 1;
+        }
+        let tenths = (bytes * 10 + per / 2) / per;
+        match (bytes >= 100 * per, tenths % 10) {
+            (true, _) => write!(f, "{} {}", (bytes + per / 2) / per, UNITS[unit]),
+            (false, 0) => write!(f, "{} {}", tenths / 10, UNITS[unit]),
+            (false, tenth) => write!(f, "{}.{tenth} {}", tenths / 10, UNITS[unit]),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

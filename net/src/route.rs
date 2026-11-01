@@ -21,6 +21,18 @@ use crate::netmon::netmon_post;
 
 const MAX_ROUTES_PER_BUCKET: usize = 16;
 
+/// What [`RouteTable::add`] or [`RouteTable::insert`] did with a route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Added {
+    New,
+    /// It replaced the route of the same prefix on the same device.
+    Updated,
+    /// A route of the same prefix on the same device is there, and stays.
+    Exists,
+    /// Its bucket was full, so the table holds nothing of it.
+    Full,
+}
+
 #[derive(Clone, Copy)]
 pub struct RouteEntry {
     pub prefix: Ipv4Addr,
@@ -146,15 +158,25 @@ impl RouteTable {
 
     /// Add a route, replacing any existing route with the same
     /// `(prefix, prefix_len, dev)`.
-    ///
-    /// Returns `true` if a new route was added, `false` if an existing route
-    /// was updated.
-    pub fn add(&self, entry: RouteEntry) -> bool {
+    pub fn add(&self, entry: RouteEntry) -> Added {
+        self.put(entry, true)
+    }
+
+    /// Add a route unless one of the same `(prefix, prefix_len, dev)` is
+    /// there, as Linux's `ip route add` does.
+    pub fn insert(&self, entry: RouteEntry) -> Added {
+        self.put(entry, false)
+    }
+
+    fn put(&self, entry: RouteEntry, replace: bool) -> Added {
         let mut inner = self.inner.lock();
         let bucket = &mut inner.buckets[entry.prefix_len as usize];
 
         for existing in bucket.iter_mut() {
             if existing.prefix == entry.prefix && existing.dev == entry.dev {
+                if !replace {
+                    return Added::Exists;
+                }
                 klog_debug!(
                     "route: updated {:?} (metric {} -> {})",
                     entry,
@@ -173,7 +195,7 @@ impl RouteTable {
                         j -= 1;
                     }
                 }
-                return false;
+                return Added::Updated;
             }
         }
 
@@ -183,29 +205,37 @@ impl RouteTable {
                 entry.prefix_len,
                 bucket.len(),
             );
-            return false;
+            return Added::Full;
         }
 
         klog_debug!("route: added {:?}", entry);
 
         let pos = bucket.partition_point(|r| r.metric <= entry.metric);
         let _ = bucket.insert(pos, entry);
-        true
+        Added::New
     }
 
-    /// Remove a route matching `(prefix, prefix_len)` — the first match if
-    /// several differ by device or metric.
-    pub fn remove(&self, prefix: Ipv4Addr, prefix_len: u8) -> bool {
-        self.remove_entry(prefix, prefix_len).is_some()
+    /// Remove a route matching `(prefix, prefix_len)` on `dev`, or on any
+    /// device for `None` — the first match if several differ by device or
+    /// metric.
+    pub fn remove(&self, prefix: Ipv4Addr, prefix_len: u8, dev: Option<DevIndex>) -> bool {
+        self.remove_entry(prefix, prefix_len, dev).is_some()
     }
 
     /// [`remove`](Self::remove), handing back the entry that went so a caller
     /// can describe it after this returns — the removal record needs the
     /// gateway and metric, which are gone once the route is.
-    pub fn remove_entry(&self, prefix: Ipv4Addr, prefix_len: u8) -> Option<RouteEntry> {
+    pub fn remove_entry(
+        &self,
+        prefix: Ipv4Addr,
+        prefix_len: u8,
+        dev: Option<DevIndex>,
+    ) -> Option<RouteEntry> {
         let mut inner = self.inner.lock();
         let bucket = &mut inner.buckets[prefix_len as usize];
-        let pos = bucket.iter().position(|r| r.prefix == prefix)?;
+        let pos = bucket
+            .iter()
+            .position(|r| r.prefix == prefix && dev.is_none_or(|dev| r.dev == dev))?;
         let removed = bucket.remove(pos);
         klog_debug!("route: removed {:?}", removed);
         Some(removed)
@@ -335,27 +365,34 @@ fn post_route_event(kind: u16, entry: &RouteEntry, origin: u8) {
     );
 }
 
-/// Install a route in the kernel table and announce it.
-///
-/// Only a genuinely new route is announced: [`RouteTable::add`] reports `false`
-/// for an in-place update and for a full bucket alike, and announcing an add
-/// the table refused would mislead a renderer.
-pub fn add(entry: RouteEntry) -> bool {
+/// Install a route in the kernel table, in place of one of its prefix on its
+/// device, and announce it when it is new.
+pub fn add(entry: RouteEntry) -> Added {
     add_with_origin(entry, implied_origin(&entry))
 }
 
 /// [`add`], with the origin stated by a caller that knows it.
-pub fn add_with_origin(entry: RouteEntry, origin: u8) -> bool {
-    let added = ROUTE_TABLE.add(entry);
-    if added {
-        post_route_event(NET_EV_ROUTE_ADDED, &entry, origin);
+pub fn add_with_origin(entry: RouteEntry, origin: u8) -> Added {
+    announced(ROUTE_TABLE.add(entry), &entry, origin)
+}
+
+/// Install a route in the kernel table unless one of its prefix is on its
+/// device, and announce it.
+pub fn insert(entry: RouteEntry) -> Added {
+    announced(ROUTE_TABLE.insert(entry), &entry, implied_origin(&entry))
+}
+
+fn announced(added: Added, entry: &RouteEntry, origin: u8) -> Added {
+    if added == Added::New {
+        post_route_event(NET_EV_ROUTE_ADDED, entry, origin);
     }
     added
 }
 
-/// Withdraw one route from the kernel table and announce it.
-pub fn remove(prefix: Ipv4Addr, prefix_len: u8) -> bool {
-    match ROUTE_TABLE.remove_entry(prefix, prefix_len) {
+/// Withdraw one route from the kernel table, on `dev` alone when it names
+/// one, and announce it.
+pub fn remove(prefix: Ipv4Addr, prefix_len: u8, dev: Option<DevIndex>) -> bool {
+    match ROUTE_TABLE.remove_entry(prefix, prefix_len, dev) {
         Some(entry) => {
             post_route_event(NET_EV_ROUTE_REMOVED, &entry, implied_origin(&entry));
             true

@@ -1,0 +1,65 @@
+# slopos layout v1 — US English (Colemak)
+#
+#   key <KEY_NAME> <caps:yes|no> <base> <shift> <altgr> <shift+altgr>
+# Colemak (XKB us(colemak)): seventeen letters move from QWERTY so the most
+# typed sit under the home row, and Z X C V stay for undo, cut, copy and
+# paste. Caps Lock keeps its usual meaning here.
+
+name = colemak
+title = US English (Colemak)
+
+# Number row.
+key KEY_GRAVE  no  grave  asciitilde   -  -
+key KEY_1      no  1      exclam       -  -
+key KEY_2      no  2      at           -  -
+key KEY_3      no  3      numbersign   -  -
+key KEY_4      no  4      dollar       -  -
+key KEY_5      no  5      percent      -  -
+key KEY_6      no  6      asciicircum  -  -
+key KEY_7      no  7      ampersand    -  -
+key KEY_8      no  8      asterisk     -  -
+key KEY_9      no  9      parenleft    -  -
+key KEY_0      no  0      parenright   -  -
+key KEY_MINUS  no  minus  underscore   -  -
+key KEY_EQUAL  no  equal  plus         -  -
+
+# Top row.
+key KEY_Q  yes  q  Q  -  -
+key KEY_W  yes  w  W  -  -
+key KEY_E  yes  f  F  -  -
+key KEY_R  yes  p  P  -  -
+key KEY_T  yes  g  G  -  -
+key KEY_Y  yes  j  J  -  -
+key KEY_U  yes  l  L  -  -
+key KEY_I  yes  u  U  -  -
+key KEY_O  yes  y  Y  -  -
+key KEY_P  no   semicolon  colon  -  -
+key KEY_LEFTBRACE   no  bracketleft   braceleft   -  -
+key KEY_RIGHTBRACE  no  bracketright  braceright  -  -
+key KEY_BACKSLASH   no  backslash     bar         -  -
+
+# Home row.
+key KEY_A  yes  a  A  -  -
+key KEY_S  yes  r  R  -  -
+key KEY_D  yes  s  S  -  -
+key KEY_F  yes  t  T  -  -
+key KEY_G  yes  d  D  -  -
+key KEY_H  yes  h  H  -  -
+key KEY_J  yes  n  N  -  -
+key KEY_K  yes  e  E  -  -
+key KEY_L  yes  i  I  -  -
+key KEY_SEMICOLON   yes  o           O       -  -
+key KEY_APOSTROPHE  no   apostrophe  dquote  -  -
+
+# Bottom row.
+key KEY_NONUS_BACKSLASH  no  backslash  bar  -  -
+key KEY_Z  yes  z  Z  -  -
+key KEY_X  yes  x  X  -  -
+key KEY_C  yes  c  C  -  -
+key KEY_V  yes  v  V  -  -
+key KEY_B  yes  b  B  -  -
+key KEY_N  yes  k  K  -  -
+key KEY_M  yes  m  M  -  -
+key KEY_COMMA  no  comma   less      -  -
+key KEY_DOT    no  period  greater   -  -
+key KEY_SLASH  no  slash   question  -  -

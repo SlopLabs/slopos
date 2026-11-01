@@ -47,7 +47,7 @@ pub struct Accounts {
 pub const NO_SUCH_PERSON: &str = "no such person";
 pub const BAD_NAME: &str = "a name is a lowercase letter, then lowercase letters, digits, - and _, at most 32 bytes, and none the base holds";
 pub const NAME_HELD: &str = "the name is held already";
-pub const LAST_ADMIN: &str = "the machine's last administrator stays one";
+pub const LAST_ADMIN: &str = "the computer's last administrator stays one";
 pub const DESKTOP_PERSON: &str = "the first person keeps the workspace at /src, so they stay";
 pub const NO_UIDS: &str = "every uid for people has been given";
 pub const TOO_MANY_ADMINS: &str = "the administrators' names would not fit the admin group's line";

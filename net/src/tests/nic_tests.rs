@@ -262,7 +262,7 @@ impl Lan {
             dev,
             metric: 0,
         });
-        if !add_address(dev, LAN_LOCAL) || !routed {
+        if !add_address(dev, LAN_LOCAL) || routed != route::Added::New {
             return None;
         }
         let _ = NEIGHBOR_CACHE.insert_or_update(

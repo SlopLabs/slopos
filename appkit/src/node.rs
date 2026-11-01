@@ -5,8 +5,8 @@ use std::sync::Arc;
 use slopos_theme_core::{EdgeInsets, Icon, Surface, TextRole, Tone};
 
 use super::components::{
-    Button, ButtonRow, Disclosure, Graph, GraphKey, IconButton, List, PropertyList, Tag, Text,
-    WindowSpec,
+    Button, ButtonRow, Disclosure, Gallery, Graph, GraphKey, IconButton, List, PropertyList, Tag,
+    Text, WindowSpec,
 };
 use super::constraints::{CrossAxisAlignment, ImageScale, Length, Orientation, Rect};
 use super::event::{Key, Modifiers};
@@ -70,6 +70,23 @@ pub struct ImageData {
 }
 
 impl ImageData {
+    /// A gallery's thumbnail of `gradient`, shaded as the desktop shades it.
+    pub fn thumbnail_of(gradient: &slopos_theme_core::Gradient) -> Self {
+        use crate::widgets::gallery::{THUMBNAIL_HEIGHT, THUMBNAIL_WIDTH};
+        let shading = gradient
+            .wallpaper
+            .shading(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT);
+        let pixels: Vec<Color32> = (0..THUMBNAIL_HEIGHT)
+            .flat_map(|y| (0..THUMBNAIL_WIDTH).map(move |x| (x, y)))
+            .map(|(x, y)| shading.at(x, y))
+            .collect();
+        Self {
+            width: THUMBNAIL_WIDTH as u32,
+            height: THUMBNAIL_HEIGHT as u32,
+            pixels: Arc::from(pixels.into_boxed_slice()),
+        }
+    }
+
     pub fn new(width: u32, height: u32, pixels: Vec<Color32>) -> Option<Self> {
         let required = (width as usize).checked_mul(height as usize)?;
         if width == 0 || height == 0 || pixels.len() < required {
@@ -165,6 +182,7 @@ pub enum Node<M> {
     ButtonRow(ButtonRow<M>),
     PropertyList(PropertyList<M>),
     List(List<M>),
+    Gallery(Gallery<M>),
     Tag(Tag),
     Disclosure(Box<Disclosure<M>>),
 

@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! name = <short-name>
-//! title = <free text>                       # ignored (metadata)
+//! title = <free text>                       # what a person reads, read by title()
 //! deadkeys = acute grave circumflex ...      # declares dead keys, in index order
 //! key <KEY_NAME> <yes|no> <base> <shift> <altgr> <shift+altgr>
 //! compose dead:<name> <base> -> <result>
@@ -28,6 +28,17 @@ const MAX_SRC: usize = 64 * 1024;
 
 /// Max whitespace-separated tokens we read from one line.
 const MAX_TOKENS: usize = 12;
+
+/// The `title` a layout file gives itself, which [`parse`] passes over: what
+/// a person is shown for the layout, as `Swiss German (QWERTZ)`.
+pub fn title(src: &[u8]) -> Option<&str> {
+    src.split(|&b| b == b'\n').find_map(|raw| {
+        let line = raw.split(|&b| b == b'#').next()?.trim_ascii();
+        let rest = line.strip_prefix(b"title")?.trim_ascii_start();
+        let value = rest.strip_prefix(b"=")?.trim_ascii();
+        core::str::from_utf8(value).ok().filter(|t| !t.is_empty())
+    })
+}
 
 /// Parse `src` into `out`, which is cleared first and [`validate`]d on success;
 /// on failure `out` is left partially written.
@@ -473,6 +484,20 @@ compose dead:acute  space -> acute
     }
 
     #[test]
+    fn a_layout_s_title_is_read_apart_from_its_keys() {
+        assert_eq!(
+            title(b"name = us\ntitle = US English (QWERTY)\n"),
+            Some("US English (QWERTY)")
+        );
+        assert_eq!(
+            title(b"# title = not this\ntitle=Dvorak  # nor this\n"),
+            Some("Dvorak")
+        );
+        assert_eq!(title(b"name = us\ntitles = no\n"), None);
+        assert_eq!(title(b"title =\n"), None);
+    }
+
+    #[test]
     fn parses_name_and_validates() {
         let t = parse_ok(DE_CH);
         assert_eq!(t.name_str(), "de_CH");
@@ -574,6 +599,90 @@ compose dead:acute  space -> acute
 
     const US_FILE: &str = include_str!("../../assets/keymaps/us.layout");
     const DE_CH_FILE: &str = include_str!("../../assets/keymaps/de_CH.layout");
+
+    /// Each shipped layout by its file, its name, and what three of its keys
+    /// type: unshifted, shifted and with AltGr.
+    const SHIPPED: [(&str, &str, [(u16, Mods, char); 3]); 5] = [
+        (
+            include_str!("../../assets/keymaps/gb.layout"),
+            "gb",
+            [
+                (KEY_3, SHIFT, '£'),
+                (KEY_APOSTROPHE, SHIFT, '@'),
+                (KEY_4, ALTGR, '€'),
+            ],
+        ),
+        (
+            include_str!("../../assets/keymaps/de.layout"),
+            "de",
+            [
+                (KEY_Y, NONE, 'z'),
+                (KEY_SEMICOLON, NONE, 'ö'),
+                (KEY_Q, ALTGR, '@'),
+            ],
+        ),
+        (
+            include_str!("../../assets/keymaps/fr.layout"),
+            "fr",
+            [(KEY_Q, NONE, 'a'), (KEY_1, SHIFT, '1'), (KEY_0, ALTGR, '@')],
+        ),
+        (
+            include_str!("../../assets/keymaps/dvorak.layout"),
+            "dvorak",
+            [
+                (KEY_S, NONE, 'o'),
+                (KEY_Q, SHIFT, '"'),
+                (KEY_SLASH, NONE, 'z'),
+            ],
+        ),
+        (
+            include_str!("../../assets/keymaps/colemak.layout"),
+            "colemak",
+            [(KEY_K, NONE, 'e'), (KEY_P, SHIFT, ':'), (KEY_N, SHIFT, 'K')],
+        ),
+    ];
+
+    #[test]
+    fn every_shipped_layout_types_what_its_keycaps_say() {
+        for (file, name, keys) in SHIPPED {
+            let t = parse_ok(file.as_bytes());
+            assert_eq!(t.name_str(), name);
+            assert!(title(file.as_bytes()).is_some(), "{name} has no title");
+            for (key, mods, want) in keys {
+                let mut d = DeadKeyState::new();
+                assert_eq!(
+                    resolve(&t, key, mods, NUM_ON, &mut d).outcome,
+                    KeyOutcome::Text(want as u32),
+                    "{name}: key {key:#x}"
+                );
+            }
+            let mut d = DeadKeyState::new();
+            for key in [KEY_A, KEY_Z, KEY_1, KEY_SLASH, KEY_COMMA, KEY_DOT] {
+                assert!(
+                    matches!(
+                        resolve(&t, key, NONE, NUM_ON, &mut d).outcome,
+                        KeyOutcome::Text(_)
+                    ),
+                    "{name}: key {key:#x} types nothing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_dead_key_of_a_shipped_layout_composes() {
+        let t = parse_ok(SHIPPED[1].0.as_bytes());
+        let mut d = DeadKeyState::new();
+        let first = resolve(&t, KEY_EQUAL, NONE, NUM_ON, &mut d).outcome;
+        assert!(
+            !matches!(first, KeyOutcome::Text(_)),
+            "´ waits for a letter"
+        );
+        assert_eq!(
+            resolve(&t, KEY_E, NONE, NUM_ON, &mut d).outcome,
+            KeyOutcome::Text('é' as u32)
+        );
+    }
 
     #[test]
     fn shipped_us_layout_matches_builtin() {

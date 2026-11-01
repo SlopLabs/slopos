@@ -9,6 +9,7 @@ extern crate std;
 
 pub mod contrast;
 mod dark;
+mod gradient;
 mod icon;
 mod insets;
 mod text;
@@ -16,6 +17,7 @@ pub mod words;
 
 use slopos_abi::draw::Color32;
 
+pub use gradient::{GRADIENT_IDS, GRADIENTS, Gradient, Shading};
 pub use icon::Icon;
 pub use insets::EdgeInsets;
 pub use text::{TextRole, TextStyle, Weight};

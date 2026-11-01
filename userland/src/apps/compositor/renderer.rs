@@ -2,12 +2,13 @@ use slopos_abi::draw::Color32;
 use slopos_abi::pixel::PixelFormat;
 use slopos_gfx::image::{BitmapRef, ImageFit, ImageSampling};
 use slopos_gfx::rounded::Rounded;
-use slopos_image::{DecodeOptions, Image};
+use slopos_image::Image;
 use slopos_protocol::{
     CURSOR_SHAPE_E_RESIZE, CURSOR_SHAPE_GRAB, CURSOR_SHAPE_GRABBING, CURSOR_SHAPE_N_RESIZE,
     CURSOR_SHAPE_NE_RESIZE, CURSOR_SHAPE_NW_RESIZE, CURSOR_SHAPE_S_RESIZE, CURSOR_SHAPE_SE_RESIZE,
     CURSOR_SHAPE_SW_RESIZE, CURSOR_SHAPE_TEXT, CURSOR_SHAPE_W_RESIZE,
 };
+use slopos_settings_core::background::{self, Scale};
 use slopos_theme_core::with_alpha;
 
 use crate::gfx::{self, DamageRect, DrawBuffer};
@@ -15,6 +16,7 @@ use crate::gfx::{self, DamageRect, DrawBuffer};
 use super::confirm::Asking;
 use super::consent::Consent;
 use super::decorations;
+use super::desktop_prefs::Chosen;
 use super::dock::Dock;
 use super::frame::{self, draw_window_shadow, paint_in_outline, uncornered};
 use super::gate::Gate;
@@ -25,16 +27,21 @@ use super::surface_cache::ClientSurfaceCache;
 use super::window_info::{WindowInfo, WindowState};
 use slopos_chrome_core::status::BAR_HEIGHT;
 
-const WALLPAPER_VAR: &str = "SLOPOS_WALLPAPER";
-
 /// virtio-gpu's cursor size.
 pub const HW_CURSOR_DIM: u32 = 64;
 /// Where every shape's click-point is drawn in the overlay.
 pub const HW_CURSOR_HOTSPOT: u32 = 20;
 
+/// The desktop's background at the screen's size: the chosen gradient, and
+/// over it the picture as its fit places it. A picture is decoded on a thread
+/// of its own, the last one shown kept until the next is ready.
 struct WallpaperCache {
-    load_attempted: bool,
+    chosen: Chosen,
     source: Option<Image>,
+    /// The picture `source` is, or was meant to be.
+    shown: Option<String>,
+    wanted: Option<String>,
+    decoding: Option<(String, std::thread::JoinHandle<Option<Image>>)>,
     cache: Vec<u8>,
     cache_width: u32,
     cache_height: u32,
@@ -44,17 +51,86 @@ struct WallpaperCache {
 }
 
 impl WallpaperCache {
-    fn new() -> Self {
-        Self {
-            load_attempted: false,
+    fn new(chosen: Chosen) -> Self {
+        let mut cache = Self {
+            chosen: chosen.clone(),
             source: None,
+            shown: None,
+            wanted: None,
+            decoding: None,
             cache: Vec::new(),
             cache_width: 0,
             cache_height: 0,
             cache_pitch: 0,
             cache_bpp: 0,
             cache_format: PixelFormat::Argb8888,
+        };
+        cache.decode(chosen.picture);
+        cache
+    }
+
+    /// Show `picture` once it is decoded, the one shown until then; one
+    /// decode at a time, the last asked for next.
+    fn decode(&mut self, picture: Option<String>) {
+        if picture.is_none() {
+            self.source = None;
+            self.shown = None;
+            self.cache.clear();
         }
+        self.wanted = picture;
+        self.start_decoding();
+    }
+
+    fn start_decoding(&mut self) {
+        let Some(path) = self.wanted.clone() else {
+            return;
+        };
+        if self.decoding.is_some() || self.shown.as_ref() == Some(&path) {
+            return;
+        }
+        let decoding = path.clone();
+        let spawned = std::thread::Builder::new()
+            .name("wallpaper".into())
+            .spawn(move || crate::regular_file::picture(&decoding));
+        match spawned {
+            Ok(handle) => self.decoding = Some((path, handle)),
+            Err(_) => log!("no thread to decode the background picture {path}"),
+        }
+    }
+
+    fn choose(&mut self, chosen: Chosen) {
+        if chosen.picture != self.chosen.picture {
+            self.decode(chosen.picture.clone());
+        }
+        self.chosen = chosen;
+        self.cache.clear();
+    }
+
+    /// Whether the picture asked for finished decoding, which the next
+    /// frame shows.
+    fn settle(&mut self) -> bool {
+        if !self
+            .decoding
+            .as_ref()
+            .is_some_and(|(_, handle)| handle.is_finished())
+        {
+            return false;
+        }
+        let Some((path, handle)) = self.decoding.take() else {
+            return false;
+        };
+        let image = handle.join().ok().flatten();
+        let wanted = self.wanted.as_ref() == Some(&path);
+        if wanted {
+            if image.is_none() {
+                log!("the background picture {path} cannot be shown");
+            }
+            self.source = image;
+            self.shown = Some(path);
+            self.cache.clear();
+        }
+        self.start_decoding();
+        wanted
     }
 
     fn draw(&mut self, buf: &mut DrawBuffer, clip: &DamageRect) -> bool {
@@ -84,13 +160,6 @@ impl WallpaperCache {
     }
 
     fn ensure_cache(&mut self, buf: &mut DrawBuffer) -> bool {
-        if !self.load_attempted {
-            self.load_attempted = true;
-            self.source = std::env::var(WALLPAPER_VAR)
-                .ok()
-                .and_then(|path| slopos_image::load_path(path, DecodeOptions::default()).ok());
-        }
-
         let width = buf.width();
         let height = buf.height();
         let pitch = buf.pitch();
@@ -119,22 +188,38 @@ impl WallpaperCache {
             return false;
         };
         cache_buf.set_pixel_format(format);
-        super::wallpaper::paint(&mut cache_buf, &slopos_theme_core::current().wallpaper);
+        super::wallpaper::paint(&mut cache_buf, &self.chosen.gradient.wallpaper);
         if let Some(source) = self.source.as_ref()
             && let Some(bitmap) = BitmapRef::new(source.width, source.height, &source.pixels)
         {
-            let (w, h) = (width as i32, height as i32);
-            let sampling = ImageSampling::for_resize(source.width, source.height, w, h);
-            slopos_gfx::image::draw_image(
-                &mut cache_buf,
-                bitmap,
-                0,
-                0,
-                w,
-                h,
-                ImageFit::Cover,
-                sampling,
-            );
+            let picture = (source.width, source.height);
+            for place in background::places(self.chosen.fit, picture, (width, height)) {
+                let (fit, sampling) = match place.scale {
+                    Scale::Cover => (ImageFit::Cover, ImageSampling::Bilinear),
+                    Scale::Contain => (ImageFit::Contain, ImageSampling::Bilinear),
+                    Scale::Stretch => (ImageFit::Stretch, ImageSampling::Bilinear),
+                    Scale::Actual => (ImageFit::Actual, ImageSampling::Nearest),
+                };
+                let sampling = match fit {
+                    ImageFit::Actual => sampling,
+                    _ => ImageSampling::for_resize(
+                        source.width,
+                        source.height,
+                        place.width,
+                        place.height,
+                    ),
+                };
+                slopos_gfx::image::draw_image(
+                    &mut cache_buf,
+                    bitmap,
+                    place.x,
+                    place.y,
+                    place.width,
+                    place.height,
+                    fit,
+                    sampling,
+                );
+            }
         }
 
         self.cache_width = width;
@@ -146,10 +231,6 @@ impl WallpaperCache {
     }
 }
 
-fn desktop() -> Color32 {
-    slopos_theme_core::current().wallpaper.bottom
-}
-
 pub struct Renderer {
     pub output_width: u32,
     pub output_height: u32,
@@ -159,14 +240,24 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new() -> Self {
+    pub fn new(background: Chosen) -> Self {
         Self {
             output_width: 0,
             output_height: 0,
             output_bytes_pp: 4,
             output_pitch: 0,
-            wallpaper: WallpaperCache::new(),
+            wallpaper: WallpaperCache::new(background),
         }
+    }
+
+    pub fn choose_background(&mut self, background: Chosen) {
+        self.wallpaper.choose(background);
+    }
+
+    /// Whether the background changed since the last frame, which then
+    /// paints it whole.
+    pub fn settle_background(&mut self) -> bool {
+        self.wallpaper.settle()
     }
 
     pub fn set_output_info(&mut self, width: u32, height: u32, bytes_pp: u8, pitch: usize) {
@@ -335,7 +426,7 @@ impl Renderer {
                 rect.y0,
                 rect.x1 - rect.x0 + 1,
                 rect.y1 - rect.y0 + 1,
-                desktop(),
+                self.wallpaper.chosen.gradient.wallpaper.bottom,
             );
         }
     }

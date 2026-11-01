@@ -10,10 +10,19 @@ use slopos_slibc_core::strftime::{DAY, MON};
 pub const ZONE: &str = "The clock shows UTC";
 pub const DATE_UNKNOWN: &str = "The date isn't known yet";
 
+/// How a person's clock counts the hours, as their preferences say.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Hours {
+    #[default]
+    TwentyFour,
+    Twelve,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct WallTime {
     tm: Tm,
     minute: i64,
+    hours: Hours,
 }
 
 impl WallTime {
@@ -22,12 +31,31 @@ impl WallTime {
         Some(WallTime {
             tm: utc_from_epoch(secs)?,
             minute: secs.div_euclid(60),
+            hours: Hours::TwentyFour,
         })
     }
 
-    /// `14:05`.
+    pub fn counted(self, hours: Hours) -> WallTime {
+        WallTime { hours, ..self }
+    }
+
+    pub fn hours(&self) -> Hours {
+        self.hours
+    }
+
+    /// `14:05`, or `2:05 PM` on a twelve-hour clock.
     pub fn time(&self) -> String {
-        format!("{:02}:{:02}", self.tm.hour, self.tm.min)
+        match self.hours {
+            Hours::TwentyFour => format!("{:02}:{:02}", self.tm.hour, self.tm.min),
+            Hours::Twelve => {
+                let half = if self.tm.hour < 12 { "AM" } else { "PM" };
+                let hour = match self.tm.hour % 12 {
+                    0 => 12,
+                    hour => hour,
+                };
+                format!("{hour}:{:02} {half}", self.tm.min)
+            }
+        }
     }
 
     /// `Tuesday 27 October`.
@@ -100,6 +128,26 @@ mod tests {
             assert_eq!(shown.len(), 5, "{shown}");
             assert_eq!(&shown[2..3], ":");
         }
+    }
+
+    #[test]
+    fn a_twelve_hour_clock_runs_from_twelve_to_eleven() {
+        let day = PHASE_START - PHASE_START % 86_400;
+        let at = |hour: i64, min: i64| {
+            WallTime::from_unix(day + hour * 3600 + min * 60)
+                .unwrap()
+                .counted(Hours::Twelve)
+                .time()
+        };
+        assert_eq!(at(0, 0), "12:00 AM");
+        assert_eq!(at(9, 5), "9:05 AM");
+        assert_eq!(at(12, 30), "12:30 PM");
+        assert_eq!(at(23, 59), "11:59 PM");
+        assert_eq!(
+            WallTime::from_unix(day + 13 * 3600).unwrap().time(),
+            "13:00",
+            "twenty-four hours unless counted otherwise"
+        );
     }
 
     #[test]

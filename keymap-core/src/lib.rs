@@ -31,7 +31,7 @@ pub use layout_table::{
 pub use modifiers::{
     LOCK_CAPS, LOCK_NUM, LOCK_SCROLL, ModSnapshot, ModTracker, mods_locks_from_raw,
 };
-pub use parse::parse;
+pub use parse::{parse, title};
 pub use repeat::{KeyRepeat, REPEAT_DELAY_MS, REPEAT_INTERVAL_MS};
 pub use scancode_set1::{DecodeStep, Set1Decoder};
 

@@ -7,6 +7,7 @@
 
 mod control;
 mod extensions;
+mod network;
 mod reexec;
 mod service;
 mod session;
@@ -200,9 +201,7 @@ fn boot() -> ! {
     let consent = Consent::make();
     let tests = tests_enabled();
     let mut init = Init::serving(consent, extensions::Carried::default(), !tests);
-    // Must precede anything interactive; a missing or invalid /etc/keymap
-    // leaves the built-in US default active.
-    crate::keymap::apply_persisted_layout();
+    let _ = init.follow_keymap(false);
 
     if tests {
         init.tests = start(&TESTS, None, &[]);
@@ -268,6 +267,14 @@ impl Consent {
     }
 }
 
+/// Whose keyboard layout init last loaded: the session in front then, or
+/// nobody's while no session was.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LayoutLoaded {
+    Never,
+    For(Option<u32>),
+}
+
 struct Init {
     consent: Option<Consent>,
     control: Option<Control>,
@@ -299,6 +306,8 @@ struct Init {
     wanted_after_reexec: bool,
     tests: Option<Child>,
     units: Units,
+    adapters: network::Adapters,
+    keymap_loaded: LayoutLoaded,
 }
 
 #[derive(Clone, Copy)]
@@ -333,6 +342,8 @@ impl Init {
             wanted_after_reexec: false,
             tests: None,
             units: Units::load(sys_core::get_time_ms(), false, units),
+            adapters: network::Adapters::start(sys_core::get_time_ms()),
+            keymap_loaded: LayoutLoaded::Never,
         };
         // Waited for before anything that may ask it. An image that could not
         // resume adopts what its predecessor started.
@@ -453,6 +464,8 @@ impl Init {
             sessions,
             tests: state.tests.map(Child::watch),
             units: Units::load(now, session_runs, units),
+            adapters: network::Adapters::start(sys_core::get_time_ms()),
+            keymap_loaded: LayoutLoaded::Never,
         };
         if let Some(reply) = state.reply {
             answer(adopt(reply), "ok");
@@ -511,6 +524,9 @@ impl Init {
                 self.request(request, now);
             }
             self.sessions.step_front(now);
+            let _ = self.follow_keymap(false);
+            self.adapters.read();
+            self.adapters.step(now);
             self.publish();
             fds.clear();
             let timeout = self.wait_set(&mut fds, now);
@@ -550,6 +566,17 @@ impl Init {
                 .map(poll),
         );
         fds.extend(self.sessions.poll_fds().map(poll));
+        fds.extend(self.adapters.fd().map(|fd| UserPollFd {
+            fd,
+            events: POLLIN,
+            revents: 0,
+        }));
+        fds.extend(
+            self.adapters
+                .child()
+                .and_then(|child| child.exited.as_ref())
+                .map(poll),
+        );
         fds.extend(self.privd_ready.iter().map(poll));
         fds.extend(self.idle_consent_ends().map(poll));
         self.units.poll_fds(fds);
@@ -604,11 +631,15 @@ impl Init {
         .into_iter()
         .flatten()
         .chain(self.retired.iter_mut())
+        .chain(self.adapters.child_mut())
         .chain(self.sessions.children_mut())
         .chain(self.units.children_mut())
     }
 
     fn exited(&mut self, pid: u32, status: WaitStatus, now: u64) {
+        if self.adapters.exited(pid) {
+            return;
+        }
         if let Some(at) = self.retired.iter().position(|child| child.pid == pid) {
             self.retired.swap_remove(at);
         } else if self.privd.is(pid) {
@@ -937,6 +968,10 @@ impl Init {
                 }
                 _ => refuse(reply, "the requester's session is no desktop"),
             },
+            Command::Keymap => match self.follow_keymap(true) {
+                Ok(()) => answer(reply, "ok"),
+                Err(why) => refuse(reply, why),
+            },
             Command::Locked(locked) => match own {
                 Some((tag, Class::User))
                     if self.leads(tag, pid) && !locked && self.sessions.front != Some(tag) =>
@@ -950,6 +985,25 @@ impl Init {
                 _ => refuse(reply, "only a desktop's compositor says it locked"),
             },
         }
+    }
+
+    /// Load the keyboard layout wanted for the session in front: its
+    /// person's own on their desktop, the computer's otherwise. Only when
+    /// the front changed, unless asked.
+    fn follow_keymap(&mut self, asked: bool) -> Result<(), &'static str> {
+        let front = self.sessions.front;
+        if !asked && self.keymap_loaded == LayoutLoaded::For(front) {
+            return Ok(());
+        }
+        self.keymap_loaded = LayoutLoaded::For(front);
+        let person = front
+            .and_then(|tag| self.sessions.find(tag))
+            .filter(|s| s.class == Class::User)
+            .map(|s| (s.who.home.clone(), s.who.uid));
+        let wanted = person.as_ref().map(|(home, uid)| (home.as_str(), *uid));
+        crate::keymap::follow(wanted).inspect_err(|why| {
+            eprintln!("init: the keyboard layout: {why}");
+        })
     }
 
     /// Whether `uid` may not leave another request waiting on an end.

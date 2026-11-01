@@ -140,6 +140,31 @@ pub fn draw_image_clipped<T: Canvas>(
     Some(clipped)
 }
 
+/// Fill `out`, a `width`×`height` picture, with `bitmap` covering it as
+/// [`ImageFit::Cover`] places it, alpha kept: `false`, touching nothing, when
+/// `out` is not that size.
+pub fn cover_into(bitmap: BitmapRef<'_>, width: u32, height: u32, out: &mut [Color32]) -> bool {
+    let (Ok(w), Ok(h)) = (i32::try_from(width), i32::try_from(height)) else {
+        return false;
+    };
+    if out.len() as u64 != u64::from(width) * u64::from(height) {
+        return false;
+    }
+    let Some(dst) = placement(bitmap.width, bitmap.height, 0, 0, w, h, ImageFit::Cover) else {
+        return false;
+    };
+    let sampling = ImageSampling::for_resize(bitmap.width, bitmap.height, dst.width, dst.height);
+    for (i, pixel) in out.iter_mut().enumerate() {
+        let rel_x = (i % width as usize) as i32 - dst.x;
+        let rel_y = (i / width as usize) as i32 - dst.y;
+        *pixel = match sampling {
+            ImageSampling::Nearest => sample_nearest(bitmap, rel_x, rel_y, dst.width, dst.height),
+            ImageSampling::Bilinear => sample_bilinear(bitmap, rel_x, rel_y, dst.width, dst.height),
+        };
+    }
+    true
+}
+
 /// Largest whole-number magnification of `src` that fits in `max`, never
 /// below 1:1. Pixel art only survives integer scaling; pairing this with
 /// [`ImageFit::Stretch`] and [`ImageSampling::Nearest`] makes the blit's
@@ -426,6 +451,28 @@ mod sampling_tests {
             ImageSampling::for_resize(100, 100, 50, 200),
             ImageSampling::Bilinear
         );
+    }
+}
+
+#[cfg(test)]
+mod cover_tests {
+    use super::*;
+
+    #[test]
+    fn a_cover_fills_the_picture_and_keeps_the_middle() {
+        let wide = [
+            Color32::rgb(255, 0, 0),
+            Color32::rgb(0, 255, 0),
+            Color32::rgb(0, 0, 255),
+            Color32::rgb(255, 0, 0),
+            Color32::rgb(0, 255, 0),
+            Color32::rgb(0, 0, 255),
+        ];
+        let bitmap = BitmapRef::new(3, 2, &wide).unwrap();
+        let mut out = [Color32::TRANSPARENT; 2];
+        assert!(cover_into(bitmap, 1, 2, &mut out));
+        assert_eq!(out, [Color32::rgb(0, 255, 0); 2]);
+        assert!(!cover_into(bitmap, 2, 2, &mut out));
     }
 }
 

@@ -47,6 +47,11 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             )
             .active(list.active),
         ),
+        Node::Gallery(gallery) => Box::new(widgets::gallery::GalleryWidget::new(
+            gallery.tiles.clone(),
+            gallery.selected,
+            erase_with(gallery.on_select),
+        )),
         Node::Tag(tag) => Box::new(widgets::tag::TagWidget::new(tag.text.clone(), tag.tone)),
         Node::Disclosure(d) => Box::new(widgets::disclosure::DisclosureWidget::new(
             d.title.clone(),

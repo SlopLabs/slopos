@@ -16,7 +16,7 @@ use slopos_abi::signal::{SIGHUP, SIGINT, SIGKILL, SIGQUIT, SIGTERM, UserSigactio
 use slopos_abi::syscall::{O_CLOEXEC, POLLHUP, POLLIN, UserPollFd};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_accounts_core::{Accounts, Entry};
-use slopos_slibc_core::passwd::{BASE_PASSWD, Passwd, lines};
+use slopos_slibc_core::passwd::{BASE_GROUP, BASE_PASSWD, Group, Passwd, lines};
 use slopos_tls_core::ct::wipe;
 
 use crate::apps::extctl::store::Store as Extensions;
@@ -294,6 +294,20 @@ pub fn people() -> Vec<Listed> {
             home: String::from_utf8_lossy(p.dir).into_owned(),
         })
         .collect()
+}
+
+/// The names `/etc/group` lists as administrators.
+pub fn admins() -> Vec<String> {
+    let group = database("/etc/group", BASE_GROUP);
+    lines(&group)
+        .filter_map(Group::parse)
+        .find(|g| g.name == slopos_abi::fs::ADMIN_GROUP.as_bytes())
+        .map(|g| {
+            g.members()
+                .map(|m| String::from_utf8_lossy(m).into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A database's bytes while it is sealed, and its stand-in otherwise.

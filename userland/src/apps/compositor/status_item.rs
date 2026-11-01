@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 
 use slopos_abi::draw::Color32;
 use slopos_appkit::text::{icons, ui};
-use slopos_chrome_core::clock::WallTime;
+use slopos_chrome_core::clock::{Hours, WallTime};
 use slopos_chrome_core::indicator::indicator_for;
 use slopos_chrome_core::netstate::NetIndicatorState;
 use slopos_chrome_core::status::{BAR_HEIGHT, StatusItemSpec, StatusKind, StatusSlot};
@@ -33,13 +33,18 @@ pub fn hover_rect(slot: &StatusSlot) -> DamageRect {
     }
 }
 
-/// `HH:MM` at its widest, so the clock and the items beside it hold still
-/// as the minutes pass.
-fn widest_time() -> i32 {
-    static WIDEST: OnceLock<i32> = OnceLock::new();
-    *WIDEST.get_or_init(|| {
+/// The time at its widest on a clock counting `hours`, so the clock and the
+/// items beside it hold still as the minutes pass.
+fn widest_time(hours: Hours) -> i32 {
+    static WIDEST: [OnceLock<i32>; 2] = [OnceLock::new(), OnceLock::new()];
+    let at = match hours {
+        Hours::TwentyFour => 0,
+        Hours::Twelve => 1,
+    };
+    *WIDEST[at].get_or_init(|| {
         (0..24 * 60)
-            .map(|minute| ui::width(&format!("{:02}:{:02}", minute / 60, minute % 60), ROLE))
+            .filter_map(|minute| WallTime::from_unix(minute * 60))
+            .map(|time| ui::width(&time.counted(hours).time(), ROLE))
             .max()
             .unwrap_or(0)
     })
@@ -80,7 +85,7 @@ impl StatusItems {
         self.clock = text;
         let spec = &mut self.specs[CLOCK_INDEX];
         spec.present = !self.clock.is_empty();
-        spec.width = widest_time();
+        spec.width = widest_time(now.map_or(Hours::TwentyFour, WallTime::hours));
         spec.revision = spec.revision.wrapping_add(1);
     }
 

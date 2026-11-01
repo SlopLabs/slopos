@@ -1,0 +1,86 @@
+# slopos layout v1 — French (AZERTY)
+#
+#   key <KEY_NAME> <caps:yes|no> <base> <shift> <altgr> <shift+altgr>
+# As on a French keyboard (XKB fr): A and Q, Z and W swap places, M sits
+# where the US semicolon is, the number row types its symbols unshifted and
+# its digits with Shift, AltGr+E types € and ^ and ¨ are dead keys.
+
+name = fr
+title = French (AZERTY)
+deadkeys = circumflex diaeresis
+
+# Number row.
+key KEY_GRAVE  no  ²            -           -             -
+key KEY_1      no  ampersand    1           -             -
+key KEY_2      no  eacute       2           asciitilde    -
+key KEY_3      no  dquote       3           numbersign    -
+key KEY_4      no  apostrophe   4           braceleft     -
+key KEY_5      no  parenleft    5           bracketleft   -
+key KEY_6      no  minus        6           bar           -
+key KEY_7      no  egrave       7           grave         -
+key KEY_8      no  underscore   8           backslash     -
+key KEY_9      no  ccedilla     9           asciicircum   -
+key KEY_0      no  agrave       0           at            -
+key KEY_MINUS  no  parenright   degree      bracketright  -
+key KEY_EQUAL  no  equal        plus        braceright    -
+
+# Top row — AZERTY.
+key KEY_Q  yes  a  A  -     -
+key KEY_W  yes  z  Z  -     -
+key KEY_E  yes  e  E  euro  -
+key KEY_R  yes  r  R  -     -
+key KEY_T  yes  t  T  -     -
+key KEY_Y  yes  y  Y  -     -
+key KEY_U  yes  u  U  -     -
+key KEY_I  yes  i  I  -     -
+key KEY_O  yes  o  O  -     -
+key KEY_P  yes  p  P  -     -
+key KEY_LEFTBRACE   no  dead:circumflex  dead:diaeresis  -         -
+key KEY_RIGHTBRACE  no  dollar           sterling        currency  -
+
+# Home row.
+key KEY_A  yes  q  Q  -  -
+key KEY_S  yes  s  S  -  -
+key KEY_D  yes  d  D  -  -
+key KEY_F  yes  f  F  -  -
+key KEY_G  yes  g  G  -  -
+key KEY_H  yes  h  H  -  -
+key KEY_J  yes  j  J  -  -
+key KEY_K  yes  k  K  -  -
+key KEY_L  yes  l  L  -  -
+key KEY_SEMICOLON   yes  m         M        -  -
+key KEY_APOSTROPHE  no   ugrave    percent  -  -
+key KEY_NONUS_HASH  no   asterisk  micro    -  -
+key KEY_BACKSLASH   no   asterisk  micro    -  -
+
+# Bottom row.
+key KEY_NONUS_BACKSLASH  no  less  greater  -  -
+key KEY_Z  yes  w  W  -  -
+key KEY_X  yes  x  X  -  -
+key KEY_C  yes  c  C  -  -
+key KEY_V  yes  v  V  -  -
+key KEY_B  yes  b  B  -  -
+key KEY_N  yes  n  N  -  -
+key KEY_M      no  comma      question  -  -
+key KEY_COMMA  no  semicolon  period    -  -
+key KEY_DOT    no  colon      slash     -  -
+key KEY_SLASH  no  exclam     section   -  -
+
+# Dead-key compositions. A dead key then space yields the bare accent.
+compose dead:circumflex  a -> acircumflex
+compose dead:circumflex  e -> ecircumflex
+compose dead:circumflex  i -> icircumflex
+compose dead:circumflex  o -> ocircumflex
+compose dead:circumflex  u -> ucircumflex
+compose dead:circumflex  A -> Acircumflex
+compose dead:circumflex  E -> Ecircumflex
+
+compose dead:diaeresis  a -> adiaeresis
+compose dead:diaeresis  e -> ediaeresis
+compose dead:diaeresis  i -> idiaeresis
+compose dead:diaeresis  o -> odiaeresis
+compose dead:diaeresis  u -> udiaeresis
+compose dead:diaeresis  y -> ydiaeresis
+compose dead:diaeresis  A -> Adiaeresis
+compose dead:diaeresis  O -> Odiaeresis
+compose dead:diaeresis  U -> Udiaeresis

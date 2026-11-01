@@ -4,8 +4,8 @@
 use slopos_theme_core::{EdgeInsets, Icon, Surface, TextRole, Tone, inset, space, stroke};
 
 use crate::constraints::{CrossAxisAlignment, Length, Rect, Size, TextAlignment};
-use crate::node::{ButtonStyle, Node};
-use crate::widgets::line_edit::LineEditInput;
+use crate::node::{ButtonStyle, ImageData, Node};
+use crate::widgets::line_edit::{LineEditInput, LineInput};
 
 /// How a text that is wider than its box goes on.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -709,6 +709,66 @@ impl<M> From<GraphKey> for Node<M> {
     }
 }
 
+/// One picture of a [`Gallery`]: a thumbnail, which the gallery covers
+/// its box with, and what it is called beneath it.
+#[derive(Clone, Debug)]
+pub struct GalleryTile {
+    pub image: Option<ImageData>,
+    pub label: String,
+    /// Shown as a tooltip: where the picture is, as a path.
+    pub description: String,
+}
+
+impl GalleryTile {
+    pub fn new(label: impl Into<String>, image: Option<ImageData>) -> Self {
+        Self {
+            image,
+            label: label.into(),
+            description: String::new(),
+        }
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
+        self
+    }
+}
+
+/// Pictures in rows, one of which may be chosen, as a desktop's backgrounds
+/// are: one tab stop, the arrows moving the choice, which is marked by an
+/// outline and a check.
+pub struct Gallery<M> {
+    pub tiles: Vec<GalleryTile>,
+    pub selected: Option<usize>,
+    pub on_select: Option<fn(usize) -> M>,
+}
+
+impl<M> Gallery<M> {
+    pub fn new(tiles: Vec<GalleryTile>) -> Self {
+        Self {
+            tiles,
+            selected: None,
+            on_select: None,
+        }
+    }
+
+    pub fn selected(mut self, selected: Option<usize>) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    pub fn on_select(mut self, f: fn(usize) -> M) -> Self {
+        self.on_select = Some(f);
+        self
+    }
+}
+
+impl<M> From<Gallery<M>> for Node<M> {
+    fn from(gallery: Gallery<M>) -> Self {
+        Node::Gallery(gallery)
+    }
+}
+
 /// Rows in sections, one of which may be chosen: one tab stop, the arrows
 /// moving the choice past rows that cannot be chosen.
 pub struct List<M> {
@@ -792,6 +852,13 @@ impl<M> Sidebar<M> {
 
     pub fn wide(mut self) -> Self {
         self.width = SIDEBAR_WIDE_WIDTH;
+        self
+    }
+
+    /// `field` above the places, which narrows them as the person types.
+    pub fn search(mut self, field: SearchField<M>) -> Self {
+        let content = std::mem::replace(&mut self.content, Node::Empty);
+        self.content = column(space::SM, vec![field.into(), content]);
         self
     }
 }
@@ -1047,6 +1114,67 @@ impl<M> From<SearchField<M>> for Node<M> {
             suffix: field.count,
             invalid: field.invalid,
             tab_stop: field.tab_stop,
+            on_input: field.on_input,
+        }
+    }
+}
+
+/// A field for a password: a bullet for each character typed, never the
+/// characters, which the app keeps in the [`LineInput`] the field is built
+/// from.
+pub struct PasswordField<M> {
+    pub chars: usize,
+    pub caret: usize,
+    pub focused: bool,
+    pub placeholder: String,
+    pub invalid: bool,
+    pub on_input: Option<fn(LineEditInput) -> M>,
+}
+
+impl<M> PasswordField<M> {
+    pub fn new(typed: &LineInput) -> Self {
+        Self {
+            chars: typed.len(),
+            caret: typed.caret,
+            focused: false,
+            placeholder: String::from("Password"),
+            invalid: false,
+            on_input: None,
+        }
+    }
+
+    pub fn focused(mut self, focused: bool) -> Self {
+        self.focused = focused;
+        self
+    }
+
+    pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = placeholder.into();
+        self
+    }
+
+    pub fn invalid(mut self, invalid: bool) -> Self {
+        self.invalid = invalid;
+        self
+    }
+
+    pub fn on_input(mut self, f: fn(LineEditInput) -> M) -> Self {
+        self.on_input = Some(f);
+        self
+    }
+}
+
+impl<M> From<PasswordField<M>> for Node<M> {
+    fn from(field: PasswordField<M>) -> Self {
+        Node::LineEdit {
+            text: crate::text::ui::BULLET.repeat(field.chars),
+            placeholder: field.placeholder,
+            caret: field.caret.min(field.chars),
+            focused: field.focused,
+            icon: Some(Icon::KeyRound),
+            suffix: String::new(),
+            invalid: field.invalid,
+            tab_stop: true,
             on_input: field.on_input,
         }
     }

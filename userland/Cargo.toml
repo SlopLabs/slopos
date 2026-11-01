@@ -62,6 +62,18 @@ name = "users"
 path = "src/bin/users.rs"
 
 [[bin]]
+name = "netctl"
+path = "src/bin/netctl.rs"
+
+[[bin]]
+name = "prefs"
+path = "src/bin/prefs.rs"
+
+[[bin]]
+name = "settings"
+path = "src/bin/settings.rs"
+
+[[bin]]
 name = "authcheck"
 path = "src/bin/authcheck.rs"
 
@@ -332,6 +344,10 @@ name = "ip_e2e_test"
 path = "src/bin/tests/ip_e2e_test.rs"
 
 [[bin]]
+name = "settings_test"
+path = "src/bin/tests/settings_test.rs"
+
+[[bin]]
 name = "rlimit_test"
 path = "src/bin/tests/rlimit_test.rs"
 
@@ -480,6 +496,8 @@ slopos-image = { workspace = true }
 slopos-protocol = { workspace = true }
 slopos-priv-core = { workspace = true }
 slopos-remote-core = { workspace = true }
+slopos-settings-app = { workspace = true }
+slopos-settings-core = { workspace = true }
 slopos-installer-core = { workspace = true }
 slopos-rt = { workspace = true }
 slopos-shell-core = { workspace = true }

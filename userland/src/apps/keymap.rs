@@ -1,100 +1,152 @@
-//! `keymap` — query, list, and switch the keyboard layout.
+//! `keymap` — see and choose keyboard layouts.
 //!
 //! ```text
-//! keymap           print the active layout name
-//! keymap list      list available layouts (active marked `*`)
-//! keymap <name>    load /usr/share/keymaps/<name>.layout and switch to it
+//! keymap                        the layout in use
+//! keymap show                   the layout in use, yours and the computer's
+//! keymap list [--titles]        the installed layouts, the one in use marked `*`
+//! keymap set NAME               your layout, while your desktop is in front
+//! keymap set --computer NAME    the computer's: the login screen's, the
+//!                               console's and everyone's who chose none
+//! keymap reset                  use the computer's layout again
+//! keymap NAME                   the same as `keymap set --computer NAME`
 //! ```
 //!
-//! A program rather than a shell builtin because installing a layout needs
-//! `ConsoleConfig` and writing `/etc/keymap` uid 0's ownership: switching is
-//! privd's `org.slopos.console.keymap`.
-//!
-//! The file → parse → serialise → upload pipeline lives in [`crate::keymap`],
-//! shared with the boot-time applier in init; the kernel never parses layout
-//! text.
+//! Your own layout is your preference, `keyboard.layout`, which nothing
+//! needs permission to change. The computer's is kept in `/etc/keymap` by
+//! privd's `org.slopos.console.keymap`. Either way init loads the layout
+//! wanted, as the desktop in front changes and when asked to.
 
-use std::fs;
+use crate::init_control::{self, Command as InitCommand};
+use crate::keymap::{Own, computer_layout, current_name, exists, keep_computer_layout, layouts};
 
-use crate::keymap::{KEYMAP_DIR, PERSIST_PATH, current_name, load_layout_by_name};
+const ACTION: &str = "org.slopos.console.keymap";
 
-pub fn keymap_user_main() -> i32 {
-    let args: Vec<String> = std::env::args().collect();
-    match args.get(1).map(String::as_str) {
-        None => print_current(),
-        Some("list" | "-l" | "--list") => list_layouts(),
-        Some(name) if !name.is_empty() => {
+const USAGE: &str = "usage: keymap [show]
+       keymap list [--titles]
+       keymap set [--computer] NAME
+       keymap reset";
+
+enum Command {
+    Current,
+    Show,
+    List { titles: bool },
+    Own(Option<String>),
+    Computer(String),
+}
+
+fn parse(args: &[String]) -> Result<Command, String> {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    Ok(match words.as_slice() {
+        [] => Command::Current,
+        ["show"] => Command::Show,
+        ["list" | "-l" | "--list"] => Command::List { titles: false },
+        ["list", "--titles"] => Command::List { titles: true },
+        ["set", name] if !name.starts_with('-') => Command::Own(Some(name.to_string())),
+        ["set", "--computer", name] => Command::Computer(name.to_string()),
+        ["reset"] => Command::Own(None),
+        [name] if !name.starts_with('-') && !name.is_empty() => Command::Computer(name.to_string()),
+        _ => return Err(USAGE.to_string()),
+    })
+}
+
+fn titled(name: &str) -> String {
+    match layouts().into_iter().find(|l| l.name == name) {
+        Some(layout) => format!("{name}  {}", layout.title),
+        None => name.to_string(),
+    }
+}
+
+fn have_init_follow() -> Result<(), String> {
+    init_control::ask(InitCommand::Keymap)
+        .map_err(|why| format!("kept, but it takes effect at the next login: {why}"))
+}
+
+fn run(command: Command) -> Result<String, String> {
+    match command {
+        Command::Current => current_name().ok_or_else(|| "cannot query the active layout".into()),
+        Command::Show => {
+            let in_use = current_name().unwrap_or_default();
+            let own = crate::prefs::read_own()
+                .keyboard_layout()
+                .map_or_else(|| String::from("none, so the computer's"), titled);
+            let computer = computer_layout()
+                .map_or_else(|| titled(crate::keymap::BUILT_IN), |name| titled(&name));
+            Ok(format!(
+                "in use      {}\nyours       {own}\ncomputer's  {computer}",
+                titled(&in_use)
+            ))
+        }
+        Command::List { titles } => {
+            let active = current_name();
+            let mut layouts = layouts();
+            if !titles {
+                layouts.sort_by(|a, b| a.name.cmp(&b.name));
+            }
+            let lines: Vec<String> = layouts
+                .into_iter()
+                .map(|layout| {
+                    let mark = if active.as_deref() == Some(layout.name.as_str()) {
+                        '*'
+                    } else {
+                        ' '
+                    };
+                    match titles {
+                        true => format!("{mark} {:<8} {}", layout.name, layout.title),
+                        false => format!("{mark} {}", layout.name),
+                    }
+                })
+                .collect();
+            Ok(lines.join("\n"))
+        }
+        Command::Own(_) if std::env::var_os(slopos_priv_core::ENV_ACTION).is_some() => {
+            Err("privd keeps only the computer's layout; set yours as yourself".into())
+        }
+        Command::Own(name) => {
+            crate::keymap::keep_own(name.as_deref()).map_err(|why| match why {
+                Own::NoSuchLayout => format!(
+                    "no such layout: '{}'; `keymap list` names them",
+                    name.as_deref().unwrap_or_default()
+                ),
+                Own::NoHome => String::from("you have no home to keep a layout in"),
+                Own::NotKept(why) => why,
+                Own::NotLoaded(why) => {
+                    format!("kept, but it takes effect at the next login: {why}")
+                }
+            })?;
+            Ok(match name {
+                Some(name) => format!("keymap: yours is {name}"),
+                None => String::from("keymap: yours is the computer's"),
+            })
+        }
+        Command::Computer(name) => {
+            if !exists(&name) {
+                return Err(format!(
+                    "no such layout: '{name}'; `keymap list` names them"
+                ));
+            }
             crate::privd::elevate(
-                Some("org.slopos.console.keymap"),
+                Some(ACTION),
                 &crate::privd::own_args(),
                 crate::privd::Input::Closed,
             );
-            set_layout(name)
-        }
-        Some(_) => {
-            eprintln!("keymap: invalid layout name");
-            1
+            keep_computer_layout(&name)?;
+            have_init_follow()?;
+            Ok(format!("keymap: the computer's is {name}"))
         }
     }
 }
 
-fn print_current() -> i32 {
-    match current_name() {
-        Some(name) => {
-            println!("{name}");
+pub fn keymap_user_main() -> i32 {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let said = parse(&args).and_then(run);
+    match said {
+        Ok(said) => {
+            println!("{said}");
             0
         }
-        None => {
-            eprintln!("keymap: cannot query active layout");
+        Err(why) => {
+            eprintln!("keymap: {why}");
             1
         }
     }
-}
-
-fn list_layouts() -> i32 {
-    let active = current_name();
-    let entries = match fs::read_dir(KEYMAP_DIR) {
-        Ok(e) => e,
-        Err(_) => {
-            eprintln!("keymap: cannot read {KEYMAP_DIR}");
-            return 1;
-        }
-    };
-    let mut names: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
-        let fname = entry.file_name();
-        if let Some(stem) = fname.to_string_lossy().strip_suffix(".layout") {
-            names.push(String::from(stem));
-        }
-    }
-    names.sort();
-    for name in &names {
-        if active.as_deref() == Some(name.as_str()) {
-            println!("* {name}");
-        } else {
-            println!("  {name}");
-        }
-    }
-    0
-}
-
-fn set_layout(name: &str) -> i32 {
-    if let Err(cause) = load_layout_by_name(name) {
-        eprintln!("keymap: {cause}: '{name}'");
-        return 1;
-    }
-
-    // Durable rather than `fs::write`: the choice is applied by `init` on the
-    // *next* boot, so a copy that only reached the flusher's queue is lost by
-    // exactly the reboot it was meant to survive. Best-effort still — a
-    // read-only root refuses it and init re-applies whatever is on disk.
-    let _ = persist_choice(name);
-
-    println!("keymap: switched to {name}");
-    0
-}
-
-fn persist_choice(name: &str) -> Result<(), ()> {
-    let path = std::ffi::CString::new(PERSIST_PATH).map_err(|_| ())?;
-    crate::syscall::fs::write_durable(&path, name.as_bytes()).map_err(|_| ())
 }

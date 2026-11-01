@@ -5,10 +5,11 @@
 
 use slopos_abi::Errno;
 use slopos_abi::net::{
-    NET_ADDROP_ADD, NET_ADDROP_DEL, NET_IFINDEX_GLOBAL, NET_IFOP_CONN_RECHECK, NET_IFOP_DEL_NEIGH,
-    NET_IFOP_DHCP_RELEASE, NET_IFOP_DHCP_RENEW, NET_IFOP_DHCP_START, NET_IFOP_DHCP_STOP,
-    NET_IFOP_FLUSH_ADDRS, NET_IFOP_FLUSH_NEIGH, NET_IFOP_SET_ADMIN_UP, NET_IFOP_SET_ENABLED,
-    NET_IFOP_SET_MTU, NET_ROUTEOP_ADD, NET_ROUTEOP_DEL, UserAddrReq, UserResolverReq, UserRouteReq,
+    NET_ADDROP_ADD, NET_ADDROP_DEL, NET_IFINDEX_GLOBAL, NET_IFINDEX_NONE, NET_IFOP_CONN_RECHECK,
+    NET_IFOP_DEL_NEIGH, NET_IFOP_DHCP_RELEASE, NET_IFOP_DHCP_RENEW, NET_IFOP_DHCP_START,
+    NET_IFOP_DHCP_STOP, NET_IFOP_FLUSH_ADDRS, NET_IFOP_FLUSH_NEIGH, NET_IFOP_SET_ADMIN_UP,
+    NET_IFOP_SET_ENABLED, NET_IFOP_SET_MTU, NET_ROUTEOP_ADD, NET_ROUTEOP_DEL, UserAddrReq,
+    UserResolverReq, UserRouteReq,
 };
 use slopos_net::iface::{AddrOrigin, AddrScope, IfaceAddr, IfaceError};
 use slopos_net::neighbor::NEIGHBOR_CACHE;
@@ -183,8 +184,17 @@ define_syscall!(syscall_net_addr_ctl
             Ok(())
         }
         NET_ADDROP_DEL => {
+            let dev = device_for(req.ifindex)?;
             iface::del_addr(req.ifindex, addr, req.prefix_len).map_err(iface_errno)?;
-            route::remove(addr.masked(req.prefix_len), req.prefix_len);
+            let prefix = addr.masked(req.prefix_len);
+            let still_covered = iface::get(req.ifindex).is_some_and(|info| {
+                info.addrs()
+                    .iter()
+                    .any(|a| a.prefix_len == req.prefix_len && a.network() == prefix)
+            });
+            if !still_covered {
+                route::remove(prefix, req.prefix_len, Some(dev));
+            }
             Ok(())
         }
         _ => Err(Errno::EINVAL),
@@ -221,10 +231,18 @@ define_syscall!(syscall_net_route_ctl
                 dev,
                 metric: req.metric,
             };
-            if route::add(entry) { Ok(()) } else { Err(Errno::ENOSPC) }
+            match route::insert(entry) {
+                route::Added::New | route::Added::Updated => Ok(()),
+                route::Added::Exists => Err(Errno::EEXIST),
+                route::Added::Full => Err(Errno::ENOSPC),
+            }
         }
         NET_ROUTEOP_DEL => {
-            if route::remove(prefix.masked(req.prefix_len), req.prefix_len) {
+            let dev = match req.ifindex {
+                NET_IFINDEX_NONE => None,
+                ifindex => Some(device_for(ifindex)?),
+            };
+            if route::remove(prefix.masked(req.prefix_len), req.prefix_len, dev) {
                 Ok(())
             } else {
                 Err(Errno::ENOENT)

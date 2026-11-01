@@ -5,14 +5,14 @@ use slopos_theme_core::words::Bytes;
 use slopos_theme_core::{Icon, TextRole, Tone, space};
 
 use crate::components::{
-    Button, ButtonRow, Dialog, Disclosure, EmptyState, Graph, GraphKey, IconButton, List, ListRow,
-    Notice, Page, PropertyList, SearchField, Section, Sidebar, StatusBar, Tag, Text, Toolbar,
-    WindowSpec, column, row,
+    Button, ButtonRow, Dialog, Disclosure, EmptyState, Gallery, GalleryTile, Graph, GraphKey,
+    IconButton, List, ListRow, Notice, Page, PasswordField, PropertyList, SearchField, Section,
+    Sidebar, StatusBar, Tag, Text, Toolbar, WindowSpec, column, row,
 };
 use crate::constraints::{CrossAxisAlignment, Length, Orientation, TextAlignment};
 use crate::node::{
-    Action, App, BarSegment, MenuItem, MenuItemKind, Node, SegmentFill, SortIndicator, TableColumn,
-    TableColumnWidth,
+    Action, App, BarSegment, ImageData, MenuItem, MenuItemKind, Node, SegmentFill, SortIndicator,
+    TableColumn, TableColumnWidth,
 };
 use crate::style::StyleSheet;
 use crate::widgets::code_view::{CodeInput, CodeLine};
@@ -38,6 +38,8 @@ pub enum Msg {
     Note(LineEditInput),
     Search(LineEditInput),
     Size(LineEditInput),
+    Secret(LineEditInput),
+    Picture(usize),
     Select(usize),
     Place(usize),
     Person(usize),
@@ -100,7 +102,7 @@ const ABOUT: [&str; 14] = [
     "Text takes a role for its size and a tone for its ink, and wraps or ends in an ellipsis.",
     "A row of buttons ends a page: going back on the left, finishing on the right.",
     "Fields share one frame, which thickens and takes the focus colour while typed into.",
-    "Choose one of several, turn one thing on, or pick an amount.",
+    "Choose one of several or a picture, turn one thing on, or pick an amount.",
     "Rows that may be chosen, one tab stop for the whole list.",
     "Rows in columns, and a tree of folders, each one tab stop the arrows move along.",
     "A page is made of sections, property lists and details that open, and ends in a row of buttons.",
@@ -176,6 +178,8 @@ pub struct Catalogue {
     note: (LineInput, bool),
     search: (LineInput, bool),
     size: (LineInput, bool),
+    secret: (LineInput, bool),
+    picture: Option<usize>,
     filter: (LineInput, bool),
     row: Option<usize>,
     place: Option<usize>,
@@ -213,6 +217,8 @@ impl Catalogue {
             note: (LineInput::new(), false),
             search: (LineInput::with_text(String::from("disk")), false),
             size: (LineInput::with_text(String::from("12 TB")), false),
+            secret: (LineInput::with_text(String::from("hunter2")), false),
+            picture: Some(1),
             filter: (LineInput::new(), false),
             row: Some(0),
             place: Some(1),
@@ -478,6 +484,13 @@ impl Catalogue {
             )
             .into(),
             Section::new(
+                "A password",
+                PasswordField::new(&self.secret.0)
+                    .focused(self.secret.1)
+                    .on_input(Msg::Secret),
+            )
+            .into(),
+            Section::new(
                 "Not usable",
                 Node::LineEdit {
                     text: self.size.0.text.clone(),
@@ -531,6 +544,19 @@ impl Catalogue {
                 List::new(options)
                     .selected(self.choice)
                     .on_select(Msg::Choose),
+            )
+            .into(),
+            Section::new(
+                "A picture",
+                Gallery::new(
+                    slopos_theme_core::GRADIENTS
+                        .iter()
+                        .take(4)
+                        .map(|g| GalleryTile::new(g.name, Some(ImageData::thumbnail_of(g))))
+                        .collect(),
+                )
+                .selected(self.picture)
+                .on_select(Msg::Picture),
             )
             .into(),
             Section::new(
@@ -1345,6 +1371,8 @@ impl App for Catalogue {
             Msg::Note(input) => edit(&mut self.note, input),
             Msg::Search(input) => edit(&mut self.search, input),
             Msg::Size(input) => edit(&mut self.size, input),
+            Msg::Secret(input) => edit(&mut self.secret, input),
+            Msg::Picture(at) => self.picture = Some(at),
             Msg::Select(row) => self.row = Some(row),
             Msg::Place(row) => self.place = Some(row),
             Msg::Person(row) => self.person = Some(row),

@@ -20,6 +20,7 @@ const INSTALLED: &[(&str, &str)] = &[
     ("org.slopos.editor", "/usr/local/bin/editor"),
     ("org.slopos.files", "/usr/local/bin/file_manager"),
     ("org.slopos.image-viewer", "/usr/local/bin/image_viewer"),
+    ("org.slopos.settings", "/bin/settings"),
     ("org.slopos.sysmon", "/bin/sysmon"),
     ("org.slopos.terminal", "/bin/terminal"),
 ];

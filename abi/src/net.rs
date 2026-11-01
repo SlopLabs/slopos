@@ -806,6 +806,7 @@ pub const NET_IFOP_CONN_RECHECK: u32 = 101;
 pub const NET_ADDROP_ADD: u32 = 1;
 pub const NET_ADDROP_DEL: u32 = 2;
 
+/// Answers `EEXIST` for a route of the prefix already on the device.
 pub const NET_ROUTEOP_ADD: u32 = 1;
 pub const NET_ROUTEOP_DEL: u32 = 2;
 
@@ -838,6 +839,8 @@ pub struct UserRouteReq {
     pub gateway: [u8; 4],
     pub prefix_len: u8,
     pub _pad0: [u8; 3],
+    /// The device an add installs on; a delete takes the route on it alone,
+    /// or on any device for `NET_IFINDEX_NONE`.
     pub ifindex: u32,
     pub metric: u32,
     pub flags: u32,

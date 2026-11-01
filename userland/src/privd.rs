@@ -383,10 +383,46 @@ pub fn run_feeding(
     let mut connection = Connection::open_within(RESTART_WAIT)
         .map_err(|why| format!("cannot reach privd: {why}"))?;
     let (read, write) = pipe()?;
-    if fs::write_slice(write.raw(), input) != Ok(input.len()) {
-        return Err(String::from("what was typed does not fit a pipe").into());
+    let feeding = Typed(input.to_vec());
+    let feeder = std::thread::Builder::new()
+        .name("privd-input".into())
+        .spawn(move || {
+            let mut at = 0;
+            while at < feeding.0.len() {
+                match fs::write_slice(write.raw(), &feeding.0[at..]) {
+                    Ok(n) if n > 0 => at += n,
+                    Err(SyscallError::EINTR) => {}
+                    _ => break,
+                }
+            }
+        })
+        .map_err(|_| NotRun::from(String::from("no thread to hand it what was typed")))?;
+    let ran = ask_feeding(&mut connection, action, args, read, out, err);
+    // Closing it has privd let go of the pipe, so a feeder whose mechanism
+    // never ran stops.
+    drop(connection);
+    let _ = feeder.join();
+    ran
+}
+
+/// A copy of what was typed, zeroed when it goes however it goes.
+struct Typed(Vec<u8>);
+
+impl Drop for Typed {
+    fn drop(&mut self) {
+        self.0.fill(0);
+        std::hint::black_box(&self.0);
     }
-    drop(write);
+}
+
+fn ask_feeding(
+    connection: &mut Connection,
+    action: &str,
+    args: &[&str],
+    read: OwnedFd,
+    out: RawFd,
+    err: RawFd,
+) -> Result<i32, NotRun> {
     let request = Request {
         id: request_id(),
         action: action.to_owned(),
@@ -422,6 +458,54 @@ pub fn run_quietly(action: &str, args: &[&str], input: &[u8]) -> Result<i32, Not
     let null = fs::open_cstr(c"/dev/null", O_RDWR | O_CLOEXEC as u32)
         .map_err(|e| NotRun::from(format!("/dev/null: {e}")))?;
     run_feeding(action, args, input, null.raw(), 2)
+}
+
+/// What a mechanism said and how it exited.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ran {
+    pub status: i32,
+    pub out: String,
+    pub err: String,
+}
+
+/// `action`'s mechanism, `input` on its standard input, what it writes to
+/// its standard output and error collected as it runs, since a window has
+/// no terminal to show either on: the first [`CAPTURED_MAX`] bytes of each,
+/// the rest read and let go so the mechanism never waits on a full pipe.
+pub fn run_capturing(action: &str, args: &[&str], input: &[u8]) -> Result<Ran, NotRun> {
+    let (out_read, out_write) = pipe()?;
+    let (err_read, err_write) = pipe()?;
+    let out = collector(out_read)?;
+    let err = collector(err_read)?;
+    let ran = run_feeding(action, args, input, out_write.raw(), err_write.raw());
+    drop((out_write, err_write));
+    let said = |reader: std::thread::JoinHandle<String>| reader.join().unwrap_or_default();
+    let (out, err) = (said(out), said(err));
+    ran.map(|status| Ran { status, out, err })
+}
+
+pub const CAPTURED_MAX: usize = 64 * 1024;
+
+fn collector(read: OwnedFd) -> Result<std::thread::JoinHandle<String>, NotRun> {
+    std::thread::Builder::new()
+        .name("privd-output".into())
+        .spawn(move || {
+            let mut said = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                match fs::read_slice(read.raw(), &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let room = CAPTURED_MAX.saturating_sub(said.len());
+                        said.extend_from_slice(&buf[..n.min(room)]);
+                    }
+                    Err(SyscallError::EINTR) => {}
+                    Err(_) => break,
+                }
+            }
+            String::from_utf8_lossy(&said).into_owned()
+        })
+        .map_err(|_| NotRun::from(String::from("no thread to read what it says")))
 }
 
 /// A fresh id, so no reply left on an inherited connection passes as this
@@ -565,7 +649,7 @@ impl Stdio {
             let open = Sys::fcntl(fd, F_GETFD as i32, 0).is_ok();
             let passed = if !open {
                 null()?
-            } else if !relayed(fd) {
+            } else if !stands_in(fd) {
                 above_stdio(fs::dup(fd).map_err(|e| format!("fd {fd}: {e}"))?)?
             } else if let Some((_, slave)) = pair.as_ref().filter(|_| fs::isatty(fd)) {
                 dup(slave)?
@@ -605,9 +689,11 @@ impl Stdio {
     }
 }
 
-/// A terminal answers `EIO` to a mechanism in privd's session, and a socket
-/// cannot travel as `SCM_RIGHTS`: either reaches it through a pipe.
-fn relayed(fd: RawFd) -> bool {
+/// Whether a mechanism privd starts gets something in place of `fd` rather
+/// than `fd` itself: a terminal answers `EIO` to a mechanism in privd's
+/// session, and a socket cannot travel as `SCM_RIGHTS`, so either reaches it
+/// through a pipe.
+pub fn stands_in(fd: RawFd) -> bool {
     if fs::isatty(fd) {
         return true;
     }

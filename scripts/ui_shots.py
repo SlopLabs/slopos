@@ -33,6 +33,11 @@ APPS = (
     ("editor", "editor", "org.slopos.editor"),
     ("files", "file_manager", "org.slopos.files"),
     ("image-viewer", "image_viewer /usr/share/slopos/wallpapers/default.png", "org.slopos.image-viewer"),
+    ("settings-network", "settings --page network", "org.slopos.settings"),
+    ("settings-users", "settings --page users", "org.slopos.settings"),
+    ("settings-keyboard", "settings --page keyboard", "org.slopos.settings"),
+    ("settings-desktop", "settings --page desktop", "org.slopos.settings"),
+    ("settings-about", "settings --page about", "org.slopos.settings"),
 )
 TABLET_MAX = 0x7FFF
 QCODES = {" ": "spc", "\n": "ret", "-": "minus", "/": "slash", ".": "dot"}

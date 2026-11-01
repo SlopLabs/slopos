@@ -165,6 +165,11 @@ impl Widget for LineEditWidget {
         constraints.constrain(Size::new(width, height))
     }
 
+    /// Its text's, so a field beside its name in a row reads on one line.
+    fn baseline(&self) -> Option<i32> {
+        Some(ui::baseline_in(self.measured_size().height, ROLE))
+    }
+
     fn paint(&self, ctx: &mut PaintContext) {
         let rect = self.layout_rect();
         let theme = ctx.theme();

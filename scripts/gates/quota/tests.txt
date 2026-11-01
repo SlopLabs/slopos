@@ -81,7 +81,7 @@ post-kernel-tests	task	9
 post-userland-tests	commitpages	193853
 post-userland-tests	custody	12
 post-userland-tests	diskblocks	7058
-post-userland-tests	fdslot	861
+post-userland-tests	fdslot	862
 post-userland-tests	kernelmeta	101298
 post-userland-tests	objectrow	257
 post-userland-tests	pages	1977053

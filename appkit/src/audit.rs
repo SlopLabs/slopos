@@ -122,7 +122,7 @@ pub fn audit(root: &mut dyn Widget, size: Size, style: &StyleSheet) -> Vec<Findi
         check_run(root, run, style, &mut findings);
     }
     check_text_over_text(&runs, &mut findings);
-    check_layout(root, &runs, &mut findings);
+    check_layout(root, WidgetId::NONE, &runs, &mut findings);
     check_focus(root, size, style, &mut findings);
     findings
 }
@@ -247,7 +247,14 @@ fn contains(outer: Rect, inner: Rect) -> bool {
         && inner.y + inner.height <= outer.y + outer.height
 }
 
-fn check_layout(widget: &dyn Widget, runs: &[TextRun], out: &mut Vec<Finding>) {
+/// `layer` is the one `widget` paints in, as [`PaintContext::with_layer`]
+/// names it: a row is held only to its own layer's text, never to a dialog's
+/// over it.
+fn check_layout(widget: &dyn Widget, layer: WidgetId, runs: &[TextRun], out: &mut Vec<Finding>) {
+    let layer = match widget.covers() {
+        true => widget.id(),
+        false => layer,
+    };
     let rect = widget.layout_rect();
     let arrangement = widget.arrangement();
     if matches!(arrangement, Arrangement::Flow | Arrangement::Row { .. }) {
@@ -283,20 +290,24 @@ fn check_layout(widget: &dyn Widget, runs: &[TextRun], out: &mut Vec<Finding>) {
         }
     }
     if arrangement == (Arrangement::Row { aligned: true }) {
-        check_baselines(widget, runs, out);
+        check_baselines(widget, layer, runs, out);
     }
-    for child in widget.children() {
-        check_layout(child.as_ref(), runs, out);
+    for (i, child) in widget.children().iter().enumerate() {
+        let layer = match (arrangement, i) {
+            (Arrangement::Layers, 1..) => child.id(),
+            _ => layer,
+        };
+        check_layout(child.as_ref(), layer, runs, out);
     }
 }
 
-fn check_baselines(row: &dyn Widget, runs: &[TextRun], out: &mut Vec<Finding>) {
+fn check_baselines(row: &dyn Widget, layer: WidgetId, runs: &[TextRun], out: &mut Vec<Finding>) {
     let mut first: Vec<(i32, &str)> = Vec::new();
     for child in row.children() {
         let r = child.layout_rect();
         let line = runs
             .iter()
-            .filter(|run| run.visible())
+            .filter(|run| run.visible() && run.layer == layer)
             .filter(|run| {
                 let (x, y) = run.origin();
                 r.contains(x, y)

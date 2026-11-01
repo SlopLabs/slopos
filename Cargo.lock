@@ -513,6 +513,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "slopos-settings-app"
+version = "0.1.0"
+dependencies = [
+ "slopos-abi",
+ "slopos-accounts-core",
+ "slopos-appkit",
+ "slopos-gfx",
+ "slopos-net-core",
+ "slopos-settings-core",
+ "slopos-theme-core",
+]
+
+[[package]]
+name = "slopos-settings-core"
+version = "0.1.0"
+dependencies = [
+ "slopos-abi",
+ "slopos-net-core",
+ "slopos-theme-core",
+]
+
+[[package]]
 name = "slopos-shell-core"
 version = "0.1.0"
 dependencies = [
@@ -638,6 +660,8 @@ dependencies = [
  "slopos-protocol",
  "slopos-remote-core",
  "slopos-rt",
+ "slopos-settings-app",
+ "slopos-settings-core",
  "slopos-shell-core",
  "slopos-slibc",
  "slopos-slibc-core",

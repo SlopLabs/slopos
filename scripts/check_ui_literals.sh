@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Fail when an app picks a colour, a spacing or an inset of its own rather
-# than the theme's roles and tokens. Apps are every file under apps/ and each
-# module of userland/src/apps/ that implements appkit's `App` or calls
-# `run_app`; appkit, outside its tests, is held to its colour constructors
+# than the theme's roles and tokens. Apps are every file under apps/, the
+# Settings panels in settings-app/ outside its tests, and each module of
+# userland/src/apps/ that implements appkit's `App` or calls `run_app`;
+# appkit, outside its tests, is held to its colour constructors
 # alone. A file whose colours are its content takes a line in
 # scripts/gates/ui-literals.txt, and a line that matches nothing fails.
 
@@ -34,6 +35,8 @@ classify() {
     printf '%s\n' "$list" | while IFS= read -r path; do
         case "$path" in
             apps/*) printf 'app\t%s\n' "$path" ;;
+            settings-app/src/tests.rs) ;;
+            settings-app/src/*) printf 'app\t%s\n' "$path" ;;
             appkit/src/tests.rs | appkit/src/tests/*) ;;
             appkit/src/*) printf 'kit\t%s\n' "$path" ;;
             userland/src/apps/*)

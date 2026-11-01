@@ -3,7 +3,7 @@
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_test, pass};
 
-use crate::route::{RouteEntry, RouteTable};
+use crate::route::{Added, RouteEntry, RouteTable};
 use crate::types::{DevIndex, Ipv4Addr};
 
 /// A per-test table rather than the shared `ROUTE_TABLE`.
@@ -234,13 +234,20 @@ pub fn test_route_metric_update() -> TestResult {
     let (dev, _) = table.lookup(Ipv4Addr([10, 0, 0, 1])).unwrap();
     assert_eq_test!(dev, DevIndex(1), "lower metric should win");
 
-    table.add(RouteEntry {
+    let updated = table.add(RouteEntry {
         prefix: Ipv4Addr([10, 0, 0, 0]),
         prefix_len: 24,
         gateway: Ipv4Addr::UNSPECIFIED,
         dev: DevIndex(1),
         metric: 200,
     });
+    assert_eq_test!(
+        updated,
+        Added::Updated,
+        "a route of the same prefix and device is updated"
+    );
+    let kept = table.insert(connected_route([10, 0, 0, 0], 24, 1, 10));
+    assert_eq_test!(kept, Added::Exists, "an insert leaves the route as it is");
 
     let (dev2, _) = table.lookup(Ipv4Addr([10, 0, 0, 1])).unwrap();
     assert_eq_test!(
@@ -258,12 +265,34 @@ pub fn test_route_add_and_remove() -> TestResult {
     table.add(connected_route([10, 0, 0, 0], 24, 0, 0));
     assert_eq_test!(table.route_count(), 1, "should have 1 route after add");
 
-    let removed = table.remove(Ipv4Addr([10, 0, 0, 0]), 24);
+    let removed = table.remove(Ipv4Addr([10, 0, 0, 0]), 24, None);
     assert_test!(removed, "remove should return true");
     assert_eq_test!(table.route_count(), 0, "should have 0 routes after remove");
 
     let result = table.lookup(Ipv4Addr([10, 0, 0, 1]));
     assert_test!(result.is_none(), "lookup should fail after remove");
+
+    pass!()
+}
+
+/// A remove that names a device leaves another device's route to the same
+/// prefix, as two adapters' default routes are.
+pub fn test_route_remove_on_one_device() -> TestResult {
+    let table = fresh_table();
+
+    table.add(gateway_route([0, 0, 0, 0], 0, [10, 0, 0, 1], 0, 100));
+    table.add(gateway_route([0, 0, 0, 0], 0, [10, 0, 1, 1], 1, 101));
+
+    let removed = table.remove(Ipv4Addr::UNSPECIFIED, 0, Some(DevIndex(1)));
+    assert_test!(removed, "the second device's default route should go");
+    assert_eq_test!(table.route_count(), 1, "the first device's should stay");
+    let kept = table.lookup(Ipv4Addr([8, 8, 8, 8]));
+    assert_test!(
+        kept.is_some_and(|(dev, _)| dev == DevIndex(0)),
+        "the default route left should be the first device's"
+    );
+    let again = table.remove(Ipv4Addr::UNSPECIFIED, 0, Some(DevIndex(1)));
+    assert_test!(!again, "nothing is left on the second device");
 
     pass!()
 }
@@ -353,6 +382,7 @@ slopos_testing::stest!(name = test_route_host_route_beats_subnet, suite = route)
 slopos_testing::stest!(name = test_route_metric_tiebreak, suite = route);
 slopos_testing::stest!(name = test_route_metric_update, suite = route);
 slopos_testing::stest!(name = test_route_add_and_remove, suite = route);
+slopos_testing::stest!(name = test_route_remove_on_one_device, suite = route);
 slopos_testing::stest!(name = test_route_remove_device_routes, suite = route);
 slopos_testing::stest!(name = test_route_entry_matches, suite = route);
 slopos_testing::stest!(name = test_route_entry_next_hop, suite = route);

@@ -375,3 +375,50 @@ fn a_name_keeps_its_series_and_names_spread_over_them() {
     }
     assert!(seen.iter().filter(|&&s| s).count() >= 4, "{seen:?}");
 }
+
+#[test]
+fn the_first_gradient_is_the_theme_s_own_and_each_is_named_once() {
+    assert_eq!(GRADIENTS[0].wallpaper, current().wallpaper);
+    for (at, gradient) in GRADIENTS.iter().enumerate() {
+        assert_eq!(GRADIENT_IDS[at], gradient.id);
+        assert!(gradient.id.bytes().all(|b| b.is_ascii_lowercase()));
+        words::label(gradient.name, &[]).unwrap();
+        assert!(
+            GRADIENTS[..at]
+                .iter()
+                .all(|g| g.id != gradient.id && g.name != gradient.name)
+        );
+    }
+}
+
+/// The desktop's own words sit on the background wherever the light is.
+#[test]
+fn text_reads_on_every_gradient_where_it_is_lightest() {
+    let theme = current();
+    for gradient in GRADIENTS {
+        let shading = gradient.wallpaper.shading(1920, 1080);
+        let lightest = [(730, 0), (0, 0), (1919, 0), (730, 1079)]
+            .map(|(x, y)| shading.at(x, y))
+            .into_iter()
+            .max_by_key(|c| u32::from(c.red()) + u32::from(c.green()) + u32::from(c.blue()))
+            .unwrap();
+        assert_floor(theme.text, lightest, TEXT, gradient.id);
+    }
+}
+
+#[test]
+fn a_gradient_runs_from_its_top_to_its_bottom() {
+    let w = GRADIENTS[1].wallpaper;
+    let shading = w.shading(400, 300);
+    let near = |a: Color32, b: Color32| {
+        [
+            a.red().abs_diff(b.red()),
+            a.green().abs_diff(b.green()),
+            a.blue().abs_diff(b.blue()),
+        ]
+        .into_iter()
+        .all(|d| d <= 8)
+    };
+    assert!(near(shading.at(399, 299), w.bottom));
+    assert_ne!(shading.at(150, 0), w.top, "lit from above");
+}

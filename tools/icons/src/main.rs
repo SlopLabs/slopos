@@ -17,7 +17,7 @@ struct Shipped {
     art: Art,
 }
 
-const ICONS: [Shipped; 6] = [
+const ICONS: [Shipped; 7] = [
     Shipped {
         dir: "apps/share/slopos/icons",
         id: "org.slopos.files",
@@ -47,6 +47,11 @@ const ICONS: [Shipped; 6] = [
         dir: "assets/icons",
         id: "org.slopos.sysmon",
         art: Art::Sysmon,
+    },
+    Shipped {
+        dir: "assets/icons",
+        id: "org.slopos.settings",
+        art: Art::Settings,
     },
 ];
 

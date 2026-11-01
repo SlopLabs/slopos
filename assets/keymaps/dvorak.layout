@@ -1,0 +1,64 @@
+# slopos layout v1 — US English (Dvorak)
+#
+#   key <KEY_NAME> <caps:yes|no> <base> <shift> <altgr> <shift+altgr>
+# The Simplified Dvorak layout (XKB us(dvorak)), the vowels under the left
+# hand's home row; the digits stay where they are.
+
+name = dvorak
+title = US English (Dvorak)
+
+# Number row.
+key KEY_GRAVE  no  grave         asciitilde   -  -
+key KEY_1      no  1             exclam       -  -
+key KEY_2      no  2             at           -  -
+key KEY_3      no  3             numbersign   -  -
+key KEY_4      no  4             dollar       -  -
+key KEY_5      no  5             percent      -  -
+key KEY_6      no  6             asciicircum  -  -
+key KEY_7      no  7             ampersand    -  -
+key KEY_8      no  8             asterisk     -  -
+key KEY_9      no  9             parenleft    -  -
+key KEY_0      no  0             parenright   -  -
+key KEY_MINUS  no  bracketleft   braceleft    -  -
+key KEY_EQUAL  no  bracketright  braceright   -  -
+
+# Top row.
+key KEY_Q  no   apostrophe  dquote   -  -
+key KEY_W  no   comma       less     -  -
+key KEY_E  no   period      greater  -  -
+key KEY_R  yes  p  P  -  -
+key KEY_T  yes  y  Y  -  -
+key KEY_Y  yes  f  F  -  -
+key KEY_U  yes  g  G  -  -
+key KEY_I  yes  c  C  -  -
+key KEY_O  yes  r  R  -  -
+key KEY_P  yes  l  L  -  -
+key KEY_LEFTBRACE   no  slash      question  -  -
+key KEY_RIGHTBRACE  no  equal      plus      -  -
+key KEY_BACKSLASH   no  backslash  bar       -  -
+
+# Home row.
+key KEY_A  yes  a  A  -  -
+key KEY_S  yes  o  O  -  -
+key KEY_D  yes  e  E  -  -
+key KEY_F  yes  u  U  -  -
+key KEY_G  yes  i  I  -  -
+key KEY_H  yes  d  D  -  -
+key KEY_J  yes  h  H  -  -
+key KEY_K  yes  t  T  -  -
+key KEY_L  yes  n  N  -  -
+key KEY_SEMICOLON   yes  s      S           -  -
+key KEY_APOSTROPHE  no   minus  underscore  -  -
+
+# Bottom row.
+key KEY_NONUS_BACKSLASH  no  backslash  bar  -  -
+key KEY_Z  no   semicolon  colon  -  -
+key KEY_X  yes  q  Q  -  -
+key KEY_C  yes  j  J  -  -
+key KEY_V  yes  k  K  -  -
+key KEY_B  yes  x  X  -  -
+key KEY_N  yes  b  B  -  -
+key KEY_M  yes  m  M  -  -
+key KEY_COMMA  yes  w  W  -  -
+key KEY_DOT    yes  v  V  -  -
+key KEY_SLASH  yes  z  Z  -  -

@@ -954,8 +954,9 @@ widgets the theme through `ctx` (`StyleSheet::theme`), and an app names a
 view's syntax spans aside, or reads `theme::current()` when it draws itself,
 as the compositor's chrome does. Text is reached only by a `TextRole`.
 `scripts/check_ui_literals.sh`, from `check-framekernel-gates`,
-fails an app — a file under `apps/`, or a module of `userland/src/apps/` that
-implements `App` or calls `run_app` — that constructs or derives a colour or
+fails an app — a file under `apps/`, a Settings panel in `settings-app/`, or
+a module of `userland/src/apps/` that implements `App` or calls `run_app` —
+that constructs or derives a colour or
 gives a spacing or an inset a number, and appkit for constructing a colour; a
 file whose colours are its content, as the editor's syntax palette or the
 checks appkit's picture view draws behind transparent pixels, is
@@ -1034,11 +1035,68 @@ one, a read-only or write-protected disk, or permissions — from what `statfs`
 and `FS_IOC_GETFLAGS` report (`appkit::Refusal`), never from its path.
 `appkit/GUIDE.md` is what to read before writing an app.
 
+**Settings changes the system through the tools a terminal has.**
+`/bin/settings` (`apps::settings`, app id `org.slopos.settings`, `--page
+network|users|keyboard|desktop|about`) is a base program whose panels are
+`settings-app`, host-tested under `just test-host`: each panel's state, its
+view and what it asks the system to do (`Effect`) are data, and the window
+carries out each effect on a thread of its own and answers it as a message,
+so every page in every state is laid out and audited on the host at 640, 820
+and 1100 px and every word held to `theme-core::words`, and `SETTINGS_SHOTS=<dir>
+cargo test -p slopos-settings-app shots` writes a PNG of each. Nothing it
+changes is changed any other way than a terminal changes it: the network is
+`netctl load`, the whole edited `/etc/network` on standard input, so one
+Apply is one question; the people are `/bin/users`, whose passwords travel on
+the mechanism's standard input alone (`users add --password`, `users
+passwd`), listed for it by `users list --porcelain`
+(`slopos_accounts_core::listing`, privd's `org.slopos.accounts.list`, `allow
+user`, since the record is uid 0's); the computer's layout is `keymap set
+--computer`; a person's own layout, background and clock are their
+preferences, written as `prefs` writes them. A request that does not do what
+it asked shows the mechanism's last line, its program's name taken off, as a
+sentence. A field is held to what the tool would refuse before anything is
+asked (`settings-core`'s sentences), a standard user is told up front that a
+change takes an administrator's password, and the page refuses what the
+mechanism would or a person would regret: the last administrator's
+demotion, the first person's removal, and the person's own removal or
+demotion. The sidebar's `SearchField` narrows
+the panels by name and keywords, and Enter opens the first.
+
+**Each person's preferences are a file of theirs.**
+`~/.config/slopos/prefs` (`settings-core::prefs`, read by
+`slopos_userland::prefs`) holds `key = value` lines for the typed keys
+`background.gradient` (one of `theme-core::GRADIENT_IDS`), `background.picture`
+(an absolute path to a PNG, or nothing), `background.fit` (`fill`, `fit`,
+`center`, `stretch`, `tile`), `clock.format` (`24h`, `12h`) and
+`keyboard.layout` (a layout's name, or nothing for the computer's), each with
+a default and a sentence that says what it does; only keys set otherwise are
+written, a default set is no setting, and a line the parser does not take is
+passed over and named, so a file edited by hand costs at most that line. It
+is always below the home, never `XDG_CONFIG_HOME`, because init, which has no
+person's environment, reads the layout there, and only from a regular file
+the person owns reached without following a link at its last step
+(`prefs::of_person`). `/bin/prefs` lists, gets, sets, resets and describes
+them and `monitor` prints each change; `set` holds a picture to decoding and a
+layout to being installed. Writers replace the file through `write_durable`;
+the compositor compares what `stat` says of it four times a second
+(`compositor::desktop_prefs`), there being no change notification, and takes a
+new background or clock at once, so Settings, `prefs` and an editor all change
+the desktop the same way. The login screen is nobody's and shows the
+defaults. Settings' *Add picture…* copies a PNG into
+`~/.local/share/backgrounds`, beside `/usr/share/slopos/wallpapers`, the
+system's, which it lists after the gradients; only a person's own copy can be
+taken away. A twelve-hour clock reads `2:05 PM` on the menu bar and the lock
+screen (`chrome-core::clock::Hours`), its width kept for the widest time of
+that count.
+
 **The compositor's chrome is drawn over the same tokens.** Frames and the dock
 paint every frame and stay hand-drawn: the desktop is the theme's wallpaper,
 a gradient with a soft light from above, drawn at the screen's size and
-dithered (`compositor::wallpaper`; `SLOPOS_WALLPAPER` names a picture to
-cover it instead); a frame is rounded at all four corners
+dithered (`compositor::wallpaper`, the shading `theme-core::Shading` gives
+each of the `GRADIENTS`, the theme's own first), and over it the picture the
+person's preferences name, placed as their fit says
+(`settings-core::background::places`) and decoded on a thread of its own, the
+last one shown kept until it is ready; a frame is rounded at all four corners
 at the window radius, its edge's coverage taken from `gfx::rounded`'s signed
 distance, and square once maximized; a dark hairline just outside it parts it
 from what is behind and a light one along its top catches the light; its
@@ -1646,6 +1704,21 @@ The PS/2 mouse and the touchpad move the same cursor as USB mice and
 tablets. `usb-hid` reads keys only from Keyboard and Keypad collections and
 motion only from Mouse and Pointer ones, so a game pad binds as neither.
 
+**A person types in their own layout.** The kernel holds one layout, which
+init loads as the session in front changes (`keymap::follow`): the front
+desktop's person's `keyboard.layout`, else the computer's in `/etc/keymap`,
+which the login screen, the console and everyone who chose none use, else the
+kernel's own `us`; it loads only a layout that is not the one in use, and
+again when asked with `/run/init`'s `keymap`, which a person or root may send.
+`keymap set NAME` keeps the person's own and asks init, needing nobody's
+permission; `keymap set --computer NAME`, and the older `keymap NAME`, keep
+the computer's through privd's `org.slopos.console.keymap`, whose mechanism
+writes `/etc/keymap` and asks init likewise and refuses to set anyone's own;
+`keymap show` names the three and `keymap list --titles` each layout's title,
+which `keymap-core::title` reads from the file. The base ships `us`, `gb`,
+`de`, `de_CH`, `fr`, `dvorak` and `colemak` in `/usr/share/keymaps`, each held
+by a `keymap-core` test to what three of its keys type.
+
 **Every NIC goes through `nic::publish`.** The stack owns the netpoll and
 net-timer kernel threads, which `nic::init` starts at boot before PCI probe. A
 NIC driver supplies a `NetDevice`, an interrupt handler that only calls
@@ -1678,6 +1751,49 @@ UDP socket queues only its peer's datagrams, so `poll` and `recv` agree. A
 socket's `IP_TOS` marks the IPv4 header of every TCP segment and UDP datagram
 it sends, ECN bits left to TCP, and an accepted connection inherits its
 listener's.
+
+**The network a computer starts with is kept in `/etc/network`.**
+`ip` changes the network until the next start; `/bin/netctl` keeps what it
+starts as and brings it there now, as networkd and `networkctl` stand beside
+iproute2. The file (`settings-core::network`) says whether networking is on,
+the DNS servers for every adapter, and per adapter, a block `adapter <id>`
+holding `ipv4 auto` or `ipv4 manual <address>/<length>` with an optional
+`gateway`, and `off` for one kept down; an id is the hardware address or the
+kernel's name, a block for an address winning over one for a name, since a
+name passes to the next adapter once its holder leaves, and `netctl` keys a
+present adapter by its address. An adapter no block names keeps what the
+kernel gives every adapter, a lease, and nothing touches it. Parsing names the
+line and the sentence of everything it refuses: a bare address, whose network
+would be guessed, a network or broadcast address, a gateway off the
+address's network, more than three DNS servers. Carrying the settings out is
+`network::plan`, pure and host-tested against a model of the kernel's calls:
+from what `net_query` reports it plans one phase at a time — the switch, which
+adapters are up, their addresses, the DNS servers — since each changes what
+the next finds, and `network_settings::apply` reads the network again after
+each, up to eight rounds, so a second apply asks for nothing. A manual address
+first stops the adapter's DHCP client and takes away the addresses set by
+hand, since ending a lease takes every route of the adapter with it, and once
+the network is read again the address and a gateway route at metric 100 plus
+its index go in; automatic again removes what was set by hand and starts the client; DNS
+servers given are pinned, and handing them back to the leases renews every
+running lease so they arrive at once. `net_route_ctl`'s add answers `EEXIST`
+for a route of its prefix already on its device, as Linux's does, and its
+delete, like `net_addr_ctl`'s delete of an address's connected route, takes
+only the route on the interface the request names, so one adapter's default
+route is never another's; an address's delete keeps the connected route
+while another address of the interface covers its network. Changing the
+settings is privd's `org.slopos.network.settings` (`NetAdmin`, `allow admin
+confirm`, not the paired agent, whose connection a change could cut): `set`,
+`dns`, `networking`, `forget`, `apply` and `load`, which replaces the whole
+file from standard input, a file or a pipe of at most 64 KiB; `netctl` holds
+what it would refuse — an adapter named wrong or absent, nothing kept to
+forget, a terminal to `load` from — before privd is asked, and a change runs
+under `/run/netctl.lock`, so init's and a person's never interleave. Init runs
+`netctl apply` holding `NetAdmin` at every start, and on resuming, when the
+file exists, and `netctl apply <adapter>` for each adapter the net monitor
+shows appearing, one at a time and each ended after a minute
+(`init::network`), so a USB adapter takes its settings when plugged in; an
+apply for one adapter leaves the switch and the DNS servers alone.
 
 **The laptop's NIC is a Realtek RTL8168h.** `drivers/src/rtl8168.rs` binds
 `10ec:8168` and brings up the versions `rtl8168-core`'s table names —
@@ -2088,7 +2204,7 @@ Write code that does not need comments. Most comments are useless: they restate 
 - Exempt from the above: `# Safety` sections, `///` public API docs, and register-contract notes in assembly. These are contracts, not commentary.
 
 ### Unsafe-code surface
-**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `boot-core`, `core`, `cpufreq-core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `kernel-services`, `hid-core`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `rtl8168-core`, `sched`, `service-core`, `signalfd`, `splash-core`, `theme-core`, `usb-core`, `verity-core`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `apps/`, `cabi/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`, `tree-core/`, `remote-core/`) are out of scope for this discipline.
+**`slopos-ostd` is the only kernel crate allowed to use `unsafe`.** It is SlopOS's Operating System Trusted Domain — the trusted core that owns every line of `unsafe` in the kernel (the framekernel **AD-1/AD-2** discipline: one trusted crate holds all `unsafe`, every other kernel crate forbids it; CI-enforced by `scripts/check_unsafe_outside_ostd.sh`). Every other crate the kernel binary links (`abi`, `acpi`, `boot`, `boot-core`, `core`, `cpufreq-core`, `drivers`, `ext4-core`, `font`, `fs`, `gfx`, `hermetic`, `kernel-services`, `hid-core`, `keymap-core`, `ktesting`, `mm`, `net`, `nvme-core`, `pidfd`, `ring`, `rtl8168-core`, `sched`, `service-core`, `signalfd`, `splash-core`, `theme-core`, `usb-core`, `verity-core`, `video`, `vt`) carries `#![forbid(unsafe_code)]`, and `check_unsafe_outside_ostd.sh` asserts that from the binary's own dependency closure, so a new crate is covered the moment it is linked. Userland-side crates (`userland/`, `apps/`, `cabi/`, `slibc/`, `slop-protocol/`, `appkit/`, `slopos-rt/`, `windowing/`, `fat-core/`, `tree-core/`, `remote-core/`, `settings-core/`, `settings-app/`) are out of scope for this discipline.
 
 `forbid` is necessary but not sufficient: rustc drops any `unsafe_code` diagnostic whose primary span satisfies `in_external_macro`, so a macro defined in another crate expands `unsafe` into a forbid crate silently, and the call site holds no keyword for a source scan to find. `scripts/check_unsafe_expansion.sh` is what closes that — see below.
 
@@ -2302,10 +2418,16 @@ database, `extctl` after an extension changes among them, so the last
 database written is the newest of both. The uids are Debian's division: 1 to
 99 the base's own, 100 to 999 extensions' (`EXTENSION_UIDS`), 1000 to 59999
 people (`PERSON_UIDS`) and 65534 `nobody`. `/bin/users` lists the people to
-anyone and, through privd's `org.slopos.accounts.manage` (`Seal` and
+anyone, `list --porcelain` one tab-separated line each with what holds for
+them, read from the record through privd's `org.slopos.accounts.list` (`allow
+user`) — who has a password, logs in by themselves or runs remoted told to
+root and the administrators, and to anyone else of themselves alone — and, through privd's `org.slopos.accounts.manage` (`Seal` and
 `DacOverride`), for root, an administrator, or a person an administrator's
 password answers for, adds one with a home of their own
-(`/home/<name>`, 0700), removes one — the home kept unless `--home` says —
+(`/home/<name>`, 0700) and, with `--password`, the password typed twice on
+standard input after any the adder must set first (`--adder-password`, which
+standard input other than a terminal must name exactly when the record says
+the adder has none), removes one — the home kept unless `--home` says —
 renames one, sets a password, promotes and demotes, sets automatic login and
 whom remoted runs as (`users remote`, the first administrator unless set);
 the last administrator stays one, and the first person, who holds the
@@ -2382,7 +2504,8 @@ asked is answered with how many did.
 `SO_PEERPROGRAM` (`peer_base_program`), four connections
 waiting per uid and a desktop's compositor's beside them: a person's `restart-session` and `end-session` (which logs
 them out), `lock` and `greeter` for the session their process carries the
-tag of — `greeter` from the desktop in front alone — and `locked` and
+tag of — `greeter` from the desktop in front alone — `keymap`, which has
+init load the layout wanted now, and `locked` and
 `unlocked` from that desktop's compositor, which `/bin/session` and the
 compositor's system menu send; and from root — uid 0 running a base
 program, as
