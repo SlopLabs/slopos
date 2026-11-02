@@ -12,7 +12,7 @@ static INPUT_SERVICES: InputServices = InputServices {
     drain_batch: input_event::input_drain_batch,
     clipboard_copy: input_event::clipboard_copy,
     clipboard_paste: input_event::clipboard_paste,
-    register_compositor: input_event::input_register_compositor,
+    take_sink: input_event::input_take_sink,
     switch_compositor: input_event::input_switch_compositor,
     cleanup_task: input_event::input_cleanup_task,
     route_key: route_key_adapter,

@@ -412,6 +412,27 @@ pub fn input_register_compositor(task_id: u32) {
     SINK_HOLDER.store(task_id, Ordering::Release);
 }
 
+/// Make `task_id` the sink's holder, as its seat makes it: it hears of the
+/// cursor only from motion, so it is told first where the cursor is, or it
+/// would show the cursor where it last saw it, or at the origin, until the
+/// next move.
+pub fn input_take_sink(task_id: u32) {
+    input_register_compositor(task_id);
+    let p = POINTER.lock();
+    if p.width == 0 {
+        return;
+    }
+    // Under the cursor's lock, as every move is routed, so no move is
+    // overtaken by the place it left.
+    if let Some(slot) = find_queue(task_id) {
+        push_event(
+            slot,
+            task_id,
+            InputEvent::pointer_motion(p.x, p.y, get_timestamp_ms()),
+        );
+    }
+}
+
 /// The task every raw input event is routed to, or 0 when the sink is free.
 #[cfg(feature = "test-hooks")]
 pub fn input_compositor_task_id() -> u32 {
@@ -549,7 +570,7 @@ pub fn input_switch_compositor(task_id: u32) {
             with_queue(slot, previous, |queue| queue.events.reset());
         }
     }
-    input_register_compositor(task_id);
+    input_take_sink(task_id);
 }
 
 /// Whether a key press also reaches the console's line discipline: only while

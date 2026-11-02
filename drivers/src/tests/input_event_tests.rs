@@ -300,6 +300,61 @@ slopos_testing::stest!(
     suite = input_event
 );
 
+/// A compositor hears of the cursor only from motion: each one the sink is
+/// handed to, one coming back in front among them, is told where it is
+/// before anything else, or it shows the cursor somewhere else until the
+/// next move.
+pub fn test_each_sink_holder_is_told_where_the_cursor_is() -> TestResult {
+    use crate::input_event::{input_get_pointer_position, input_switch_compositor, pointer_bounds};
+
+    const FIRST: u32 = 1_000_029;
+    const SECOND: u32 = 1_000_031;
+
+    let (width, height) = pointer_bounds();
+    if width <= 0 || height <= 0 {
+        return fail!("the video layer published no screen");
+    }
+    let restore = input_compositor_task_id();
+    input_cleanup_task(FIRST);
+    input_cleanup_task(SECOND);
+    let at = input_get_pointer_position();
+
+    input_switch_compositor(FIRST);
+    let first_told = input_poll(FIRST);
+    route_a(9);
+    input_switch_compositor(SECOND);
+    let second_told = input_poll(SECOND);
+    let second_rest = input_poll(SECOND);
+    input_switch_compositor(FIRST);
+    let first_back = input_poll(FIRST);
+    let first_rest = input_poll(FIRST);
+
+    input_cleanup_task(FIRST);
+    input_cleanup_task(SECOND);
+    input_register_compositor(restore);
+
+    let placed = |event: Option<slopos_abi::InputEvent>| {
+        event.is_some_and(|e| {
+            e.event_type == InputEventType::PointerMotion && (e.pointer_x(), e.pointer_y()) == at
+        })
+    };
+    if !placed(first_told) {
+        return fail!("the first holder was not told the cursor is at {:?}", at);
+    }
+    if !placed(second_told) || second_rest.is_some() {
+        return fail!("the second holder was not told the cursor's place alone");
+    }
+    if !placed(first_back) || first_rest.is_some() {
+        return fail!("the holder back in front was not told the cursor's place alone");
+    }
+    pass!()
+}
+
+slopos_testing::stest!(
+    name = test_each_sink_holder_is_told_where_the_cursor_is,
+    suite = input_event
+);
+
 /// Each session's clipboard is its own, a process of no session has none,
 /// and past the clipboards kept the one copied into longest ago goes.
 pub fn test_each_session_keeps_its_own_clipboard() -> TestResult {

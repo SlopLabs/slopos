@@ -43,6 +43,7 @@ use slopos_chrome_core::menu::{Choice, Ending};
 use slopos_chrome_core::netstate::{
     IfaceKind, IfaceRow, NetIndicatorState, NetPanelModel, indicator_state_for,
 };
+use slopos_chrome_core::pointer::{Overlay, Upload};
 use slopos_chrome_core::positioner;
 use slopos_chrome_core::status::{BAR_HEIGHT, MAX_STATUS_ITEMS};
 use slopos_protocol::server::MAX_CLIENTS;
@@ -122,14 +123,7 @@ struct WindowManager {
     /// A `net_monitor` drives refreshes, and no timer backs it up, so one
     /// that stopped is noticed rather than masked.
     net_event_driven: bool,
-    /// Whether the virtio-gpu overlay draws the pointer, once probed.
-    hw_cursor: Option<bool>,
-    /// -1 before any.
-    hw_cursor_shape: i32,
-    /// Where the overlay was last moved to, so a move that blocks is made
-    /// only when the pointer moved.
-    hw_cursor_last_x: i32,
-    hw_cursor_last_y: i32,
+    pointer: Overlay,
 }
 
 impl WindowManager {
@@ -188,41 +182,30 @@ impl WindowManager {
             net_indicator: NetIndicatorState::Disconnected,
             net_last_poll: None,
             net_event_driven: false,
-            hw_cursor: None,
-            hw_cursor_shape: -1,
-            hw_cursor_last_x: i32::MIN,
-            hw_cursor_last_y: i32::MIN,
+            pointer: Overlay::default(),
         }
     }
 
-    /// Whether the virtio-gpu overlay draws the pointer, `shape` uploaded to
-    /// it when it changed.
-    fn update_hw_cursor(&mut self, shape: u8) -> bool {
-        match self.hw_cursor {
-            Some(false) => return false,
-            Some(true) if self.hw_cursor_shape == shape as i32 => return true,
-            _ => {}
+    /// Put the pointer's `shape` and place on the overlay where they are not
+    /// there yet.
+    fn show_pointer(&mut self, shape: u8) {
+        if self.pointer.wants_image(shape) {
+            const N: usize = (renderer::HW_CURSOR_DIM * renderer::HW_CURSOR_DIM * 4) as usize;
+            let mut pixels = [0u8; N];
+            self.renderer.render_cursor_image(shape, &mut pixels);
+            let rc = window::cursor_set_image(
+                &pixels,
+                renderer::HW_CURSOR_HOTSPOT,
+                renderer::HW_CURSOR_HOTSPOT,
+            );
+            self.pointer.uploaded(shape, Upload::of(rc));
         }
-        const N: usize = (renderer::HW_CURSOR_DIM * renderer::HW_CURSOR_DIM * 4) as usize;
-        let mut pixels = [0u8; N];
-        self.renderer.render_cursor_image(shape, &mut pixels);
-        let ok = window::cursor_set_image(
-            &pixels,
-            renderer::HW_CURSOR_HOTSPOT,
-            renderer::HW_CURSOR_HOTSPOT,
-        ) == 0;
-        if ok {
-            self.hw_cursor = Some(true);
-            self.hw_cursor_shape = shape as i32;
-            return true;
-        }
-        // A failed upload once the overlay is in use keeps its last shape, so
-        // two pointers never show.
-        if self.hw_cursor.is_none() {
-            self.hw_cursor = Some(false);
-            false
-        } else {
-            true
+        let (x, y) = (self.input.mouse_x, self.input.mouse_y);
+        // A move blocks on the device, so it is made only when the pointer
+        // moved.
+        if self.pointer.wants_move(x, y) {
+            let done = window::cursor_move(x.max(0) as u32, y.max(0) as u32) == 0;
+            self.pointer.moved(x, y, done);
         }
     }
 
@@ -910,17 +893,14 @@ impl WindowManager {
             wm.prev_cursor_shape = cursor_shape;
         }
 
-        let hw_cursor = wm.update_hw_cursor(cursor_shape);
-        if hw_cursor
-            && (wm.input.mouse_x != wm.hw_cursor_last_x || wm.input.mouse_y != wm.hw_cursor_last_y)
-        {
-            let _ = window::cursor_move(
-                wm.input.mouse_x.max(0) as u32,
-                wm.input.mouse_y.max(0) as u32,
-            );
-            wm.hw_cursor_last_x = wm.input.mouse_x;
-            wm.hw_cursor_last_y = wm.input.mouse_y;
+        let was_painted = wm.pointer.painted();
+        wm.show_pointer(cursor_shape);
+        // No frame painted the pointer before the display answered.
+        if wm.pointer.painted() && !was_painted {
+            wm.output_damage
+                .add(renderer::cursor_reach(wm.input.mouse_x, wm.input.mouse_y));
         }
+        let hw_cursor = !wm.pointer.painted();
 
         let focus_after = wm.input.focused_window();
         if focus_after != focus_before {
@@ -1108,6 +1088,8 @@ impl WindowManager {
                 self.behind = false;
                 self.force_full_redraw = true;
                 self.first_frame = true;
+                // The session that was in front drew its own pointer there.
+                self.pointer.forget();
             }
             b"behind" => {
                 self.gate.lock();

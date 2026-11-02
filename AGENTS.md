@@ -1699,10 +1699,23 @@ alone, a pointer event while nothing holds the sink going nowhere: a pointing de
 reports a `hid-core` `Motion`, relative axes moving the cursor and absolute
 ones mapping their logical range onto the screen when they change, and a
 button stays down while any device holds it; a report changes only the
-buttons it carries.
+buttons it carries. Whoever the sink is handed to, by its seat or by init's
+`seat_switch`, first hears where the cursor is (`input_take_sink`), since it
+hears of the cursor only from motion.
 The PS/2 mouse and the touchpad move the same cursor as USB mice and
 tablets. `usb-hid` reads keys only from Keyboard and Keypad collections and
 motion only from Mouse and Pointer ones, so a game pad binds as neither.
+The display's hardware pointer (virtio-gpu's cursor queue, the Xe cursor
+plane) is drawn by the compositor through `cursor_set_image` and
+`cursor_move`, which the kernel takes only from the screen's holder. A
+compositor init starts runs before it is handed the screen, so
+`chrome-core::pointer` reads `EPERM` as saying nothing of the display: the
+compositor paints the pointer itself only once the display refused an
+image, paints none before either answer, so the overlay and a painted
+pointer never show together, and puts its image and place on the overlay
+again each time it comes in front. virtio-gpu takes the pointer off the
+screen at bring-up, since QEMU keeps the last boot's across a device reset
+and its window goes on drawing it over the host's.
 
 **A person types in their own layout.** The kernel holds one layout, which
 init loads as the session in front changes (`keymap::follow`): the front

@@ -44,7 +44,7 @@ define_syscall!(syscall_input_sink_acquire
     if fd < 0 {
         return Err(Errno::from_raw(fd).unwrap_or(Errno::EINVAL));
     }
-    input::register_compositor(task_id);
+    input::take_sink(task_id);
     Ok(fd as u64)
 });
 

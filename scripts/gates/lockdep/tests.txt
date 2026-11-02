@@ -40,7 +40,7 @@ require-phase post-userland-tests
 # site, so by a phase's end the count is a property of the kernel. One more is
 # a new lock, or a lock reached a phase earlier; each phase's
 # `LOCKDEP-CLASS[<phase>]:` lines name its classes.
-boot	classes	105
+boot	classes	106
 post-kernel-tests	classes	268
 post-userland-tests	classes	283
 

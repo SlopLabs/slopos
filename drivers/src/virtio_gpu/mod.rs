@@ -1125,6 +1125,24 @@ impl VirtioGpuInner {
         self.cursor_cmd(&cmd)
     }
 
+    /// `UPDATE_CURSOR` naming no resource takes the pointer off the screen.
+    fn cursor_hide(&self) -> bool {
+        let cmd = VirtioGpuUpdateCursor {
+            hdr: VirtioGpuCtrlHdr::cmd(VIRTIO_GPU_CMD_UPDATE_CURSOR),
+            pos: VirtioGpuCursorPos {
+                scanout_id: 0,
+                x: 0,
+                y: 0,
+                padding: 0,
+            },
+            resource_id: 0,
+            hot_x: 0,
+            hot_y: 0,
+            padding: 0,
+        };
+        self.cursor_cmd(&cmd)
+    }
+
     fn cursor_cmd(&self, cmd: &VirtioGpuUpdateCursor) -> bool {
         let Some(page) = OwnedPageFrame::alloc_zeroed() else {
             return false;
@@ -1339,6 +1357,13 @@ fn virtio_gpu_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
         scanout::SCANOUT.abort_claim();
         return Err(PciProbeError::DeviceFault);
     };
+
+    // A device reset leaves the host showing the last boot's pointer, which
+    // QEMU's window goes on drawing as the host's own; none is shown until
+    // the compositor puts its pointer there.
+    if !current_device().is_some_and(|d| d.cursor_hide()) {
+        klog_warn!("virtio-gpu: could not take the last pointer off the screen");
+    }
 
     scanout::SCANOUT.commit_install(
         ScanoutProvider {

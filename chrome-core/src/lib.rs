@@ -13,5 +13,6 @@ pub mod key;
 pub mod menu;
 pub mod netstate;
 pub mod placement;
+pub mod pointer;
 pub mod positioner;
 pub mod status;
