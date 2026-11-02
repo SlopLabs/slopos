@@ -77,24 +77,20 @@ pub struct Gate {
 
 impl Gate {
     pub fn login(people: Vec<String>) -> Gate {
-        let focus = match people.is_empty() {
-            true => Focus::Field,
-            false => Focus::People,
-        };
-        Gate::new(people, true, focus)
+        Gate::new(people, true)
     }
 
     pub fn lock(person: String) -> Gate {
-        Gate::new(alloc::vec![person], false, Focus::Field)
+        Gate::new(alloc::vec![person], false)
     }
 
-    fn new(people: Vec<String>, greeter: bool, focus: Focus) -> Gate {
+    fn new(people: Vec<String>, greeter: bool) -> Gate {
         Gate {
             people,
             greeter,
             chosen: 0,
             first: 0,
-            focus,
+            focus: Focus::Field,
             secret: Secret::default(),
             said: Said::Nothing,
             typed_ahead: String::new(),
@@ -198,8 +194,7 @@ impl Gate {
             self.chosen = 0;
             self.first = 0;
         }
-        let first = self.stops()[0];
-        self.focus = first;
+        self.focus = Focus::Field;
         self.secret.clear();
         self.said = Said::Nothing;
         self.typed_ahead.clear();
@@ -361,8 +356,17 @@ mod tests {
     }
 
     #[test]
-    fn a_name_typed_tab_and_a_password_log_that_person_in() {
+    fn the_login_screen_takes_the_first_person_s_password_at_once() {
         let mut gate = Gate::login(people());
+        assert_eq!((gate.person(), gate.focus()), (Some("user"), Focus::Field));
+        typed(&mut gate, "user-pw");
+        checks(gate.key(Key::Press), "user", b"user-pw");
+    }
+
+    #[test]
+    fn back_at_the_list_a_name_typed_tab_and_a_password_log_that_person_in() {
+        let mut gate = Gate::login(people());
+        gate.key(Key::Move { back: true });
         assert_eq!(gate.focus(), Focus::People);
         typed(&mut gate, "carol");
         assert_eq!(gate.person(), Some("carol"));
@@ -376,6 +380,7 @@ mod tests {
     #[test]
     fn enter_on_the_list_moves_to_the_field_and_an_empty_password_is_asked() {
         let mut gate = Gate::login(vec!["user".into()]);
+        gate.key(Key::Move { back: true });
         typed(&mut gate, "user");
         assert_eq!(gate.key(Key::Press), None);
         assert_eq!(gate.focus(), Focus::Field);
@@ -385,6 +390,7 @@ mod tests {
     #[test]
     fn the_arrows_choose_within_the_list_and_stop_at_its_ends() {
         let mut gate = Gate::login(people());
+        gate.key(Key::Move { back: true });
         gate.key(Key::Choose { next: false });
         assert_eq!(gate.chosen(), Some(0));
         for _ in 0..5 {
@@ -400,6 +406,7 @@ mod tests {
     fn the_list_shows_the_choice_as_it_moves() {
         let crowd: Vec<String> = (0..9).map(|n| alloc::format!("p{n}")).collect();
         let mut gate = Gate::login(crowd);
+        gate.key(Key::Move { back: true });
         typed(&mut gate, "p6");
         assert_eq!(gate.first_shown(), 6 + 1 - PEOPLE_SHOWN);
         for _ in 0..4 {
@@ -417,6 +424,7 @@ mod tests {
     #[test]
     fn a_name_typed_ahead_that_matches_nobody_starts_again_from_its_last_letter() {
         let mut gate = Gate::login(people());
+        gate.key(Key::Move { back: true });
         typed(&mut gate, "bq");
         assert_eq!(gate.person(), Some("bob"));
         typed(&mut gate, "c");
@@ -445,6 +453,17 @@ mod tests {
         gate.key(Key::Arrow { right: false });
         assert_eq!(gate.focus(), Focus::Switch);
         assert_eq!(gate.key(Key::Text(' ')), Some(Asks::SwitchUser));
+
+        let mut login = Gate::login(people());
+        let mut seen = vec![login.focus()];
+        for _ in 0..3 {
+            login.key(Key::Move { back: false });
+            seen.push(login.focus());
+        }
+        assert_eq!(
+            seen,
+            [Focus::Field, Focus::Submit, Focus::People, Focus::Field]
+        );
     }
 
     #[test]
@@ -508,14 +527,16 @@ mod tests {
     #[test]
     fn a_reset_forgets_what_was_typed_and_said() {
         let mut gate = Gate::login(people());
+        gate.key(Key::Move { back: true });
         typed(&mut gate, "b");
         gate.key(Key::Press);
         typed(&mut gate, "pw");
         gate.key(Key::Press);
         gate.checked(Checked::Wrong);
+        gate.key(Key::Move { back: true });
         gate.reset(vec!["dave".into()]);
         assert_eq!(gate.people(), ["dave"]);
-        assert_eq!((gate.person(), gate.focus()), (Some("dave"), Focus::People));
+        assert_eq!((gate.person(), gate.focus()), (Some("dave"), Focus::Field));
         assert_eq!((gate.typed_chars(), gate.message()), (0, None));
     }
 

@@ -230,6 +230,9 @@ fn a_second_person_logs_in_at_the_login_screen() -> bool {
         return false;
     }
     typed_in_front(|| {
+        // test_key sends no Shift, so Tab past Log in wraps round to the list.
+        asking::key(KEY_TAB, 0);
+        asking::key(KEY_TAB, 0);
         asking::type_text(CAROL);
         asking::key(KEY_TAB, 0);
         asking::type_text(CAROL_PASSWORD);
@@ -618,9 +621,8 @@ fn alive(pid: u32) -> bool {
     process::kill(pid, 0) == 0
 }
 
-/// With nobody's desktop in front, the login screen is; the first person
-/// logs in by their name alone, having no password, to the desktop they
-/// left, which it unlocks.
+/// With nobody's desktop in front, the login screen is; Enter alone logs the
+/// first person, who has no password, back in to the desktop they left.
 fn the_login_screen_takes_the_place_of_a_session_logged_out() -> bool {
     let Some(first) = desktop_of(SESSION_UID) else {
         return false;
@@ -628,11 +630,7 @@ fn the_login_screen_takes_the_place_of_a_session_logged_out() -> bool {
     if !greeter_in_front() {
         return false;
     }
-    typed_in_front(|| {
-        asking::type_text("user");
-        asking::key(KEY_TAB, 0);
-        asking::key(KEY_ENTER, 0);
-    });
+    typed_in_front(|| asking::key(KEY_ENTER, 0));
     let back = in_front(SESSION_UID, SESSION_DEADLINE);
     if back.as_ref().is_none_or(|s| s.tag != first)
         || !locked_within(first, false, SESSION_DEADLINE)

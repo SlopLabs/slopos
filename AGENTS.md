@@ -1164,9 +1164,12 @@ takes every key, and no window hears the pointer, or shapes it, while the lock
 or login screen or a question is up; a button's release goes only to the
 surface its press reached. The lock and login screens dim the wallpaper and
 show the time and date, the person's initial in a circle and their name, or
-the people as rows, five at a time around the one chosen, whom the arrows, the
-wheel and typing move, typing choosing the first whose name starts with what
-was typed; what they say back sits on a notice. The login screen takes nothing
+the people as rows, five at a time around the one chosen, the first at first;
+either comes up with the password field focused, so the person chosen types
+their password at once, as LightDM's and SDDM's greeters do, and the wheel,
+or the arrows and typing once Tab or Shift+Tab reaches the list, move the
+choice, typing choosing the first whose name starts with what was typed;
+what they say back sits on a notice. The login screen takes nothing
 more once a password has passed, and starts over each time it comes in front
 or when that desktop has not after thirty seconds. The system menu names the
 person and offers *Lock screen*, *Switch user…* and *Log out…*, then

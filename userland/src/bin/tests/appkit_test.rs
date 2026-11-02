@@ -58,6 +58,7 @@ fn the_compositor_s_surfaces_read_whole_at_every_width() {
     }
 
     let mut login = Gate::login(vec!["user".into(), "bob".into(), "carol".into()]);
+    login.key(Key::Move { back: true });
     typed(&mut login, "car");
     found.extend(audited("login", &views::gate(&login, now.as_ref())));
     login.key(Key::Press);
@@ -68,6 +69,7 @@ fn the_compositor_s_surfaces_read_whole_at_every_width() {
         &views::gate(&login, now.as_ref()),
     ));
     let mut crowded = Gate::login((0..20).map(|n| format!("person{n:02}")).collect());
+    crowded.key(Key::Move { back: true });
     typed(&mut crowded, "person17");
     found.extend(audited(
         "login with twenty people",

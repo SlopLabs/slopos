@@ -295,8 +295,7 @@ def chrome(g):
     g.press("tab")
     g.press("ret")
     g.shot("login-screen", changed=True)
-    # Typing chooses the person, Enter moves to the password, Enter logs in.
-    g.type_keys("user\n\n")
+    g.press("ret")
     g.settle(60)
 
 
