@@ -207,11 +207,13 @@ impl ListWidget {
         }
     }
 
-    fn inks(theme: &Theme, enabled: bool) -> (Color32, Color32) {
-        if enabled {
-            (theme.text, theme.text_secondary)
-        } else {
-            (theme.text_disabled, theme.text_disabled)
+    /// A chosen row's wash on a raised surface leaves secondary ink under
+    /// the text floor, so its words all take the body ink.
+    fn inks(theme: &Theme, enabled: bool, chosen: bool) -> (Color32, Color32) {
+        match (enabled, chosen) {
+            (false, _) => (theme.text_disabled, theme.text_disabled),
+            (true, true) => (theme.text, theme.text),
+            (true, false) => (theme.text, theme.text_secondary),
         }
     }
 }
@@ -267,7 +269,7 @@ impl Widget for ListWidget {
             };
             super::paint_row(ctx, rect, state);
 
-            let (ink, quiet) = Self::inks(theme, row.enabled());
+            let (ink, quiet) = Self::inks(theme, row.enabled(), state.selected);
             let mut x = rect.x + PAD;
             let top = rect.y + PAD;
             if let Some(graph) = &row.graph {

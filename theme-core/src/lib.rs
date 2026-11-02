@@ -383,6 +383,8 @@ pub mod inset {
     /// Around a band of a page: a header, a footer, a toolbar.
     pub const SECTION: EdgeInsets = EdgeInsets::symmetric(XL, MD);
     pub const CARD: EdgeInsets = EdgeInsets::all(LG);
+    /// Around a row of a group of rows.
+    pub const ROW: EdgeInsets = EdgeInsets::symmetric(LG, MD);
     /// Inside a button or a field.
     pub const CONTROL: EdgeInsets = EdgeInsets::symmetric(MD, XS);
 }

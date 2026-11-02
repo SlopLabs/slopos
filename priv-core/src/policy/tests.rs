@@ -178,6 +178,29 @@ fn shapes_match_fixed_words_then_anything_after_a_star() {
 }
 
 #[test]
+fn a_question_mark_takes_exactly_one_argument_of_any_kind() {
+    let text = EXAMPLE.replace("  args     status\n", "  args     set ? off\n");
+    let policy = Policy::parse(&text).unwrap();
+    let action = policy.action("org.slopos.boot.install").unwrap();
+    assert!(action.accepts(&args(&["set", "eth0", "off"])));
+    assert!(action.accepts(&args(&["set", "52:54:00:12:34:56", "off"])));
+    assert!(!action.accepts(&args(&["set", "eth0", "on"])));
+    assert!(!action.accepts(&args(&["set", "off"])), "one, not none");
+    assert!(
+        !action.accepts(&args(&["set", "eth0", "manual", "off"])),
+        "one, not two"
+    );
+    assert!(!action.accepts(&args(&["set", "eth0", "off", "now"])));
+    assert_eq!(
+        Policy::parse(&EXAMPLE.replace("args     status", "args     * ?")).map(|_| ()),
+        Err(PolicyError {
+            line: 5,
+            msg: "* ends a shape"
+        })
+    );
+}
+
+#[test]
 fn the_first_matching_principal_decides() {
     let policy = Policy::parse(EXAMPLE).unwrap();
     let install = policy.action("org.slopos.boot.install").unwrap();
@@ -755,7 +778,7 @@ fn values_outside_their_grammar_refuse() {
 #[test]
 fn the_shipped_policy_speaks_to_the_person() {
     let policy = Policy::parse(SHIPPED).unwrap();
-    assert_eq!(policy.actions().len(), 36);
+    assert_eq!(policy.actions().len(), 37);
     for action in policy.actions() {
         let name = &action.name;
         assert_eq!(crate::words::describe(&action.describe), Ok(()), "{name}");
@@ -778,7 +801,7 @@ fn the_shipped_policy_speaks_to_the_person() {
         .collect();
     said.sort_unstable();
     said.dedup();
-    assert_eq!(said.len(), 36, "two actions say the same");
+    assert_eq!(said.len(), 37, "two actions say the same");
 }
 
 #[test]
@@ -987,6 +1010,12 @@ fn the_shipped_policy_says_what_the_access_model_does() {
         ("org.slopos.base.rollback", &["base", "rollback"]),
         ("org.slopos.net.toggle", &["net", "off"]),
         ("org.slopos.net.configure", &["link", "set", "lo", "up"]),
+        ("org.slopos.network.switch", &["networking", "off"]),
+        (
+            "org.slopos.network.switch",
+            &["set", "52:54:00:12:34:56", "on"],
+        ),
+        ("org.slopos.network.settings", &["set", "eth0", "auto"]),
         ("org.slopos.cpufreq.set", &["set", "hwp"]),
     ] {
         assert!(
@@ -999,6 +1028,13 @@ fn the_shipped_policy_says_what_the_access_model_does() {
         ("org.slopos.base.rollback", &["base", "rollback", "/b"]),
         ("org.slopos.base.install", &["install", "b", "/k"]),
         ("org.slopos.boot.install", &["base", "install", "/b"]),
+        (
+            "org.slopos.network.switch",
+            &["set", "eth0", "manual", "10.0.0.2/24"],
+        ),
+        ("org.slopos.network.switch", &["networking", "on", "now"]),
+        ("org.slopos.network.switch", &["dns", "1.1.1.1"]),
+        ("org.slopos.network.settings", &["networking", "off"]),
     ] {
         assert!(
             !policy.action(name).unwrap().accepts(&args_of(args)),
@@ -1019,14 +1055,17 @@ fn the_shipped_policy_says_what_the_access_model_does() {
         );
     }
     let compositor = Requester::new(USER, Some("/bin/compositor"), false);
-    let toggle = policy.action("org.slopos.net.toggle").unwrap();
-    assert_eq!(toggle.admits(&compositor, &people), Verdict::Run);
+    for name in ["org.slopos.net.toggle", "org.slopos.network.switch"] {
+        let action = policy.action(name).unwrap();
+        assert_eq!(action.admits(&compositor, &people), Verdict::Run, "{name}");
+    }
     for name in [
         "org.slopos.boot.install",
         "org.slopos.base.install",
         "org.slopos.base.rollback",
         "org.slopos.boot.set-default",
         "org.slopos.net.configure",
+        "org.slopos.network.settings",
         "org.slopos.software.install",
         "org.slopos.accounts.manage",
         "org.slopos.accounts.password",

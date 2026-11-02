@@ -18,8 +18,9 @@
 //!   verb     "Install"
 //! ```
 //!
-//! `args` repeats, one shape each: fixed leading words, then `*` for any
-//! further ones. `allow` lines are tried in order and the first whose
+//! `args` repeats, one shape each: words, `?` standing for any one argument,
+//! then `*` for any further ones; the mechanism holds what `?` and `*` take
+//! to its own grammar. `allow` lines are tried in order and the first whose
 //! principal matches decides, at its level: `user` takes `alone`, `confirm`
 //! or `password`, `admin` takes `confirm` or `password`, and no level runs
 //! the request unasked. A level asks only a person whose session can be
@@ -91,9 +92,22 @@ pub enum RunsAs {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Shape {
-    pub words: Vec<String>,
-    /// Any further arguments follow the fixed words.
+    pub words: Vec<Word>,
+    /// Any further arguments follow the words.
     pub open: bool,
+}
+
+/// One argument of a [`Shape`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Word {
+    Is(String),
+    Any,
+}
+
+impl From<&str> for Word {
+    fn from(word: &str) -> Word {
+        Word::Is(word.to_string())
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -432,8 +446,10 @@ impl Shape {
             }
             if word == "*" {
                 shape.open = true;
+            } else if word == "?" {
+                shape.words.push(Word::Any);
             } else if valid_word(word) {
-                shape.words.push(word.to_string());
+                shape.words.push(Word::Is(word.to_string()));
             } else {
                 return Err("an argument word is printable and unquoted");
             }
@@ -449,11 +465,10 @@ impl Shape {
             args.len() == fixed
         };
         count_ok
-            && self
-                .words
-                .iter()
-                .zip(args)
-                .all(|(word, arg)| word.as_bytes() == *arg)
+            && self.words.iter().zip(args).all(|(word, arg)| match word {
+                Word::Is(word) => word.as_bytes() == *arg,
+                Word::Any => true,
+            })
     }
 }
 

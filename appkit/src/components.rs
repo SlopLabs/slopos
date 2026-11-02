@@ -476,6 +476,165 @@ impl<M> From<PropertyList<M>> for Node<M> {
     }
 }
 
+/// Rows about one thing in a raised box, a hairline between each.
+pub struct Group<M> {
+    pub rows: Vec<Node<M>>,
+}
+
+impl<M> Group<M> {
+    pub fn new() -> Self {
+        Self { rows: Vec::new() }
+    }
+
+    pub fn row(mut self, row: impl Into<Node<M>>) -> Self {
+        self.rows.push(row.into());
+        self
+    }
+}
+
+impl<M> Default for Group<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<M> From<Group<M>> for Node<M> {
+    fn from(group: Group<M>) -> Self {
+        let mut children = Vec::with_capacity(group.rows.len() * 2);
+        for row in group.rows {
+            if !children.is_empty() {
+                children.push(Node::Divider);
+            }
+            children.push(padded(inset::ROW, row));
+        }
+        Node::Card {
+            surface: Surface::Raised,
+            shadow: false,
+            child: Box::new(column(0, children)),
+        }
+    }
+}
+
+/// A row of a [`Group`]: a title, a line about it and a trailing control.
+pub struct ActionRow<M> {
+    pub icon: Option<Icon>,
+    pub title: String,
+    pub detail: String,
+    pub trailing: Option<Node<M>>,
+}
+
+impl<M> ActionRow<M> {
+    pub fn new(title: impl Into<String>) -> Self {
+        Self {
+            icon: None,
+            title: title.into(),
+            detail: String::new(),
+            trailing: None,
+        }
+    }
+
+    pub fn icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = detail.into();
+        self
+    }
+
+    pub fn trailing(mut self, trailing: impl Into<Node<M>>) -> Self {
+        self.trailing = Some(trailing.into());
+        self
+    }
+}
+
+impl<M> From<ActionRow<M>> for Node<M> {
+    fn from(action: ActionRow<M>) -> Self {
+        let mut children = Vec::with_capacity(3);
+        if let Some(icon) = action.icon {
+            children.push(Node::Icon {
+                icon,
+                role: TextRole::Heading,
+                tone: Tone::Secondary,
+            });
+        }
+        children.push(expand(title_and_detail(
+            action.title,
+            action.detail,
+            Tone::Normal,
+        )));
+        children.extend(action.trailing);
+        Node::HStack {
+            children,
+            spacing: space::MD,
+            align: CrossAxisAlignment::Baseline,
+        }
+    }
+}
+
+pub(crate) fn title_and_detail<M>(title: String, detail: String, ink: Tone) -> Node<M> {
+    let mut words = vec![Text::new(title).tone(ink).wrap().into()];
+    if !detail.is_empty() {
+        let quiet = match ink {
+            Tone::Disabled => Tone::Disabled,
+            _ => Tone::Secondary,
+        };
+        words.push(
+            Text::new(detail)
+                .role(TextRole::Caption)
+                .tone(quiet)
+                .wrap()
+                .into(),
+        );
+    }
+    column(0, words)
+}
+
+/// An on/off setting that takes effect at once; the whole row is the
+/// control. A choice a later button applies is a checkbox.
+#[derive(Clone, Debug)]
+pub struct Switch<M> {
+    pub label: String,
+    pub detail: String,
+    pub on: bool,
+    pub on_toggle: Option<M>,
+    pub enabled: bool,
+}
+
+impl<M> Switch<M> {
+    pub fn new(label: impl Into<String>, on: bool) -> Self {
+        Self {
+            label: label.into(),
+            detail: String::new(),
+            on,
+            on_toggle: None,
+            enabled: true,
+        }
+    }
+
+    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = detail.into();
+        self
+    }
+
+    pub fn on_toggle(mut self, msg: M) -> Self {
+        self.on_toggle = Some(msg);
+        self
+    }
+
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+}
+
+impl<M> From<Switch<M>> for Node<M> {
+    fn from(switch: Switch<M>) -> Self {
+        Node::Switch(switch)
+    }
+}
+
 /// Something the person should know before going on, with the icon of its
 /// tone and what they can do about it.
 pub struct Notice<M> {

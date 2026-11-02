@@ -5,9 +5,10 @@ use slopos_theme_core::words::Bytes;
 use slopos_theme_core::{Icon, TextRole, Tone, space};
 
 use crate::components::{
-    Button, ButtonRow, Dialog, Disclosure, EmptyState, Gallery, GalleryTile, Graph, GraphKey,
-    IconButton, KeyCap, KeyboardMap, List, ListRow, Notice, Page, PasswordField, PropertyList,
-    SearchField, Section, Sidebar, StatusBar, Tag, Text, Toolbar, WindowSpec, column, row,
+    ActionRow, Button, ButtonRow, Dialog, Disclosure, EmptyState, Gallery, GalleryTile, Graph,
+    GraphKey, Group, IconButton, KeyCap, KeyboardMap, List, ListRow, Notice, Page, PasswordField,
+    PropertyList, SearchField, Section, Sidebar, StatusBar, Switch, Tag, Text, Toolbar, WindowSpec,
+    column, row,
 };
 use crate::constraints::{CrossAxisAlignment, Length, Orientation, TextAlignment};
 use crate::node::{
@@ -30,7 +31,7 @@ pub enum Msg {
     Step(bool),
     Filter(LineEditInput),
     Press,
-    /// Which checkbox.
+    /// Which checkbox or switch.
     Toggle(usize),
     Choose(usize),
     Slide(SliderInput),
@@ -102,10 +103,10 @@ const ABOUT: [&str; 14] = [
     "Text takes a role for its size and a tone for its ink, and wraps or ends in an ellipsis.",
     "A row of buttons ends a page: going back on the left, finishing on the right.",
     "Fields share one frame, which thickens and takes the focus colour while typed into.",
-    "Choose one of several or a picture, turn one thing on, or pick an amount; a keyboard shows what each key of a layout types.",
+    "Choose one of several or a picture, turn one thing on at once or with a button after it, or pick an amount; a keyboard shows what each key of a layout types.",
     "Rows that may be chosen, one tab stop for the whole list.",
     "Rows in columns, and a tree of folders, each one tab stop the arrows move along.",
-    "A page is made of sections, property lists and details that open, and ends in a row of buttons.",
+    "A page is made of sections, groups of rows, property lists and details that open, and ends in a row of buttons.",
     "Tabs that switch what a view shows, a menu bar and its menu, and the documents an app has open.",
     "Lines of code beside a pane whose edge can be dragged.",
     "Notices, tags and progress tell the person what happened and what is happening.",
@@ -169,7 +170,7 @@ const CODE: [&str; 6] = [
 pub struct Catalogue {
     page: usize,
     presses: u32,
-    checked: [bool; 2],
+    checked: [bool; 4],
     choice: Option<usize>,
     amount: u64,
     grab: Option<SliderGrab>,
@@ -209,7 +210,7 @@ impl Catalogue {
         Self {
             page: page.min(PAGES.len() - 1),
             presses: 0,
-            checked: [true, false],
+            checked: [true, false, true, false],
             choice: Some(0),
             amount: 40,
             grab: None,
@@ -561,7 +562,26 @@ impl Catalogue {
             .into(),
             Section::new("A keyboard", Self::keyboard()).into(),
             Section::new(
-                "On or off",
+                "On or off, at once",
+                Group::new()
+                    .row(
+                        Switch::new("Networking", self.checked[2])
+                            .detail("Every adapter stops while it is off.")
+                            .on_toggle(Msg::Toggle(2)),
+                    )
+                    .row(
+                        Switch::new("Show seconds on the clock", self.checked[3])
+                            .on_toggle(Msg::Toggle(3)),
+                    )
+                    .row(
+                        Switch::new("Check for updates", true)
+                            .detail("Set by your administrator.")
+                            .enabled(false),
+                    ),
+            )
+            .into(),
+            Section::new(
+                "On or off, with a button after it",
                 column(
                     space::SM,
                     vec![
@@ -830,6 +850,27 @@ impl Catalogue {
         .wrap_anywhere();
         Self::sections(vec![
             Section::new("A property list", properties).into(),
+            Section::new(
+                "A group of rows",
+                Group::new()
+                    .row(
+                        Switch::new("Use this adapter", self.checked[2])
+                            .detail("Connected")
+                            .on_toggle(Msg::Toggle(2)),
+                    )
+                    .row(
+                        PropertyList::new()
+                            .row("Address", "192.168.1.20/24")
+                            .row("Hardware address", "52:54:00:12:34:56"),
+                    )
+                    .row(
+                        ActionRow::new("IP settings")
+                            .icon(Icon::EthernetPort)
+                            .detail("Automatic")
+                            .trailing(Button::new("Edit…").on_press(Msg::Press)),
+                    ),
+            )
+            .into(),
             Section::new(
                 "Details",
                 column(

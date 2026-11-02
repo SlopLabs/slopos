@@ -2245,6 +2245,10 @@ pub fn cases() -> &'static [(&'static str, fn())] {
             controls::test_a_checkbox_toggles_on_release_and_space,
         ),
         (
+            "a_switch_turns_from_anywhere_on_its_row",
+            controls::test_a_switch_turns_from_anywhere_on_its_row,
+        ),
+        (
             "menu_arrows_skip_what_cannot_be_chosen",
             controls::test_menu_arrows_skip_what_cannot_be_chosen,
         ),

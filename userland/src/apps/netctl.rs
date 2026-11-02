@@ -3,7 +3,8 @@
 //! each adapter gets its address. `ip` changes the network until the next
 //! start; netctl changes what it starts as, and brings it there now. Init
 //! runs `netctl apply` at every start and `netctl apply ADAPTER` as each
-//! adapter appears. Changing the settings is privd's
+//! adapter appears. Turning networking or an adapter on or off is privd's
+//! `org.slopos.network.switch`; every other change is
 //! `org.slopos.network.settings`.
 
 use slopos_settings_core::network::{
@@ -16,7 +17,8 @@ use slopos_abi::syscall::posix::{LOCK_EX, LOCK_NB, O_CLOEXEC, O_NONBLOCK};
 use crate::network_settings as kept;
 use crate::privd::{self, Input};
 
-const ACTION: &str = "org.slopos.network.settings";
+const SWITCH: &str = "org.slopos.network.switch";
+const SETTINGS: &str = "org.slopos.network.settings";
 const LOCK: &str = "/run/netctl.lock";
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -129,17 +131,17 @@ fn parse(args: &[String]) -> Result<Command, String> {
 }
 
 impl Command {
-    fn changes(&self) -> bool {
-        matches!(
-            self,
+    fn action(&self) -> Option<&'static str> {
+        match self {
+            Command::Networking(_) | Command::Set(_, Change::Enabled(_)) => Some(SWITCH),
             Command::Set(..)
-                | Command::Dns(_)
-                | Command::Networking(_)
-                | Command::Forget(_)
-                | Command::Apply(_)
-                | Command::Load
-                | Command::Loaded(_)
-        )
+            | Command::Dns(_)
+            | Command::Forget(_)
+            | Command::Apply(_)
+            | Command::Load
+            | Command::Loaded(_) => Some(SETTINGS),
+            Command::Status(_) | Command::Cat | Command::Help => None,
+        }
     }
 }
 
@@ -461,15 +463,15 @@ pub fn netctl_main() {
         eprintln!("netctl: {why}");
         std::process::exit(status);
     }
-    if command.changes() {
-        privd::elevate(Some(ACTION), &privd::own_args(), Input::Closed);
+    if let Some(action) = command.action() {
+        privd::elevate(Some(action), &privd::own_args(), Input::Closed);
     }
     let command = match command {
         Command::Load => given().map(Command::Loaded),
         command => Ok(command),
     };
     let ran = command.and_then(|command| {
-        let _held = command.changes().then(exclusive).transpose()?;
+        let _held = command.action().is_some().then(exclusive).transpose()?;
         run(command)
     });
     match ran {

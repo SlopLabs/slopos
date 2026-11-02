@@ -1168,6 +1168,63 @@ pub(super) fn test_a_checkbox_toggles_on_release_and_space() {
     assert!(!deliver(&mut checkbox, key(NamedKey::Enter, false)).0);
 }
 
+pub(super) fn test_a_switch_turns_from_anywhere_on_its_row() {
+    use crate::components::Switch;
+    use crate::tree::build_widget_tree;
+    let node = |enabled| {
+        Switch::new("Networking", true)
+            .detail("Every adapter stops while it is off.")
+            .on_toggle(())
+            .enabled(enabled)
+            .into()
+    };
+    let mut switch = build_widget_tree(&node(true));
+    let size = lay_out(
+        switch.as_mut(),
+        BoxConstraints::loose(Size::new(400, 200)),
+        (0, 0),
+    );
+    assert_eq!(size.width, 400, "a switch's row is as wide as its group");
+    let release = |x, y| WidgetEvent::PointerUp {
+        x,
+        y,
+        button: PointerButton::Left,
+    };
+    let turns = |switch: &mut dyn Widget, x, y| {
+        deliver(switch, press(x, y));
+        deliver(switch, release(x, y)).1.drain_typed::<()>().len()
+    };
+    let words = switch.children()[0].layout_rect();
+    let (label_x, label_y) = (words.x + 2, words.y + 2);
+    assert_eq!(turns(switch.as_mut(), label_x, label_y), 1, "on its words");
+    assert_eq!(
+        turns(switch.as_mut(), 396, size.height / 2),
+        1,
+        "on its track"
+    );
+    focused(switch.as_mut());
+    assert_eq!(
+        deliver(switch.as_mut(), key(NamedKey::Space, false))
+            .1
+            .drain_typed::<()>()
+            .len(),
+        1
+    );
+    assert!(
+        !deliver(switch.as_mut(), key(NamedKey::Enter, false)).0,
+        "Enter is the page's"
+    );
+
+    let mut off = build_widget_tree(&node(false));
+    lay_out(
+        off.as_mut(),
+        BoxConstraints::loose(Size::new(400, 200)),
+        (0, 0),
+    );
+    assert_eq!(turns(off.as_mut(), label_x, label_y), 0, "disabled");
+    assert_eq!(off.focus_policy(), FocusPolicy::None);
+}
+
 pub(super) fn test_menu_arrows_skip_what_cannot_be_chosen() {
     use crate::node::{MenuItem, MenuItemKind};
     use crate::widgets::menu::MenuWidget;

@@ -974,7 +974,9 @@ page of every fixture.
 
 **Apps are built from components.** appkit's components
 (`appkit/src/components.rs`) — `Text` in a role and a tone, `Page`, `Section`,
-`PropertyList`, `Notice`, `Button`, `ButtonRow`, a `List` of `ListRow`s,
+`PropertyList`, `Notice`, `Button`, `ButtonRow`, a `List` of `ListRow`s, a
+`Group` of rows — a `Switch`, which acts the moment it is turned, a
+`PropertyList`, an `ActionRow` ending in the control that changes it —
 `Sidebar`, a `Toolbar` of `IconButton`s, `SearchField`, `StatusBar`, `Tag`,
 `EmptyState`, `Disclosure`, and `Dialog`, which a `ButtonRow` ends, laid out
 with `column` and `row` — own their spacing, roles and states: a line too
@@ -1045,9 +1047,10 @@ carries out each effect on a thread of its own and answers it as a message,
 so every page in every state is laid out and audited on the host at 640, 820
 and 1100 px and every word held to `theme-core::words`, and `SETTINGS_SHOTS=<dir>
 cargo test -p slopos-settings-app shots` writes a PNG of each. Nothing it
-changes is changed any other way than a terminal changes it: the network is
-`netctl load`, the whole edited `/etc/network` on standard input, so one
-Apply is one question; the people are `/bin/users`, whose passwords travel on
+changes is changed any other way than a terminal changes it: a network switch
+is `netctl networking on|off` or `netctl set ADAPTER on|off`, and an edit
+`netctl load`, the whole edited `/etc/network` on standard input, so each
+change is one request; the people are `/bin/users`, whose passwords travel on
 the mechanism's standard input alone (`users add --password`, `users
 passwd`), listed for it by `users list --porcelain`
 (`slopos_accounts_core::listing`, privd's `org.slopos.accounts.list`, `allow
@@ -1060,7 +1063,21 @@ asked (`settings-core`'s sentences), a standard user is told up front that a
 change takes an administrator's password, and the page refuses what the
 mechanism would or a person would regret: the last administrator's
 demotion, the first person's removal, and the person's own removal or
-demotion. The sidebar's `SearchField` narrows
+demotion. The Network page leads with how the computer stands — connected,
+through which adapter and at what address, or else what to do about it — as
+Windows 11's Network & internet does, and then a `Group` per adapter and one
+for the DNS servers, which every adapter shares. A `Switch` turns networking
+or an adapter on or off the moment it is pressed, with no Apply after it, as
+NN/g's and Fluent's switch guidance asks, unasked for an administrator as the
+menu bar's does; the networking switch shows what the computer does now, as
+the status above it says. An address or the DNS servers, whose parts change
+together, change in a dialog behind *Edit…* whose Save is the one request,
+which an administrator confirms, as Windows' *IP assignment* and GNOME's IPv4
+tab do. A
+manual address starts from the one the adapter holds, and a field says what
+is wrong once focus leaves it or Save is pressed, as the GNOME HIG asks. A
+request done keeps what it asked for, so a switch never flicks back before
+the next read; one the person declined says nothing. The sidebar's `SearchField` narrows
 the panels by name and keywords, and Enter opens the first. The Keyboard
 page leads with the layout in use drawn as a keyboard — appkit's
 `KeyboardMap` over `keymap-core::board`, each key printing what it types
@@ -1804,14 +1821,23 @@ for a route of its prefix already on its device, as Linux's does, and its
 delete, like `net_addr_ctl`'s delete of an address's connected route, takes
 only the route on the interface the request names, so one adapter's default
 route is never another's; an address's delete keeps the connected route
-while another address of the interface covers its network. Changing the
-settings is privd's `org.slopos.network.settings` (`NetAdmin`, `allow admin
-confirm`, not the paired agent, whose connection a change could cut): `set`,
-`dns`, `networking`, `forget`, `apply` and `load`, which replaces the whole
-file from standard input, a file or a pipe of at most 64 KiB; `netctl` holds
-what it would refuse — an adapter named wrong or absent, nothing kept to
-forget, a terminal to `load` from — before privd is asked, and a change runs
-under `/run/netctl.lock`, so init's and a person's never interleave. Init runs
+while another address of the interface covers its network. Turning
+networking or an adapter on or off is privd's `org.slopos.network.switch`
+(`netctl networking on|off` and `netctl set ? on|off`, a policy shape's `?`
+standing for any one argument; `NetAdmin`, `allow admin`, unasked), which
+the desktop's networking switch and Settings' switches both run, so the two
+always agree and a switch lasts across restarts. Every other change is
+`org.slopos.network.settings` (`allow admin confirm`): `set`, `dns`,
+`forget`, `apply` and `load`, which replaces the whole file from standard
+input, a file or a pipe of at most 64 KiB. Neither is the paired agent's,
+whose connection a change could cut, and `netctl` picks the one its command
+is. `netctl` holds what it would refuse — an adapter named wrong or absent,
+nothing kept to forget, a terminal to `load` from — before privd is asked,
+and a change runs under `/run/netctl.lock`, so init's and a person's never
+interleave; the switch leaves privd's exclusive groups alone, so a second
+press waits there rather than being refused. `ip net on|off` is
+`org.slopos.net.toggle` and lasts until the next start, as all of `ip`
+does. Init runs
 `netctl apply` holding `NetAdmin` at every start, and on resuming, when the
 file exists, and `netctl apply <adapter>` for each adapter the net monitor
 shows appearing, one at a time and each ended after a minute

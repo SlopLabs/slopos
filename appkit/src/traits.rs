@@ -237,6 +237,7 @@ pub enum Role {
     Button,
     TextField,
     Checkbox,
+    Switch,
     Slider,
     Label,
     List,

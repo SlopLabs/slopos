@@ -326,7 +326,7 @@ impl Popover {
     }
 
     fn issue(&mut self, wanted: bool) {
-        if spawn_ip_net(wanted) {
+        if spawn_netctl_networking(wanted) {
             self.issued_at = Some(Instant::now());
         }
     }
@@ -358,25 +358,29 @@ fn panel_area(screen_w: u32, screen_h: u32) -> Rect {
     )
 }
 
-/// Whether `/bin/ip net` started, on a privd connection of the compositor's
-/// own, which the policy lets switch networking unasked; it holds no `NetAdmin`.
-fn spawn_ip_net(enable: bool) -> bool {
+/// Whether `netctl networking on|off` started on the compositor's own privd
+/// connection; the compositor holds no `NetAdmin`.
+fn spawn_netctl_networking(enable: bool) -> bool {
     let Ok(privd) = crate::privd::Connection::open() else {
         return false;
     };
     let verb: &[u8] = if enable { b"on\0" } else { b"off\0" };
-    let argv: [*const u8; 3] = [b"ip\0".as_ptr(), b"net\0".as_ptr(), verb.as_ptr()];
+    let argv: [*const u8; 3] = [
+        b"netctl\0".as_ptr(),
+        b"networking\0".as_ptr(),
+        verb.as_ptr(),
+    ];
     let env = format!("{}={PRIVD_AT}\0", slopos_priv_core::ENV_FD);
     let envp = [env.as_ptr()];
-    // `ip` reads nothing, and the compositor's stdin would put a child on
-    // the console's input.
+    // `netctl` reads nothing, and the compositor's stdin would put a child
+    // on the console's input.
     let actions = [
         process::clone_fd(1, 1),
         process::clone_fd(2, 2),
         process::clone_fd(privd.raw(), PRIVD_AT),
     ];
     let tid = process::spawn_path_with_env(
-        b"/bin/ip",
+        b"/bin/netctl",
         &argv,
         &envp,
         slopos_abi::task::TaskPriority::Normal,

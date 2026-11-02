@@ -313,7 +313,13 @@ fn text_roles_descend_and_fit_their_line() {
 fn spacing_is_a_four_pixel_scale() {
     let scale = [space::XS, space::SM, space::MD, space::LG, space::XL];
     assert_eq!(scale, [4, 8, 12, 16, 24]);
-    for insets in [inset::PAGE, inset::SECTION, inset::CARD, inset::CONTROL] {
+    for insets in [
+        inset::PAGE,
+        inset::SECTION,
+        inset::CARD,
+        inset::CONTROL,
+        inset::ROW,
+    ] {
         for side in [insets.top, insets.right, insets.bottom, insets.left] {
             assert!(scale.contains(&side), "{insets:?}");
         }

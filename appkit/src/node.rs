@@ -6,7 +6,7 @@ use slopos_theme_core::{EdgeInsets, Icon, Surface, TextRole, Tone};
 
 use super::components::{
     Button, ButtonRow, Disclosure, Gallery, Graph, GraphKey, IconButton, KeyboardMap, List,
-    PropertyList, Tag, Text, WindowSpec,
+    PropertyList, Switch, Tag, Text, WindowSpec,
 };
 use super::constraints::{CrossAxisAlignment, ImageScale, Length, Orientation, Rect};
 use super::event::{Key, Modifiers};
@@ -146,6 +146,7 @@ pub enum Node<M> {
         on_toggle: Option<M>,
         enabled: bool,
     },
+    Switch(Switch<M>),
     /// A horizontal slider over `min + k * step` up to `max`, and `max`.
     Slider {
         value: u64,

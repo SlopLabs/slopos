@@ -92,6 +92,8 @@ last resort.
 | `Page` | A whole screen: a title, a sentence about it, content that scrolls, and a `ButtonRow` under a separator. |
 | `Section` | A heading and the content it heads. Put sections in a column with `space::XL` between them. |
 | `PropertyList` | Names and their values, such as a disk's model or a review of choices. The name column is as wide as the widest name, and each row sits on one baseline. |
+| `Group`, `ActionRow` | The settings of one thing, as a box of rows with a hairline between each: its `Switch`, a `PropertyList` of what it is now, and `ActionRow`s whose title and line say how it is set and whose control at the end, such as *Edit…*, opens a dialog that changes it. Head each group with a `Section` when a page has several. |
+| `Switch` | A setting that takes effect the moment it is turned, with no button after it, such as networking on or off: what it does, a line about it, and a track at the row's end whose knob says which. The whole row is the control. A choice that a later button applies is a checkbox. |
 | `Notice` | Something the person must know before going on. Its tone picks its icon: info, success, warning, danger. It can carry one action. |
 | `ButtonRow` | The buttons that end a page or a dialog. `.back()` and `.aside()` go on the left, and `.cancel()`, `.confirm()` and `.destructive()` on the right, in the order you add them; the one that finishes goes last. In a `Page`'s or a dialog's footer, Enter presses the confirming button and Escape presses back or cancel. Enter never reaches a destructive button through the footer: only one that has focus takes it. Left and Right move focus along the row. |
 | `Button` | A single button outside a row. A button is secondary unless you call `.primary()` or `.destructive()`. |
@@ -169,11 +171,11 @@ shows every component in each of its states. Its pages are
   text shows in a tooltip when the pointer rests on it. Wrapped text never
   loses a word, and a field's own text is never cut: it scrolls to the caret.
 - **States.** Every control lights under the pointer and shows when it has
-  focus. A button, an icon button, a checkbox, a disclosure's header and a
-  slider's knob also show while pressed; a field shows focus instead, since a
-  press focuses it. A button, an icon button, a checkbox, a slider and a row
-  of a list or a menu can be disabled and show it; a field cannot be. You
-  never draw a state yourself.
+  focus. A button, an icon button, a checkbox, a switch, a disclosure's header
+  and a slider's knob also show while pressed; a field shows focus instead,
+  since a press focuses it. A button, an icon button, a checkbox, a switch, a
+  slider and a row of a list or a menu can be disabled and show it; a field
+  cannot be. You never draw a state yourself.
 - **Focus.** The focused control gets one 2 px ring around it, a disclosure
   around its header and a tab bar just inside its tabs; a field's own edge
   thickens in the focus colour instead. For a list, a table, a tree or a
@@ -183,7 +185,8 @@ shows every component in each of its states. Its pages are
   for a button, so a toolbar button never takes the keyboard from a search
   field. While a dialog is open, Tab moves only among the dialog's controls.
 - **Keys.** Enter and Escape reach the page's `ButtonRow` when no control took
-  them. A focused button takes Enter for itself; a checkbox takes only Space.
+  them. A focused button takes Enter for itself; a checkbox and a switch take
+  only Space.
 - **Hit targets.** Every control, and every row of a list, a table, a tree or
   a menu, is at least `style::MIN_TARGET` across. A `DragHandle` is a divider
   rather than a control: it is as long as the panes it parts and as wide as

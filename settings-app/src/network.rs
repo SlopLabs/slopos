@@ -1,24 +1,25 @@
-//! Network: whether the computer uses the network, how each adapter gets its
-//! address and which DNS servers it asks. What the page shows of an adapter
-//! is read from the kernel every few seconds; what it changes is kept in
-//! `/etc/network` by `netctl`, which privd runs once allowed, so the change
-//! is the same one `netctl` makes at a terminal and lasts across restarts.
+//! Network: whether this computer is online, each adapter, its address and
+//! the DNS servers. A switch is one [`SWITCH`] request, run at once; an
+//! address or the DNS servers change in a dialog saved as one [`SETTINGS`]
+//! `netctl load`.
 
 use slopos_appkit::{
-    Button, ButtonRow, LineEditInput, List, ListRow, Node, Notice, PropertyList, Section, Text,
-    Tone, column,
+    ActionRow, Button, ButtonRow, Dialog, Group, LineEditInput, List, ListRow, Node, Notice,
+    PropertyList, Section, Switch, Text, Tone, column, row,
 };
-use slopos_net_core::Ipv4;
-use slopos_net_core::Mac;
+use slopos_net_core::{Ipv4, Mac};
 use slopos_settings_core::network::{
     self as net, AdapterId, Dns, Invalid, Ipv4Method, Live, LiveAdapter, Settings,
 };
 use slopos_theme_core::{Icon, TextRole, space};
 
-use crate::field::{Field, Left, caption_text, with_error};
-use crate::{Ask, Asked, Effect as AppEffect, Msg as AppMsg, Panel, Purpose};
+use crate::field::{Field, Left, caption_text, with_caption};
+use crate::{Ask, Asked, Effect as AppEffect, Input, Msg as AppMsg, Panel, Purpose};
 
-pub const ACTION: &str = "org.slopos.network.settings";
+/// On or off, which an administrator runs unasked.
+pub const SWITCH: &str = "org.slopos.network.switch";
+/// Every other change, which an administrator confirms.
+pub const SETTINGS: &str = "org.slopos.network.settings";
 
 /// How often the page reads the network again while it shows it.
 pub const REFRESH_MS: u64 = 2000;
@@ -28,18 +29,18 @@ pub enum Msg {
     /// What `/etc/network` keeps and the network now, or why either could
     /// not be read.
     Read(Result<(Settings, Live), String>),
-    Adapter(usize),
     Networking,
-    Enabled,
+    /// With its hardware address, since a name passes to the next adapter.
+    Adapter(String, Mac),
+    EditAddress(String, Mac),
+    EditDns,
     Method(usize),
     Address(LineEditInput),
     Gateway(LineEditInput),
-    DnsMethod(usize),
-    Dns(LineEditInput),
-    Apply,
-    Revert,
-    Kept(usize),
-    Forget,
+    Servers(LineEditInput),
+    Save,
+    Cancel,
+    Forget(AdapterId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,67 +49,164 @@ pub enum Effect {
     Read,
 }
 
-/// What the page holds of the whole network as the person edits it.
-#[derive(Clone, Debug, Default)]
-struct Whole {
-    networking: bool,
-    dns_manual: bool,
-    dns: Field,
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Request {
+    Networking(bool),
+    Adapter { name: String, mac: Mac, on: bool },
+    Forget(AdapterId),
+    Save,
 }
 
-impl Whole {
-    fn of(kept: &Settings) -> Whole {
-        let (dns_manual, dns) = match &kept.dns {
-            Dns::Auto => (false, String::new()),
-            Dns::Manual(servers) => (true, joined(servers)),
-        };
-        Whole {
-            networking: kept.networking,
-            dns_manual,
-            dns: Field::with(dns),
+impl Request {
+    fn failed(&self) -> &'static str {
+        match self {
+            Request::Networking(true) => "Networking couldn't be turned on",
+            Request::Networking(false) => "Networking couldn't be turned off",
+            Request::Adapter { on: true, .. } => "The adapter couldn't be turned on",
+            Request::Adapter { on: false, .. } => "The adapter couldn't be turned off",
+            Request::Forget(_) => "The settings couldn't be forgotten",
+            Request::Save => "The settings couldn't be saved",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct Typed {
+    field: Field,
+    /// Focus left it holding something, so what is wrong with it shows.
+    left: bool,
+}
+
+impl Typed {
+    fn with(text: String) -> Typed {
+        Typed {
+            field: Field::with(text),
+            left: false,
         }
     }
 
-    fn same_dns(&self, other: &Whole) -> bool {
-        self.dns_manual == other.dns_manual && self.dns.text().trim() == other.dns.text().trim()
+    fn text(&self) -> &str {
+        self.field.text().trim()
+    }
+
+    fn edit(&mut self, input: LineEditInput) -> Left {
+        if matches!(input, LineEditInput::Blur) && !self.text().is_empty() {
+            self.left = true;
+        }
+        self.field.edit(input)
     }
 }
 
-/// What the page holds of the adapter chosen as the person edits it.
-#[derive(Clone, Debug, Default)]
-struct OneAdapter {
-    enabled: bool,
-    manual: bool,
-    address: Field,
-    gateway: Field,
+#[derive(Debug)]
+enum Form {
+    Address {
+        name: String,
+        mac: Mac,
+        manual: bool,
+        address: Typed,
+        gateway: Typed,
+    },
+    Dns {
+        manual: bool,
+        servers: Typed,
+    },
 }
 
-impl OneAdapter {
-    fn of(kept: &Settings, adapter: Option<&LiveAdapter>) -> OneAdapter {
-        let governing = adapter.and_then(|a| kept.governing(&a.name, a.mac));
-        let (enabled, ipv4) = governing.map_or((true, Ipv4Method::Auto), |a| (a.enabled, a.ipv4));
-        let (manual, address, gateway) = match ipv4 {
-            Ipv4Method::Auto => (false, String::new(), String::new()),
-            Ipv4Method::Manual { address, gateway } => (
-                true,
-                address.to_string(),
-                gateway.map(|g| g.to_string()).unwrap_or_default(),
-            ),
-        };
-        OneAdapter {
-            enabled,
-            manual,
-            address: Field::with(address),
-            gateway: Field::with(gateway),
+impl Form {
+    fn address_error(&self) -> Option<Invalid> {
+        match self {
+            Form::Address {
+                manual: true,
+                address,
+                ..
+            } => net::parse_address(address.text()).err(),
+            _ => None,
         }
     }
 
-    fn same(&self, other: &OneAdapter) -> bool {
-        self.enabled == other.enabled
-            && self.manual == other.manual
-            && self.address.text().trim() == other.address.text().trim()
-            && self.gateway.text().trim() == other.gateway.text().trim()
+    fn gateway_error(&self) -> Option<Invalid> {
+        let Form::Address {
+            manual: true,
+            address,
+            gateway,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if gateway.text().is_empty() {
+            return None;
+        }
+        let gateway = match net::parse_gateway(gateway.text()) {
+            Ok(gateway) => gateway,
+            Err(why) => return Some(why),
+        };
+        let address = net::parse_address(address.text()).ok()?;
+        net::check_gateway(address, gateway).err()
     }
+
+    fn servers_error(&self) -> Option<Invalid> {
+        let Form::Dns {
+            manual: true,
+            servers,
+        } = self
+        else {
+            return None;
+        };
+        match net::parse_dns(servers.text()) {
+            Ok(Dns::Auto) => Some(Invalid::DnsServer),
+            Ok(Dns::Manual(_)) => None,
+            Err(why) => Some(why),
+        }
+    }
+
+    fn over(&self, kept: &Settings) -> Option<Settings> {
+        if self.address_error().is_some()
+            || self.gateway_error().is_some()
+            || self.servers_error().is_some()
+        {
+            return None;
+        }
+        let mut wanted = kept.clone();
+        match self {
+            Form::Address {
+                name,
+                mac,
+                manual,
+                address,
+                gateway,
+            } => {
+                let (enabled, was) = governing(kept, name, *mac);
+                let ipv4 = match manual {
+                    false => Ipv4Method::Auto,
+                    true => {
+                        let address = net::parse_address(address.text()).ok()?;
+                        let gateway = match gateway.text().is_empty() {
+                            true => None,
+                            false => Some(net::parse_gateway(gateway.text()).ok()?),
+                        };
+                        Ipv4Method::manual(address, gateway).ok()?
+                    }
+                };
+                if ipv4 != was {
+                    wanted.set_for(name, *mac, enabled, ipv4);
+                }
+            }
+            Form::Dns { manual, servers } => {
+                wanted.dns = match manual {
+                    true => net::parse_dns(servers.text()).ok()?,
+                    false => Dns::Auto,
+                };
+            }
+        }
+        Some(wanted)
+    }
+}
+
+struct Editing {
+    form: Form,
+    tried: bool,
+    trouble: Option<String>,
 }
 
 pub struct Network {
@@ -116,45 +214,32 @@ pub struct Network {
     kept: Option<Settings>,
     live: Option<Live>,
     problem: Option<String>,
-    /// By name and hardware address, since a name passes to the next
-    /// adapter once its holder leaves.
-    chosen: Option<(String, Mac)>,
-    /// The edits, and what they were made over, so a change kept from
-    /// elsewhere meanwhile stays where the person changed nothing.
-    whole: Whole,
-    whole_was: Whole,
-    adapter: OneAdapter,
-    adapter_was: OneAdapter,
-    absent: Option<AdapterId>,
-    asking: bool,
-    /// The next read takes what is kept as it is, edits and all.
-    settling: bool,
-    said: Option<(Tone, String)>,
+    /// With the settings it keeps once done.
+    asking: Option<(Request, Settings)>,
+    trouble: Option<(Request, String)>,
+    editing: Option<Editing>,
+}
+
+fn governing(kept: &Settings, name: &str, mac: Mac) -> (bool, Ipv4Method) {
+    kept.governing(name, mac)
+        .map_or((true, Ipv4Method::Auto), |a| (a.enabled, a.ipv4))
 }
 
 fn kind_name(adapter: &LiveAdapter) -> String {
     format!("Wired network {}", adapter.name)
 }
 
-fn status(adapter: &LiveAdapter) -> &'static str {
-    match (adapter.up, adapter.carrier) {
-        (false, _) => "Off",
-        (true, true) => "Connected",
-        (true, false) => "No cable",
-    }
-}
-
-fn addresses(adapter: &LiveAdapter) -> String {
-    let all: Vec<String> = adapter
+fn addresses(adapter: &LiveAdapter) -> Vec<String> {
+    adapter
         .addresses
         .iter()
         .filter(|a| !a.link_local)
         .map(|a| a.address.to_string())
-        .collect();
-    match all.is_empty() {
-        true => String::from("None"),
-        false => all.join(", "),
-    }
+        .collect()
+}
+
+fn gateway(adapter: &LiveAdapter) -> Option<Ipv4> {
+    adapter.gateway.filter(|g| !g.is_unspecified())
 }
 
 fn joined(servers: &[Ipv4]) -> String {
@@ -165,6 +250,34 @@ fn joined(servers: &[Ipv4]) -> String {
         .join(", ")
 }
 
+fn reach(adapter: &LiveAdapter) -> u8 {
+    match (adapter.up, adapter.carrier) {
+        (false, _) => 0,
+        (true, false) => 1,
+        _ if addresses(adapter).is_empty() => 2,
+        _ if gateway(adapter).is_none() => 3,
+        _ => 4,
+    }
+}
+
+struct Standing {
+    icon: Icon,
+    tone: Tone,
+    title: String,
+    detail: String,
+}
+
+impl Standing {
+    fn new(icon: Icon, tone: Tone, title: &str, detail: impl Into<String>) -> Standing {
+        Standing {
+            icon,
+            tone,
+            title: String::from(title),
+            detail: detail.into(),
+        }
+    }
+}
+
 impl Network {
     pub fn new(admin: bool) -> Network {
         Network {
@@ -172,15 +285,9 @@ impl Network {
             kept: None,
             live: None,
             problem: None,
-            chosen: None,
-            whole: Whole::default(),
-            whole_was: Whole::default(),
-            adapter: OneAdapter::default(),
-            adapter_was: OneAdapter::default(),
-            absent: None,
-            asking: false,
-            settling: false,
-            said: None,
+            asking: None,
+            trouble: None,
+            editing: None,
         }
     }
 
@@ -191,11 +298,10 @@ impl Network {
             .unwrap_or_default()
     }
 
-    fn chosen(&self) -> Option<&LiveAdapter> {
-        let (name, mac) = self.chosen.as_ref()?;
+    fn adapter(&self, name: &str, mac: Mac) -> Option<&LiveAdapter> {
         self.adapters()
             .into_iter()
-            .find(|a| a.name == *name && a.mac == *mac)
+            .find(|a| a.name == name && a.mac == mac)
     }
 
     /// The settings kept for adapters that are not here.
@@ -209,215 +315,283 @@ impl Network {
             .collect()
     }
 
-    fn reset_whole(&mut self) {
-        if let Some(kept) = &self.kept {
-            let focused = self.whole.dns.focused;
-            self.whole = Whole::of(kept);
-            self.whole_was = self.whole.clone();
-            self.whole.dns.focused = focused;
+    fn idle(&self) -> bool {
+        self.kept.is_some() && self.asking.is_none() && self.problem.is_none()
+    }
+
+    fn pending(&self) -> Option<&Request> {
+        self.asking.as_ref().map(|(request, _)| request)
+    }
+
+    /// What the computer does now, which `ip net` may have left unlike what
+    /// is kept.
+    fn networking_on(&self) -> bool {
+        match (self.pending(), &self.live) {
+            (Some(Request::Networking(on)), _) => *on,
+            (_, Some(live)) => live.networking,
+            (_, None) => self.kept.as_ref().is_some_and(|k| k.networking),
         }
     }
 
-    fn reset_adapter(&mut self) {
-        if let Some(kept) = &self.kept {
-            let focused = (self.adapter.address.focused, self.adapter.gateway.focused);
-            self.adapter = OneAdapter::of(kept, self.chosen());
-            self.adapter_was = self.adapter.clone();
-            (self.adapter.address.focused, self.adapter.gateway.focused) = focused;
-        }
-    }
-
-    /// Whether the address and gateway fields show, and so count.
-    fn addressed(&self) -> bool {
-        self.whole.networking && self.adapter.enabled && self.adapter.manual
-    }
-
-    fn address_error(&self) -> Option<Invalid> {
-        if !self.addressed() {
-            return None;
-        }
-        net::parse_address(self.adapter.address.text()).err()
-    }
-
-    fn gateway_error(&self) -> Option<Invalid> {
-        let typed = self.adapter.gateway.text().trim();
-        if !self.addressed() || typed.is_empty() {
-            return None;
-        }
-        let gateway = match net::parse_gateway(typed) {
-            Ok(gateway) => gateway,
-            Err(why) => return Some(why),
-        };
-        let address = net::parse_address(self.adapter.address.text()).ok()?;
-        net::check_gateway(address, gateway).err()
-    }
-
-    fn dns_error(&self) -> Option<Invalid> {
-        if !self.whole.dns_manual {
-            return None;
-        }
-        match net::parse_dns(self.whole.dns.text()) {
-            Ok(Dns::Auto) => Some(Invalid::DnsServer),
-            Ok(Dns::Manual(_)) => None,
-            Err(why) => Some(why),
-        }
-    }
-
-    /// What is kept with the person's edits over it, `None` while a field
-    /// is wrong.
-    fn wanted(&self) -> Option<Settings> {
-        let mut wanted = self.kept.clone()?;
-        if self.address_error().is_some()
-            || self.gateway_error().is_some()
-            || self.dns_error().is_some()
-        {
-            return None;
-        }
-        if self.whole.networking != self.whole_was.networking {
-            wanted.networking = self.whole.networking;
-        }
-        if !self.whole.same_dns(&self.whole_was) {
-            wanted.dns = match self.whole.dns_manual {
-                true => net::parse_dns(self.whole.dns.text()).ok()?,
-                false => Dns::Auto,
-            };
-        }
-        if let Some(adapter) = self.chosen()
-            && !self.adapter.same(&self.adapter_was)
-        {
-            let (kept_enabled, kept) = wanted
-                .governing(&adapter.name, adapter.mac)
-                .map_or((true, Ipv4Method::Auto), |a| (a.enabled, a.ipv4));
-            let ipv4 = match (self.adapter.manual, self.addressed()) {
-                (false, _) => Ipv4Method::Auto,
-                (true, false) => kept,
-                (true, true) => {
-                    let address = net::parse_address(self.adapter.address.text()).ok()?;
-                    let typed = self.adapter.gateway.text().trim();
-                    let gateway = match typed.is_empty() {
-                        true => None,
-                        false => Some(net::parse_gateway(typed).ok()?),
-                    };
-                    Ipv4Method::manual(address, gateway).ok()?
-                }
-            };
-            if (self.adapter.enabled, ipv4) != (kept_enabled, kept) {
-                wanted.set_for(&adapter.name, adapter.mac, self.adapter.enabled, ipv4);
+    fn adapter_on(&self, adapter: &LiveAdapter) -> bool {
+        match self.pending() {
+            Some(Request::Adapter { name, mac, on })
+                if *name == adapter.name && *mac == adapter.mac =>
+            {
+                *on
             }
-        }
-        Some(wanted)
-    }
-
-    fn changed(&self) -> bool {
-        match (&self.kept, self.wanted()) {
-            (Some(kept), Some(wanted)) => *kept != wanted,
-            _ => self.kept.is_some(),
+            _ => self
+                .kept
+                .as_ref()
+                .is_none_or(|k| governing(k, &adapter.name, adapter.mac).0),
         }
     }
 
-    fn apply(&mut self, wanted: Settings) -> Vec<AppEffect> {
-        self.asking = true;
-        self.said = None;
+    fn ask(&mut self, request: Request, wanted: Settings) -> Vec<AppEffect> {
+        self.trouble = None;
+        let turned = |on: bool| String::from(if on { "on" } else { "off" });
+        let (action, args, input) = match &request {
+            Request::Networking(on) => (
+                SWITCH,
+                vec![String::from("networking"), turned(*on)],
+                Input::default(),
+            ),
+            Request::Adapter { name, mac, on } => {
+                let adapter = match mac.is_zero() {
+                    true => name.clone(),
+                    false => mac.to_string(),
+                };
+                (
+                    SWITCH,
+                    vec![String::from("set"), adapter, turned(*on)],
+                    Input::default(),
+                )
+            }
+            Request::Forget(_) | Request::Save => {
+                (SETTINGS, vec![String::from("load")], wanted.render().into())
+            }
+        };
+        self.asking = Some((request, wanted));
         vec![AppEffect::Ask(Ask {
             purpose: Purpose::Network,
-            action: ACTION,
-            args: vec![String::from("load")],
-            input: wanted.render().into(),
+            action,
+            args,
+            input,
         })]
     }
 
-    fn read(&mut self, kept: Settings, live: Live) {
-        let fresh = self.kept.is_none() || std::mem::take(&mut self.settling);
-        self.kept = Some(kept);
-        self.live = Some(live);
-        self.problem = None;
-        if fresh || self.chosen().is_none() || self.adapter.same(&self.adapter_was) {
-            if self.chosen().is_none() {
-                self.chosen = self.adapters().first().map(|a| (a.name.clone(), a.mac));
+    fn to_change(&self) -> Option<Settings> {
+        self.kept.clone().filter(|_| self.idle())
+    }
+
+    fn turn_networking(&mut self) -> Vec<AppEffect> {
+        let Some(mut wanted) = self.to_change() else {
+            return Vec::new();
+        };
+        let on = !self.networking_on();
+        wanted.networking = on;
+        self.ask(Request::Networking(on), wanted)
+    }
+
+    fn turn_adapter(&mut self, name: String, mac: Mac) -> Vec<AppEffect> {
+        let Some(mut wanted) = self.to_change() else {
+            return Vec::new();
+        };
+        let (enabled, ipv4) = governing(&wanted, &name, mac);
+        wanted.set_for(&name, mac, !enabled, ipv4);
+        self.ask(
+            Request::Adapter {
+                name,
+                mac,
+                on: !enabled,
+            },
+            wanted,
+        )
+    }
+
+    fn forget(&mut self, id: AdapterId) -> Vec<AppEffect> {
+        let Some(mut wanted) = self.to_change() else {
+            return Vec::new();
+        };
+        wanted.adapters.retain(|a| a.id != id);
+        match self.kept.as_ref() == Some(&wanted) {
+            true => Vec::new(),
+            false => self.ask(Request::Forget(id), wanted),
+        }
+    }
+
+    fn open(&mut self, form: Form) {
+        if self.idle() {
+            self.editing = Some(Editing {
+                form,
+                tried: false,
+                trouble: None,
+            });
+        }
+    }
+
+    fn open_address(&mut self, name: String, mac: Mac) {
+        let Some(kept) = &self.kept else {
+            return;
+        };
+        let form = match governing(kept, &name, mac).1 {
+            Ipv4Method::Auto => Form::Address {
+                name,
+                mac,
+                manual: false,
+                address: Typed::default(),
+                gateway: Typed::default(),
+            },
+            Ipv4Method::Manual { address, gateway } => Form::Address {
+                name,
+                mac,
+                manual: true,
+                address: Typed::with(address.to_string()),
+                gateway: Typed::with(gateway.map(|g| g.to_string()).unwrap_or_default()),
+            },
+        };
+        self.open(form);
+    }
+
+    fn open_dns(&mut self) {
+        let Some(kept) = &self.kept else {
+            return;
+        };
+        let form = match &kept.dns {
+            Dns::Auto => Form::Dns {
+                manual: false,
+                servers: Typed::default(),
+            },
+            Dns::Manual(servers) => Form::Dns {
+                manual: true,
+                servers: Typed::with(
+                    servers
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
+            },
+        };
+        self.open(form);
+    }
+
+    /// A manual address starts from the one the adapter holds now.
+    fn method(&mut self, chosen: bool) {
+        let now = match &self.editing {
+            Some(Editing {
+                form: Form::Address { name, mac, .. },
+                ..
+            }) => self.adapter(name, *mac).map(|a| {
+                let address = addresses(a).into_iter().next().unwrap_or_default();
+                let gateway = gateway(a).map(|g| g.to_string()).unwrap_or_default();
+                (address, gateway)
+            }),
+            _ => None,
+        };
+        let Some(editing) = &mut self.editing else {
+            return;
+        };
+        match &mut editing.form {
+            Form::Address {
+                manual,
+                address,
+                gateway,
+                ..
+            } => {
+                if chosen && !*manual && address.text().is_empty() && gateway.text().is_empty() {
+                    if let Some((now_address, now_gateway)) = now {
+                        *address = Typed::with(now_address);
+                        *gateway = Typed::with(now_gateway);
+                    }
+                }
+                *manual = chosen;
             }
-            self.reset_adapter();
+            Form::Dns { manual, .. } => *manual = chosen,
         }
-        let networking_edited = self.whole.networking != self.whole_was.networking;
-        let dns_edited = !self.whole.same_dns(&self.whole_was);
-        let mine = self.whole.clone();
-        self.reset_whole();
-        if !fresh && networking_edited {
-            self.whole.networking = mine.networking;
+    }
+
+    fn typed(
+        &mut self,
+        input: LineEditInput,
+        which: fn(&mut Form) -> Option<&mut Typed>,
+    ) -> Vec<AppEffect> {
+        let Some(typed) = self.editing.as_mut().and_then(|e| which(&mut e.form)) else {
+            return Vec::new();
+        };
+        match typed.edit(input) {
+            Left::Enter => self.save(),
+            Left::Nothing => Vec::new(),
         }
-        if !fresh && dns_edited {
-            self.whole.dns_manual = mine.dns_manual;
-            self.whole.dns = mine.dns;
+    }
+
+    fn save(&mut self) -> Vec<AppEffect> {
+        if !self.idle() {
+            return Vec::new();
         }
-        let gone = self
-            .absent
-            .as_ref()
-            .is_some_and(|id| !self.absent_kept().iter().any(|a| a.id == *id));
-        if gone {
-            self.absent = None;
+        let (Some(kept), Some(editing)) = (&self.kept, &mut self.editing) else {
+            return Vec::new();
+        };
+        editing.tried = true;
+        editing.trouble = None;
+        let Some(wanted) = editing.form.over(kept) else {
+            return Vec::new();
+        };
+        match wanted == *kept {
+            true => {
+                self.editing = None;
+                Vec::new()
+            }
+            false => self.ask(Request::Save, wanted),
         }
     }
 
     pub fn update(&mut self, msg: Msg) -> Vec<AppEffect> {
         match msg {
-            Msg::Read(Ok((kept, live))) => self.read(kept, live),
+            Msg::Read(Ok((kept, live))) => {
+                self.kept = Some(kept);
+                self.live = Some(live);
+                self.problem = None;
+            }
             Msg::Read(Err(why)) => self.problem = Some(why),
-            Msg::Adapter(row) => {
-                let next = self.adapters().get(row).map(|a| (a.name.clone(), a.mac));
-                if next.is_some() && next != self.chosen {
-                    self.chosen = next;
-                    self.reset_adapter();
-                }
+            Msg::Networking => return self.turn_networking(),
+            Msg::Adapter(name, mac) => return self.turn_adapter(name, mac),
+            Msg::Forget(id) => return self.forget(id),
+            Msg::EditAddress(name, mac) => self.open_address(name, mac),
+            Msg::EditDns => self.open_dns(),
+            Msg::Method(row) => self.method(row == 1),
+            Msg::Address(input) => {
+                return self.typed(input, |form| match form {
+                    Form::Address { address, .. } => Some(address),
+                    Form::Dns { .. } => None,
+                });
             }
-            Msg::Networking => self.whole.networking = !self.whole.networking,
-            Msg::Enabled => self.adapter.enabled = !self.adapter.enabled,
-            Msg::Method(row) => self.adapter.manual = row == 1,
-            Msg::DnsMethod(row) => self.whole.dns_manual = row == 1,
-            Msg::Address(input) => return self.typed(|n| &mut n.adapter.address, input),
-            Msg::Gateway(input) => return self.typed(|n| &mut n.adapter.gateway, input),
-            Msg::Dns(input) => return self.typed(|n| &mut n.whole.dns, input),
-            Msg::Apply => return self.update_apply(),
-            Msg::Revert => {
-                self.reset_whole();
-                self.reset_adapter();
-                self.said = None;
+            Msg::Gateway(input) => {
+                return self.typed(input, |form| match form {
+                    Form::Address { gateway, .. } => Some(gateway),
+                    Form::Dns { .. } => None,
+                });
             }
-            Msg::Kept(row) => self.absent = self.absent_kept().get(row).map(|a| a.id.clone()),
-            Msg::Forget => {
-                if self.changed() || self.asking || self.problem.is_some() {
-                    return Vec::new();
+            Msg::Servers(input) => {
+                return self.typed(input, |form| match form {
+                    Form::Dns { servers, .. } => Some(servers),
+                    Form::Address { .. } => None,
+                });
+            }
+            Msg::Save => return self.save(),
+            Msg::Cancel => {
+                if self.asking.is_none() {
+                    self.editing = None;
                 }
-                let (Some(mut wanted), Some(id)) = (self.kept.clone(), self.absent.take()) else {
-                    return Vec::new();
-                };
-                wanted.adapters.retain(|a| a.id != id);
-                return self.apply(wanted);
             }
         }
         Vec::new()
-    }
-
-    fn typed(
-        &mut self,
-        field: fn(&mut Network) -> &mut Field,
-        input: LineEditInput,
-    ) -> Vec<AppEffect> {
-        match field(self).edit(input) {
-            Left::Enter => self.update_apply(),
-            Left::Nothing => Vec::new(),
-        }
-    }
-
-    /// Whether Apply may ask now: something changed, every field holds, and
-    /// what it goes over was read.
-    fn can_apply(&self) -> bool {
-        self.changed() && self.wanted().is_some() && !self.asking && self.problem.is_none()
     }
 
     /// Whether `read` is what the page shows already, so reading it again
     /// changes nothing.
     pub fn holds(&self, (kept, live): &(Settings, Live)) -> bool {
         self.problem.is_none()
-            && !self.settling
             && self.kept.as_ref() == Some(kept)
             && self.live.as_ref() == Some(live)
     }
@@ -426,280 +600,448 @@ impl Network {
         self.admin = admin;
     }
 
-    fn update_apply(&mut self) -> Vec<AppEffect> {
-        match self.wanted().filter(|_| self.can_apply()) {
-            Some(wanted) => self.apply(wanted),
-            None => Vec::new(),
+    /// A done request keeps what it asked for, so nothing flicks back before
+    /// the next read; a declined one says nothing.
+    pub fn answered(&mut self, asked: Asked) -> Vec<AppEffect> {
+        let read = vec![AppEffect::Network(Effect::Read)];
+        let Some((request, wanted)) = self.asking.take() else {
+            return read;
+        };
+        let declined = matches!(
+            asked,
+            Asked::Refused {
+                by_person: true,
+                ..
+            }
+        );
+        match (asked.trouble(), declined) {
+            (None, _) => {
+                self.kept = Some(wanted);
+                match request {
+                    Request::Save => self.editing = None,
+                    Request::Networking(on) => {
+                        if let Some(live) = &mut self.live {
+                            live.networking = on;
+                        }
+                    }
+                    Request::Adapter { .. } | Request::Forget(_) => {}
+                }
+            }
+            (Some(_), true) => {}
+            (Some(why), false) => match (request, &mut self.editing) {
+                (Request::Save, Some(editing)) => editing.trouble = Some(why),
+                (Request::Save, None) => {}
+                (request, _) => self.trouble = Some((request, why)),
+            },
+        }
+        read
+    }
+
+    fn standing(&self) -> Standing {
+        let Some(live) = &self.live else {
+            return match &self.problem {
+                Some(why) => Standing::new(
+                    Icon::TriangleAlert,
+                    Tone::Danger,
+                    "The network settings can't be read",
+                    why.clone(),
+                ),
+                None => Standing::new(Icon::RefreshCw, Tone::Secondary, "Reading the network", ""),
+            };
+        };
+        if !live.networking {
+            return Standing::new(
+                Icon::Power,
+                Tone::Secondary,
+                "Networking is off",
+                "Turn it on to reach other computers and the internet.",
+            );
+        }
+        let adapters = self.adapters();
+        let Some(best) = adapters.iter().rev().max_by_key(|a| reach(a)).copied() else {
+            return Standing::new(
+                Icon::EthernetPort,
+                Tone::Secondary,
+                "No network adapter",
+                "Plug one in, such as a USB Ethernet adapter.",
+            );
+        };
+        let lone = adapters.len() == 1;
+        let name = &best.name;
+        let address = best
+            .addresses
+            .iter()
+            .find(|a| !a.link_local)
+            .map(|a| a.address.addr.to_string())
+            .unwrap_or_default();
+        match reach(best) {
+            4 => Standing::new(
+                Icon::Network,
+                Tone::Success,
+                "Connected",
+                format!("Through {name}, with the address {address}."),
+            ),
+            3 => Standing::new(
+                Icon::Network,
+                Tone::Warning,
+                "Local network only",
+                format!("Only this network can be reached: {name} has no gateway."),
+            ),
+            2 => Standing::new(
+                Icon::RefreshCw,
+                Tone::Info,
+                "Connecting",
+                format!("Waiting for the network to give {name} an address."),
+            ),
+            1 if lone => Standing::new(
+                Icon::Unplug,
+                Tone::Warning,
+                "Not connected",
+                format!("Plug a network cable into {name}."),
+            ),
+            1 => Standing::new(
+                Icon::Unplug,
+                Tone::Warning,
+                "Not connected",
+                "Plug a network cable into an adapter.",
+            ),
+            _ if lone => Standing::new(
+                Icon::Power,
+                Tone::Secondary,
+                "Not connected",
+                format!("The adapter {name} is turned off."),
+            ),
+            _ => Standing::new(
+                Icon::Power,
+                Tone::Secondary,
+                "Not connected",
+                "Every adapter is turned off.",
+            ),
         }
     }
 
-    pub fn answered(&mut self, asked: Asked) -> Vec<AppEffect> {
-        self.asking = false;
-        self.settling = matches!(asked, Asked::Ran { .. });
-        self.said = Some(match asked.trouble() {
-            None => (
-                Tone::Success,
-                String::from("The network settings are kept and in use."),
-            ),
-            Some(why) => (Tone::Danger, why),
-        });
-        vec![AppEffect::Network(Effect::Read)]
+    fn adapter_status(&self, adapter: &LiveAdapter) -> &'static str {
+        if self.live.as_ref().is_some_and(|l| !l.networking) {
+            return "Off while networking is off";
+        }
+        match reach(adapter) {
+            0 => "Off",
+            1 => "No cable plugged in",
+            2 => "Waiting for an address",
+            _ => "Connected",
+        }
     }
 
-    pub fn dialog(&self) -> Option<Node<AppMsg>> {
-        None
+    fn trouble_where(&self, asked: impl Fn(&Request) -> bool) -> Option<Node<AppMsg>> {
+        let (request, why) = self.trouble.as_ref().filter(|(r, _)| asked(r))?;
+        Some(
+            Notice::new(Tone::Danger, request.failed())
+                .body(why.clone())
+                .into(),
+        )
     }
 
     pub fn view(&self) -> Node<AppMsg> {
-        let about = "How this computer reaches other computers and the internet.";
-        let footer = ButtonRow::new()
-            .aside(
-                Button::new("Revert")
-                    .on_press(AppMsg::Network(Msg::Revert))
-                    .enabled(self.changed() && !self.asking),
-            )
-            .confirm(
-                Button::new("Apply")
-                    .on_press(AppMsg::Network(Msg::Apply))
-                    .enabled(self.can_apply()),
-            );
-        if self.kept.is_none() {
-            let words = self
-                .problem
-                .clone()
-                .unwrap_or_else(|| String::from("Reading the network settings."));
-            let notice = match self.problem {
-                Some(_) => {
-                    Notice::new(Tone::Danger, "The network settings can't be read").body(words)
-                }
-                None => Notice::new(Tone::Info, words),
-            };
-            return crate::page(Panel::Network, about, vec![notice.into()], None);
-        }
+        let about = "Whether this computer is online, and how it connects.";
         let mut parts: Vec<Node<AppMsg>> = Vec::new();
-        if let Some(problem) = &self.problem {
+        if let (Some(_), Some(problem)) = (&self.kept, &self.problem) {
             let notice = Notice::new(Tone::Danger, "The network settings can't be read again");
             parts.push(notice.body(problem.clone()).into());
         }
-        if let Some((tone, said)) = &self.said {
-            parts.push(Notice::new(*tone, said.clone()).into());
+        parts.push(self.overview());
+        if self.kept.is_some() {
+            for adapter in self.adapters() {
+                parts.push(self.adapter_section(adapter));
+            }
+            parts.push(self.dns_section());
+            let absent = self.absent_kept();
+            if !absent.is_empty() {
+                parts.push(self.absent_section(&absent));
+            }
         }
-        if !self.admin {
-            parts.push(
-                Notice::new(
-                    Tone::Info,
-                    "Changing these takes an administrator's password",
-                )
-                .into(),
-            );
-        }
-        parts.push(
-            Section::new(
-                "Networking",
-                Node::Checkbox {
-                    checked: self.whole.networking,
-                    label: String::from("Use the network"),
-                    on_toggle: Some(AppMsg::Network(Msg::Networking)),
-                    enabled: true,
-                },
-            )
-            .into(),
-        );
-        parts.push(self.adapters_section());
-        if self.whole.networking
-            && let Some(adapter) = self.chosen()
-        {
-            parts.push(self.adapter_section(adapter));
-        }
-        parts.push(self.dns_section());
-        let absent = self.absent_kept();
-        if !absent.is_empty() {
-            parts.push(self.absent_section(&absent));
-        }
-        crate::page(Panel::Network, about, parts, Some(footer))
+        crate::page(Panel::Network, about, parts, None)
     }
 
-    fn adapters_section(&self) -> Node<AppMsg> {
-        let adapters = self.adapters();
-        if adapters.is_empty() {
-            return Section::new(
-                "Adapters",
-                Text::new("This computer has no network adapter.")
+    fn overview(&self) -> Node<AppMsg> {
+        let standing = self.standing();
+        let mut words: Vec<Node<AppMsg>> = vec![
+            Text::new(standing.title)
+                .role(TextRole::Title)
+                .wrap()
+                .into(),
+        ];
+        if !standing.detail.is_empty() {
+            words.push(
+                Text::new(standing.detail)
                     .tone(Tone::Secondary)
-                    .wrap(),
-            )
-            .into();
+                    .wrap()
+                    .into(),
+            );
         }
-        let rows = adapters
-            .iter()
-            .map(|a| {
-                let detail = match (a.up, a.carrier) {
-                    (true, true) => format!("{} · {}", status(a), addresses(a)),
-                    _ => String::from(status(a)),
-                };
-                ListRow::new(kind_name(a))
-                    .icon(Icon::EthernetPort)
-                    .detail(detail)
-            })
-            .collect();
-        let chosen = adapters
-            .iter()
-            .position(|a| self.chosen.as_ref() == Some(&(a.name.clone(), a.mac)));
-        Section::new(
-            "Adapters",
-            List::new(rows)
-                .selected(chosen)
-                .on_select(|row| AppMsg::Network(Msg::Adapter(row))),
-        )
-        .into()
+        let status = row(
+            space::LG,
+            vec![
+                Node::Icon {
+                    icon: standing.icon,
+                    role: TextRole::Display,
+                    tone: standing.tone,
+                },
+                Node::Expand {
+                    weight: 1,
+                    child: Box::new(column(space::XS, words)),
+                },
+            ],
+        );
+        let mut group = Group::new().row(status);
+        if self.kept.is_some() {
+            group = group.row(
+                Switch::new("Networking", self.networking_on())
+                    .detail("Every adapter stops while it is off.")
+                    .on_toggle(AppMsg::Network(Msg::Networking))
+                    .enabled(self.idle()),
+            );
+        }
+        let mut parts: Vec<Node<AppMsg>> = vec![group.into()];
+        parts.extend(self.trouble_where(|r| matches!(r, Request::Networking(_))));
+        if !self.admin && self.kept.is_some() {
+            parts.push(row(
+                space::XS,
+                vec![
+                    Node::Icon {
+                        icon: Icon::Lock,
+                        role: TextRole::Caption,
+                        tone: Tone::Secondary,
+                    },
+                    Node::Expand {
+                        weight: 1,
+                        child: Box::new(caption_text(
+                            "Changes ask for an administrator's password.",
+                            Tone::Secondary,
+                        )),
+                    },
+                ],
+            ));
+        }
+        column(space::SM, parts)
+    }
+
+    fn edit_button(&self, msg: Msg) -> Button<AppMsg> {
+        Button::new("Edit…")
+            .on_press(AppMsg::Network(msg))
+            .enabled(self.idle())
     }
 
     fn adapter_section(&self, adapter: &LiveAdapter) -> Node<AppMsg> {
-        let mut facts = PropertyList::new()
-            .row("Status", status(adapter))
-            .row("Hardware address", adapter.mac.to_string())
-            .row("Address", addresses(adapter));
-        if let Some(gateway) = adapter.gateway.filter(|g| !g.is_unspecified()) {
+        let (name, mac) = (adapter.name.clone(), adapter.mac);
+        let switch = Switch::new("Use this adapter", self.adapter_on(adapter))
+            .detail(self.adapter_status(adapter))
+            .on_toggle(AppMsg::Network(Msg::Adapter(name.clone(), mac)))
+            .enabled(self.idle());
+        let mut facts = PropertyList::new();
+        let held = addresses(adapter);
+        if !held.is_empty() {
+            facts = facts.row("Address", held.join(", "));
+        }
+        if let Some(gateway) = gateway(adapter) {
             facts = facts.row("Gateway", gateway.to_string());
         }
-        let mut parts: Vec<Node<AppMsg>> = vec![
-            facts.into(),
-            Node::Checkbox {
-                checked: self.adapter.enabled,
-                label: String::from("Use this adapter"),
-                on_toggle: Some(AppMsg::Network(Msg::Enabled)),
-                enabled: true,
-            },
-        ];
-        if self.adapter.enabled {
-            let methods = vec![
-                ListRow::new("Automatic address").detail("The network gives one, by DHCP."),
-                ListRow::new("Manual address").detail("You choose the address and the gateway."),
-            ];
-            parts.push(
-                List::new(methods)
-                    .selected(Some(usize::from(self.adapter.manual)))
-                    .on_select(|row| AppMsg::Network(Msg::Method(row)))
-                    .into(),
-            );
-            if self.adapter.manual {
-                let (address_error, gateway_error) = (self.address_error(), self.gateway_error());
-                let address =
-                    self.adapter
-                        .address
-                        .checked("192.168.1.20/24", address_error.is_some(), |i| {
-                            AppMsg::Network(Msg::Address(i))
-                        });
-                let gateway = self.adapter.gateway.checked(
-                    "192.168.1.1, or nothing",
-                    gateway_error.is_some(),
-                    |i| AppMsg::Network(Msg::Gateway(i)),
-                );
-                parts.push(
-                    PropertyList::new()
-                        .row_with(
-                            "Address",
-                            with_error(address, address_error.map(Invalid::sentence)),
-                        )
-                        .row_with(
-                            "Gateway",
-                            with_error(gateway, gateway_error.map(Invalid::sentence)),
-                        )
-                        .into(),
-                );
-            }
+        if !mac.is_zero() {
+            facts = facts.row("Hardware address", mac.to_string());
         }
-        Section::new(kind_name(adapter), column(space::MD, parts)).into()
+        let ipv4 = self
+            .kept
+            .as_ref()
+            .map_or(Ipv4Method::Auto, |k| governing(k, &name, mac).1);
+        let how = match ipv4 {
+            Ipv4Method::Auto => {
+                ActionRow::new("Automatic address").detail("The network gives it one.")
+            }
+            Ipv4Method::Manual { address, gateway } => {
+                let detail = match gateway {
+                    Some(gateway) => format!("{address}, gateway {gateway}"),
+                    None => format!("{address}, no gateway"),
+                };
+                ActionRow::new("Manual address").detail(detail)
+            }
+        };
+        let mut group = Group::new().row(switch);
+        if !facts.rows.is_empty() {
+            group = group.row(facts);
+        }
+        group = group.row(how.trailing(self.edit_button(Msg::EditAddress(name.clone(), mac))));
+        let mut parts: Vec<Node<AppMsg>> = vec![group.into()];
+        parts.extend(self.trouble_where(
+            |r| matches!(r, Request::Adapter { name: n, mac: m, .. } if *n == name && *m == mac),
+        ));
+        Section::new(kind_name(adapter), column(space::SM, parts)).into()
     }
 
     fn dns_section(&self) -> Node<AppMsg> {
         let in_use = self
             .live
             .as_ref()
-            .map(|live| match live.dns.servers.is_empty() {
-                true => String::from("None in use now."),
-                false => format!("In use now: {}.", joined(&live.dns.servers)),
-            })
-            .unwrap_or_default();
-        let methods = vec![
-            ListRow::new("Automatic").detail("The network names them, with each address."),
-            ListRow::new("These servers").detail("The ones you type, for every adapter."),
-        ];
-        let mut parts: Vec<Node<AppMsg>> = vec![
-            List::new(methods)
-                .selected(Some(usize::from(self.whole.dns_manual)))
-                .on_select(|row| AppMsg::Network(Msg::DnsMethod(row)))
-                .into(),
-        ];
-        if self.whole.dns_manual {
-            let error = self.dns_error();
-            let field = self
-                .whole
-                .dns
-                .checked("1.1.1.1, 9.9.9.9", error.is_some(), |i| {
-                    AppMsg::Network(Msg::Dns(i))
-                });
-            parts.push(with_error(field, error.map(Invalid::sentence)));
-        }
-        parts.push(
-            Text::new(in_use)
-                .role(TextRole::Caption)
-                .tone(Tone::Secondary)
-                .wrap()
-                .into(),
-        );
-        Section::new("DNS servers", column(space::SM, parts)).into()
+            .filter(|live| !live.dns.servers.is_empty())
+            .map_or_else(
+                || String::from("None yet"),
+                |live| joined(&live.dns.servers),
+            );
+        let manual = self
+            .kept
+            .as_ref()
+            .is_some_and(|k| matches!(k.dns, Dns::Manual(_)));
+        let how = match manual {
+            false => ActionRow::new("Automatic").detail("Each network names its own."),
+            true => ActionRow::new("Manual")
+                .detail("Every adapter asks these, whatever the network names."),
+        };
+        let group = Group::new()
+            .row(PropertyList::new().row("In use", in_use))
+            .row(how.trailing(self.edit_button(Msg::EditDns)));
+        Section::new("DNS servers", group).into()
     }
 
     fn absent_section(&self, absent: &[&net::Adapter]) -> Node<AppMsg> {
-        let rows = absent
-            .iter()
-            .map(|a| {
-                let how = match a.ipv4 {
-                    Ipv4Method::Auto => String::from("Automatic"),
-                    Ipv4Method::Manual { address, .. } => format!("Manual, {address}"),
-                };
-                ListRow::new(a.id.to_string())
+        let mut group = Group::new();
+        for adapter in absent {
+            let mut how = match adapter.ipv4 {
+                Ipv4Method::Auto => String::from("Automatic address"),
+                Ipv4Method::Manual { address, .. } => format!("Manual address {address}"),
+            };
+            if !adapter.enabled {
+                how.push_str(", turned off");
+            }
+            let forget = Button::new("Forget")
+                .on_press(AppMsg::Network(Msg::Forget(adapter.id.clone())))
+                .enabled(self.idle());
+            group = group.row(
+                ActionRow::new(adapter.id.to_string())
                     .icon(Icon::Unplug)
                     .detail(how)
-            })
-            .collect();
-        Section::new(
-            "Settings for adapters not here",
-            column(
-                space::SM,
-                vec![
-                    List::new(rows)
-                        .selected(
-                            absent
-                                .iter()
-                                .position(|a| Some(&a.id) == self.absent.as_ref()),
-                        )
-                        .on_select(|row| AppMsg::Network(Msg::Kept(row)))
-                        .into(),
-                    slopos_appkit::row(
-                        0,
-                        vec![
-                            Button::new("Forget these settings")
-                                .on_press(AppMsg::Network(Msg::Forget))
-                                .enabled(
-                                    self.absent.is_some()
-                                        && !self.asking
-                                        && !self.changed()
-                                        && self.problem.is_none(),
-                                )
-                                .into(),
-                        ],
-                    ),
-                ]
-                .into_iter()
-                .chain(self.changed().then(|| {
-                    caption_text("Apply or revert the changes above first.", Tone::Secondary)
-                }))
-                .collect(),
+                    .trailing(forget),
+            );
+        }
+        let mut parts: Vec<Node<AppMsg>> = vec![
+            group.into(),
+            caption_text(
+                "Each adapter's settings come back into use when it is plugged in again.",
+                Tone::Secondary,
             ),
+        ];
+        parts.extend(self.trouble_where(|r| matches!(r, Request::Forget(_))));
+        Section::new("Adapters that aren't here", column(space::SM, parts)).into()
+    }
+
+    pub fn dialog(&self) -> Option<Node<AppMsg>> {
+        let editing = self.editing.as_ref()?;
+        let shown =
+            |typed: &Typed, error: Option<Invalid>| error.filter(|_| typed.left || editing.tried);
+        let line = |typed: &Typed,
+                    error: Option<Invalid>,
+                    placeholder: &str,
+                    hint: &'static str,
+                    on_input: fn(LineEditInput) -> AppMsg| {
+            let error = shown(typed, error);
+            let field = typed.field.checked(placeholder, error.is_some(), on_input);
+            let caption = match error {
+                Some(why) => (why.sentence(), Tone::Danger),
+                None => (hint, Tone::Secondary),
+            };
+            with_caption(field, Some(caption))
+        };
+        let form = &editing.form;
+        let (title, choices, manual, fields) = match form {
+            Form::Address {
+                name,
+                manual,
+                address,
+                gateway,
+                ..
+            } => (
+                format!("IP settings for {name}"),
+                [
+                    ("Automatic", "The network gives this adapter an address."),
+                    ("Manual", "You type the address and the gateway."),
+                ],
+                *manual,
+                PropertyList::new()
+                    .row_with(
+                        "Address",
+                        line(
+                            address,
+                            form.address_error(),
+                            "192.168.1.20/24",
+                            "With its network's prefix length, such as /24.",
+                            |i| AppMsg::Network(Msg::Address(i)),
+                        ),
+                    )
+                    .row_with(
+                        "Gateway",
+                        line(
+                            gateway,
+                            form.gateway_error(),
+                            "192.168.1.1",
+                            "Without one, only this network can be reached.",
+                            |i| AppMsg::Network(Msg::Gateway(i)),
+                        ),
+                    ),
+            ),
+            Form::Dns { manual, servers } => (
+                String::from("DNS servers"),
+                [
+                    ("Automatic", "Each network names its own."),
+                    ("Manual", "You type them, and every adapter asks them."),
+                ],
+                *manual,
+                PropertyList::new().row_with(
+                    "Servers",
+                    line(
+                        servers,
+                        form.servers_error(),
+                        "1.1.1.1 9.9.9.9",
+                        "Up to three, separated by spaces.",
+                        |i| AppMsg::Network(Msg::Servers(i)),
+                    ),
+                ),
+            ),
+        };
+        let rows = choices
+            .iter()
+            .map(|(title, detail)| ListRow::new(*title).detail(*detail))
+            .collect();
+        let mut parts: Vec<Node<AppMsg>> = vec![
+            List::new(rows)
+                .selected(Some(usize::from(manual)))
+                .on_select(|row| AppMsg::Network(Msg::Method(row)))
+                .into(),
+        ];
+        if manual {
+            parts.push(fields.into());
+        }
+        if let Some(trouble) = &editing.trouble {
+            parts.push(
+                Notice::new(Tone::Danger, Request::Save.failed())
+                    .body(trouble.clone())
+                    .into(),
+            );
+        }
+        let idle = self.asking.is_none();
+        let footer = ButtonRow::new()
+            .cancel(
+                Button::new("Cancel")
+                    .on_press(AppMsg::Network(Msg::Cancel))
+                    .enabled(idle),
+            )
+            .confirm(
+                Button::new("Save")
+                    .on_press(AppMsg::Network(Msg::Save))
+                    .enabled(idle && self.problem.is_none()),
+            );
+        Some(
+            Dialog::new(title)
+                .content(column(space::MD, parts))
+                .footer(footer)
+                .into(),
         )
-        .into()
     }
 }
 

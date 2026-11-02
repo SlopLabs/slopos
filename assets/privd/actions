@@ -373,11 +373,23 @@ action org.slopos.net.configure
   describe "change the network settings"
   verb     "Change"
 
+action org.slopos.network.switch
+  program  /bin/netctl
+  args     networking on
+  args     networking off
+  args     set ? on
+  args     set ? off
+  caps     NetAdmin
+  uid      0
+  allow    root
+  allow    admin
+  describe "turn networking or a network adapter on or off"
+  detail   "It stays that way each time the computer starts."
+
 action org.slopos.network.settings
   program  /bin/netctl
   args     set *
   args     dns *
-  args     networking *
   args     forget *
   args     apply *
   args     load

@@ -80,6 +80,24 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             erase(on_toggle),
             *enabled,
         )),
+        Node::Switch(switch) => {
+            let ink = match switch.enabled {
+                true => Tone::Normal,
+                false => Tone::Disabled,
+            };
+            let words = super::components::title_and_detail::<M>(
+                switch.label.clone(),
+                switch.detail.clone(),
+                ink,
+            );
+            Box::new(widgets::switch::SwitchWidget::new(
+                switch.on,
+                switch.label.clone(),
+                build_widget_tree(&words),
+                erase(&switch.on_toggle),
+                switch.enabled,
+            ))
+        }
         Node::Slider {
             value,
             min,

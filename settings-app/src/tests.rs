@@ -117,20 +117,7 @@ fn states() -> Vec<(String, Settings)> {
         out.push((panel.id().to_string(), read(panel, admin())));
         out.push((format!("{} standard", panel.id()), read(panel, standard())));
     }
-    let mut manual = read(Panel::Network, admin());
-    manual.update(Msg::Network(network::Msg::Method(1)));
-    type_into(
-        &mut manual,
-        |i| Msg::Network(network::Msg::Address(i)),
-        "192.168.1.300",
-    );
-    manual.update(Msg::Network(network::Msg::DnsMethod(1)));
-    type_into(
-        &mut manual,
-        |i| Msg::Network(network::Msg::Dns(i)),
-        "1.1.1.1 nonsense",
-    );
-    out.push(("network manual, wrong".into(), manual));
+    out.extend(network_states());
 
     for (name, open) in [
         ("users add", users::Msg::Add),
@@ -205,6 +192,96 @@ fn states() -> Vec<(String, Settings)> {
     out
 }
 
+fn network_states() -> Vec<(String, Settings)> {
+    let mut out = Vec::new();
+    let reread = |change: fn(&mut NetSettings, &mut slopos_settings_core::network::Live)| {
+        let mut app = read(Panel::Network, admin());
+        let (mut kept, mut live) = network::sample();
+        change(&mut kept, &mut live);
+        app.update(net(network::Msg::Read(Ok((kept, live)))));
+        app
+    };
+    out.push((
+        "network off".into(),
+        reread(|kept, live| {
+            kept.networking = false;
+            live.networking = false;
+            for adapter in &mut live.adapters {
+                adapter.up = adapter.loopback;
+                adapter.addresses.clear();
+                adapter.gateway = None;
+            }
+        }),
+    ));
+    out.push((
+        "network unplugged".into(),
+        reread(|_, live| {
+            for adapter in live.adapters.iter_mut().filter(|a| !a.loopback) {
+                adapter.carrier = false;
+                adapter.addresses.clear();
+                adapter.gateway = None;
+            }
+        }),
+    ));
+    out.push((
+        "network no adapter".into(),
+        reread(|_, live| live.adapters.retain(|a| a.loopback)),
+    ));
+    out.push((
+        "network two adapters".into(),
+        reread(|kept, live| {
+            let mut usb = live.adapters[1].clone();
+            usb.ifindex = 3;
+            usb.name = "eth1".into();
+            usb.mac = slopos_net_core::Mac([0x52, 0x54, 0, 0x12, 0x34, 0x58]);
+            usb.carrier = false;
+            usb.addresses.clear();
+            usb.gateway = None;
+            kept.set_for(&usb.name, usb.mac, false, manual("192.168.7.2/24", None));
+            usb.up = false;
+            live.adapters.push(usb);
+        }),
+    ));
+
+    let mut asking = read(Panel::Network, admin());
+    asking.update(net(network::Msg::Networking));
+    out.push(("network turning off".into(), asking));
+    let mut failed = read(Panel::Network, admin());
+    failed.update(net(network::Msg::Networking));
+    failed.update(ran(1, "netctl: eth0 would not go down"));
+    out.push(("network not turned off".into(), failed));
+
+    let mut address = read(Panel::Network, admin());
+    edit_eth0(&mut address);
+    out.push(("network address".into(), address));
+    let mut pinned = read(Panel::Network, standard());
+    edit_eth0(&mut pinned);
+    pinned.update(net(network::Msg::Method(1)));
+    out.push(("network address, manual".into(), pinned));
+    let mut wrong = unaddressed();
+    edit_eth0(&mut wrong);
+    wrong.update(net(network::Msg::Method(1)));
+    type_into(
+        &mut wrong,
+        |i| net(network::Msg::Address(i)),
+        "192.168.1.300",
+    );
+    type_into(&mut wrong, |i| net(network::Msg::Gateway(i)), "10.0.0.1");
+    wrong.update(net(network::Msg::Save));
+    out.push(("network address, wrong".into(), wrong));
+    let mut dns = read(Panel::Network, admin());
+    dns.update(net(network::Msg::EditDns));
+    dns.update(net(network::Msg::Method(1)));
+    type_into(
+        &mut dns,
+        |i| net(network::Msg::Servers(i)),
+        "1.1.1.1 nonsense",
+    );
+    dns.update(net(network::Msg::Save));
+    out.push(("network dns, wrong".into(), dns));
+    out
+}
+
 #[test]
 fn every_page_reads_whole_at_every_width() {
     fonts();
@@ -228,6 +305,10 @@ fn texts(node: &Node<Msg>, out: &mut Vec<(Kind, String)>) {
     match node {
         Node::Text(text) => push(Kind::Any, &text.text),
         Node::Checkbox { label, .. } => push(Kind::Label, label),
+        Node::Switch(switch) => {
+            push(Kind::Label, &switch.label);
+            push(Kind::Any, &switch.detail);
+        }
         Node::Button(button) => push(Kind::Label, &button.label),
         Node::ButtonRow(row) => {
             for button in row.leading.iter().chain(&row.trailing) {
@@ -332,145 +413,254 @@ fn a_search_narrows_the_panels_and_enter_opens_the_first() {
     assert_eq!(Panel::named("display"), None);
 }
 
-#[test]
-fn applying_a_manual_address_asks_netctl_to_load_the_settings_as_one() {
+fn net(msg: network::Msg) -> Msg {
+    Msg::Network(msg)
+}
+
+fn eth0() -> (String, slopos_net_core::Mac) {
+    (
+        String::from("eth0"),
+        slopos_net_core::Mac([0x52, 0x54, 0, 0x12, 0x34, 0x56]),
+    )
+}
+
+fn edit_eth0(app: &mut Settings) {
+    let (name, mac) = eth0();
+    app.update(net(network::Msg::EditAddress(name, mac)));
+}
+
+fn unaddressed() -> Settings {
     let mut app = read(Panel::Network, admin());
-    app.update(Msg::Network(network::Msg::Method(1)));
-    type_into(
-        &mut app,
-        |i| Msg::Network(network::Msg::Address(i)),
-        "192.168.1.20/24",
-    );
-    type_into(
-        &mut app,
-        |i| Msg::Network(network::Msg::Gateway(i)),
-        "192.168.1.1",
-    );
-    let (_, effects) = app.update(Msg::Network(network::Msg::Apply));
-    let [Effect::Ask(ask)] = &effects[..] else {
-        panic!("{effects:?}");
-    };
-    assert_eq!(
-        (ask.action, ask.args.as_slice()),
-        (network::ACTION, &["load".to_string()][..])
-    );
-    let loaded = NetSettings::parse(std::str::from_utf8(&ask.input).unwrap()).unwrap();
-    let eth0 = slopos_net_core::Mac([0x52, 0x54, 0, 0x12, 0x34, 0x56]);
-    let governing = loaded.governing("eth0", eth0).unwrap();
-    assert_eq!(
-        governing.ipv4,
-        slopos_settings_core::network::Ipv4Method::manual(
-            slopos_net_core::Cidr::from_str_bytes(b"192.168.1.20/24").unwrap(),
-            Some(slopos_net_core::Ipv4([192, 168, 1, 1]))
-        )
-        .unwrap()
-    );
-    assert_eq!(
-        loaded.adapters.len(),
-        2,
-        "the block for an adapter not here stays"
-    );
-    let (_, again) = app.update(Msg::Network(network::Msg::Apply));
-    assert!(again.is_empty(), "one request at a time");
+    let (kept, mut live) = network::sample();
+    for adapter in &mut live.adapters {
+        adapter.addresses.clear();
+        adapter.gateway = None;
+    }
+    app.update(net(network::Msg::Read(Ok((kept, live)))));
+    app
 }
 
 fn loaded(effects: &[Effect]) -> NetSettings {
     let [Effect::Ask(ask)] = effects else {
         panic!("{effects:?}");
     };
+    assert_eq!(
+        (ask.action, ask.args.as_slice()),
+        (network::SETTINGS, &["load".to_string()][..])
+    );
     NetSettings::parse(std::str::from_utf8(&ask.input).unwrap()).unwrap()
 }
 
-#[test]
-fn an_edit_goes_over_what_was_kept_meanwhile() {
-    let mut app = read(Panel::Network, admin());
-    app.update(Msg::Network(network::Msg::Networking));
-    let (mut kept, live) = network::sample();
-    kept.dns =
-        slopos_settings_core::network::Dns::Manual(vec![slopos_net_core::Ipv4([9, 9, 9, 9])]);
-    app.update(Msg::Network(network::Msg::Read(Ok((kept.clone(), live)))));
-    let (_, effects) = app.update(Msg::Network(network::Msg::Apply));
-    let wanted = loaded(&effects);
-    assert!(!wanted.networking, "the person's edit");
-    assert_eq!(wanted.dns, kept.dns, "what a terminal kept meanwhile");
+fn switched(effects: &[Effect]) -> Vec<String> {
+    let [Effect::Ask(ask)] = effects else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(ask.action, network::SWITCH);
+    assert!(ask.input.is_empty(), "a switch sends no settings");
+    ask.args.clone()
+}
+
+fn manual(address: &str, gateway: Option<[u8; 4]>) -> slopos_settings_core::network::Ipv4Method {
+    slopos_settings_core::network::Ipv4Method::manual(
+        slopos_net_core::Cidr::from_str_bytes(address.as_bytes()).unwrap(),
+        gateway.map(slopos_net_core::Ipv4),
+    )
+    .unwrap()
+}
+
+fn shows(app: &Settings, wanted: &str) -> bool {
+    let mut found = Vec::new();
+    texts(&app.view(), &mut found);
+    found.iter().any(|(_, text)| text == wanted)
+}
+
+fn ran(status: i32, said: &str) -> Msg {
+    Msg::Answered(
+        Purpose::Network,
+        Asked::Ran {
+            status,
+            said: said.into(),
+            notes: String::new(),
+        },
+    )
 }
 
 #[test]
-fn reading_again_with_no_adapter_keeps_what_was_typed() {
+fn choosing_manual_pins_the_address_the_adapter_has_now() {
     let mut app = read(Panel::Network, admin());
-    let (kept, mut live) = network::sample();
-    live.adapters.retain(|a| a.loopback);
-    app.update(Msg::Network(network::Msg::Read(Ok((
-        kept.clone(),
-        live.clone(),
-    )))));
-    app.update(Msg::Network(network::Msg::DnsMethod(1)));
-    type_into(&mut app, |i| Msg::Network(network::Msg::Dns(i)), "1.1.1.1");
-    app.update(Msg::Network(network::Msg::Read(Ok((kept, live)))));
-    let (_, effects) = app.update(Msg::Network(network::Msg::Apply));
+    edit_eth0(&mut app);
+    app.update(net(network::Msg::Method(1)));
+    let (_, effects) = app.update(net(network::Msg::Save));
+    let wanted = loaded(&effects);
+    let (name, mac) = eth0();
     assert_eq!(
-        loaded(&effects).dns,
-        slopos_settings_core::network::Dns::Manual(vec![slopos_net_core::Ipv4([1, 1, 1, 1])])
+        wanted.governing(&name, mac).unwrap().ipv4,
+        manual("10.0.2.15/24", Some([10, 0, 2, 2]))
+    );
+    assert_eq!(
+        wanted.adapters.len(),
+        2,
+        "the block for an adapter not here stays"
+    );
+    let (_, again) = app.update(net(network::Msg::Save));
+    assert!(again.is_empty(), "one request at a time");
+}
+
+#[test]
+fn a_typed_address_and_gateway_go_in_one_request() {
+    let mut app = unaddressed();
+    edit_eth0(&mut app);
+    app.update(net(network::Msg::Method(1)));
+    type_into(
+        &mut app,
+        |i| net(network::Msg::Address(i)),
+        "192.168.1.20/24",
+    );
+    type_into(&mut app, |i| net(network::Msg::Gateway(i)), "192.168.1.1");
+    let (_, effects) = app.update(net(network::Msg::Gateway(LineEditInput::Key {
+        key: Key::Named(NamedKey::Enter),
+        modifiers: Modifiers::default(),
+    })));
+    let (name, mac) = eth0();
+    assert_eq!(
+        loaded(&effects).governing(&name, mac).unwrap().ipv4,
+        manual("192.168.1.20/24", Some([192, 168, 1, 1])),
+        "Enter in a field saves"
     );
 }
 
 #[test]
-fn forget_takes_the_settings_chosen_whatever_row_they_move_to() {
+fn a_wrong_address_says_why_once_left_and_holds_save() {
+    let mut app = unaddressed();
+    edit_eth0(&mut app);
+    app.update(net(network::Msg::Method(1)));
+    type_into(&mut app, |i| net(network::Msg::Address(i)), "192.168.1.20");
+    let why = slopos_settings_core::network::Invalid::NoPrefix.sentence();
+    assert!(!shows(&app, why), "not while it is typed");
+    app.update(net(network::Msg::Address(LineEditInput::Blur)));
+    assert!(shows(&app, why), "once focus leaves it");
+    let (_, effects) = app.update(net(network::Msg::Save));
+    assert!(effects.is_empty());
+    assert!(app.network.dialog().is_some());
+
+    app.update(net(network::Msg::Method(0)));
+    let (_, effects) = app.update(net(network::Msg::Save));
+    assert!(effects.is_empty(), "automatic is what is kept");
+    assert!(
+        app.network.dialog().is_none(),
+        "a hidden field holds nothing up"
+    );
+}
+
+#[test]
+fn a_switch_asks_for_what_it_turns_alone_and_stays_turned() {
+    let mut app = read(Panel::Network, admin());
+    let (_, effects) = app.update(net(network::Msg::Networking));
+    assert_eq!(switched(&effects), ["networking", "off"]);
+    let (name, mac) = eth0();
+    let (_, busy) = app.update(net(network::Msg::Adapter(name.clone(), mac)));
+    assert!(busy.is_empty(), "one request at a time");
+    let (_, effects) = app.update(ran(0, ""));
+    assert_eq!(effects, [Effect::Network(network::Effect::Read)]);
+    let (_, effects) = app.update(net(network::Msg::Networking));
+    assert_eq!(
+        switched(&effects),
+        ["networking", "on"],
+        "turned again from where it was turned, before the read"
+    );
+    app.update(ran(0, ""));
+
+    let (_, effects) = app.update(net(network::Msg::Adapter(name, mac)));
+    assert_eq!(
+        switched(&effects),
+        ["set", "52:54:00:12:34:56", "off"],
+        "an adapter by its hardware address, which outlasts its name"
+    );
+}
+
+#[test]
+fn the_networking_switch_turns_from_what_the_computer_does_now() {
+    let mut app = read(Panel::Network, admin());
+    let (kept, mut live) = network::sample();
+    live.networking = false;
+    app.update(net(network::Msg::Read(Ok((kept, live)))));
+    let (_, effects) = app.update(net(network::Msg::Networking));
+    assert_eq!(
+        switched(&effects),
+        ["networking", "on"],
+        "off by a terminal's ip net, though kept on"
+    );
+}
+
+#[test]
+fn a_refusal_is_said_where_it_was_asked_and_a_no_is_not() {
+    let mut app = read(Panel::Network, admin());
+    app.update(net(network::Msg::Networking));
+    app.update(Msg::Answered(
+        Purpose::Network,
+        Asked::Refused {
+            why: "You didn't allow it.".into(),
+            by_person: true,
+        },
+    ));
+    let (_, effects) = app.update(net(network::Msg::Networking));
+    assert_eq!(
+        switched(&effects),
+        ["networking", "off"],
+        "back where it was"
+    );
+    app.update(ran(1, "netctl: eth0 would not go down"));
+    assert!(shows(&app, "Networking couldn't be turned off"));
+    assert!(shows(&app, "Eth0 would not go down."));
+
+    edit_eth0(&mut app);
+    app.update(net(network::Msg::Method(1)));
+    app.update(net(network::Msg::Save));
+    app.update(ran(1, "netctl: the address is taken"));
+    assert!(
+        app.network.dialog().is_some(),
+        "the dialog stays to try again"
+    );
+    assert!(shows(&app, "The address is taken."));
+    app.update(net(network::Msg::Cancel));
+    assert!(app.network.dialog().is_none());
+}
+
+#[test]
+fn a_save_goes_over_what_was_kept_meanwhile() {
+    let mut app = read(Panel::Network, admin());
+    app.update(net(network::Msg::EditDns));
+    app.update(net(network::Msg::Method(1)));
+    type_into(&mut app, |i| net(network::Msg::Servers(i)), "1.1.1.1");
+    let (mut kept, live) = network::sample();
+    kept.networking = false;
+    app.update(net(network::Msg::Read(Ok((kept, live)))));
+    let (_, effects) = app.update(net(network::Msg::Save));
+    let wanted = loaded(&effects);
+    assert_eq!(
+        wanted.dns,
+        slopos_settings_core::network::Dns::Manual(vec![slopos_net_core::Ipv4([1, 1, 1, 1])])
+    );
+    assert!(!wanted.networking, "what a terminal kept meanwhile");
+}
+
+#[test]
+fn forget_takes_only_the_settings_it_names() {
     let mut app = read(Panel::Network, admin());
     let (_, live) = network::sample();
     let kept = NetSettings::parse(
-        "adapter 52:54:00:00:00:0b\n  ipv4 auto\nadapter 52:54:00:00:00:0c\n  off\n",
+        "adapter 52:54:00:00:00:0b\n  ipv4 auto\nadapter eth7\n  off\nadapter 52:54:00:00:00:0c\n  off\n",
     )
     .unwrap();
-    app.update(Msg::Network(network::Msg::Read(Ok((
-        kept.clone(),
-        live.clone(),
-    )))));
-    app.update(Msg::Network(network::Msg::Kept(1)));
-    let mut moved = kept.clone();
-    moved.adapters.insert(
-        0,
-        NetSettings::parse("adapter eth7\n")
-            .unwrap()
-            .adapters
-            .remove(0),
-    );
-    app.update(Msg::Network(network::Msg::Read(Ok((moved, live)))));
-    let (_, effects) = app.update(Msg::Network(network::Msg::Forget));
+    let id = kept.adapters[2].id.clone();
+    app.update(net(network::Msg::Read(Ok((kept, live)))));
+    let (_, effects) = app.update(net(network::Msg::Forget(id)));
     let left: Vec<String> = loaded(&effects)
         .adapters
         .iter()
         .map(|a| a.id.to_string())
         .collect();
-    assert_eq!(left, ["eth7", "52:54:00:00:00:0b"]);
-}
-
-#[test]
-fn a_field_hidden_with_its_adapter_holds_nothing_up() {
-    let mut app = read(Panel::Network, admin());
-    app.update(Msg::Network(network::Msg::Method(1)));
-    app.update(Msg::Network(network::Msg::Enabled));
-    let (_, effects) = app.update(Msg::Network(network::Msg::Apply));
-    let eth0 = slopos_net_core::Mac([0x52, 0x54, 0, 0x12, 0x34, 0x56]);
-    let governing = loaded(&effects).governing("eth0", eth0).cloned().unwrap();
-    assert!(!governing.enabled);
-    assert_eq!(
-        governing.ipv4,
-        slopos_settings_core::network::Ipv4Method::Auto
-    );
-}
-
-#[test]
-fn a_wrong_address_keeps_apply_from_asking() {
-    let mut app = read(Panel::Network, admin());
-    app.update(Msg::Network(network::Msg::Method(1)));
-    type_into(
-        &mut app,
-        |i| Msg::Network(network::Msg::Address(i)),
-        "192.168.1.20",
-    );
-    let (_, effects) = app.update(Msg::Network(network::Msg::Apply));
-    assert!(effects.is_empty());
+    assert_eq!(left, ["52:54:00:00:00:0b", "eth7"]);
 }
 
 #[test]

@@ -1242,7 +1242,7 @@ fn net_toggle_unasked() -> bool {
     let Ok(policy) = crate::privd::policy() else {
         return false;
     };
-    let Some(action) = policy.action("org.slopos.net.toggle") else {
+    let Some(action) = policy.action("org.slopos.network.switch") else {
         return false;
     };
     let uid = process::getuid();

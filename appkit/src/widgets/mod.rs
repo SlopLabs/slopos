@@ -27,6 +27,7 @@ pub mod scroll_view;
 mod scrollbar;
 pub mod separator;
 pub mod slider;
+pub mod switch;
 pub mod tab_bar;
 pub mod table;
 pub mod tag;

@@ -28,6 +28,11 @@ pub struct StyleSheet {
 
     pub checkbox_size: i32,
     pub checkbox_gap: i32,
+
+    pub switch_width: i32,
+    pub switch_height: i32,
+    pub switch_knob_inset: i32,
+    pub switch_gap: i32,
 }
 
 impl StyleSheet {
@@ -57,6 +62,11 @@ impl StyleSheet {
 
             checkbox_size: 16,
             checkbox_gap: space::SM,
+
+            switch_width: 40,
+            switch_height: 22,
+            switch_knob_inset: 3,
+            switch_gap: space::LG,
         }
     }
 }

@@ -1,7 +1,8 @@
 //! The tools Settings changes the system through, as a terminal runs them:
 //! `netctl` (with `--network`, which brings the network back to DHCP before
-//! it ends), `prefs`, `keymap`'s own layout and `users list --porcelain`,
-//! the last three as root and as the first person holding nothing.
+//! it ends), `prefs`, `keymap`'s own layout, `users list --porcelain` and
+//! netctl's switches, the last four as root and as the first person holding
+//! nothing.
 
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -185,6 +186,38 @@ fn the_people_are_listed_for_another_program() -> bool {
         .and_then(|people| people.iter().find(|p| p.uid == slopos_abi::fs::SESSION_UID));
     (ran.ok() && first.is_some_and(|p| p.admin && !p.withheld))
         || fail(format!("listed {} as {listed:?}", ran.shown()))
+}
+
+/// As the first person this passes only if privd runs the switch unasked: a
+/// test boot has no screen to ask on.
+fn networking_and_an_adapter_turn_off_and_on_and_are_kept() -> bool {
+    let Some(eth0) = eth0() else {
+        return fail(String::from("no eth0"));
+    };
+    let mac = eth0.mac.to_string();
+    let off = run(NETCTL, &["networking", "off"]);
+    let kept_off = kept::read().is_ok_and(|s| !s.networking);
+    if !off.ok() || !kept_off || !until("networking off", |live| !live.networking) {
+        return fail(format!("networking off {}, kept {kept_off}", off.shown()));
+    }
+    let on = run(NETCTL, &["networking", "on"]);
+    let kept_on = kept::read().is_ok_and(|s| s.networking);
+    if !on.ok() || !kept_on || !until("eth0 leased again", leased) {
+        return fail(format!("networking on {}, kept {kept_on}", on.shown()));
+    }
+    let down = run(NETCTL, &["set", &mac, "off"]);
+    let adapter_down =
+        |live: &network::Live| live.adapters.iter().any(|a| a.name == "eth0" && !a.up);
+    if !down.ok() || !until("eth0 down", adapter_down) {
+        return fail(format!("eth0 off {}", down.shown()));
+    }
+    let up = run(NETCTL, &["set", &mac, "on"]);
+    let governing = kept::read()
+        .ok()
+        .and_then(|s| s.governing("eth0", Mac(eth0.mac.0)).cloned());
+    let enabled = governing.as_ref().is_some_and(|g| g.enabled);
+    (up.ok() && enabled && until("eth0 leased again", leased))
+        || fail(format!("eth0 on {}, kept {governing:?}", up.shown()))
 }
 
 fn eth0() -> Option<network::LiveAdapter> {
@@ -408,6 +441,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "the_people_are_listed_for_another_program",
         the_people_are_listed_for_another_program,
+    ),
+    (
+        "networking_and_an_adapter_turn_off_and_on_and_are_kept",
+        networking_and_an_adapter_turn_off_and_on_and_are_kept,
     ),
 ];
 
