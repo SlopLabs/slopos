@@ -10,6 +10,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod board;
 pub mod keymap;
 pub mod layout_table;
 pub mod modifiers;

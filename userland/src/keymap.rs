@@ -68,14 +68,18 @@ pub fn layouts() -> Vec<Layout> {
     found
 }
 
+pub fn table(name: &str) -> Result<Box<LayoutTable>, &'static str> {
+    let path = layout_path(name).ok_or("no such layout")?;
+    let src = fs::read(&path).map_err(|_| "no such layout")?;
+    let mut table = Box::new(LayoutTable::empty());
+    parse(&src, &mut table).map_err(|_| "failed to parse layout")?;
+    Ok(table)
+}
+
 /// Load `/usr/share/keymaps/<name>.layout`, parse and validate it, and upload
 /// the binary table to the kernel. The `Err` names the failing stage.
 pub fn load_layout_by_name(name: &str) -> Result<(), &'static str> {
-    let path = layout_path(name).ok_or("no such layout")?;
-    let src = fs::read(&path).map_err(|_| "no such layout")?;
-
-    let mut table = Box::new(LayoutTable::empty());
-    parse(&src, &mut table).map_err(|_| "failed to parse layout")?;
+    let table = table(name)?;
     let mut blob = vec![0u8; SERIALIZED_LEN];
     serialize(&table, &mut blob).map_err(|_| "failed to serialise layout")?;
 

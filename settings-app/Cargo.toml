@@ -17,6 +17,7 @@ doctest = false
 slopos-abi = { workspace = true }
 slopos-accounts-core = { workspace = true }
 slopos-appkit = { workspace = true }
+slopos-keymap-core = { workspace = true }
 slopos-net-core = { workspace = true }
 slopos-settings-core = { workspace = true }
 slopos-theme-core = { workspace = true }

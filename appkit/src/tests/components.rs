@@ -505,16 +505,19 @@ pub(super) fn test_a_dialog_takes_focus_from_the_page() {
 }
 
 pub(super) fn test_a_rebuild_keeps_what_was_scrolled() {
-    let page = || -> Node<()> {
+    let led = |title: &str, first: &str| -> Node<()> {
         let lines = (0..60).map(|i| Text::new(format!("Line {i}")).into());
-        crate::components::Page::new("Long")
+        crate::components::Page::new(title)
             .content(Node::VStack {
-                children: lines.collect(),
+                children: std::iter::once(Text::new(first).into())
+                    .chain(lines)
+                    .collect(),
                 spacing: 0,
                 align: CrossAxisAlignment::Stretch,
             })
             .into()
     };
+    let page = || led("Long", "Swiss German");
     let table = |rows: usize, shows: u64| -> Node<()> {
         Node::Table {
             columns: vec![crate::node::TableColumn {
@@ -557,6 +560,10 @@ pub(super) fn test_a_rebuild_keeps_what_was_scrolled() {
     assert_eq!(is, was);
     let (was, is) = rebuilt(page(), dialog_over(page()));
     assert_eq!(is, was, "a dialog over the page moves nothing beneath it");
+    let (was, is) = rebuilt(page(), led("Long", "US English"));
+    assert_eq!(is, was, "a page is the same page whatever leads it");
+    let (_, is) = rebuilt(page(), led("Short", "Swiss German"));
+    assert_eq!(is, KeptAt::Scroll(0), "another page starts at the top");
     let (was, is) = rebuilt(table(100, 1), table(99, 1));
     assert_eq!(is, was, "a row more or less moves nothing");
     let (_, is) = rebuilt(table(100, 1), table(100, 2));
@@ -1274,6 +1281,7 @@ pub(super) fn test_a_line_shown_a_pixel_deep_belongs_to_its_view() {
                     scroll_y: 0,
                     on_scroll: None,
                     follow_end: false,
+                    shows: None,
                 }),
             },
             Node::Divider,

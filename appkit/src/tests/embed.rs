@@ -129,6 +129,7 @@ pub(super) fn test_hover_lights_what_a_press_reaches() {
         scroll_y: 0,
         on_scroll: None,
         follow_end: false,
+        shows: None,
     };
     let mut tree = Embedded::new(&scrolled, Rect::new(0, 0, 200, 100));
     assert!(!tree.hover(20, 5));
@@ -195,6 +196,7 @@ pub(super) fn test_an_embedded_thumb_drags() {
         scroll_y: 0,
         on_scroll: None,
         follow_end: false,
+        shows: None,
     };
     let mut tree = Embedded::new(&scrolled, Rect::new(0, 0, 200, 100));
     let down = |tree: &Embedded| {

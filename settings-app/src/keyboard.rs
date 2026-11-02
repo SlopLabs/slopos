@@ -1,24 +1,30 @@
-//! Keyboard: which layout the keys type in. Your own is a preference of
-//! yours, which nothing needs permission to change and init loads while your
-//! desktop is in front; the computer's, which the login screen and everyone
-//! who chose none use, is kept in `/etc/keymap` by `keymap`, which privd runs
-//! once allowed.
+//! Keyboard: your layout, a preference init loads while your desktop is in
+//! front, and the login screen's, the computer's own in `/etc/keymap`, which
+//! everyone who chose none follows. Outcomes take a fixed line, so none moves
+//! the page.
 
 use slopos_appkit::{
-    Button, ButtonRow, Dialog, LineEditInput, List, ListRow, Node, Notice, PropertyList, Section,
-    Text, Tone, column, row,
+    Button, ButtonRow, Dialog, KeyCap, KeyboardMap, LineEditInput, List, ListRow, Node, Notice,
+    PropertyList, Section, Text, Tone, column, row,
 };
-use slopos_theme_core::space;
+use slopos_keymap_core::board::{self, Board, Fixed, Key, Place, Shape};
+use slopos_theme_core::{Icon, Surface, TextRole, inset, space};
 
-use crate::field::Field;
+use crate::field::{Field, caption_text};
 use crate::{Ask, Asked, Effect as AppEffect, Msg as AppMsg, Panel, Purpose};
 
 pub const ACTION: &str = "org.slopos.console.keymap";
+
+const YOURS: &str = "You type in it whenever your desktop is on the screen.";
+const FOLLOWS: &str = "It follows the login screen's, as you haven't chosen your own.";
+const LATER: &str = "It's kept, and takes effect when you next log in.";
+const SAME: &str = "Same as the login screen";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Layout {
     pub name: String,
     pub title: String,
+    pub board: Option<Board>,
 }
 
 /// What the window read of the layouts.
@@ -32,9 +38,10 @@ pub struct Read {
 #[derive(Clone, Debug)]
 pub enum Msg {
     Read(Read),
-    /// Row 0 is the computer's; the rest are the layouts in order.
+    /// Row 0 follows the login screen's; then the layouts in order.
     Yours(usize),
     Try(LineEditInput),
+    UseYours,
     Change,
     Computer(usize),
     Cancel,
@@ -72,15 +79,48 @@ pub struct Keyboard {
     try_it: Field,
     computer_dialog: Option<ComputerDialog>,
     asking: bool,
-    said: Option<(Tone, String)>,
+    /// What came of keeping yours, until the next choice.
+    yours_said: Option<(Tone, String)>,
+    computer_trouble: Option<String>,
 }
 
 impl Keyboard {
+    fn layout<'a>(&'a self, name: &str) -> Option<&'a Layout> {
+        self.read.as_ref()?.layouts.iter().find(|l| l.name == name)
+    }
+
     fn title_of<'a>(&'a self, name: &'a str) -> &'a str {
-        self.read
-            .as_ref()
-            .and_then(|r| r.layouts.iter().find(|l| l.name == name))
-            .map_or(name, |l| l.title.as_str())
+        self.layout(name).map_or(name, |l| l.title.as_str())
+    }
+
+    fn typed(&self) -> Option<char> {
+        let input = &self.try_it.input;
+        let before = input.caret.checked_sub(1)?;
+        self.try_it
+            .focused
+            .then(|| input.text.chars().nth(before))
+            .flatten()
+    }
+
+    fn yours_apart(&self) -> Option<&Layout> {
+        let read = self.read.as_ref()?;
+        let yours = self.layout(read.yours.as_deref()?)?;
+        (yours.name != read.computer).then_some(yours)
+    }
+
+    fn set_computer(&mut self, name: String) -> Vec<AppEffect> {
+        if self.asking {
+            return Vec::new();
+        }
+        self.computer_dialog = None;
+        self.asking = true;
+        self.computer_trouble = None;
+        vec![AppEffect::Ask(Ask {
+            purpose: Purpose::Keyboard,
+            action: ACTION,
+            args: vec!["set".into(), "--computer".into(), name],
+            input: crate::Input::default(),
+        })]
     }
 
     pub fn update(&mut self, msg: Msg) -> Vec<AppEffect> {
@@ -98,22 +138,25 @@ impl Keyboard {
                     return Vec::new();
                 }
                 read.yours = yours.clone();
-                self.said = None;
+                self.yours_said = None;
                 return vec![AppEffect::Keyboard(Effect::Keep(yours))];
             }
-            Msg::Kept(Ok(())) => {
-                self.said = Some((Tone::Success, String::from("Your layout is in use.")));
-            }
+            Msg::Kept(Ok(())) => self.yours_said = None,
             Msg::Kept(Err(Kept::Later)) => {
-                let later = "Your layout is kept, and takes effect when you next log in.";
-                self.said = Some((Tone::Info, String::from(later)));
+                self.yours_said = Some((Tone::Info, String::from(LATER)));
             }
             Msg::Kept(Err(Kept::Not(why))) => {
-                self.said = Some((Tone::Danger, why));
+                self.yours_said = Some((Tone::Danger, why));
                 return vec![AppEffect::Keyboard(Effect::Read)];
             }
             Msg::Try(input) => {
                 self.try_it.edit(input);
+            }
+            Msg::UseYours => {
+                let Some(name) = self.yours_apart().map(|l| l.name.clone()) else {
+                    return Vec::new();
+                };
+                return self.set_computer(name);
             }
             Msg::Change => {
                 let read = self.read.as_ref();
@@ -132,18 +175,10 @@ impl Keyboard {
                     .and_then(|dialog| dialog.chosen)
                     .and_then(|row| self.read.as_ref()?.layouts.get(row))
                     .map(|l| l.name.clone());
-                let Some(name) = name.filter(|_| !self.asking) else {
+                let Some(name) = name else {
                     return Vec::new();
                 };
-                self.computer_dialog = None;
-                self.asking = true;
-                self.said = None;
-                return vec![AppEffect::Ask(Ask {
-                    purpose: Purpose::Keyboard,
-                    action: ACTION,
-                    args: vec!["set".into(), "--computer".into(), name],
-                    input: crate::Input::default(),
-                })];
+                return self.set_computer(name);
             }
         }
         Vec::new()
@@ -151,13 +186,7 @@ impl Keyboard {
 
     pub fn answered(&mut self, asked: Asked) -> Vec<AppEffect> {
         self.asking = false;
-        self.said = Some(match asked.trouble() {
-            None => (
-                Tone::Success,
-                String::from("The computer's layout is changed."),
-            ),
-            Some(why) => (Tone::Danger, why),
-        });
+        self.computer_trouble = asked.trouble();
         vec![AppEffect::Keyboard(Effect::Read)]
     }
 
@@ -167,13 +196,62 @@ impl Keyboard {
             let reading = Notice::new(Tone::Info, "Reading the layouts");
             return crate::page(Panel::Keyboard, about, vec![reading.into()], None);
         };
-        let computer = self.title_of(&read.computer).to_string();
-        let mut rows = vec![ListRow::new("The computer's layout").detail(computer.clone())];
-        rows.extend(
-            read.layouts
-                .iter()
-                .map(|l| ListRow::new(l.title.clone()).detail(l.name.clone())),
+        let parts = vec![
+            self.in_use(read),
+            self.choices(read),
+            self.login_screen(read),
+        ];
+        crate::page(Panel::Keyboard, about, parts, None)
+    }
+
+    /// Yours, no longer installed, isn't loaded, so the login screen's shows.
+    fn in_use(&self, read: &Read) -> Node<AppMsg> {
+        let yours = read.yours.as_deref().and_then(|name| self.layout(name));
+        let (title, board) = match yours.or_else(|| self.layout(&read.computer)) {
+            Some(layout) => (layout.title.as_str(), layout.board.as_ref()),
+            None => (read.computer.as_str(), None),
+        };
+        let (tone, said, icon) = match (&self.yours_said, yours) {
+            (Some((tone, said)), _) => (*tone, said.as_str(), Icon::for_tone(*tone)),
+            (None, Some(_)) => (Tone::Secondary, YOURS, Icon::Keyboard),
+            (None, None) => (Tone::Secondary, FOLLOWS, Icon::Keyboard),
+        };
+        let status = row(
+            space::XS,
+            vec![
+                Node::Icon {
+                    icon,
+                    role: TextRole::Caption,
+                    tone,
+                },
+                Node::Expand {
+                    weight: 1,
+                    child: Box::new(Text::new(said).role(TextRole::Caption).tone(tone).into()),
+                },
+            ],
         );
+        let heading = column(
+            space::XS,
+            vec![Text::new(title).role(TextRole::Heading).into(), status],
+        );
+        let try_it = self
+            .try_it
+            .line("Type here to try it", |i| AppMsg::Keyboard(Msg::Try(i)));
+        let keys = KeyboardMap::new(title, caps(board, self.typed()));
+        Node::Card {
+            surface: Surface::Raised,
+            shadow: false,
+            child: Box::new(Node::Padding {
+                padding: inset::CARD,
+                child: Box::new(column(space::MD, vec![heading, try_it, keys.into()])),
+            }),
+        }
+    }
+
+    fn choices(&self, read: &Read) -> Node<AppMsg> {
+        let login_screen = self.title_of(&read.computer).to_string();
+        let mut rows = vec![ListRow::new(SAME).detail(login_screen)];
+        rows.extend(read.layouts.iter().map(|l| ListRow::new(l.title.clone())));
         let yours = match &read.yours {
             None => 0,
             Some(name) => read
@@ -182,66 +260,39 @@ impl Keyboard {
                 .position(|l| &l.name == name)
                 .map_or(0, |at| at + 1),
         };
-        let mut parts: Vec<Node<AppMsg>> = Vec::new();
-        if let Some((tone, said)) = &self.said {
-            parts.push(Notice::new(*tone, said.clone()).into());
+        Section::new(
+            "Your layout",
+            List::new(rows)
+                .selected(Some(yours))
+                .on_select(|row| AppMsg::Keyboard(Msg::Yours(row))),
+        )
+        .into()
+    }
+
+    /// Disables rather than hides, so a choice never changes the page's height.
+    fn login_screen(&self, read: &Read) -> Node<AppMsg> {
+        let about = "The login screen uses this layout, and so does everyone who hasn't chosen their own. Give it yours, so your password types the same there.";
+        let buttons = vec![
+            Button::new("Use your layout")
+                .on_press(AppMsg::Keyboard(Msg::UseYours))
+                .enabled(!self.asking && self.yours_apart().is_some())
+                .into(),
+            Button::new("Change…")
+                .on_press(AppMsg::Keyboard(Msg::Change))
+                .enabled(!self.asking)
+                .into(),
+        ];
+        let mut parts = vec![
+            Text::new(about).tone(Tone::Secondary).wrap().into(),
+            PropertyList::new()
+                .row("Layout", self.title_of(&read.computer))
+                .into(),
+            row(space::SM, buttons),
+        ];
+        if let Some(why) = &self.computer_trouble {
+            parts.push(caption_text(why, Tone::Danger));
         }
-        parts.push(
-            Section::new(
-                "Your layout",
-                column(
-                    space::SM,
-                    vec![
-                        Text::new("Your desktop uses it whenever it is on the screen.")
-                            .tone(Tone::Secondary)
-                            .wrap()
-                            .into(),
-                        List::new(rows)
-                            .selected(Some(yours))
-                            .on_select(|row| AppMsg::Keyboard(Msg::Yours(row)))
-                            .into(),
-                    ],
-                ),
-            )
-            .into(),
-        );
-        parts.push(
-            Section::new(
-                "Try it",
-                self.try_it.line("Type here to try the layout", |i| {
-                    AppMsg::Keyboard(Msg::Try(i))
-                }),
-            )
-            .into(),
-        );
-        parts.push(
-            Section::new(
-                "The computer's layout",
-                column(
-                    space::SM,
-                    vec![
-                        Text::new(
-                            "The login screen uses it, and so does everyone who hasn't chosen a layout of their own.",
-                        )
-                        .tone(Tone::Secondary)
-                        .wrap()
-                        .into(),
-                        PropertyList::new().row("Layout", computer).into(),
-                        row(
-                            0,
-                            vec![
-                                Button::new("Change…")
-                                    .on_press(AppMsg::Keyboard(Msg::Change))
-                                    .enabled(!self.asking)
-                                    .into(),
-                            ],
-                        ),
-                    ],
-                ),
-            )
-            .into(),
-        );
-        crate::page(Panel::Keyboard, about, parts, None)
+        Section::new("Login screen", column(space::SM, parts)).into()
     }
 
     pub fn dialog(&self) -> Option<Node<AppMsg>> {
@@ -256,7 +307,7 @@ impl Keyboard {
             .and_then(|at| read.layouts.get(at))
             .is_some_and(|l| l.name != read.computer);
         Some(
-            Dialog::new("The computer's layout")
+            Dialog::new("Layout for the login screen")
                 .content(
                     List::new(rows)
                         .selected(chosen)
@@ -273,5 +324,43 @@ impl Keyboard {
                 )
                 .into(),
         )
+    }
+}
+
+/// A bare keyboard when the layout can't be read, so the height holds.
+fn caps(board: Option<&Board>, typed: Option<char>) -> Vec<Vec<KeyCap>> {
+    let rows = board.map_or_else(|| board::rows(Shape::Ansi), Board::rows);
+    rows.iter()
+        .map(|row| row.iter().map(|place| cap(board, place, typed)).collect())
+        .collect()
+}
+
+fn cap(board: Option<&Board>, place: &Place, typed: Option<char>) -> KeyCap {
+    let quarters = u16::from(place.quarters);
+    let cap = match place.key {
+        Key::Typing(usage) => {
+            let legend = board.map(|b| b.legend(usage)).unwrap_or_default();
+            let text = |c: Option<char>| c.map(String::from).unwrap_or_default();
+            let lit = typed
+                .is_some_and(|c| [legend.base, legend.shift, legend.alt_gr].contains(&Some(c)));
+            let cap = match legend.letter() {
+                Some(capital) => {
+                    KeyCap::typing(quarters).legends(capital, String::new(), text(legend.alt_gr))
+                }
+                None => KeyCap::typing(quarters).legends(
+                    text(legend.shift),
+                    text(legend.base),
+                    text(legend.alt_gr),
+                ),
+            };
+            cap.lit(lit)
+        }
+        Key::Fixed(fixed) => {
+            KeyCap::fixed(quarters).lit(fixed == Fixed::Space && typed == Some(' '))
+        }
+    };
+    match place.joins_above {
+        true => cap.joins_above(),
+        false => cap,
     }
 }

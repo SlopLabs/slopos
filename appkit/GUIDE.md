@@ -67,9 +67,11 @@ what the app gives it back, such as a caret or a slider grab, and three
 things it hands the widget built in its place while that shows the same: a
 scroll view whose offset the app does not keep, its offset; a table, how far
 it is scrolled; and a menu, the row the arrows reached. Shown something else,
-each starts afresh. A table cannot tell by itself that its rows are of
-something else, so give `Node::Table` a `shows` that changes when they are,
-such as the directory a file manager lists.
+each starts afresh. A `Page` shows the same while its title does, so a
+notice that comes and goes, or a heading that names what was just chosen,
+moves nothing the person scrolled to. A table cannot tell by itself that its
+rows are of something else, so give `Node::Table` a `shows` that changes when
+they are, such as the directory a file manager lists.
 
 `title` is read again after every rebuild. A window that shows a document
 is titled `document_title(document, app)`, as `notes.txt — Editor`; any other
@@ -96,6 +98,7 @@ last resort.
 | `List`, `ListRow` | Rows the person chooses from, such as disks, places or results. The whole list is one tab stop and the arrows move the choice. Enter opens the chosen row when the list has something to open, and otherwise reaches the page's `ButtonRow`. A row that cannot be chosen is built with `.disabled(reason)`, and the reason is shown in place of its detail. A row for a person leads with `.avatar()`, and a row for a resource that changes, such as a processor or a disk, with `.graph(graph)`: a thumbnail of the graph, as tall as the row's text. |
 | `Sidebar` | The places an app moves between, down its left side: a `List`, optionally in sections. `Sidebar::empty(reason)` says why there are none, as when a filter matches nothing. `.wide()` makes it `SIDEBAR_WIDE_WIDTH` across, for rows led by a graph. `.search(field)` puts a `SearchField` above the places, as Settings narrows its panels. |
 | `Gallery`, `GalleryTile` | Pictures to choose one of, such as backgrounds: thumbnails in rows as many as fit, each named beneath. The whole gallery is one tab stop, the arrows move the choice across and down, and the chosen picture is outlined in the accent and checked, so colour is not the only sign. Give each tile an `ImageData`, which the gallery covers its box with; `ImageData::thumbnail_of(gradient)` shades one of the theme's. A tile with no picture yet shows an image glyph, and `.description()` is its tooltip, such as the picture's path. |
+| `KeyboardMap`, `KeyCap` | A picture of a keyboard's keys in rows, such as a layout being chosen: each key is as wide as its `quarters` of a letter key's and prints what it types alone, with Shift above and with AltGr to the right, on a plate as tall as its rows whatever its width. `KeyCap::fixed()` is a key whose job no layout changes, drawn quieter and bare; `.joins_above()` reaches up to the key above, as an ISO Enter does, and `.lit(true)` marks the key that typed last in the accent. A legend with no room on its key is left off. |
 | `Graph` | Samples over time, the newest at the right edge, such as a minute of processor load. `Graph::new(label, window)` takes what it plots, its accessible name, and how many samples span its width; `.line(values, series)` adds a solid series filled beneath, `.dashed(values, series)` a dashed one, `.max()` the value at its top, `.elapsed()` the samples taken so far, which its time grid moves with, and `.small()` makes it one of a grid. It draws no text: caption its scale beside it. |
 | `GraphKey` | A short stretch of a series' line before the figure it stands for, on a text row aligned by baseline. `.dashed()` for a dashed series. |
 | `Toolbar`, `IconButton` | Tools across the top of a view. An icon button's label is its tooltip, so always give it a label. |

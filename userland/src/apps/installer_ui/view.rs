@@ -360,6 +360,7 @@ fn log(app: &InstallerApp) -> Node<Msg> {
             scroll_y: app.log_scroll,
             on_scroll: Some(Msg::LogScroll),
             follow_end: true,
+            shows: None,
         }),
     }
 }

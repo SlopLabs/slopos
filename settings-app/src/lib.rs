@@ -92,7 +92,14 @@ impl Panel {
                 "automatic",
                 "user",
             ],
-            Panel::Keyboard => &["layout", "keymap", "language", "typing", "keys"],
+            Panel::Keyboard => &[
+                "layout",
+                "keymap",
+                "language",
+                "typing",
+                "keys",
+                "login screen",
+            ],
             Panel::Desktop => &[
                 "background",
                 "wallpaper",

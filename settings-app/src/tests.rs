@@ -1,6 +1,11 @@
 use std::sync::Once;
 
-use slopos_appkit::{Key, LineEditInput, Modifiers, NamedKey, Node};
+use slopos_appkit::embed::Embedded;
+use slopos_appkit::{
+    Key, KeyboardMap, LineEditInput, Modifiers, NamedKey, Node, Rect, Role, Size, Widget,
+};
+use slopos_keymap_core::LayoutTable;
+use slopos_keymap_core::board::Board;
 use slopos_settings_core::network::Settings as NetSettings;
 use slopos_settings_core::prefs::{Key as PrefKey, Prefs};
 use slopos_theme_core::words;
@@ -41,10 +46,12 @@ fn read(panel: Panel, person: Person) -> Settings {
             keyboard::Layout {
                 name: "de_CH".into(),
                 title: "Swiss German (QWERTZ)".into(),
+                board: Some(board(include_str!("../../assets/keymaps/de_CH.layout"))),
             },
             keyboard::Layout {
                 name: "us".into(),
                 title: "US English (QWERTY)".into(),
+                board: Some(board(include_str!("../../assets/keymaps/us.layout"))),
             },
         ],
         yours: None,
@@ -76,6 +83,12 @@ fn read(panel: Panel, person: Person) -> Settings {
     app
 }
 
+fn board(file: &str) -> Board {
+    let mut table = Box::new(LayoutTable::empty());
+    slopos_keymap_core::parse(file.as_bytes(), &mut table).unwrap();
+    Board::of(&table)
+}
+
 fn typed(text: &str) -> Vec<LineEditInput> {
     text.chars()
         .map(|character| LineEditInput::Text { character })
@@ -86,6 +99,11 @@ fn type_into(app: &mut Settings, wrap: fn(LineEditInput) -> Msg, text: &str) {
     for input in typed(text) {
         app.update(wrap(input));
     }
+}
+
+fn try_typing(app: &mut Settings, text: &str) {
+    app.update(Msg::Keyboard(keyboard::Msg::Try(LineEditInput::Focus)));
+    type_into(app, |i| Msg::Keyboard(keyboard::Msg::Try(i)), text);
 }
 
 /// Every state a panel has a page or a dialog for, by name.
@@ -131,6 +149,36 @@ fn states() -> Vec<(String, Settings)> {
     let mut computer = read(Panel::Keyboard, admin());
     computer.update(Msg::Keyboard(keyboard::Msg::Change));
     out.push(("keyboard computer".into(), computer));
+    for (name, kept) in [
+        ("keyboard yours", Ok(())),
+        ("keyboard later", Err(keyboard::Kept::Later)),
+        (
+            "keyboard not kept",
+            Err(keyboard::Kept::Not("Your layout couldn't be kept.".into())),
+        ),
+    ] {
+        let mut app = read(Panel::Keyboard, standard());
+        app.update(Msg::Keyboard(keyboard::Msg::Yours(1)));
+        app.update(Msg::Keyboard(keyboard::Msg::Kept(kept)));
+        out.push((name.into(), app));
+    }
+    let mut tried = read(Panel::Keyboard, standard());
+    tried.update(Msg::Keyboard(keyboard::Msg::Yours(1)));
+    try_typing(&mut tried, "Grüezi z");
+    tried.update(Msg::Keyboard(keyboard::Msg::Try(LineEditInput::Blur)));
+    out.push(("keyboard tried".into(), tried));
+    let mut refused = read(Panel::Keyboard, standard());
+    refused.update(Msg::Keyboard(keyboard::Msg::Change));
+    refused.update(Msg::Keyboard(keyboard::Msg::Computer(0)));
+    refused.update(Msg::Keyboard(keyboard::Msg::Confirm));
+    refused.update(Msg::Answered(
+        Purpose::Keyboard,
+        Asked::Refused {
+            why: "You didn't allow this.".into(),
+            by_person: true,
+        },
+    ));
+    out.push(("keyboard computer refused".into(), refused));
 
     let mut add = read(Panel::Desktop, admin());
     add.update(Msg::Desktop(desktop::Msg::Add));
@@ -521,6 +569,131 @@ fn the_computer_s_layout_is_privd_s_to_change() {
         panic!("{effects:?}");
     };
     assert_eq!(ask.args, ["set", "--computer", "de_CH"]);
+}
+
+fn placed(app: &Settings, role: Role, name: &str, width: i32, height: i32) -> Rect {
+    fn find(widget: &dyn Widget, role: Role, name: &str) -> Option<Rect> {
+        if widget.role() == role && widget.accessible_name() == Some(name) {
+            return Some(widget.layout_rect());
+        }
+        widget
+            .children()
+            .iter()
+            .find_map(|child| find(child.as_ref(), role, name))
+    }
+    let mut root = slopos_appkit::tree::build_widget_tree(&app.view());
+    let style = slopos_appkit::StyleSheet::current();
+    slopos_appkit::tree::layout_tree(root.as_mut(), Size::new(width, height), &style);
+    find(root.as_ref(), role, name).unwrap_or_else(|| panic!("no {role:?} named {name:?}"))
+}
+
+#[test]
+fn nothing_said_of_a_choice_moves_what_is_chosen_from() {
+    fonts();
+    let list = |app: &Settings| {
+        [(640, 480), (920, 660)]
+            .map(|(w, h)| placed(app, Role::List, "Same as the login screen", w, h))
+    };
+    let mut app = read(Panel::Keyboard, standard());
+    let before = list(&app);
+    let answers = [
+        Ok(()),
+        Err(keyboard::Kept::Later),
+        Err(keyboard::Kept::Not("Your layout couldn't be kept.".into())),
+    ];
+    for (row, kept) in [1, 2, 0].into_iter().zip(answers) {
+        app.update(Msg::Keyboard(keyboard::Msg::Yours(row)));
+        assert_eq!(list(&app), before, "choosing row {row}");
+        app.update(Msg::Keyboard(keyboard::Msg::Kept(kept.clone())));
+        assert_eq!(list(&app), before, "row {row} answered {kept:?}");
+    }
+}
+
+#[test]
+fn choosing_a_layout_leaves_the_page_where_it_was_scrolled() {
+    fonts();
+    let window = Rect::new(0, 0, 920, 480);
+    let us_row = |shown: &mut Embedded| {
+        (0..window.height).step_by(4).find(|&y| {
+            let said = shown.click::<Msg>(600, y, true);
+            shown.click::<Msg>(600, y, false);
+            matches!(said[..], [Msg::Keyboard(keyboard::Msg::Yours(2))])
+        })
+    };
+    let mut app = read(Panel::Keyboard, standard());
+    let mut shown = Embedded::new(&app.view(), window);
+    shown.wheel::<Msg>(600, 300, 960);
+    let before = us_row(&mut shown).expect("the row is in view once scrolled");
+    app.update(Msg::Keyboard(keyboard::Msg::Yours(1)));
+    shown.rebuild(&app.view(), window);
+    assert_eq!(us_row(&mut shown), Some(before), "a choice moved the page");
+}
+
+#[test]
+fn your_layout_goes_to_the_login_screen_through_privd() {
+    let mut app = read(Panel::Keyboard, standard());
+    let (_, effects) = app.update(Msg::Keyboard(keyboard::Msg::UseYours));
+    assert_eq!(
+        effects,
+        [],
+        "following the login screen, there is none to give"
+    );
+    app.update(Msg::Keyboard(keyboard::Msg::Yours(1)));
+    let (_, effects) = app.update(Msg::Keyboard(keyboard::Msg::UseYours));
+    let [Effect::Ask(ask)] = &effects[..] else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(ask.action, keyboard::ACTION);
+    assert_eq!(ask.args, ["set", "--computer", "de_CH"]);
+    let (_, effects) = app.update(Msg::Keyboard(keyboard::Msg::UseYours));
+    assert_eq!(effects, [], "one question at a time");
+}
+
+fn lit(app: &Settings) -> Vec<(usize, usize)> {
+    fn map(node: &Node<Msg>) -> Option<&KeyboardMap> {
+        match node {
+            Node::KeyboardMap(map) => Some(map),
+            Node::VStack { children, .. }
+            | Node::HStack { children, .. }
+            | Node::ZStack { children } => children.iter().find_map(map),
+            Node::Padding { child, .. }
+            | Node::Expand { child, .. }
+            | Node::Background { child, .. }
+            | Node::Card { child, .. }
+            | Node::SizedBox { child, .. }
+            | Node::ScrollView { child, .. } => map(child),
+            _ => None,
+        }
+    }
+    let view = app.view();
+    let keys = map(&view).expect("the page draws the keyboard");
+    keys.rows
+        .iter()
+        .enumerate()
+        .flat_map(|(r, row)| {
+            row.iter()
+                .enumerate()
+                .filter(|(_, key)| key.lit)
+                .map(move |(at, _)| (r, at))
+        })
+        .collect()
+}
+
+#[test]
+fn the_key_a_character_came_from_is_lit_while_trying_the_layout() {
+    let mut app = read(Panel::Keyboard, standard());
+    app.update(Msg::Keyboard(keyboard::Msg::Yours(1)));
+    try_typing(&mut app, "z");
+    assert_eq!(lit(&app), [(1, 6)], "QWERTZ types z where QWERTY has Y");
+    try_typing(&mut app, "y");
+    assert_eq!(lit(&app), [(3, 2)], "and y beside the key ISO adds");
+    try_typing(&mut app, " ");
+    assert_eq!(lit(&app), [(4, 3)]);
+    app.update(Msg::Keyboard(keyboard::Msg::Try(LineEditInput::Blur)));
+    assert_eq!(lit(&app), [], "nothing is lit once the field lets go");
+    app.update(Msg::Keyboard(keyboard::Msg::Yours(2)));
+    try_typing(&mut app, "y");
+    assert_eq!(lit(&app), [(1, 6)]);
 }
 
 /// What the file holds once a save's changes go into `base`.

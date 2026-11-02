@@ -311,14 +311,21 @@ fn expand<M>(child: Node<M>) -> Node<M> {
     }
 }
 
+/// The body keeps its scroll by the page's title, whatever leads its content.
 impl<M> From<Page<M>> for Node<M> {
     fn from(page: Page<M>) -> Self {
         let top = EdgeInsets::new(inset::PAGE.top, inset::PAGE.right, 0, inset::PAGE.left);
+        let shows = (!page.title.is_empty()).then(|| {
+            let mut shows = std::hash::DefaultHasher::new();
+            std::hash::Hash::hash(&page.title, &mut shows);
+            std::hash::Hasher::finish(&shows)
+        });
         let body = Node::ScrollView {
             child: Box::new(padded(inset::PAGE, page.content)),
             scroll_y: 0,
             on_scroll: None,
             follow_end: false,
+            shows,
         };
         let mut parts = Vec::new();
         if !page.title.is_empty() {
@@ -769,6 +776,82 @@ impl<M> From<Gallery<M>> for Node<M> {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KeyCap {
+    /// In quarters of a letter key's width.
+    pub quarters: u16,
+    /// Printed top left, bottom left and bottom right.
+    pub shift: String,
+    pub base: String,
+    pub alt_gr: String,
+    /// The same in every layout, as Shift: drawn bare and quieter.
+    pub fixed: bool,
+    /// The lower part of an ISO Enter, joining the key above.
+    pub joins_above: bool,
+    pub lit: bool,
+}
+
+impl KeyCap {
+    pub fn typing(quarters: u16) -> Self {
+        Self {
+            quarters,
+            ..Self::default()
+        }
+    }
+
+    pub fn fixed(quarters: u16) -> Self {
+        Self {
+            quarters,
+            fixed: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn legends(
+        mut self,
+        shift: impl Into<String>,
+        base: impl Into<String>,
+        alt_gr: impl Into<String>,
+    ) -> Self {
+        self.shift = shift.into();
+        self.base = base.into();
+        self.alt_gr = alt_gr.into();
+        self
+    }
+
+    pub fn joins_above(mut self) -> Self {
+        self.joins_above = true;
+        self
+    }
+
+    pub fn lit(mut self, lit: bool) -> Self {
+        self.lit = lit;
+        self
+    }
+}
+
+/// A keyboard's keys in rows, each printing what it types.
+#[derive(Clone, Debug)]
+pub struct KeyboardMap {
+    pub label: String,
+    pub rows: Vec<Vec<KeyCap>>,
+}
+
+impl KeyboardMap {
+    pub fn new(label: impl Into<String>, rows: Vec<Vec<KeyCap>>) -> Self {
+        Self {
+            label: label.into(),
+            rows,
+        }
+    }
+}
+
+impl<M> From<KeyboardMap> for Node<M> {
+    fn from(map: KeyboardMap) -> Self {
+        Node::KeyboardMap(map)
+    }
+}
+
 /// Rows in sections, one of which may be chosen: one tab stop, the arrows
 /// moving the choice past rows that cannot be chosen.
 pub struct List<M> {
@@ -877,6 +960,7 @@ impl<M> From<Sidebar<M>> for Node<M> {
                         scroll_y: 0,
                         on_scroll: None,
                         follow_end: false,
+                        shows: None,
                     },
                 )),
             }),

@@ -13,6 +13,7 @@ use slopos_abi::PAGE_SIZE;
 use slopos_abi::syscall::types::{UserCpuInfo, UserSysInfo, UserUtsname};
 use slopos_accounts_core::listing::{self, Listed};
 use slopos_appkit::{Action, App, AppSender, ImageData, Node, SIDEBAR_WIDTH, WindowSpec};
+use slopos_keymap_core::board::Board;
 use slopos_settings_app::{
     Ask, Asked, Effect, Msg, Panel, Person, Settings, about, desktop, keyboard, network, users,
 };
@@ -213,6 +214,9 @@ fn layouts() -> keyboard::Read {
         layouts: crate::keymap::layouts()
             .into_iter()
             .map(|l| keyboard::Layout {
+                board: crate::keymap::table(&l.name)
+                    .ok()
+                    .map(|table| Board::of(&table)),
                 name: l.name,
                 title: l.title,
             })

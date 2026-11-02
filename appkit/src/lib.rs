@@ -27,9 +27,9 @@ pub mod widgets;
 
 pub use components::{
     Button, ButtonRow, Dialog, Disclosure, EmptyState, Gallery, GalleryTile, Graph, GraphKey,
-    GraphSeries, GraphSize, IconButton, List, ListRow, Notice, Page, PasswordField, PropertyList,
-    RowButton, SIDEBAR_WIDE_WIDTH, SIDEBAR_WIDTH, SearchField, Section, Sidebar, StatusBar, Tag,
-    Text, Toolbar, WindowSpec, Wrap, column, row,
+    GraphSeries, GraphSize, IconButton, KeyCap, KeyboardMap, List, ListRow, Notice, Page,
+    PasswordField, PropertyList, RowButton, SIDEBAR_WIDE_WIDTH, SIDEBAR_WIDTH, SearchField,
+    Section, Sidebar, StatusBar, Tag, Text, Toolbar, WindowSpec, Wrap, column, row,
 };
 pub use node::{
     Action, App, BarSegment, ButtonStyle, ContextMenuAt, ImageData, MenuItem, MenuItemKind, Node,

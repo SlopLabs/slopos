@@ -25,6 +25,7 @@ pub struct ScrollViewWidget {
     dragging: bool,
     focused: bool,
     follow_end: bool,
+    shows: Option<u64>,
     on_scroll: Option<Box<dyn Fn(i32) -> Box<dyn Any>>>,
 }
 
@@ -41,12 +42,18 @@ impl ScrollViewWidget {
             dragging: false,
             focused: false,
             follow_end: false,
+            shows: None,
             on_scroll: None,
         }
     }
 
     pub fn following_end(mut self, follow_end: bool) -> Self {
         self.follow_end = follow_end;
+        self
+    }
+
+    pub fn showing(mut self, shows: Option<u64>) -> Self {
+        self.shows = shows;
         self
     }
 
@@ -249,8 +256,6 @@ impl Widget for ScrollViewWidget {
         self.bar()?.hover(x, y)
     }
 
-    /// What it shows is known by the first name in it: a page's first
-    /// heading, a list's first row.
     fn kept(&self) -> Option<Kept> {
         fn first_name(widget: &dyn Widget) -> Option<&str> {
             let inner = || {
@@ -264,10 +269,13 @@ impl Widget for ScrollViewWidget {
         if self.on_scroll.is_some() {
             return None;
         }
-        let mut shows = std::hash::DefaultHasher::new();
-        first_name(self.child.as_ref()).hash(&mut shows);
+        let shows = self.shows.unwrap_or_else(|| {
+            let mut shows = std::hash::DefaultHasher::new();
+            first_name(self.child.as_ref()).hash(&mut shows);
+            shows.finish()
+        });
         Some(Kept {
-            shows: shows.finish(),
+            shows,
             at: KeptAt::Scroll(self.offset),
         })
     }

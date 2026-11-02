@@ -5,8 +5,8 @@ use std::sync::Arc;
 use slopos_theme_core::{EdgeInsets, Icon, Surface, TextRole, Tone};
 
 use super::components::{
-    Button, ButtonRow, Disclosure, Gallery, Graph, GraphKey, IconButton, List, PropertyList, Tag,
-    Text, WindowSpec,
+    Button, ButtonRow, Disclosure, Gallery, Graph, GraphKey, IconButton, KeyboardMap, List,
+    PropertyList, Tag, Text, WindowSpec,
 };
 use super::constraints::{CrossAxisAlignment, ImageScale, Length, Orientation, Rect};
 use super::event::{Key, Modifiers};
@@ -183,6 +183,7 @@ pub enum Node<M> {
     PropertyList(PropertyList<M>),
     List(List<M>),
     Gallery(Gallery<M>),
+    KeyboardMap(KeyboardMap),
     Tag(Tag),
     Disclosure(Box<Disclosure<M>>),
 
@@ -196,6 +197,9 @@ pub enum Node<M> {
         /// Reports its end as `i32::MAX`, which given back keeps it there as
         /// it grows.
         follow_end: bool,
+        /// Keeps its offset across rebuilds while equal; `None` keys on the
+        /// first name in it.
+        shows: Option<u64>,
     },
     TabBar {
         tabs: Vec<String>,

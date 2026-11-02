@@ -6,8 +6,8 @@ use slopos_theme_core::{Icon, TextRole, Tone, space};
 
 use crate::components::{
     Button, ButtonRow, Dialog, Disclosure, EmptyState, Gallery, GalleryTile, Graph, GraphKey,
-    IconButton, List, ListRow, Notice, Page, PasswordField, PropertyList, SearchField, Section,
-    Sidebar, StatusBar, Tag, Text, Toolbar, WindowSpec, column, row,
+    IconButton, KeyCap, KeyboardMap, List, ListRow, Notice, Page, PasswordField, PropertyList,
+    SearchField, Section, Sidebar, StatusBar, Tag, Text, Toolbar, WindowSpec, column, row,
 };
 use crate::constraints::{CrossAxisAlignment, Length, Orientation, TextAlignment};
 use crate::node::{
@@ -102,7 +102,7 @@ const ABOUT: [&str; 14] = [
     "Text takes a role for its size and a tone for its ink, and wraps or ends in an ellipsis.",
     "A row of buttons ends a page: going back on the left, finishing on the right.",
     "Fields share one frame, which thickens and takes the focus colour while typed into.",
-    "Choose one of several or a picture, turn one thing on, or pick an amount.",
+    "Choose one of several or a picture, turn one thing on, or pick an amount; a keyboard shows what each key of a layout types.",
     "Rows that may be chosen, one tab stop for the whole list.",
     "Rows in columns, and a tree of folders, each one tab stop the arrows move along.",
     "A page is made of sections, property lists and details that open, and ends in a row of buttons.",
@@ -559,6 +559,7 @@ impl Catalogue {
                 .on_select(Msg::Picture),
             )
             .into(),
+            Section::new("A keyboard", Self::keyboard()).into(),
             Section::new(
                 "On or off",
                 column(
@@ -600,6 +601,55 @@ impl Catalogue {
             )
             .into(),
         ])
+    }
+
+    fn keyboard() -> KeyboardMap {
+        let typing = |keys: &[(&str, &str, &str)]| -> Vec<KeyCap> {
+            keys.iter()
+                .map(|&(shift, base, alt_gr)| KeyCap::typing(4).legends(shift, base, alt_gr))
+                .collect()
+        };
+        let letters = |letters: &str| -> Vec<KeyCap> {
+            letters
+                .chars()
+                .map(|c| KeyCap::typing(4).legends(c.to_string(), "", ""))
+                .collect()
+        };
+        let mut digits = typing(&[
+            ("°", "^", ""),
+            ("!", "1", ""),
+            ("\"", "2", "²"),
+            ("§", "3", "³"),
+            ("$", "4", ""),
+            ("%", "5", ""),
+            ("&", "6", ""),
+            ("/", "7", "{"),
+            ("(", "8", "["),
+            (")", "9", "]"),
+            ("=", "0", "}"),
+            ("?", "ß", "\\"),
+            ("`", "´", ""),
+        ]);
+        digits.push(KeyCap::fixed(8));
+        let mut top = vec![KeyCap::fixed(6)];
+        top.extend(letters("QWERTZUIOPÜ"));
+        top[1].alt_gr = String::from("@");
+        top[3].alt_gr = String::from("€");
+        top[3].lit = true;
+        top.extend(typing(&[("*", "+", "~")]));
+        top.push(KeyCap::fixed(6));
+        let mut home = vec![KeyCap::fixed(7)];
+        home.extend(letters("ASDFGHJKLÖÄ"));
+        home.extend(typing(&[("'", "#", "")]));
+        home.push(KeyCap::fixed(5).joins_above());
+        let mut bottom = vec![KeyCap::fixed(5)];
+        bottom.extend(typing(&[(">", "<", "|")]));
+        bottom.extend(letters("YXCVBNM"));
+        bottom[8].alt_gr = String::from("µ");
+        bottom.extend(typing(&[(";", ",", ""), (":", ".", ""), ("_", "-", "")]));
+        bottom.push(KeyCap::fixed(11));
+        let space = [5, 5, 5, 25, 5, 5, 5, 5].map(KeyCap::fixed).to_vec();
+        KeyboardMap::new("German", vec![digits, top, home, bottom, space])
     }
 
     fn lists(&self) -> Node<Msg> {

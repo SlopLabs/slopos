@@ -349,8 +349,8 @@ action org.slopos.console.keymap
   allow    user alone
   allow    admin
   allow    paired
-  describe "change the computer's keyboard layout"
-  detail   "The login screen uses it, and so does everyone who hasn't chosen a layout of their own."
+  describe "change the login screen's keyboard layout"
+  detail   "Everyone who hasn't chosen a layout of their own types in it too."
   verb     "Change"
 
 action org.slopos.net.toggle

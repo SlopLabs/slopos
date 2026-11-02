@@ -13,6 +13,7 @@ pub mod graph;
 pub mod icon;
 pub mod icon_button;
 pub mod image;
+pub mod keyboard_map;
 pub mod line_edit;
 pub mod list;
 pub mod menu;

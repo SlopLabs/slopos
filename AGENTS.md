@@ -997,7 +997,8 @@ back or cancel one; Escape dismisses a dialog without one) before the app's
 leaves an Alt chord to the app, a table's chosen row opens on Enter or a
 second click (`on_activate`), a scroll view is a tab stop only while it
 scrolls, and a scroll view and a table keep their offset, and a menu its
-keyboard row, through a rebuild that shows the same (`Widget::kept`), the
+keyboard row, through a rebuild that shows the same (`Widget::kept`; a
+`Page` shows the same while its title does, whatever leads its content), the
 wheel goes to the innermost view that can
 move, and a dialog is modal for Tab, the pointer and tooltips
 (`Widget::is_modal`, `Widget::covers`, `EventResponse::Blocked`), giving
@@ -1060,7 +1061,16 @@ change takes an administrator's password, and the page refuses what the
 mechanism would or a person would regret: the last administrator's
 demotion, the first person's removal, and the person's own removal or
 demotion. The sidebar's `SearchField` narrows
-the panels by name and keywords, and Enter opens the first.
+the panels by name and keywords, and Enter opens the first. The Keyboard
+page leads with the layout in use drawn as a keyboard — appkit's
+`KeyboardMap` over `keymap-core::board`, each key printing what it types
+alone, with Shift and with AltGr, ISO or ANSI as the layout is — under a
+field to try it in, whose last character's key is lit; a layout chosen
+takes effect at once, and what came of it is said in a line that is
+always there, so no answer moves the list being chosen from. The page calls
+the computer's layout the login screen's, as GNOME's Region & Language and
+Windows' welcome screen do: the list's first row follows it, and its own
+section gives it yours in one step or another through `Change…`.
 
 **Each person's preferences are a file of theirs.**
 `~/.config/slopos/prefs` (`settings-core::prefs`, read by

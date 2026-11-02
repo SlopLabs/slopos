@@ -520,6 +520,7 @@ dependencies = [
  "slopos-accounts-core",
  "slopos-appkit",
  "slopos-gfx",
+ "slopos-keymap-core",
  "slopos-net-core",
  "slopos-settings-core",
  "slopos-theme-core",

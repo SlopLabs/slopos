@@ -52,6 +52,10 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             gallery.selected,
             erase_with(gallery.on_select),
         )),
+        Node::KeyboardMap(map) => Box::new(widgets::keyboard_map::KeyboardMapWidget::new(
+            map.label.clone(),
+            map.rows.clone(),
+        )),
         Node::Tag(tag) => Box::new(widgets::tag::TagWidget::new(tag.text.clone(), tag.tone)),
         Node::Disclosure(d) => Box::new(widgets::disclosure::DisclosureWidget::new(
             d.title.clone(),
@@ -108,13 +112,15 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             scroll_y,
             on_scroll,
             follow_end,
+            shows,
         } => Box::new(
             widgets::scroll_view::ScrollViewWidget::with_scroll(
                 build_widget_tree(child),
                 *scroll_y,
                 erase_with(*on_scroll),
             )
-            .following_end(*follow_end),
+            .following_end(*follow_end)
+            .showing(*shows),
         ),
         Node::TabBar {
             tabs,
