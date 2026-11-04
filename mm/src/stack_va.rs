@@ -156,34 +156,40 @@ impl<R: StackRegion, const WORDS: usize> StackVaAllocator<R, WORDS> {
         self.ready = true;
     }
 
-    /// `None` if the region is exhausted or `init()` has not run.
+    /// A free slot that still has frames mapped, else any free slot; `None` if
+    /// the region is exhausted or `init()` has not run. A freed stack keeps
+    /// its frames, so taking a fresh slot while a backed one is free would
+    /// grow the region's memory toward every slot it has, not toward the most
+    /// stacks ever live at once.
     pub fn alloc_one(&mut self) -> Option<SlotEntry> {
         if !self.ready {
             return None;
         }
+        let (word_idx, bit) = self
+            .find_free(|word_idx| self.backed_bitmap[word_idx])
+            .or_else(|| self.find_free(|_| !0))?;
+        let slot = word_idx * 64 + bit;
+        let mask = 1u64 << bit;
+        self.free_bitmap[word_idx] &= !mask;
+        let backed = self.backed_bitmap[word_idx] & mask != 0;
+        self.in_use += 1;
+        self.hint = ((slot + 1) % R::MAX_SLOTS) as u32;
+        Some(SlotEntry {
+            idx: slot as u32,
+            backed,
+        })
+    }
+
+    /// The first free slot from `hint` on that `filter` keeps, as its word
+    /// and bit.
+    fn find_free(&self, filter: impl Fn(usize) -> u64) -> Option<(usize, usize)> {
         let start_word = (self.hint as usize / 64) % WORDS;
-        for offset in 0..WORDS {
+        (0..WORDS).find_map(|offset| {
             let word_idx = (start_word + offset) % WORDS;
-            let word = self.free_bitmap[word_idx];
-            if word == 0 {
-                continue;
-            }
+            let word = self.free_bitmap[word_idx] & filter(word_idx);
             let bit = word.trailing_zeros() as usize;
-            let slot = word_idx * 64 + bit;
-            if slot >= R::MAX_SLOTS {
-                continue;
-            }
-            let mask = 1u64 << bit;
-            self.free_bitmap[word_idx] &= !mask;
-            let backed = self.backed_bitmap[word_idx] & mask != 0;
-            self.in_use += 1;
-            self.hint = ((slot + 1) % R::MAX_SLOTS) as u32;
-            return Some(SlotEntry {
-                idx: slot as u32,
-                backed,
-            });
-        }
-        None
+            (word != 0 && word_idx * 64 + bit < R::MAX_SLOTS).then_some((word_idx, bit))
+        })
     }
 
     /// Returns the number of `SlotEntry`s written to the front of `out`.

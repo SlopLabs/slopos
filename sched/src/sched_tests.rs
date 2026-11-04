@@ -1978,6 +1978,72 @@ pub fn test_kstack_pcp_was_backed_preserved() -> TestResult {
     TestResult::Pass
 }
 
+/// With freed stacks in the global pool, a refill hands out slots that keep
+/// their frames rather than backing fresh ones, wherever the freed slots lie:
+/// the region's memory follows the most stacks live at once, not every slot
+/// ever handed out.
+pub fn test_kstack_global_reuses_backed_slots_first() -> TestResult {
+    use super::task_stack::KernelStack;
+    use slopos_abi::task::TASK_STACK_SIZE;
+    use slopos_mm::stack_region::KstackRegion;
+    use slopos_mm::stack_va::{alloc_slot, pcp_capacity, pcp_flush_current};
+
+    // The freed stacks fill a refill; the held slots, a bitmap word's worth
+    // with no frames behind them, push the allocator's hint a whole word past.
+    const FREED: usize = 16;
+    const HELD: usize = 64;
+    if pcp_capacity::<KstackRegion>() > FREED {
+        return TestResult::Fail;
+    }
+    pcp_flush_current::<KstackRegion>();
+    let mut freed = slopos_ostd::KVec::new();
+    for _ in 0..FREED {
+        let stack = match KernelStack::allocate(
+            TASK_STACK_SIZE as usize,
+            slopos_ostd::process::quota::root(),
+        ) {
+            Ok(stack) => stack,
+            Err(e) => {
+                klog_info!("SCHED_TEST[backed_first]: alloc failed: {:?}", e);
+                return TestResult::Fail;
+            }
+        };
+        if freed.push(stack).is_err() {
+            return TestResult::Fail;
+        }
+    }
+    let mut held = slopos_ostd::KVec::new();
+    for _ in 0..HELD {
+        let Some(slot) = alloc_slot::<KstackRegion>() else {
+            return TestResult::Fail;
+        };
+        if held.push(slot).is_err() {
+            return TestResult::Fail;
+        }
+    }
+
+    // Pinned so the drops, the flush and the refill all use one CPU's cache.
+    let pinned = PreemptGuard::new();
+    drop(freed);
+    pcp_flush_current::<KstackRegion>();
+    let taken = alloc_slot::<KstackRegion>().map(|slot| (slot.was_backed(), slot.index()));
+    pcp_flush_current::<KstackRegion>();
+    drop(pinned);
+    drop(held);
+
+    match taken {
+        Some((true, _)) => TestResult::Pass,
+        Some((false, idx)) => {
+            klog_info!(
+                "SCHED_TEST[backed_first]: refill took fresh slot {} over freed ones",
+                idx
+            );
+            TestResult::Fail
+        }
+        None => TestResult::Fail,
+    }
+}
+
 /// Freed slots are visible to any CPU's refill path; a cross-CPU free is
 /// simulated by an explicit flush in between.
 pub fn test_kstack_pcp_cross_cpu_safety() -> TestResult {
@@ -5233,6 +5299,10 @@ slopos_testing::stest!(name = test_kstack_pcp_refill, suite = sched_core);
 slopos_testing::stest!(name = test_kstack_pcp_spill_overflow, suite = sched_core);
 slopos_testing::stest!(
     name = test_kstack_pcp_was_backed_preserved,
+    suite = sched_core
+);
+slopos_testing::stest!(
+    name = test_kstack_global_reuses_backed_slots_first,
     suite = sched_core
 );
 slopos_testing::stest!(name = test_kstack_pcp_cross_cpu_safety, suite = sched_core);
