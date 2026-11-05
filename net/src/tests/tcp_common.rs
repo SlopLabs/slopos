@@ -322,18 +322,18 @@ pub fn wds_wrong_state(name: &str) -> ! {
 #[macro_export]
 macro_rules! with_data_state {
     ($id:expr, |$d:ident| $body:expr) => {{
-        let __wds_id: crate::tcp::ConnId = $id;
+        let __wds_id: $crate::tcp::ConnId = $id;
         if __wds_id.is_listener() {
-            crate::tests::tcp_common::wds_listener_id();
+            $crate::tests::tcp_common::wds_listener_id();
         }
-        let __wds_guard = crate::tcp::table::TCP_PCB_SLOTS[__wds_id.linear_slot()].lock();
+        let __wds_guard = $crate::tcp::table::TCP_PCB_SLOTS[__wds_id.linear_slot()].lock();
         let __wds_slot = match __wds_guard.as_ref() {
             Some(slot) => slot,
-            None => crate::tests::tcp_common::wds_missing_pcb(),
+            None => $crate::tests::tcp_common::wds_missing_pcb(),
         };
         match &__wds_slot.pcb.state {
-            crate::tcp::PcbState::Data($d) => $body,
-            other => crate::tests::tcp_common::wds_wrong_state(other.name()),
+            $crate::tcp::PcbState::Data($d) => $body,
+            other => $crate::tests::tcp_common::wds_wrong_state(other.name()),
         }
     }};
 }

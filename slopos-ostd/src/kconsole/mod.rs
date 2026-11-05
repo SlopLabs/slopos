@@ -49,7 +49,7 @@ pub const KCMD_DESTRUCTIVE: u8 = 1 << 1;
 ///
 /// `#[repr(C)]` and 48 bytes: [`registry_slice`] divides the concatenated
 /// section by this stride, so the size is part of the contract and
-/// `scripts/check_registry_sections.sh` holds the span to a whole number of
+/// the `registry-sections` gate holds the span to a whole number of
 /// them.
 #[repr(C)]
 pub struct KCommand {
@@ -145,7 +145,7 @@ impl KConsole<'_> {
     ///
     /// `#[inline(never)]` on purpose: inlining a `format_args!` emitter into
     /// each caller grows every one of their frames against
-    /// `check_stack_sizes.sh`'s 2 KiB cap.
+    /// the `stack-sizes` ELF gate's 2 KiB cap.
     #[inline(never)]
     pub fn line(&mut self, args: fmt::Arguments<'_>) {
         if self.emitted >= self.budget {

@@ -105,6 +105,10 @@ unsafe fn push_action(actions: *mut posix_spawn_file_actions_t, action: FileActi
     0
 }
 
+/// # Safety
+///
+/// `actions` must be null or valid for writes of one
+/// `posix_spawn_file_actions_t`; any prior contents are overwritten, not freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawn_file_actions_init(
     actions: *mut posix_spawn_file_actions_t,
@@ -124,6 +128,10 @@ pub unsafe extern "C" fn posix_spawn_file_actions_init(
     0
 }
 
+/// # Safety
+///
+/// `actions` must be null or initialized by `posix_spawn_file_actions_init`
+/// and not already destroyed; no other thread may use it concurrently.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawn_file_actions_destroy(
     actions: *mut posix_spawn_file_actions_t,
@@ -146,6 +154,10 @@ pub unsafe extern "C" fn posix_spawn_file_actions_destroy(
     0
 }
 
+/// # Safety
+///
+/// `actions` must be null or initialized by `posix_spawn_file_actions_init`
+/// and not destroyed; `path` must be null or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawn_file_actions_addopen(
     actions: *mut posix_spawn_file_actions_t,
@@ -178,6 +190,10 @@ pub unsafe extern "C" fn posix_spawn_file_actions_addopen(
     rc
 }
 
+/// # Safety
+///
+/// `actions` must be null or initialized by `posix_spawn_file_actions_init`
+/// and not destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawn_file_actions_addclose(
     actions: *mut posix_spawn_file_actions_t,
@@ -199,6 +215,10 @@ pub unsafe extern "C" fn posix_spawn_file_actions_addclose(
     )
 }
 
+/// # Safety
+///
+/// `actions` must be null or initialized by `posix_spawn_file_actions_init`
+/// and not destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawn_file_actions_adddup2(
     actions: *mut posix_spawn_file_actions_t,
@@ -221,6 +241,10 @@ pub unsafe extern "C" fn posix_spawn_file_actions_adddup2(
     )
 }
 
+/// # Safety
+///
+/// `actions` must be null or initialized by `posix_spawn_file_actions_init`
+/// and not destroyed; `path` must be null or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawn_file_actions_addchdir_np(
     actions: *mut posix_spawn_file_actions_t,
@@ -250,6 +274,9 @@ pub unsafe extern "C" fn posix_spawn_file_actions_addchdir_np(
     rc
 }
 
+/// # Safety
+///
+/// `attr` must be null or valid for writes of one `posix_spawnattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawnattr_init(attr: *mut posix_spawnattr_t) -> c_int {
     if attr.is_null() {
@@ -270,11 +297,18 @@ pub unsafe extern "C" fn posix_spawnattr_init(attr: *mut posix_spawnattr_t) -> c
     0
 }
 
+/// # Safety
+///
+/// None: `attr` is only tested for null; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawnattr_destroy(attr: *mut posix_spawnattr_t) -> c_int {
     if attr.is_null() { EINVAL.raw() } else { 0 }
 }
 
+/// # Safety
+///
+/// `attr` must be null or initialized by `posix_spawnattr_init`; `flags`
+/// must be null or valid for writes of one `c_short`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawnattr_getflags(
     attr: *const posix_spawnattr_t,
@@ -287,6 +321,9 @@ pub unsafe extern "C" fn posix_spawnattr_getflags(
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or valid for writes of one `posix_spawnattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawnattr_setflags(
     attr: *mut posix_spawnattr_t,
@@ -299,6 +336,10 @@ pub unsafe extern "C" fn posix_spawnattr_setflags(
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or initialized by `posix_spawnattr_init`; `pgroup`
+/// must be null or valid for writes of one `pid_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawnattr_getpgroup(
     attr: *const posix_spawnattr_t,
@@ -311,6 +352,9 @@ pub unsafe extern "C" fn posix_spawnattr_getpgroup(
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or valid for writes of one `posix_spawnattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawnattr_setpgroup(
     attr: *mut posix_spawnattr_t,
@@ -323,6 +367,10 @@ pub unsafe extern "C" fn posix_spawnattr_setpgroup(
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or initialized by `posix_spawnattr_init`; `sigdefault`
+/// must be null or valid for writes of one `sigset_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawnattr_getsigdefault(
     attr: *const posix_spawnattr_t,
@@ -335,6 +383,10 @@ pub unsafe extern "C" fn posix_spawnattr_getsigdefault(
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or initialized by `posix_spawnattr_init`; `sigdefault`
+/// must be null or point to a valid `sigset_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawnattr_setsigdefault(
     attr: *mut posix_spawnattr_t,
@@ -347,6 +399,10 @@ pub unsafe extern "C" fn posix_spawnattr_setsigdefault(
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or initialized by `posix_spawnattr_init`; `sigmask`
+/// must be null or valid for writes of one `sigset_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawnattr_getsigmask(
     attr: *const posix_spawnattr_t,
@@ -359,6 +415,10 @@ pub unsafe extern "C" fn posix_spawnattr_getsigmask(
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or initialized by `posix_spawnattr_init`; `sigmask`
+/// must be null or point to a valid `sigset_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawnattr_setsigmask(
     attr: *mut posix_spawnattr_t,
@@ -371,6 +431,12 @@ pub unsafe extern "C" fn posix_spawnattr_setsigmask(
     0
 }
 
+/// # Safety
+///
+/// `pid` must be null or valid for writes of one `pid_t`; `path` must be null
+/// or a NUL-terminated string; `file_actions` and `attrp` must be null or
+/// initialized by their `_init` and not destroyed; `argv` and `envp` must
+/// each be null or a null-terminated array of NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawn(
     pid: *mut pid_t,
@@ -383,6 +449,9 @@ pub unsafe extern "C" fn posix_spawn(
     spawn(pid, path, false, file_actions, attrp, argv, envp)
 }
 
+/// # Safety
+///
+/// As for [`posix_spawn`], with `file` searched along `PATH`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_spawnp(
     pid: *mut pid_t,
@@ -406,6 +475,10 @@ const SHELL_NOT_STARTED: c_int = 127 << 8;
 /// command and no handler reaps it first; the shell starts with the caller's
 /// mask and those two as the caller had them, a handler reset to the default.
 /// A null `command` asks whether there is a shell.
+///
+/// # Safety
+///
+/// `command` must be null or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn system(command: *const u8) -> c_int {
     if command.is_null() {

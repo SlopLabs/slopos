@@ -1,9 +1,9 @@
-# check_stack_sizes allowlist — variant: dev
+# stack-sizes allowlist — variant: dev
 #
 # Frames above STACK_SIZE_THRESHOLD (2048 B) that are permitted, each capped
 # at its measured size so growth still fails.
 #
-#     scripts/check_stack_sizes.sh --variant dev --emit-allowlist builddir/kernel-dev.elf
+#     xtask elf --variant dev builddir/kernel-dev.elf --emit-allowlist stack-sizes
 #
 # Every entry must match at least one over-threshold frame: a dead exemption
 # fails the gate, so a frame that shrinks hands its exemption back. No entry

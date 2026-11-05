@@ -133,6 +133,11 @@ pub struct MetaVtable {
 // synchronisation is through the slot's atomics.
 unsafe impl Sync for MetaVtable {}
 
+/// # Safety
+///
+/// `payload` must point to a live `M` in a slot whose last reference the
+/// caller holds and has moved to BUSY. The `M` is dropped in place and must
+/// not be used again.
 unsafe fn drop_in_place_for<M: AnyFrameMeta>(payload: *mut u8) {
     // SAFETY: caller (`Drop for Frame<M>`) holds the only remaining ref and
     // has transitioned the slot to BUSY, so access to the payload at
@@ -142,6 +147,10 @@ unsafe fn drop_in_place_for<M: AnyFrameMeta>(payload: *mut u8) {
     }
 }
 
+/// # Safety
+///
+/// `payload` must point to a live `M` in a slot whose last reference the
+/// caller holds, as for [`drop_in_place_for`].
 unsafe fn returns_frame_for<M: AnyFrameMeta>(payload: *const u8) -> bool {
     // SAFETY: same as `drop_in_place_for` — exclusive access to a
     // valid M payload at `payload`; this only reads it.
@@ -325,6 +334,10 @@ static META_SLOTS: MetaSlotsRegion = MetaSlotsRegion {
 /// must point to `len` zero-initialised, non-aliased [`MetaSlot`]s valid for
 /// the kernel's static lifetime — a raw-pointer obligation the type system
 /// cannot express, carried by the inline contract on the unsafe deref below.
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "BSP-only boot wiring (witnessed by the token); the slots' validity is the documented caller obligation, and the mm crate calling it forbids unsafe code"
+)]
 pub fn init_meta_slots<'brand>(_token: &BspToken<'brand>, slots: *mut MetaSlot, len: usize) {
     // Zeroed pages read as `REF_COUNT_BUSY`, not `UNUSED`; without this seed
     // the first `from_unused` on any frame would spin forever.
@@ -763,6 +776,13 @@ impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
 
     pub fn into_raw(self) -> *const MetaSlot {
         let p = self.ptr;
+        #[cfg_attr(
+            target_os = "none",
+            expect(
+                clippy::disallowed_methods,
+                reason = "the reference moves into the returned raw slot pointer, which `from_raw` takes back"
+            )
+        )]
         core::mem::forget(self);
         p
     }
@@ -931,6 +951,13 @@ impl<M: AnyFrameMeta> Frame<M, init_state::Uninit> {
         let ptr = self.ptr;
         // Bypass Drop: the handle moves into the new typestate-tagged value
         // and the refcount is unchanged.
+        #[cfg_attr(
+            target_os = "none",
+            expect(
+                clippy::disallowed_methods,
+                reason = "the reference moves into the retyped Frame below with its count unchanged"
+            )
+        )]
         core::mem::forget(self);
         Frame {
             ptr,
@@ -1025,6 +1052,13 @@ impl<S: init_state::InitState> Frame<KernelMeta, S> {
             slot.ref_count.store(REF_COUNT_UNUSED, Ordering::Release);
         }
         // Skip Drop — the slot was hand-released above.
+        #[cfg_attr(
+            target_os = "none",
+            expect(
+                clippy::disallowed_methods,
+                reason = "the slot was released by hand above; Drop would release it again"
+            )
+        )]
         core::mem::forget(self);
         paddr
     }
@@ -1291,6 +1325,13 @@ impl<M: AnyFrameMeta, S: init_state::InitState> core::fmt::Debug for Frame<M, S>
 impl<M: AnyFrameMeta, S: init_state::InitState> Frame<M, S> {
     /// Give up this reference and, if it was the last, the page the
     /// allocator is owed — for the caller to return rather than this.
+    #[cfg_attr(
+        target_os = "none",
+        expect(
+            clippy::disallowed_methods,
+            reason = "release_ref does Drop's work but hands the page to the caller; Drop would free it too"
+        )
+    )]
     pub(crate) fn release(self) -> Option<PhysAddr> {
         core::mem::ManuallyDrop::new(self).release_ref()
     }
@@ -1451,6 +1492,10 @@ pub trait FrameAlloc: Send + Sync + 'static {
 mod tests {
     use super::*;
 
+    #[expect(
+        clippy::absurd_extreme_comparisons,
+        reason = "pins the fit for every metadata type, including the zero-sized ones"
+    )]
     #[test]
     fn meta_size_fits() {
         assert!(KernelMeta::SIZE <= MAX_META_SIZE);

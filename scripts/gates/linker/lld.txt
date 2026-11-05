@@ -23,9 +23,9 @@
 #   dot-align          `. = ALIGN(0x1000);` before the early page tables.
 #                      link.ld uses all three ALIGN spellings and they are
 #                      separate productions.
-#   in-section-assign  __start_/__stop_ pairs bracket eleven registries;
-#                      check_registry_sections.sh holds their spans to whole
-#                      entries. Measured against each section's own address
+#   in-section-assign  __start_/__stop_ pairs bracket twelve registries;
+#                      the registry-sections gate holds each to being tiled
+#                      by entries of one size. Measured against each section's own address
 #                      and size, so this stays independent of where the
 #                      section landed.
 #   phdrs              three PT_LOADs with declared flags — a .rodata that

@@ -383,10 +383,8 @@ pub fn register_ap_timer_start(cb: fn() -> bool) {
 fn deferred_start_ap_timer(cpu_id: usize) {
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    static AP_TIMER_DONE: [AtomicBool; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS] = {
-        const FALSE: AtomicBool = AtomicBool::new(false);
-        [FALSE; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS]
-    };
+    static AP_TIMER_DONE: [AtomicBool; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS] =
+        [const { AtomicBool::new(false) }; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS];
 
     if cpu_id >= AP_TIMER_DONE.len() {
         return;

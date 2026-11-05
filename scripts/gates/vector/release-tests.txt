@@ -1,10 +1,10 @@
-# check_kernel_softfloat allowlist — variant: release-tests
+# softfloat allowlist — variant: release-tests
 #
 # Instructions touching XCR0-managed state (XMM/YMM/ZMM, x87, MMX, and the
 # xsave/xrstor pair) that are permitted, each capped at its measured
 # occurrence count in the named symbol.
 #
-#     scripts/check_kernel_softfloat.sh --variant release-tests --emit-allowlist builddir/kernel-release-tests.elf
+#     xtask elf --variant release-tests builddir/kernel-release-tests.elf --emit-allowlist softfloat
 #
 # Every entry must match at least one hit. A dead entry fails the gate.
 #

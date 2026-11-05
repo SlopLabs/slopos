@@ -1,4 +1,4 @@
-# check_authority_reachability allowlist — variant: release
+# authority allowlist — variant: release
 #
 # Syscall handlers that can reach a terminal power primitive
 # (`slopos_ostd::platform::power::{shutdown,reboot}`).
@@ -12,8 +12,7 @@
 # closure bodies, so the `*0` symbols do not survive. The *set of handlers* is
 # what matters and it is identical.
 #
-#     scripts/check_authority_reachability.sh --variant release \
-#         --emit-allowlist builddir/kernel-release.elf
+#     xtask elf --variant release builddir/kernel-release.elf --emit-allowlist authority
 
 # Classified `Power`.
 syscall_reboot

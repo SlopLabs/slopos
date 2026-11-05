@@ -20,6 +20,9 @@ use super::file::{fclose, fdopen};
 const SHELL: &[u8] = b"/bin/sh\0";
 const O_CLOEXEC: u32 = slopos_abi::syscall::O_CLOEXEC as u32;
 
+/// # Safety
+///
+/// `command` and `mode` must each be null or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn popen(command: *const u8, mode: *const u8) -> *mut FILE {
     let direction = if command.is_null() || mode.is_null() {
@@ -80,6 +83,10 @@ pub unsafe extern "C" fn popen(command: *const u8, mode: *const u8) -> *mut FILE
 }
 
 /// Close a stream `popen` opened and answer the shell's wait status.
+///
+/// # Safety
+///
+/// `stream` must be null or a live `FILE`, not yet closed; it must not be used after this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pclose(stream: *mut FILE) -> c_int {
     if stream.is_null() || (*stream).child <= 0 {

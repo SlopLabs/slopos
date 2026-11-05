@@ -51,6 +51,10 @@ pub fn read_pod_at<T: Copy>(payload: &[u8], offset: usize) -> Option<T> {
 /// with no `unsafe` in sight at the call site. A closure's argument lifetime
 /// is higher-ranked, so the caller cannot name it or outlive the call.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "the module contract, not the signature, carries the pointer's validity so crates forbidding unsafe code can borrow FFI memory; the closure scopes the borrow"
+)]
 pub fn with_buf<T, R>(ptr: *const T, len: usize, f: impl FnOnce(&[T]) -> R) -> R {
     // SAFETY: caller upholds the module-level contract.
     f(unsafe { core::slice::from_raw_parts(ptr, len) })
@@ -58,6 +62,10 @@ pub fn with_buf<T, R>(ptr: *const T, len: usize, f: impl FnOnce(&[T]) -> R) -> R
 
 /// Mutable sibling of [`with_buf`].
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "the module contract, not the signature, carries the pointer's validity so crates forbidding unsafe code can borrow FFI memory; the closure scopes the borrow"
+)]
 pub fn with_buf_mut<T, R>(ptr: *mut T, len: usize, f: impl FnOnce(&mut [T]) -> R) -> R {
     // SAFETY: caller upholds the module-level contract, including
     // exclusive ownership of `[ptr, ptr+len)` for the duration of `f`.
@@ -72,6 +80,10 @@ pub fn with_buf_mut<T, R>(ptr: *mut T, len: usize, f: impl FnOnce(&mut [T]) -> R
 /// slice's. Deliberately `&mut A` only: a shared form let callers pass a token
 /// standing in no relation to `ptr`, which constrained nothing.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "the module contract, not the signature, carries the pointer's validity so crates forbidding unsafe code can borrow memory they own; the anchor bounds the borrow"
+)]
 pub fn anchored_buf_mut<'a, A: ?Sized, T>(
     _anchor: &'a mut A,
     ptr: *mut T,
@@ -242,6 +254,10 @@ pub fn with_at_mut<T, R>(
 /// `__stop_<section>` flank a contiguous array. `'static` is the honest
 /// lifetime of a section: it is part of the image and is never freed.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "its inputs are a linker __start_/__stop_ symbol pair, which bound one section of the image for its whole life"
+)]
 pub fn section_slice<T: 'static>(start: *const T, stop: *const T) -> &'static [T] {
     // SAFETY: `offset_from` requires both pointers to land in the same
     // allocated object, which the linker guarantees for a `__start_*` /
@@ -257,6 +273,10 @@ pub fn section_slice<T: 'static>(start: *const T, stop: *const T) -> &'static [T
 ///
 /// Caller upholds the module-level contract for `ptr` when non-null.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "the module contract, not the signature, carries the pointer's validity so crates forbidding unsafe code can write through FFI memory"
+)]
 pub fn write_if_non_null<T>(ptr: *mut T, value: T) {
     if ptr.is_null() {
         return;
@@ -270,6 +290,10 @@ pub fn write_if_non_null<T>(ptr: *mut T, value: T) {
 
 /// Write `value` at `ptr.add(index)` using `ptr::write`.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "the module contract, not the signature, carries the pointer's validity so crates forbidding unsafe code can write through FFI memory"
+)]
 pub fn write_at_index<T>(ptr: *mut T, index: usize, value: T) {
     // SAFETY: caller upholds the module-level contract for the
     // `[ptr, ptr + index + 1)` range.
@@ -309,6 +333,10 @@ pub fn zero_bytes_at_kernel_va(addr: u64, len: usize) {
 /// Copy `len` bytes from `src` to `dst` using
 /// `copy_nonoverlapping`. Caller upholds non-overlap + bounds.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "the module contract, not the signature, carries both ranges' validity so crates forbidding unsafe code can copy through FFI memory"
+)]
 pub fn copy_bytes(dst: *mut u8, src: *const u8, len: usize) {
     // SAFETY: caller upholds the module-level contract for both ranges and
     // certifies they do not overlap.
@@ -320,6 +348,10 @@ pub fn copy_bytes(dst: *mut u8, src: *const u8, len: usize) {
 /// Typed pointer advance. Caller asserts the resulting pointer stays within
 /// the same allocation.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "the module contract, not the signature, carries the in-bounds offset so crates forbidding unsafe code can step through FFI memory"
+)]
 pub fn ptr_add<T>(ptr: *mut T, count: usize) -> *mut T {
     // SAFETY: caller asserts the in-bounds offset.
     unsafe { ptr.add(count) }
@@ -327,6 +359,10 @@ pub fn ptr_add<T>(ptr: *mut T, count: usize) -> *mut T {
 
 /// Same as [`ptr_add`] but for `*const T`.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "the module contract, not the signature, carries the in-bounds offset so crates forbidding unsafe code can step through FFI memory"
+)]
 pub fn ptr_add_const<T>(ptr: *const T, count: usize) -> *const T {
     // SAFETY: caller asserts the in-bounds offset.
     unsafe { ptr.add(count) }

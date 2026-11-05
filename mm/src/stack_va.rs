@@ -323,7 +323,7 @@ impl<R: StackRegion, const CAP: usize> PcpArray<R, CAP> {
 
 /// Refill the current CPU's cache from the global allocator in one batch.
 ///
-/// # Safety
+/// # Preconditions
 /// Caller must hold a `PreemptGuard`.
 pub fn pcp_refill<R: StackRegion, const WORDS: usize, const CAP: usize, const REFILL: usize>(
     global: &SpinLock<StackVaAllocator<R, WORDS>>,
@@ -371,7 +371,7 @@ pub fn pcp_refill<R: StackRegion, const WORDS: usize, const CAP: usize, const RE
 /// Spill a batch of cached slots back to the global allocator when the cache
 /// overflows.
 ///
-/// # Safety
+/// # Preconditions
 /// Caller must hold a `PreemptGuard`.
 pub fn pcp_spill<R: StackRegion, const WORDS: usize, const CAP: usize, const SPILL: usize>(
     global: &SpinLock<StackVaAllocator<R, WORDS>>,
@@ -654,11 +654,8 @@ mod kstack {
             lock_class!("kstack.GLOBAL", LOCK_LEVEL_ALLOCATOR),
         );
 
-    pub(super) static PCP: PcpArray<KstackRegion, REGION_PCP_CAPACITY> = PcpArray::new({
-        const INIT: CacheAligned<PerCpuStackCache<KstackRegion, REGION_PCP_CAPACITY>> =
-            CacheAligned(PerCpuStackCache::new());
-        [INIT; MAX_CPUS]
-    });
+    pub(super) static PCP: PcpArray<KstackRegion, REGION_PCP_CAPACITY> =
+        PcpArray::new([const { CacheAligned(PerCpuStackCache::new()) }; MAX_CPUS]);
 
     impl StackRegion for KstackRegion {
         const NAME: &'static str = "kstack";
@@ -744,11 +741,8 @@ mod ustack {
             lock_class!("ustack.GLOBAL", LOCK_LEVEL_ALLOCATOR),
         );
 
-    pub(super) static PCP: PcpArray<UstackRegion, REGION_PCP_CAPACITY> = PcpArray::new({
-        const INIT: CacheAligned<PerCpuStackCache<UstackRegion, REGION_PCP_CAPACITY>> =
-            CacheAligned(PerCpuStackCache::new());
-        [INIT; MAX_CPUS]
-    });
+    pub(super) static PCP: PcpArray<UstackRegion, REGION_PCP_CAPACITY> =
+        PcpArray::new([const { CacheAligned(PerCpuStackCache::new()) }; MAX_CPUS]);
 
     impl StackRegion for UstackRegion {
         const NAME: &'static str = "ustack";

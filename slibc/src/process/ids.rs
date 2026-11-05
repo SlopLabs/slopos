@@ -29,11 +29,17 @@ fn answer(ret: u64) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// None: the argument is a plain integer the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setuid(uid: uid_t) -> c_int {
     answer(syscall1(SYSCALL_SETUID, u64::from(uid)))
 }
 
+/// # Safety
+///
+/// None: the argument is a plain integer the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setgid(gid: gid_t) -> c_int {
     answer(syscall1(SYSCALL_SETGID, u64::from(gid)))
@@ -41,11 +47,18 @@ pub unsafe extern "C" fn setgid(gid: gid_t) -> c_int {
 
 /// `seteuid(-1)` is `EINVAL`, as POSIX lets it be: `setresuid` would read
 /// the same id as "leave it".
+///
+/// # Safety
+///
+/// None: the argument is a plain integer the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn seteuid(uid: uid_t) -> c_int {
     set_effective(SYSCALL_SETRESUID, uid)
 }
 
+/// # Safety
+///
+/// None: the argument is a plain integer the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setegid(gid: gid_t) -> c_int {
     set_effective(SYSCALL_SETRESGID, gid)
@@ -59,16 +72,25 @@ fn set_effective(call: u64, id: u32) -> c_int {
     answer(unsafe { syscall3(call, KEEP, u64::from(id), KEEP) })
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setreuid(ruid: uid_t, euid: uid_t) -> c_int {
     answer(syscall2(SYSCALL_SETREUID, u64::from(ruid), u64::from(euid)))
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setregid(rgid: gid_t, egid: gid_t) -> c_int {
     answer(syscall2(SYSCALL_SETREGID, u64::from(rgid), u64::from(egid)))
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setresuid(ruid: uid_t, euid: uid_t, suid: uid_t) -> c_int {
     answer(syscall3(
@@ -79,6 +101,9 @@ pub unsafe extern "C" fn setresuid(ruid: uid_t, euid: uid_t, suid: uid_t) -> c_i
     ))
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setresgid(rgid: gid_t, egid: gid_t, sgid: gid_t) -> c_int {
     answer(syscall3(
@@ -89,6 +114,9 @@ pub unsafe extern "C" fn setresgid(rgid: gid_t, egid: gid_t, sgid: gid_t) -> c_i
     ))
 }
 
+/// # Safety
+///
+/// `ruid`, `euid` and `suid` must each be valid for writes of one `uid_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getresuid(ruid: *mut uid_t, euid: *mut uid_t, suid: *mut uid_t) -> c_int {
     answer(syscall3(
@@ -99,6 +127,9 @@ pub unsafe extern "C" fn getresuid(ruid: *mut uid_t, euid: *mut uid_t, suid: *mu
     ))
 }
 
+/// # Safety
+///
+/// `rgid`, `egid` and `sgid` must each be valid for writes of one `gid_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getresgid(rgid: *mut gid_t, egid: *mut gid_t, sgid: *mut gid_t) -> c_int {
     answer(syscall3(
@@ -109,18 +140,30 @@ pub unsafe extern "C" fn getresgid(rgid: *mut gid_t, egid: *mut gid_t, sgid: *mu
     ))
 }
 
+/// # Safety
+///
+/// `ptr` must be valid for reads of `ngroups` initialized `gid_t` elements.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setgroups(ngroups: usize, ptr: *const gid_t) -> c_int {
     answer(syscall2(SYSCALL_SETGROUPS, ngroups as u64, ptr as u64))
 }
 
 /// A zero `ngroups` is the sizing query, as POSIX has it.
+///
+/// # Safety
+///
+/// When `ngroups` is nonzero, `ptr` must be valid for writes of `ngroups`
+/// `gid_t` elements.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getgroups(ngroups: c_int, ptr: *mut gid_t) -> c_int {
     answer(syscall2(SYSCALL_GETGROUPS, ngroups as u64, ptr as u64))
 }
 
 /// `getpgrp()` is `getpgid(0)`, which is all it has ever been.
+///
+/// # Safety
+///
+/// None: it takes no arguments; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getpgrp() -> pid_t {
     match Sys::getpgid(0) {
@@ -134,6 +177,11 @@ pub unsafe extern "C" fn getpgrp() -> pid_t {
 
 /// `wait4(2)`. The kernel writes `usage` as `slopos_abi::syscall::Rusage`
 /// says: the child's CPU time and its peak resident set.
+///
+/// # Safety
+///
+/// `status` must be null or valid for writes of one `c_int`; `usage` must be
+/// null or valid for writes of one `rusage`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wait4(
     pid: pid_t,
@@ -158,6 +206,10 @@ pub const ITIMER_PROF: c_int = 2;
 /// There is no per-process interval timer, so an alarm cannot be armed.
 /// `alarm` has no failure return of its own — 0 means "none was pending" —
 /// so the refusal is reported through `errno` alone.
+///
+/// # Safety
+///
+/// None: the argument is ignored; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn alarm(_seconds: c_uint) -> c_uint {
     errno_set(ENOSYS.raw());
@@ -165,6 +217,10 @@ pub unsafe extern "C" fn alarm(_seconds: c_uint) -> c_uint {
 }
 
 /// `getitimer(2)`: no timer is ever armed, so every one reads zero.
+///
+/// # Safety
+///
+/// `value` must be null or valid for writes of one `itimerval`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getitimer(which: c_int, value: *mut itimerval) -> c_int {
     if !matches!(which, ITIMER_REAL | ITIMER_VIRTUAL | ITIMER_PROF) || value.is_null() {
@@ -177,6 +233,11 @@ pub unsafe extern "C" fn getitimer(which: c_int, value: *mut itimerval) -> c_int
 
 /// `setitimer(2)`. Disarming — a zero `it_value` — succeeds, there being
 /// nothing armed; arming is `ENOSYS`, as for `alarm`.
+///
+/// # Safety
+///
+/// `value` must be null or point to a valid `itimerval`; `ovalue` must be
+/// null or valid for writes of one `itimerval`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setitimer(
     which: c_int,
@@ -223,6 +284,11 @@ fn dumpable() -> bool {
 /// setting it changes nothing. Any other option — `PR_SET_NAME`,
 /// `PR_SET_PDEATHSIG` — is `ENOSYS`; a thread name is kept through
 /// `pthread_setname_np`.
+///
+/// # Safety
+///
+/// For `PR_SET_NO_NEW_PRIVS` and `PR_SET_DUMPABLE` the caller must pass a
+/// second, `unsigned long` variadic argument; other options read none.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn prctl(option: c_int, mut args: ...) -> c_int {
     match option {
@@ -254,6 +320,10 @@ pub unsafe extern "C" fn prctl(option: c_int, mut args: ...) -> c_int {
 
 /// `getrlimit(2)`, the C form. The Rust-typed helpers next door in
 /// [`crate::process::rlimit`] are what slibc itself uses.
+///
+/// # Safety
+///
+/// `rlim` must be null or valid for writes of one `rlimit`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getrlimit(resource: c_int, rlim: *mut rlimit) -> c_int {
     if rlim.is_null() || resource < 0 {
@@ -263,6 +333,9 @@ pub unsafe extern "C" fn getrlimit(resource: c_int, rlim: *mut rlimit) -> c_int 
     crate::process::rlimit::getrlimit(resource as u32, &mut *rlim)
 }
 
+/// # Safety
+///
+/// `rlim` must be null or point to a valid, initialized `rlimit`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setrlimit(resource: c_int, rlim: *const rlimit) -> c_int {
     if rlim.is_null() || resource < 0 {
@@ -278,6 +351,10 @@ pub const RUSAGE_CHILDREN: c_int = -1;
 /// A reaped child's usage is `wait4`'s to report; the kernel has no call that
 /// answers for a live process, and a zeroed `struct rusage` is
 /// indistinguishable from a process that has used no time at all.
+///
+/// # Safety
+///
+/// None: the arguments are never read; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getrusage(_who: c_int, _usage: *mut rusage) -> c_int {
     errno_set(ENOSYS.raw());

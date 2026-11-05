@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# Shared plumbing for the source-scanning discipline gates.
-#
-# Deliberately narrow: only what was already copied verbatim between them,
-# plus the self-test harness. Each gate keeps its own exemption regexes and
-# patterns — those are the thing under test and belong beside the test that
-# pins them.
+# Shared plumbing for the shell gates that remain (the base-interface, libc
+# exports and toolchain-pin gates): the file enumerator and the self-test
+# harness. Source and ELF gates are Rust (tools/xtask) and do not use it.
 #
 # Portability: bash 3.2 and stock BSD awk (macOS ships both). No `mapfile`,
 # no `declare -A`, and no `\b` / `\s` in an ERE — awk reads `\b` as

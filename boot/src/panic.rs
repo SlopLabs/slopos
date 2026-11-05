@@ -318,10 +318,8 @@ pub fn panic_handler_impl(info: &PanicInfo) -> ! {
     // neither contends on the console nor holds a lock the owner needs.
     let cpu_id = slopos_ostd::cpu::x86_64::pcr::current_cpu_id() as u32;
     if !slopos_ostd::panic::claim_panic_owner(cpu_id) {
-        loop {
-            cpu::disable_interrupts();
-            cpu::halt_loop();
-        }
+        cpu::disable_interrupts();
+        cpu::halt_loop();
     }
 
     // The switch to the emergency stacks discards RSP-relative locals, so what

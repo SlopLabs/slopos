@@ -18,6 +18,12 @@ pub use rlimit::{RLIM_INFINITY, RLIMIT_ALL, RLimit, getrlimit, prlimit, setrlimi
 pub use wait::{WEXITSTATUS, WIFCONTINUED, WIFEXITED, WIFSIGNALED, WIFSTOPPED, WSTOPSIG, WTERMSIG};
 
 /// Returns the child PID to the parent, 0 to the child, -1 on error.
+///
+/// # Safety
+///
+/// Handlers registered with `pthread_atfork` run and must be sound to call.
+/// In a multithreaded parent the child may, as POSIX says, make only
+/// async-signal-safe calls until it execs.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fork() -> i32 {
     crate::thread::atfork::before_fork();
@@ -33,6 +39,12 @@ pub unsafe extern "C" fn fork() -> i32 {
 }
 
 /// Only returns on error (-1, sets errno).
+///
+/// # Safety
+///
+/// `path` must be null or point to a NUL-terminated string; `argv` and
+/// `envp` must be null or point to null-terminated arrays of NUL-terminated
+/// strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execve(
     path: *const u8,
@@ -53,17 +65,30 @@ pub unsafe extern "C" fn execve(
 }
 
 /// Exec with the current environment.
+///
+/// # Safety
+///
+/// As for [`execve`]; `environ` must be null or a valid environment array.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execv(path: *const u8, argv: *const *const u8) -> i32 {
     execve(path, argv, environ as *const *const u8)
 }
 
 /// Search `PATH` for `file`, then exec; a `file` containing `/` is used as-is.
+///
+/// # Safety
+///
+/// As for [`execvpe`]; `environ` must be null or a valid environment array.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execvp(file: *const u8, argv: *const *const u8) -> i32 {
     execvpe(file, argv, environ as *const *const u8)
 }
 
+/// # Safety
+///
+/// `file` must be null or point to a NUL-terminated string; `argv` and
+/// `envp` must be null or point to null-terminated arrays of NUL-terminated
+/// strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execvpe(
     file: *const u8,
@@ -167,12 +192,21 @@ unsafe fn exec_list(
     rc
 }
 
+/// # Safety
+///
+/// As for [`execvp`]; the variadic arguments after a non-null `arg0` must be
+/// NUL-terminated `const char *` strings ending in a null pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execlp(file: *const u8, arg0: *const u8, mut args: ...) -> i32 {
     exec_list(arg0, &mut args, |argv, _| execvp(file, argv))
 }
 
 /// `execl(3)`: [`execv`] with the argument list spelled out.
+///
+/// # Safety
+///
+/// As for [`execv`]; the variadic arguments after a non-null `arg0` must be
+/// NUL-terminated `const char *` strings ending in a null pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execl(path: *const u8, arg0: *const u8, mut args: ...) -> i32 {
     exec_list(arg0, &mut args, |argv, _| execv(path, argv))
@@ -180,6 +214,12 @@ pub unsafe extern "C" fn execl(path: *const u8, arg0: *const u8, mut args: ...) 
 
 /// `execle(3)`: [`execve`] with the argument list spelled out and the
 /// environment after its terminating null.
+///
+/// # Safety
+///
+/// As for [`execve`], plus: the variadic arguments after `arg0` must be
+/// `const char *` ending in a null pointer, followed by a `char *const *`
+/// envp; if `arg0` is null, the envp must follow `arg0` directly.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn execle(path: *const u8, arg0: *const u8, mut args: ...) -> i32 {
     exec_list(arg0, &mut args, |argv, rest| {
@@ -233,6 +273,10 @@ pub(crate) unsafe fn script_argv(
 pub(crate) const SH_PATH: &[u8] = b"/bin/sh\0";
 
 /// Returns the child PID on success, -1 on error.
+///
+/// # Safety
+///
+/// `status` must be null or valid for writes of one `i32`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32 {
     match times::reap(pid, status, options, ptr::null_mut()) {
@@ -245,6 +289,10 @@ pub unsafe extern "C" fn waitpid(pid: i32, status: *mut i32, options: i32) -> i3
 }
 
 /// Wait for any child process.
+///
+/// # Safety
+///
+/// `status` must be null or valid for writes of one `i32`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wait(status: *mut i32) -> i32 {
     waitpid(-1, status, 0)
@@ -253,6 +301,10 @@ pub unsafe extern "C" fn wait(status: *mut i32) -> i32 {
 /// Immediately terminate the whole process without cleanup.
 ///
 /// `SYSCALL_EXIT` ends only the calling task, so this must be `exit_group`.
+///
+/// # Safety
+///
+/// None: the argument is a plain integer; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _exit(status: i32) -> ! {
     Sys::exit_group(status)
@@ -281,6 +333,10 @@ pub const EX__MAX: i32 = 78;
 
 /// `_Exit(3)`. C's spelling of [`_exit`]: no `atexit` handlers, and whether
 /// open streams are flushed is implementation-defined. They are not.
+///
+/// # Safety
+///
+/// None: the argument is a plain integer; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _Exit(status: i32) -> ! {
     _exit(status)
@@ -292,6 +348,12 @@ pub unsafe extern "C" fn _Exit(status: i32) -> ! {
 /// The flush after the handlers is what C11 §7.22.4.4 requires; the one before
 /// them keeps a handler that faults or calls `_exit` from discarding what
 /// `main` buffered. Flushing is idempotent, so no conforming program can tell.
+///
+/// # Safety
+///
+/// Every handler registered with `atexit`/`__cxa_atexit` and every open
+/// stream must still be valid to call and flush; the call must not be made
+/// from inside one of those handlers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn exit(status: i32) -> ! {
     crate::stdio::__stdio_exit();
@@ -304,36 +366,57 @@ pub unsafe extern "C" fn exit(status: i32) -> ! {
     _exit(status)
 }
 
+/// # Safety
+///
+/// None: it takes no arguments; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getpid() -> i32 {
     Sys::getpid()
 }
 
+/// # Safety
+///
+/// None: it takes no arguments; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getppid() -> i32 {
     Sys::getppid()
 }
 
+/// # Safety
+///
+/// None: it takes no arguments; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getuid() -> u32 {
     Sys::getuid()
 }
 
+/// # Safety
+///
+/// None: it takes no arguments; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getgid() -> u32 {
     Sys::getgid()
 }
 
+/// # Safety
+///
+/// None: it takes no arguments; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn geteuid() -> u32 {
     Sys::geteuid()
 }
 
+/// # Safety
+///
+/// None: it takes no arguments; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getegid() -> u32 {
     Sys::getegid()
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setpgid(pid: i32, pgid: i32) -> i32 {
     match Sys::setpgid(pid, pgid) {
@@ -345,6 +428,9 @@ pub unsafe extern "C" fn setpgid(pid: i32, pgid: i32) -> i32 {
     }
 }
 
+/// # Safety
+///
+/// None: the argument is a plain integer the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getpgid(pid: i32) -> i32 {
     match Sys::getpgid(pid) {
@@ -356,6 +442,9 @@ pub unsafe extern "C" fn getpgid(pid: i32) -> i32 {
     }
 }
 
+/// # Safety
+///
+/// None: the argument is a plain integer the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getsid(pid: i32) -> i32 {
     match Sys::getsid(pid) {
@@ -371,6 +460,10 @@ pub unsafe extern "C" fn getsid(pid: i32) -> i32 {
 /// waits on, as the leader of a session of its own; in `/` unless `nochdir`,
 /// and with `/dev/null` as standard input, output and error unless
 /// `noclose`.
+///
+/// # Safety
+///
+/// None: the arguments are plain integers; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn daemon(nochdir: i32, noclose: i32) -> i32 {
     match fork() {
@@ -405,6 +498,9 @@ pub unsafe extern "C" fn daemon(nochdir: i32, noclose: i32) -> i32 {
     0
 }
 
+/// # Safety
+///
+/// None: it takes no arguments; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setsid() -> i32 {
     match Sys::setsid() {

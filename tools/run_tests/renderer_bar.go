@@ -19,6 +19,9 @@ type BarRenderer struct {
 	WarnMs       int
 	TTY          bool
 	TerminalCols int
+	// Label prefixes every live line, naming the shard of a sharded run
+	// whose boot produced it; empty in an unsharded run.
+	Label string
 
 	testsInPhase    int
 	phaseStarted    time.Time
@@ -111,7 +114,7 @@ func (r *BarRenderer) onTest(rec *TestRecord, _ *RunSummary) {
 
 func (r *BarRenderer) onKernelAbort(ev *EvKernelAbort) {
 	r.eraseBar()
-	msg := "KERNEL ABORT on some CPU"
+	msg := r.Label + "KERNEL ABORT on some CPU"
 	if ev.Reason != "" {
 		msg += ": " + ev.Reason
 	}
@@ -126,7 +129,7 @@ func (r *BarRenderer) onKernelAbort(ev *EvKernelAbort) {
 func (r *BarRenderer) onBail(ev *EvBail) {
 	r.eraseBar()
 	r.println(Paint(
-		fmt.Sprintf("BAIL OUT in %s: %s", phaseNameFor(ev.PhaseIdx), ev.Reason),
+		fmt.Sprintf("%sBAIL OUT in %s: %s", r.Label, phaseNameFor(ev.PhaseIdx), ev.Reason),
 		ansiRedBold, r.Colour,
 	))
 }
@@ -167,7 +170,7 @@ func (r *BarRenderer) endPhase(ev *EvPhaseEnd, _ *RunSummary) {
 			marker = "FAIL"
 		}
 	}
-	r.println(fmt.Sprintf("%s %s: %s in %.2fs", marker, ev.Name, strings.Join(parts, ", "), secs))
+	r.println(fmt.Sprintf("%s%s %s: %s in %.2fs", r.Label, marker, ev.Name, strings.Join(parts, ", "), secs))
 }
 
 // Finalize emits all post-run sections, starting from a clean line.
@@ -214,7 +217,8 @@ func (r *BarRenderer) printAboveBar(line string) {
 
 func (r *BarRenderer) formatWarningLine(rec *TestRecord, marker, colour, label string) string {
 	head := fmt.Sprintf(
-		"  %s %s %d %s",
+		"  %s%s %s %d %s",
+		r.Label,
 		Paint(marker, colour, r.Colour),
 		Paint(label, colour, r.Colour),
 		rec.Idx, rec.Name,
@@ -326,6 +330,9 @@ func (r *BarRenderer) renderFailureBlock(rec *TestRecord, k, total int) {
 	header := fmt.Sprintf("==== FAILURE %d of %d — %s ====", k, total, rec.Name)
 	r.println(Paint(header, ansiRedBold, r.Colour))
 	r.println("  phase:    " + rec.PhaseName)
+	if rec.Shard > 0 {
+		r.println(fmt.Sprintf("  shard:    %d", rec.Shard))
+	}
 	r.println(fmt.Sprintf("  idx:      %d", rec.Idx))
 	if rec.FailFile != nil {
 		r.println("  file:     " + *rec.FailFile)

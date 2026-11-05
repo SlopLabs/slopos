@@ -49,6 +49,10 @@ pub struct pthread_mutexattr_t {
 
 const MUTEXATTR_PSHARED: c_int = 1 << 30;
 
+#[expect(
+    clippy::declare_interior_mutable_const,
+    reason = "POSIX's static initializer: each use is meant to be a fresh, unshared mutex"
+)]
 pub const PTHREAD_MUTEX_INITIALIZER: pthread_mutex_t = pthread_mutex_t {
     state: AtomicI32::new(0),
     owner_tid: AtomicI32::new(0),
@@ -64,6 +68,10 @@ unsafe fn scope_of(mutex: *const pthread_mutex_t) -> FutexScope {
     FutexScope::of_pshared((*mutex).pshared != 0)
 }
 
+/// # Safety
+///
+/// `mutex` must be null or valid for writes of a `pthread_mutex_t` no thread
+/// is using; `attr` must be null or point to an initialized `pthread_mutexattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_init(
     mutex: *mut pthread_mutex_t,
@@ -175,6 +183,10 @@ pub(crate) fn unlock_state(state: &AtomicI32, scope: FutexScope) {
     }
 }
 
+/// # Safety
+///
+/// `mutex` must be null or point to an initialized `pthread_mutex_t` that stays
+/// valid while waited on or held.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut pthread_mutex_t) -> c_int {
     if mutex.is_null() {
@@ -206,6 +218,9 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut pthread_mutex_t) -> c_in
     0
 }
 
+/// # Safety
+///
+/// `mutex` must be null or point to an initialized `pthread_mutex_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut pthread_mutex_t) -> c_int {
     if mutex.is_null() {
@@ -241,6 +256,10 @@ pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut pthread_mutex_t) -> c
     0
 }
 
+/// # Safety
+///
+/// `mutex` must be null or point to an initialized `pthread_mutex_t`; for the
+/// `NORMAL` kind (no owner check) the caller must hold it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut pthread_mutex_t) -> c_int {
     if mutex.is_null() {
@@ -267,6 +286,10 @@ pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut pthread_mutex_t) -> c_
     0
 }
 
+/// # Safety
+///
+/// `mutex` must be null or point to an initialized `pthread_mutex_t` no thread
+/// is waiting on.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_destroy(mutex: *mut pthread_mutex_t) -> c_int {
     if mutex.is_null() {
@@ -283,6 +306,9 @@ pub unsafe extern "C" fn pthread_mutex_destroy(mutex: *mut pthread_mutex_t) -> c
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or valid for writes of a `pthread_mutexattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutexattr_init(attr: *mut pthread_mutexattr_t) -> c_int {
     if attr.is_null() {
@@ -292,6 +318,9 @@ pub unsafe extern "C" fn pthread_mutexattr_init(attr: *mut pthread_mutexattr_t) 
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or point to an initialized `pthread_mutexattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutexattr_settype(
     attr: *mut pthread_mutexattr_t,
@@ -312,6 +341,9 @@ pub unsafe extern "C" fn pthread_mutexattr_settype(
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or valid for writes of a `pthread_mutexattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutexattr_destroy(attr: *mut pthread_mutexattr_t) -> c_int {
     if attr.is_null() {
@@ -321,6 +353,9 @@ pub unsafe extern "C" fn pthread_mutexattr_destroy(attr: *mut pthread_mutexattr_
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or point to an initialized `pthread_mutexattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutexattr_setpshared(
     attr: *mut pthread_mutexattr_t,
@@ -341,6 +376,10 @@ pub unsafe extern "C" fn pthread_mutexattr_setpshared(
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or point to an initialized `pthread_mutexattr_t`;
+/// `pshared` must be null or valid for writing a `c_int`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutexattr_getpshared(
     attr: *const pthread_mutexattr_t,

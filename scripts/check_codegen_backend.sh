@@ -9,7 +9,7 @@
 # sanitizer as supported, and `-Zemit-stack-sizes` from any backend at all;
 # a backend that ignores either leaves the build green, the ELF plausible,
 # and S-5 (bounded kernel stack use) and the dual-stack split enforced by
-# nothing. `check_stack_sizes.sh` catches the second through `min-records`.
+# nothing. The `stack-sizes` ELF gate catches the second through `min-records`.
 # Nothing else catches the first.
 #
 # The direction that matters most is the *other* one. A `lacks` line here is
@@ -263,7 +263,7 @@ record() {
 "
 }
 
-# The same four classes check_kernel_softfloat.sh scans the kernel ELF for:
+# The same four classes the `softfloat` ELF gate scans the kernel ELF for:
 # XMM/YMM/ZMM, x87, MMX and the xsave pair all live under XCR0, and the
 # kernel saves none of them on a syscall or fault entry.
 XCR0_CLASSIFIER='
@@ -325,7 +325,7 @@ require_probe_inputs() {
     fi
 }
 
-# Field-exact, as in check_stack_sizes.sh: a bare /Size:/ also matches the
+# Field-exact, as in the `stack-sizes` ELF gate: a bare /Size:/ also matches the
 # `AddressSize:` line llvm-readobj prints for every archive member.
 stack_size_of_probe_frame() {
     awk '/Functions: \[probe_frame\]/ { want = 1; next }

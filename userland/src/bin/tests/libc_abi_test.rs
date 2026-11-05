@@ -524,7 +524,9 @@ fn read_dir_names_match_getdents64() -> bool {
             break;
         }
         let name_ptr = unsafe { (*ent).d_name.as_ptr() } as *const u8;
-        let len = slopos_slibc::u_strnlen(name_ptr, 256);
+        // SAFETY: `name_ptr` is the `d_name` of a dirent `readdir` just
+        // returned, readable up to its NUL within the 256-byte field.
+        let len = unsafe { slopos_slibc::u_strnlen(name_ptr, 256) };
         let bytes = unsafe { core::slice::from_raw_parts(name_ptr, len) };
         if bytes == b"." || bytes == b".." {
             continue;
@@ -1462,7 +1464,8 @@ fn realpath_of(path: &str) -> Option<String> {
     if got.is_null() {
         return None;
     }
-    let len = slopos_slibc::u_strnlen(buf.as_ptr(), buf.len());
+    // SAFETY: `buf` is a live local array readable for `buf.len()` bytes.
+    let len = unsafe { slopos_slibc::u_strnlen(buf.as_ptr(), buf.len()) };
     Some(String::from_utf8_lossy(&buf[..len]).into_owned())
 }
 

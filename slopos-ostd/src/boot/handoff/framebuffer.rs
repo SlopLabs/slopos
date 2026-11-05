@@ -27,6 +27,10 @@ pub fn fb_blit_bytes(base: u64, byte_offset: usize, src: &[u8]) {
 /// Solid-color fast path for the `bytes_per_pixel == 4`, all-bytes-identical
 /// case.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "safe by framekernel design: the caller certifies the range lies in the pre-mapped framebuffer; its callers forbid unsafe code"
+)]
 pub fn fb_fill_u8_bulk(base_ptr: *mut u8, byte_value: u8, byte_count: usize) {
     // SAFETY: caller certifies `[base_ptr, base_ptr + byte_count)`
     // lies inside a pre-mapped framebuffer; `write_bytes` does not
@@ -47,6 +51,10 @@ pub fn fb_write_u32_at(ptr: *mut u8, value: u32) {
 
 /// Volatile `u64` store, for an 8-byte-aligned destination.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "safe by framekernel design: the caller certifies the range lies in the pre-mapped framebuffer; its callers forbid unsafe code"
+)]
 pub fn fb_write_u64_at(ptr: *mut u64, value: u64) {
     // SAFETY: caller certifies `ptr..ptr+8` is within a pre-mapped FB.
     unsafe {
@@ -65,6 +73,10 @@ pub fn fb_write_u16_at(ptr: *mut u8, value: u16) {
 
 /// Volatile `u8` store at `ptr`.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "safe by framekernel design: the caller certifies the range lies in the pre-mapped framebuffer; its callers forbid unsafe code"
+)]
 pub fn fb_write_u8_at(ptr: *mut u8, value: u8) {
     // SAFETY: caller certifies `ptr..ptr+1` is within a pre-mapped FB.
     unsafe {
@@ -74,6 +86,10 @@ pub fn fb_write_u8_at(ptr: *mut u8, value: u8) {
 
 /// Advance `base_ptr` by `byte_offset`, folding `(*mut u8).add` inside OSTD.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "safe by framekernel design: the caller certifies the result stays in the pre-mapped framebuffer; its callers forbid unsafe code"
+)]
 pub fn fb_ptr_add(base_ptr: *mut u8, byte_offset: usize) -> *mut u8 {
     // SAFETY: caller certifies the resulting address remains within
     // the pre-mapped framebuffer (and within the same allocation —

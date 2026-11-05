@@ -504,6 +504,10 @@ fn lend_host_memory(controller: &Controller) {
     match controller.host_memory.lock() {
         Ok(mut lent) => *lent = Some(buffer),
         // The controller holds it now: never freed if it cannot be recorded.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the drive DMAs into the granted buffer until reset; dropping it would return memory the controller still writes to the allocator"
+        )]
         Err(_) => core::mem::forget(buffer),
     }
 }

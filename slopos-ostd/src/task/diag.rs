@@ -6,7 +6,7 @@
 //! arrives while any CPU holds it deadlocks the dump; upgrading to a `KArc`
 //! risks the matching drop running the allocator-heavy destructor from inside a
 //! fault handler, possibly on an IST stack; and a `&TaskInner` would assert a
-//! liveness a fault path cannot honestly promise. `check_task_ownership.sh`
+//! liveness a fault path cannot honestly promise. The `task-ownership` gate's
 //! check 7 enforces the first two on `boot/src/exception.rs`, `boot/src/idt.rs`
 //! and every `slopos-ostd/src/panic*` file.
 //!

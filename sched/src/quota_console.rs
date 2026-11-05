@@ -200,7 +200,7 @@ fn run_ledger(kc: &mut KConsole<'_>) {
 }
 
 /// Emit one `QUOTA[<phase>]` line per account row carrying numbers — the wire
-/// form `scripts/check_quota_headroom.sh` parses. Called at the same three
+/// form `run_tests gate quota` parses. Called at the same three
 /// points the lockdep report is, so one boot answers both ratchets.
 pub fn quota_report(phase: &str) {
     report_charge_cost();

@@ -1,8 +1,10 @@
 //! Per-test registry walked by the harness.
 //!
-//! Every `stest!` emits a static `TestDesc` into the `.test_registry` linker
-//! section; the harness reads the section, sorts by `(module, name)`, then runs
-//! each entry.
+//! Every `stest!`, `utest!` and `fixture!` emits a static `TestDesc` into the
+//! `.test_registry` linker section; the harness reads the section, sorts it by
+//! `(order, module, rank, name)`, then runs each entry. Nothing depends on how
+//! a name sorts: a test that must run ahead of others says so with `order` or
+//! `rank`, and shared setup is a fixture.
 
 use core::cmp::Ordering;
 
@@ -17,8 +19,23 @@ pub enum TestKind {
     Userland = 1,
 }
 
+/// Where a test runs within its phase.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TestOrder {
+    /// Ahead of every other test, in every shard; a failure bails the phase,
+    /// so broken plumbing stops the run before anything spends time on it.
+    First = 0,
+    Sorted = 1,
+    /// After every `First` and `Sorted` test of its shard.
+    Last = 2,
+}
+
 /// Compile-time descriptor for one test entry. `bin`/`argv` are set by `utest!`
 /// and ignored by kernel tests.
+///
+/// `order` and `rank` sit in what was padding after `kind`, so the entry stays
+/// 104 bytes, the stride the ELF gates walk the section with.
 #[repr(C)]
 pub struct TestDesc {
     pub name: &'static str,
@@ -27,10 +44,16 @@ pub struct TestDesc {
     pub line: u32,
     pub run: fn() -> TestResult,
     pub kind: TestKind,
+    pub order: TestOrder,
+    /// Within one module and order, every test of a lower rank runs first: the
+    /// declared form of "this test reads what those left behind".
+    pub rank: u8,
     pub flags: u32,
     pub bin: Option<&'static str>,
     pub argv: &'static [&'static str],
 }
+
+const _: () = assert!(core::mem::size_of::<TestDesc>() == 104);
 
 /// `flags` bit: a panic from this test is reported as Pass with an
 /// `EXPECTED_PANIC` suffix.
@@ -45,6 +68,17 @@ pub const FLAG_UNCAPTURED: u32 = 0x2;
 /// `tests.run` pattern is its full name, never under a wildcard.
 pub const FLAG_EXPLICIT: u32 = 0x4;
 
+/// `flags` bit: the entry is a `fixture!`, not a test. It runs before the
+/// first test of its phase whenever that phase runs any, whatever the filter
+/// or shard, and is neither counted nor reported as a test.
+pub const FLAG_FIXTURE: u32 = 0x8;
+
+impl TestDesc {
+    pub fn is_fixture(&self) -> bool {
+        self.flags & FLAG_FIXTURE != 0
+    }
+}
+
 impl slopos_ostd::ffi::registry::RegistryEntry for TestDesc {
     const REGISTRIES: &'static [slopos_ostd::ffi::registry::RegistryId] =
         &[slopos_ostd::ffi::registry::RegistryId::Tests];
@@ -57,26 +91,12 @@ pub fn registry_iter() -> impl Iterator<Item = &'static TestDesc> {
     .iter()
 }
 
-fn is_bootstrap(desc: &TestDesc) -> bool {
-    desc.name.starts_with("bootstrap_")
-}
-
 fn cmp_desc(a: &&TestDesc, b: &&TestDesc) -> Ordering {
-    // `bootstrap_*` sorts ahead of everything so broken plumbing aborts the run
-    // before any subsystem test spends time on it.
-    let a_boot = is_bootstrap(a);
-    let b_boot = is_bootstrap(b);
-    if a_boot != b_boot {
-        return if a_boot {
-            Ordering::Less
-        } else {
-            Ordering::Greater
-        };
-    }
-    match a.module.as_bytes().cmp(b.module.as_bytes()) {
-        Ordering::Equal => a.name.as_bytes().cmp(b.name.as_bytes()),
-        other => other,
-    }
+    a.order
+        .cmp(&b.order)
+        .then_with(|| a.module.as_bytes().cmp(b.module.as_bytes()))
+        .then_with(|| a.rank.cmp(&b.rank))
+        .then_with(|| a.name.as_bytes().cmp(b.name.as_bytes()))
 }
 
 /// One bottom-up merge pass: merge each adjacent pair of `width`-sized sorted
@@ -110,9 +130,9 @@ fn merge_pass(src: &[&'static TestDesc], dst: &mut [&'static TestDesc], width: u
     }
 }
 
-/// Sort every registry entry by `(module, name)`. Bottom-up merge sort: the
-/// registry holds thousands of entries and an O(n^2) sort would cost more than
-/// the run it orders.
+/// Sort every registry entry by `(order, module, rank, name)`. Bottom-up merge
+/// sort: the registry holds thousands of entries and an O(n^2) sort would cost
+/// more than the run it orders.
 pub fn registry_sorted() -> Result<KVec<&'static TestDesc>, AllocError> {
     let mut src: KVec<&'static TestDesc> = KVec::new();
     for desc in registry_iter() {

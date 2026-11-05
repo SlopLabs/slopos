@@ -5,6 +5,9 @@ rust_channel      := `sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' 
 rust_target       := "targets/x86_64-slos.json"
 userland_target   := "targets/x86_64-unknown-slopos.json"
 kernel_rustflags  := env("KERNEL_RUSTFLAGS", "-C force-frame-pointers=yes")
+# The tree's checks (tools/xtask): source gates, kernel-ELF gates, the loose
+# programs gate and clippy. Built for the host into the shared target dir.
+xtask             := cargo + " +" + rust_channel + " run --locked --release --quiet -p slopos-xtask --"
 
 build_dir        := env("BUILD_DIR", "builddir")
 cargo_target_dir := build_dir / "target"
@@ -88,7 +91,7 @@ install_medium := build_dir / "install.cpio"
 # building one.
 iso_installer   := build_dir / "slop-installer.iso"
 installer_medium := build_dir / "install-tests.cpio"
-installer_live_cmdline := "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=off roulette=skip root=initramfs " + dev_watchdog + " tests.run=*ext4_aaa*,*installer*"
+installer_live_cmdline := "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=off roulette=skip root=initramfs " + dev_watchdog + " tests.run=*installer*"
 iso_tests    := build_dir / "slop-tests.iso"
 # `test-elf`: a kernel built elsewhere, never the build's own ISO.
 iso_elf_tests := build_dir / "slop-elf-tests.iso"
@@ -161,14 +164,14 @@ _build-userland:
     scripts/ensure_toolchain.sh
     CARGO="{{cargo}} +slopos" USERLAND_TARGET={{userland_target}} \
         scripts/build_userland.sh "{{build_dir}}" "{{cargo_target_dir}}"
-    scripts/check_loose_programs.sh {{build_dir}}/apps/bin/*
+    {{xtask}} programs {{build_dir}}/apps/bin/*
 
 _build-userland-tests: _build-userland
     CARGO="{{cargo}} +slopos" USERLAND_TARGET={{userland_target}} \
         scripts/build_userland.sh "{{build_dir}}" "{{cargo_target_dir}}" --test
     # The programs the extensions of `extension_test`, `extension_action_test`
     # and `extension_service_test` carry.
-    scripts/check_loose_programs.sh {{build_dir}}/libc_probe.elf {{build_dir}}/ext_daemon.elf
+    {{xtask}} programs {{build_dir}}/libc_probe.elf {{build_dir}}/ext_daemon.elf
 
 # `VERITY=off` for the tests image because the suite writes to it; the
 # shipped image keeps its trailer and `test_verity_artifact_*` mounts it.
@@ -320,7 +323,8 @@ _kernel variant features='':
     CARGO="{{cargo}} +slopos" RUST_TARGET={{rust_target}} KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
     KERNEL_RELEASE={{ if variant =~ '^release' { "1" } else { "0" } }} \
         scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}" "{{features}}"
-    scripts/check_kernel_elf_gates.sh "{{build_dir}}" "{{variant}}"
+    {{xtask}} elf --variant {{variant}} "{{build_dir}}/kernel-{{variant}}.elf"
+    {{xtask}} lint kernel-pml4-writer
 
 [doc("Build the kernel (implies fs-image)")]
 build: _fs-image (_kernel kernel_variant)
@@ -375,6 +379,23 @@ _iso-tests: _fs-image _fs-image-tests _initramfs-tests (_kernel kernel_variant_t
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_iso.sh "{{iso_tests}}" "{{build_dir}}" "{{test_cmdline_effective}}"
+
+# `run_tests --shards N`: one ISO per shard at builddir/shards/<K>/slop-tests.iso,
+# each TEST_CMDLINE plus `tests.shard=K/N`, from one kernel and base built
+# once. ONLY=K builds that shard's ISO alone.
+_iso-tests-shards SHARDS ONLY='': _fs-image _fs-image-tests _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for k in $(seq 1 "{{SHARDS}}"); do
+        [ -z "{{ONLY}}" ] || [ "$k" = "{{ONLY}}" ] || continue
+        mkdir -p "{{build_dir}}/shards/$k"
+        KERNEL_ELF={{kernel_elf_tests}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
+        QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
+        QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
+        QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
+            scripts/build_iso.sh "{{build_dir}}/shards/$k/slop-tests.iso" "{{build_dir}}" \
+                "{{test_cmdline_effective}} tests.shard=$k/{{SHARDS}}"
+    done
 
 # `tests.run=__userland_only__` is a glob that deliberately matches no kernel
 # test, leaving the userland phase as the only thing exercised.
@@ -468,7 +489,7 @@ ui-shots *ARGS:
 test-install:
     #!/usr/bin/env bash
     set -euo pipefail
-    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext4_aaa*,*install*,*base_tests*" BOOTDISK_PANIC_ENTRY=1 \
+    TEST_CMDLINE="{{test_cmdline}} tests.run=*install*,*base_tests*" BOOTDISK_PANIC_ENTRY=1 \
         BOOTDISK_ROOT_IMAGE={{fs_image_tests}} just _boot-disk
     . scripts/lib/bootdisk.sh
     bootdisk_layout
@@ -539,7 +560,7 @@ test-install-guest:
     just _fs-image-selfhost
     # Slot a is the optimized tests kernel, as for test-selfhost: it is the
     # machine that runs the build.
-    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} tests.run=*ext4_aaa*,*install*" \
+    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} tests.run=*install*" \
         BOOTDISK_PANIC_ENTRY=1 just _boot-disk
     log="{{build_dir}}/install-guest.log"
     push="$PWD/{{build_dir}}/install-guest-push.git"
@@ -935,9 +956,15 @@ _build-run-tests:
     mkdir -p {{build_dir}}
     cd tools/run_tests && go build -o ../../{{build_dir}}/run_tests .
 
-[doc("Run the SlopOS test harness — live progress bar, per-failure detail; pass a 'glob' filter as the positional argument")]
+# One boot per 8 host CPUs, 1 to 4 of them: a boot is QEMU_SMP=4 vCPUs, and
+# leaving each as many host CPUs again keeps the boots from stealing the time
+# the timing-sensitive tests measure. A 4-CPU CI runner gets 1. TEST_SHARDS
+# overrides it.
+test_shards := env("TEST_SHARDS", `n=$(( $(getconf _NPROCESSORS_ONLN) / 8 )); [ "$n" -ge 1 ] || n=1; [ "$n" -le 4 ] || n=4; echo "$n"`)
+
+[doc("Run the SlopOS test harness — live progress bar, per-failure detail; pass a 'glob' filter as the positional argument. Splits the run over TEST_SHARDS concurrent boots, by default one per 8 host CPUs, 1 to 4")]
 test FILTER='': _build-run-tests
-    {{build_dir}}/run_tests --filter "{{FILTER}}"
+    {{build_dir}}/run_tests --shards {{test_shards}} --filter "{{FILTER}}"
 
 [doc("Re-run only the tests that failed on the previous `just test` invocation.")]
 test-rerun-failed: _build-run-tests
@@ -991,8 +1018,7 @@ test-elf +ARGS: _fs-image _fs-image-tests _initramfs-tests _build-run-tests
 test-persist: _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
-    # `*ext4_aaa*` is the ext4 root mount every file-creating filtered run needs.
-    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext4_aaa*,*persist*" just _iso-tests
+    TEST_CMDLINE="{{test_cmdline}} tests.run=*persist*" just _iso-tests
     echo "── boot 1: seed ──"
     {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}"
     scripts/check_fs_image.sh --map "{{fs_image_tests}}"
@@ -1061,12 +1087,12 @@ test-usb: _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
 # The capacity check: one boot with a 16 GiB volume attached as nvme0n3,
 # which the suite mounts, measures and grades. Separate from `just test`
 # because the image takes minutes to build once and is then preserved; the
-# per-run ratchet that CI does grade lives in `check_fs_throughput.sh`.
+# per-run ratchet that CI does grade is `run_tests gate fsperf` on the suite's capture.
 [doc("Capacity check: mount and write a 16 GiB volume, then grade the mount and write cost")]
 test-capacity: _build-run-tests _fs-image-capacity
     #!/usr/bin/env bash
     set -euo pipefail
-    TEST_CMDLINE="{{test_cmdline}} tests.run=*ext4_aaa*,*capacity*" just _iso-tests
+    TEST_CMDLINE="{{test_cmdline}} tests.run=*capacity*" just _iso-tests
     # The silence guard is the wrong instrument here: the capacity fill is one
     # test that legitimately runs for minutes emitting nothing, and a host
     # still flushing 1.35 GB of freshly written image makes the guest's
@@ -1078,7 +1104,7 @@ test-capacity: _build-run-tests _fs-image-capacity
         --raw --no-color > {{build_dir}}/capacity.log 2>&1 || rc=$?
     tail -n 30 {{build_dir}}/capacity.log
     [ "$rc" -eq 0 ] || { echo "FAIL: the capacity boot exited $rc — full log in {{build_dir}}/capacity.log" >&2; exit 1; }
-    scripts/check_fs_throughput.sh --log {{build_dir}}/capacity.log --require-capacity
+    {{build_dir}}/run_tests gate fsperf --log {{build_dir}}/capacity.log --require-capacity
     scripts/check_fs_image.sh "{{fs_image_capacity}}"
 
 # Two boots of one image, as test-persist: the first climbs the ladder and
@@ -1093,7 +1119,7 @@ test-toolchain: _build-run-tests
     free="$(dumpe2fs -h "{{fs_image_selfhost}}" 2>/dev/null | awk -F: '/^Free blocks:/ {f=$2} /^Block size:/ {b=$2} END {print f * b}')"
     [ "$free" -ge "$(numfmt --from=iec {{root_free_floor}})" ] ||
         { echo "FAIL: the self-hosting root has ${free}B free, under the {{root_free_floor}} floor" >&2; exit 1; }
-    TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*ext4_aaa*,*toolchain*,*reboot_clone*" just _iso-tests
+    TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*toolchain*,*reboot_clone*" just _iso-tests
     push="$PWD/{{build_dir}}/toolchain-push.git"
     # Only the toolchain's ssh dials the peer, so only then is sshd needed.
     ssh_peer=""
@@ -1141,7 +1167,7 @@ test-selfhost: _build-run-tests
     just _fs-image-selfhost
     # The machine running the build boots the optimized tests kernel: a
     # dev-profile one spends ten times as long in every syscall and fault.
-    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*ext4_aaa*,*selfhost*" just _iso-tests
+    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*selfhost*" just _iso-tests
     rc=0
     push="$PWD/{{build_dir}}/selfhost-push.git"
     rm -rf "$push"
@@ -1158,7 +1184,7 @@ test-selfhost: _build-run-tests
     for variant in dev tests; do
         scripts/export_fs_file.sh "src/slopos/builddir/kernel-$variant.elf" \
             "{{fs_image_selfhost}}" "$guest/kernel-$variant.elf"
-        scripts/check_kernel_elf_gates.sh "$guest" "$variant"
+        {{xtask}} elf --variant "$variant" "$guest/kernel-$variant.elf"
     done
     scripts/export_fs_file.sh src/slopos/builddir/initramfs-tests.cpio "{{fs_image_selfhost}}" "$guest/initramfs-tests.cpio"
     just test-elf "ELF=$guest/kernel-tests.elf" "BASE=$guest/initramfs-tests.cpio"
@@ -1173,7 +1199,7 @@ bench-selfhost: _build-run-tests
     set -euo pipefail
     [ -d "{{toolchain_install}}" ] || { echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain" >&2; exit 1; }
     just _fs-image-selfhost
-    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} ${BENCH_PROF-prof=on} {{test_cmdline_extra}} tests.run=*ext4_aaa*,*selfhost*" just _iso-tests
+    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} ${BENCH_PROF-prof=on} {{test_cmdline_extra}} tests.run=*selfhost*" just _iso-tests
     cp {{build_dir}}/libc.so {{build_dir}}/bench-libc.so
     rc=0
     push="$PWD/{{build_dir}}/bench-push.git"
@@ -1431,37 +1457,33 @@ test-remote: _build-userland _base-recipes
     fi
     echo "test-remote: identity, commands, files, kernel log, the sealed pairing, install and power-off all held"
 
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, rtl8168-core, usb-core, hid-core, cpufreq-core, ext4-core, verity-core, http-core, remote-core, installer-core, priv-core, fat-core, boot-core, tree-core, accounts-core, extension-core, tls-core, chrome-core, fate-core, splash-core, theme-core, settings-core, settings-app, slibc-core, kallsyms, initramfs, extension, icons, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, net-core, nvme-core, rtl8168-core, usb-core, hid-core, cpufreq-core, ext4-core, verity-core, http-core, remote-core, installer-core, priv-core, fat-core, boot-core, tree-core, accounts-core, extension-core, tls-core, chrome-core, fate-core, splash-core, theme-core, settings-core, settings-app, slibc-core, kallsyms, initramfs, extension, icons, the gates of tools/xtask and tools/run_tests, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-verity-core -p slopos-http-core -p slopos-remote-core -p slopos-installer-core -p slopos-priv-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-accounts-core -p slopos-settings-core -p slopos-settings-app -p slopos-extension-core -p slopos-tls-core -p slopos-chrome-core -p slopos-fate-core -p slopos-splash-core -p slopos-theme-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs -p slopos-extension -p slopos-icons
+    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-verity-core -p slopos-http-core -p slopos-remote-core -p slopos-installer-core -p slopos-priv-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-accounts-core -p slopos-settings-core -p slopos-settings-app -p slopos-extension-core -p slopos-tls-core -p slopos-chrome-core -p slopos-fate-core -p slopos-splash-core -p slopos-theme-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs -p slopos-extension -p slopos-icons -p slopos-xtask
+    just check-tests-host
 
-[doc("Run the Go-based wrapper's own unit tests (host-side, no QEMU)")]
+[doc("Run the Go test runner's own unit tests and its log gates' (host-side, no QEMU)")]
 check-tests-host:
-    cd tools/run_tests && go test ./...
-
-[doc("Count-regression guard: assert `just test` plans at least TEST_COUNT_BASELINE tests")]
-check-test-count: _build-run-tests
-    scripts/check_test_count.sh
+    cd tools/run_tests && go vet ./... && go test ./...
 
 [doc("Hold an image a boot wrote to e2fsck -fn and to being at rest: clean, no journal to replay; the tests image, or any with --map, also to the ownership map")]
 check-fs-image *ARGS:
     scripts/check_fs_image.sh {{ARGS}}
 
-[doc("SMP gate: assert every online CPU is eligible for task placement")]
-check-sched-spread *ARGS:
-    scripts/check_sched_spread.sh {{ARGS}}
-
-[doc("Lockdep ratchet: assert the validator boots ACTIVE and no pool nears its ceiling")]
-check-lockdep-headroom: _build-run-tests
-    scripts/check_lockdep_headroom.sh
-
-[doc("Quota ratchet: assert every account's peak stays under its measured cap and nothing was denied")]
-check-quota-headroom: _build-run-tests
-    scripts/check_quota_headroom.sh
-
-[doc("Filesystem cost ratchet: assert a write still costs a bounded number of transactions and device requests per MiB")]
-check-fs-throughput: _build-run-tests
-    scripts/check_fs_throughput.sh
+# One raw capture per boot of the suite: CI's sharded capture under
+# builddir/ci/, or any `run_tests --raw` log named on the command line.
+[doc("Grade boot captures (one per shard) with every log gate: the tracked test list, lockdep, SMP placement, quota headroom and filesystem cost. Defaults to builddir/ci/shard-*.log")]
+check-capture *LOGS: _build-run-tests
+    #!/usr/bin/env bash
+    set -euo pipefail
+    logs=({{LOGS}})
+    [ "${#logs[@]}" -gt 0 ] || logs=({{build_dir}}/ci/shard-*.log)
+    args=()
+    for log in "${logs[@]}"; do
+        [ -f "$log" ] || { echo "check-capture: no capture at $log — run \`just ci-suite\` first" >&2; exit 2; }
+        args+=(--log "$log")
+    done
+    {{build_dir}}/run_tests gate tests lockdep sched quota fsperf "${args[@]}"
 
 # Two passes: `TaskOwnCell::get_ptr` hands out `*mut T` rather than `&mut T` so
 # two witnesses for one task may hold live pointers into the same field, and
@@ -1517,9 +1539,9 @@ check-miri:
     done
     exit "$rc"
 
-[doc("Print TCB ratio: unsafe lines in slopos-ostd / total kernel Rust LoC (the gates hold it to <= 1.0%)")]
+[doc("Print the TCB ratio: unsafe lines in slopos-ostd and the TCB annexes / total kernel Rust LoC (the gates hold it to <= 1.0%)")]
 tcb-ratio:
-    scripts/tcb_ratio.sh
+    {{xtask}} lint tcb-ratio
 
 [doc("Download + pin the Verus toolchain (verification/verus.toml) under third_party/verus")]
 ensure-verus:
@@ -1573,43 +1595,17 @@ check-clang-driver:
 verify FILTER='':
     scripts/verify.sh "{{FILTER}}"
 
-[doc("Fail the build on any `async fn` in a kernel crate (AD-8/AD-9/R13). OSTD + all kernel services stay sync; async lives in userspace.")]
-check-no-kernel-async:
-    scripts/check_no_kernel_async.sh
-
 # Single source of truth for the gate list: CI calls this recipe rather than
-# duplicating it inline, because `check-framekernel` below also runs KernMiri
-# and Verus, which are separate CI jobs.
-[doc("Run the framekernel gate scripts only — no fmt, KernMiri, or Verus (requires a prior `just build`)")]
+# duplicating it inline. The Rust and Go gates' own fixtures run under
+# `just test-host`; the toolchain gates that stay shell scripts carry a
+# `--self-test`, run first, since a gate whose patterns have rotted produces
+# output nobody can trust.
+[doc("Run every framekernel gate — the toolchain and pin gates, every source gate (`xtask lint`) and the dev kernel's ELF gates — no fmt, clippy, KernMiri or Verus (requires a prior `just build`)")]
 check-framekernel-gates:
-    # Self-tests first: a gate whose patterns have rotted produces output nobody
-    # can trust.
-    scripts/check_unsafe_outside_ostd.sh --self-test
-    scripts/check_alloc_dep.sh --self-test
-    scripts/check_no_kernel_async.sh --self-test
-    scripts/check_drop_panic_free.sh --self-test
-    scripts/check_wait_predicate_purity.sh --self-test
-    scripts/check_wait_result_handling.sh --self-test
-    scripts/check_kernel_pml4_writer.sh --self-test
-    scripts/check_task_ownership.sh --self-test
-    scripts/check_process_designator.sh --self-test
-    scripts/check_frame_ownership.sh --self-test
-    scripts/check_stack_sizes.sh --self-test
-    scripts/check_kernel_softfloat.sh --self-test
-    scripts/check_registry_sections.sh --self-test
-    scripts/check_bootstrap_stack_rewind.sh --self-test
-    scripts/check_authority_reachability.sh --self-test
-    scripts/check_lockdep_headroom.sh --self-test
-    scripts/check_safe_contract_surface.sh --self-test
-    scripts/check_charge_linearity.sh --self-test
-    scripts/check_quota_headroom.sh --self-test
-    scripts/check_sched_spread.sh --self-test
     scripts/check_fs_image.sh --self-test
     scripts/check_fs_replay.sh --self-test
     python3 scripts/fs_tree.py --self-test
     python3 scripts/gen_verity.py --self-test
-    scripts/check_fs_throughput.sh --self-test
-    scripts/check_syscall_abi.sh --self-test
     scripts/check_base_interface.sh --self-test
     scripts/check_toolchain_pin.sh --self-test
     scripts/check_rustc_target.sh --self-test
@@ -1620,9 +1616,6 @@ check-framekernel-gates:
     scripts/check_recipes.sh --self-test
     scripts/check_libc_license.sh --self-test
     scripts/check_libc_exports.sh --self-test
-    scripts/check_loose_programs.sh --self-test
-    scripts/check_ui_literals.sh --self-test
-    scripts/check_app_deps.sh --self-test
     scripts/check_codegen_backend.sh --self-test
     scripts/check_linker_script.sh --self-test
     scripts/check_offline_build.sh --self-test
@@ -1637,30 +1630,10 @@ check-framekernel-gates:
     scripts/check_recipes.sh
     scripts/check_libc_license.sh
     scripts/check_libc_exports.sh {{build_dir}}/libc.so
-    scripts/check_unsafe_outside_ostd.sh
-    scripts/check_unsafe_expansion.sh
-    scripts/check_no_kernel_async.sh
-    scripts/check_alloc_dep.sh
-    scripts/check_drop_panic_free.sh
-    scripts/check_stack_sizes.sh --variant dev {{build_dir}}/kernel-dev.elf
-    scripts/check_kernel_softfloat.sh --variant dev {{build_dir}}/kernel-dev.elf
-    scripts/check_registry_sections.sh {{build_dir}}/kernel-dev.elf
-    scripts/check_bootstrap_stack_rewind.sh --variant dev {{build_dir}}/kernel-dev.elf
-    scripts/check_authority_reachability.sh --variant dev {{build_dir}}/kernel-dev.elf
-    scripts/check_wait_predicate_purity.sh
-    scripts/check_wait_result_handling.sh
-    scripts/check_task_ownership.sh
-    scripts/check_process_designator.sh
-    scripts/check_kernel_pml4_writer.sh
-    scripts/check_frame_ownership.sh
-    scripts/check_safe_contract_surface.sh
-    scripts/check_charge_linearity.sh
-    scripts/check_syscall_abi.sh
     scripts/check_base_interface.sh
-    scripts/check_ui_literals.sh
-    scripts/check_app_deps.sh
+    {{xtask}} lint
+    {{xtask}} elf --variant dev {{build_dir}}/kernel-dev.elf stack-sizes softfloat registry-sections stack-rewind authority
     just check-toolchain-coverage
-    scripts/tcb_ratio.sh --max 1.0
 
 [doc("Hold every codegen backend and linker to what targets/x86_64-slos.json and link.ld need. `llvm`/`lld` are the shipping pair; `cranelift`/`wild` skip when not installed.")]
 check-toolchain-coverage:
@@ -1669,13 +1642,112 @@ check-toolchain-coverage:
     scripts/check_linker_script.sh --linker lld
     scripts/check_linker_script.sh --linker wild
 
-# TODO(tech-debt): no `cargo clippy -- -D warnings` gate here — there is no
-# clippy config in tree and the custom `no_std` target needs plumbing first.
-[doc("Run every framekernel-discipline gate: vendor pin / toolchain pin / unsafe source + expansion / async / alloc / Drop / stack / registry sections / task ownership / TCB ratio / fmt / KernMiri / Verus (requires a prior `just build`)")]
-check-framekernel: check-framekernel-gates
+[doc("Clippy over every target the tree builds — the host crates, the kernel's crate graph, the userland — each with its build's own flags; name `host`, `kernel` or `userland` to run one")]
+clippy *TARGETS:
+    scripts/ensure_toolchain.sh
+    {{xtask}} clippy {{TARGETS}}
+
+[doc("Run every framekernel-discipline gate: the toolchain pins, every source and dev-kernel ELF gate, clippy, fmt, KernMiri and Verus (requires a prior `just build`)")]
+check-framekernel: check-framekernel-gates clippy
     {{cargo}} +{{rust_channel}} fmt --all -- --check
     just check-miri
     just verify
+
+# What CI runs, lane by lane. Each job in .github/workflows/ci.yml is one of
+# these recipes after the shared setup, so a lane reproduces here with the
+# command CI ran, and `just ci` runs them all. CI_RUSTC_WRAPPER (sccache in CI)
+# wraps the build steps only: a gate that asks what a compiler does must get a
+# fresh answer, not a cached one.
+ci_shards := "2"
+
+[doc("Every CI lane on this machine, in CI's order: what a green CI run proves, reproduced locally. The toolchain lane fetches ~2 GB of pinned sources")]
+ci: ci-gates ci-candidates ci-suite check-capture (ci-boot "persist") (ci-boot "usb") (ci-boot "selfhost-root") ci-toolchain check-miri verify
+
+[doc("CI's gates lane: formatting, the host tests, clippy, the dev kernel and every framekernel gate, the offline build, and the release kernel with its gates")]
+ci-gates:
+    just fmt
+    just test-host
+    just clippy
+    RUSTC_WRAPPER="${CI_RUSTC_WRAPPER:-}" just build-kernel-only
+    just check-framekernel-gates
+    just check-offline-build
+    RUSTC_WRAPPER="${CI_RUSTC_WRAPPER:-}" KERNEL_RELEASE=1 just build-kernel-only
+    {{xtask}} elf --variant release {{build_dir}}/kernel-release.elf authority
+
+# Installs into builddir/candidates rather than ~/.cargo/bin, so the gates lane
+# grades the shipping pair with neither candidate on PATH.
+[doc("CI's candidate-toolchain lane: hold the cranelift backend and the pinned wild linker to what the kernel needs, installing either when absent (`--require` on wild: a skip would mean CI stopped asking)")]
+ci-candidates:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rustup component add rustc-codegen-cranelift-preview --toolchain {{rust_channel}} ||
+        echo "ci-candidates: cranelift is not published for {{rust_channel}} — its gate reports skipped" >&2
+    root="$PWD/{{build_dir}}/candidates"
+    [ -x "$root/bin/wild" ] || {{cargo}} install --locked wild-linker --version 0.10.0 --root "$root"
+    PATH="$root/bin:$PATH" scripts/check_codegen_backend.sh --backend cranelift
+    PATH="$root/bin:$PATH" scripts/check_linker_script.sh --linker wild --require
+
+[doc("CI's suite lane: the tests system booted as ci_shards shards (every shard, or the one SHARD names), each capture at builddir/ci/shard-K.log; then each shard's image held to e2fsck and the ownership map, and the tests kernel to the authority gate")]
+ci-suite SHARD='': _build-run-tests
+    #!/usr/bin/env bash
+    set -euo pipefail
+    only=()
+    [ -z "{{SHARD}}" ] || only=(--only-shard "{{SHARD}}")
+    rc=0
+    RUSTC_WRAPPER="${CI_RUSTC_WRAPPER:-}" {{build_dir}}/run_tests --no-color \
+        --shards {{ci_shards}} "${only[@]}" --capture-dir {{build_dir}}/ci || rc=$?
+    for k in $(seq 1 {{ci_shards}}); do
+        [ -z "{{SHARD}}" ] || [ "$k" = "{{SHARD}}" ] || continue
+        scripts/check_fs_image.sh --map "{{build_dir}}/shards/$k/$(basename {{fs_image_tests}})" || rc=1
+    done
+    {{xtask}} elf --variant tests {{kernel_elf_tests}} authority || rc=1
+    exit "$rc"
+
+[doc("CI's boot lanes, a machine each in CI: persist (test-persist, then test-rude-exit), usb (test-usb) and selfhost-root (test-toolchain)")]
+ci-boot LANE:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export RUSTC_WRAPPER="${CI_RUSTC_WRAPPER:-}"
+    case "{{LANE}}" in
+        persist) just test-persist && just test-rude-exit ;;
+        usb) just test-usb ;;
+        selfhost-root) just test-toolchain ;;
+        *) echo "ci-boot: no lane '{{LANE}}' (persist, usb, selfhost-root)" >&2; exit 2 ;;
+    esac
+
+# A check runs whenever the inputs it reads were made, even if an unrelated
+# check before it failed, so one red check does not hide the rest.
+[doc("CI's toolchain lane: materialise the llvm-project and rustc sources, build the tests userland, then every check of the port; the lane fails at the end if any step did")]
+ci-toolchain:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    failed=()
+    ok() { echo "── $* ──"; "$@" || { failed+=("$*"); return 1; }; }
+    llvm=0 userland=0 rustc=0
+    ok scripts/make_slopos_llvm_src.sh && llvm=1
+    ok env RUSTC_WRAPPER="${CI_RUSTC_WRAPPER:-}" just _build-userland-tests && userland=1
+    ok scripts/make_rustc_src.sh && rustc=1
+    if [ "$llvm" = 1 ]; then
+        ok scripts/check_clang_driver.sh --self-test && ok scripts/check_clang_driver.sh --require
+    fi
+    if [ "$userland" = 1 ]; then
+        ok scripts/check_cxx_pin.sh
+        ok scripts/check_libc_exports.sh --self-test && ok scripts/check_libc_exports.sh --require {{build_dir}}/libc.so
+        ok scripts/build_recipes.sh && ok scripts/check_recipes.sh
+    fi
+    if [ "$userland" = 1 ] && [ "$llvm" = 1 ]; then
+        ok scripts/check_llvm_port.sh --self-test && ok scripts/check_llvm_port.sh --require
+    fi
+    if [ "$userland" = 1 ] && [ "$rustc" = 1 ]; then
+        ok scripts/check_bootstrap_config.sh --self-test && ok scripts/check_bootstrap_config.sh --require
+    fi
+    if [ "$rustc" = 1 ]; then
+        ok scripts/check_rustc_target.sh --self-test && ok scripts/check_rustc_target.sh --require
+    fi
+    if [ "${#failed[@]}" -gt 0 ]; then
+        printf 'ci-toolchain: failed: %s\n' "${failed[@]}" >&2
+        exit 1
+    fi
 
 [doc("Show detected QEMU framebuffer resolution")]
 show-qemu-resolution:
@@ -1695,10 +1767,6 @@ show-qemu-resolution:
 [doc("Check formatting")]
 fmt:
     {{cargo}} +{{rust_channel}} fmt --all -- --check
-
-[doc("Heuristic audit: kernel `pub fn` returning large by-value types — slow and advisory")]
-check-return-types:
-    scripts/check_return_types.sh
 
 [doc("Clean build artifacts")]
 clean:

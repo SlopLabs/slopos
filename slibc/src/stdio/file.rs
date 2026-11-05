@@ -65,6 +65,9 @@ unsafe fn new_stream(fd: i32, fflags: u32) -> *mut FILE {
     raw
 }
 
+/// # Safety
+///
+/// `path` and `mode` must point to NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fopen(path: *const u8, mode: *const u8) -> *mut FILE {
     let (oflags, fflags) = match parse_mode(mode) {
@@ -86,6 +89,10 @@ pub unsafe extern "C" fn fopen(path: *const u8, mode: *const u8) -> *mut FILE {
 
 /// Associate a stream with an already-open descriptor. POSIX: `fclose` on the
 /// result closes `fd`, and an append mode seeks it to end-of-file first.
+///
+/// # Safety
+///
+/// `mode` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdopen(fd: i32, mode: *const u8) -> *mut FILE {
     if fd < 0 {
@@ -103,6 +110,10 @@ pub unsafe extern "C" fn fdopen(fd: i32, mode: *const u8) -> *mut FILE {
     new_stream(fd, fflags | FILE_FLAG_OWNED_FD)
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live `FILE` from `fopen`/`fdopen`/the std streams, not yet
+/// closed; it must not be used after this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fclose(stream: *mut FILE) -> i32 {
     if stream.is_null() {
@@ -262,6 +273,10 @@ unsafe fn fread_core(ptr: *mut u8, size: usize, nmemb: usize, stream: *mut FILE)
     done / size
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live, unclosed `FILE`; `ptr` must be null or valid for
+/// writes of `size * nmemb` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fread(
     ptr: *mut u8,
@@ -367,6 +382,10 @@ unsafe fn fwrite_core(ptr: *const u8, size: usize, nmemb: usize, stream: *mut FI
     }
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live, unclosed `FILE`; `ptr` must be null or valid for
+/// reads of `size * nmemb` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fwrite(
     ptr: *const u8,
@@ -400,6 +419,9 @@ pub unsafe extern "C" fn fwrite_unlocked(
     fwrite_core(ptr, size, nmemb, stream)
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live `FILE` from `fopen`/`fdopen`/the std streams, not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fseek(stream: *mut FILE, offset: i64, whence: i32) -> i32 {
     if stream.is_null() {
@@ -436,6 +458,9 @@ pub unsafe extern "C" fn fseek(stream: *mut FILE, offset: i64, whence: i32) -> i
     ret
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live `FILE` from `fopen`/`fdopen`/the std streams, not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ftell(stream: *mut FILE) -> i64 {
     if stream.is_null() {
@@ -461,6 +486,9 @@ pub unsafe extern "C" fn ftell(stream: *mut FILE) -> i64 {
     ret
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live `FILE` from `fopen`/`fdopen`/the std streams, not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rewind(stream: *mut FILE) {
     if !stream.is_null() {
@@ -473,6 +501,9 @@ pub unsafe extern "C" fn rewind(stream: *mut FILE) {
     }
 }
 
+/// # Safety
+///
+/// `stream` must be null (flush all streams) or a live `FILE`, not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fflush(stream: *mut FILE) -> i32 {
     if stream.is_null() {
@@ -496,6 +527,10 @@ pub unsafe extern "C" fn fflush(stream: *mut FILE) -> i32 {
 
 /// Deliberately unlocked: the answer is a single aligned load, and POSIX
 /// §2.5.1's locking would only make a stale answer arrive later.
+///
+/// # Safety
+///
+/// `stream` must be null or a live `FILE` from `fopen`/`fdopen`/the std streams, not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn feof(stream: *mut FILE) -> i32 {
     if stream.is_null() {
@@ -509,6 +544,10 @@ pub unsafe extern "C" fn feof(stream: *mut FILE) -> i32 {
 }
 
 /// Unlocked for the same reason as [`feof`].
+///
+/// # Safety
+///
+/// `stream` must be null or a live `FILE` from `fopen`/`fdopen`/the std streams, not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ferror(stream: *mut FILE) -> i32 {
     if stream.is_null() {
@@ -521,6 +560,9 @@ pub unsafe extern "C" fn ferror(stream: *mut FILE) -> i32 {
     }
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live `FILE` from `fopen`/`fdopen`/the std streams, not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clearerr(stream: *mut FILE) {
     if !stream.is_null() {
@@ -531,12 +573,19 @@ pub unsafe extern "C" fn clearerr(stream: *mut FILE) {
 }
 
 /// The stream keeps its own buffer, so `buf` only selects the mode.
+///
+/// # Safety
+///
+/// `stream` must be null or a live, unclosed `FILE`; `buf` is never dereferenced.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setbuf(stream: *mut FILE, buf: *mut u8) {
     let mode = if buf.is_null() { _IONBF } else { _IOFBF };
     setvbuf(stream, buf, mode, super::BUFSIZ);
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live, unclosed `FILE`; `buf` and `size` are ignored.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setvbuf(stream: *mut FILE, _buf: *mut u8, mode: i32, _size: usize) -> i32 {
     if stream.is_null() {
@@ -556,6 +605,10 @@ pub unsafe extern "C" fn setvbuf(stream: *mut FILE, _buf: *mut u8, mode: i32, _s
 
 /// Unlocked for the same reason as [`feof`] — the descriptor never changes for
 /// the life of the stream.
+///
+/// # Safety
+///
+/// `stream` must be null or a live `FILE` from `fopen`/`fdopen`/the std streams, not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fileno(stream: *mut FILE) -> i32 {
     if stream.is_null() {
@@ -564,6 +617,9 @@ pub unsafe extern "C" fn fileno(stream: *mut FILE) -> i32 {
     (*stream).fd
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live `FILE` from `fopen`/`fdopen`/the std streams, not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn flockfile(stream: *mut FILE) {
     if !stream.is_null() {
@@ -572,6 +628,10 @@ pub unsafe extern "C" fn flockfile(stream: *mut FILE) {
 }
 
 /// Returns 0 if the lock was acquired, non-zero otherwise.
+///
+/// # Safety
+///
+/// `stream` must be null or a live `FILE` from `fopen`/`fdopen`/the std streams, not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ftrylockfile(stream: *mut FILE) -> i32 {
     if stream.is_null() {
@@ -580,6 +640,9 @@ pub unsafe extern "C" fn ftrylockfile(stream: *mut FILE) -> i32 {
     if (*stream).lock.try_lock() { 0 } else { -1 }
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live, unclosed `FILE` whose lock the calling thread holds.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn funlockfile(stream: *mut FILE) {
     if !stream.is_null() {

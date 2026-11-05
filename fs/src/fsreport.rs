@@ -1,5 +1,5 @@
 //! The `FSPERF[<phase>]` / `FSCAP[<phase>]` report lines
-//! `scripts/check_fs_throughput.sh` parses.
+//! `run_tests gate fsperf` parses.
 //!
 //! Emitted at a phase boundary rather than from inside the measuring test: at
 //! the default `tests.verbosity=summary` a passing test's klog capture is

@@ -1,9 +1,9 @@
-# check_stack_sizes allowlist — variant: release-tests
+# stack-sizes allowlist — variant: release-tests
 #
 # Frames above STACK_SIZE_THRESHOLD (2048 B) that are permitted, each capped
 # at its measured size so growth still fails.
 #
-#     scripts/check_stack_sizes.sh --variant release-tests --emit-allowlist builddir/kernel-release-tests.elf
+#     xtask elf --variant release-tests builddir/kernel-release-tests.elf --emit-allowlist stack-sizes
 #
 # The optimized tests kernel, which `just test-selfhost` boots so the machine
 # running the guest's build is not an unoptimized one. Its large frames are

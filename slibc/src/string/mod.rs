@@ -5,19 +5,35 @@ pub mod convert;
 pub mod libgen;
 pub(crate) mod vector;
 
-pub fn u_memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
+/// # Safety
+///
+/// Unless either is null or `n` is 0, `src` must be valid for reads and `dst`
+/// for writes of `n` bytes (overlap is tolerated, as in `memmove`).
+pub unsafe fn u_memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
     unsafe { memcpy(dst, src, n) }
 }
 
-pub fn u_memset(dst: *mut c_void, c: i32, n: usize) -> *mut c_void {
+/// # Safety
+///
+/// Unless `dst` is null or `n` is 0, `dst` must be valid for writes of `n`
+/// bytes.
+pub unsafe fn u_memset(dst: *mut c_void, c: i32, n: usize) -> *mut c_void {
     unsafe { memset(dst, c, n) }
 }
 
-pub fn u_strlen(s: *const u8) -> usize {
+/// # Safety
+///
+/// `s` must be null or point to a NUL-terminated string readable up to its
+/// NUL.
+pub unsafe fn u_strlen(s: *const u8) -> usize {
     unsafe { strlen(s.cast()) }
 }
 
-pub fn u_strnlen(s: *const u8, maxlen: usize) -> usize {
+/// # Safety
+///
+/// `s` must be null or readable up to `maxlen` bytes or its first NUL,
+/// whichever comes first.
+pub unsafe fn u_strnlen(s: *const u8, maxlen: usize) -> usize {
     unsafe { strnlen(s, maxlen) }
 }
 
@@ -26,8 +42,13 @@ pub fn ptr_is_null<T>(ptr: *const T) -> bool {
     ptr.is_null()
 }
 
+/// # Safety
+///
+/// A null `ptr` or a `len` of 0 yields an empty slice. Otherwise `ptr` must be
+/// valid for `len` byte reads for the caller-chosen lifetime `'a`, during
+/// which the bytes must not be mutated.
 #[inline(always)]
-pub fn slice_from_cstr<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
+pub unsafe fn slice_from_cstr<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     if len == 0 || ptr.is_null() {
         &[]
     } else {
@@ -35,8 +56,13 @@ pub fn slice_from_cstr<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     }
 }
 
+/// # Safety
+///
+/// A null `ptr` or a `len` of 0 yields an empty slice. Otherwise `ptr` must be
+/// valid for `len` byte reads and writes for the caller-chosen lifetime `'a`,
+/// during which no other reference or pointer may access those bytes.
 #[inline(always)]
-pub fn slice_from_cstr_mut<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] {
+pub unsafe fn slice_from_cstr_mut<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] {
     if len == 0 || ptr.is_null() {
         &mut []
     } else {
@@ -44,6 +70,10 @@ pub fn slice_from_cstr_mut<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] {
     }
 }
 
+/// # Safety
+///
+/// Unless either is null or `n` is 0, `src` must be valid for reads and `dst`
+/// for writes of `n` bytes (overlap is tolerated, as in `memmove`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn memcpy(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
     // Overlap-safe like `memmove`, as glibc's x86-64 `memcpy` is: callers that
@@ -51,6 +81,10 @@ pub unsafe extern "C" fn memcpy(dst: *mut c_void, src: *const c_void, n: usize) 
     memmove(dst, src, n)
 }
 
+/// # Safety
+///
+/// Unless either is null or `n` is 0, `src` must be valid for reads and `dst`
+/// for writes of `n` bytes; the ranges may overlap.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
     if dst.is_null() || src.is_null() || n == 0 {
@@ -60,6 +94,9 @@ pub unsafe extern "C" fn memmove(dst: *mut c_void, src: *const c_void, n: usize)
     dst
 }
 
+/// # Safety
+///
+/// Unless `dst` is null or `n` is 0, `dst` must be valid for writes of `n` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn memset(dst: *mut c_void, c: i32, n: usize) -> *mut c_void {
     if dst.is_null() || n == 0 {
@@ -69,6 +106,10 @@ pub unsafe extern "C" fn memset(dst: *mut c_void, c: i32, n: usize) -> *mut c_vo
     dst
 }
 
+/// # Safety
+///
+/// If `n` is non-zero, `a` and `b` must be non-null and valid for reads of `n`
+/// bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn memcmp(a: *const c_void, b: *const c_void, n: usize) -> i32 {
     if n == 0 {
@@ -77,6 +118,9 @@ pub unsafe extern "C" fn memcmp(a: *const c_void, b: *const c_void, n: usize) ->
     vector::compare(a.cast(), b.cast(), n)
 }
 
+/// # Safety
+///
+/// `s` must be null or valid for reads of `n` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn memchr(s: *const u8, c: i32, n: usize) -> *const u8 {
     if s.is_null() {
@@ -85,6 +129,9 @@ pub unsafe extern "C" fn memchr(s: *const u8, c: i32, n: usize) -> *const u8 {
     vector::find_byte(s, c as u8, n)
 }
 
+/// # Safety
+///
+/// `s` must be null or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strlen(s: *const i8) -> usize {
     if s.is_null() {
@@ -93,6 +140,9 @@ pub unsafe extern "C" fn strlen(s: *const i8) -> usize {
     vector::c_len(s.cast())
 }
 
+/// # Safety
+///
+/// `s` must be null or readable up to `maxlen` bytes or its first NUL.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strnlen(s: *const u8, maxlen: usize) -> usize {
     if s.is_null() {
@@ -101,6 +151,10 @@ pub unsafe extern "C" fn strnlen(s: *const u8, maxlen: usize) -> usize {
     vector::c_len_bounded(s, maxlen)
 }
 
+/// # Safety
+///
+/// Unless either is null, `src` must be a NUL-terminated string and `dst` valid
+/// for writes of `strlen(src) + 1` bytes, not overlapping `src`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strcpy(dst: *mut u8, src: *const u8) -> *mut u8 {
     if dst.is_null() || src.is_null() {
@@ -118,6 +172,10 @@ pub unsafe extern "C" fn strcpy(dst: *mut u8, src: *const u8) -> *mut u8 {
     dst
 }
 
+/// # Safety
+///
+/// Unless either is null or `n` is 0, `dst` must be valid for writes of `n`
+/// bytes and `src` readable up to `n` bytes or its first NUL; no overlap.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strncpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     if dst.is_null() || src.is_null() || n == 0 {
@@ -139,16 +197,25 @@ pub unsafe extern "C" fn strncpy(dst: *mut u8, src: *const u8, n: usize) -> *mut
     dst
 }
 
+/// # Safety
+///
+/// `a` and `b` must be non-null NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strcmp(a: *const u8, b: *const u8) -> i32 {
     vector::c_compare(a, b, usize::MAX)
 }
 
+/// # Safety
+///
+/// `a` and `b` must be non-null and readable up to `n` bytes or their first NUL.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strncmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     vector::c_compare(a, b, n)
 }
 
+/// # Safety
+///
+/// `s` must be null or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strchr(s: *const u8, c: i32) -> *const u8 {
     if s.is_null() {
@@ -157,6 +224,9 @@ pub unsafe extern "C" fn strchr(s: *const u8, c: i32) -> *const u8 {
     vector::c_find(s, c as u8)
 }
 
+/// # Safety
+///
+/// `s` must be null or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strrchr(s: *const u8, c: i32) -> *const u8 {
     if s.is_null() {
@@ -165,6 +235,9 @@ pub unsafe extern "C" fn strrchr(s: *const u8, c: i32) -> *const u8 {
     vector::c_find_last(s, c as u8)
 }
 
+/// # Safety
+///
+/// Each of `haystack` and `needle` must be null or a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strstr(haystack: *const u8, needle: *const u8) -> *const u8 {
     if haystack.is_null() || needle.is_null() {
@@ -195,6 +268,10 @@ pub unsafe extern "C" fn strstr(haystack: *const u8, needle: *const u8) -> *cons
     core::ptr::null()
 }
 
+/// # Safety
+///
+/// Unless either is null, both must be NUL-terminated strings, `dst` with room
+/// for `strlen(dst) + strlen(src) + 1` bytes, not overlapping `src`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strcat(dst: *mut u8, src: *const u8) -> *mut u8 {
     if dst.is_null() || src.is_null() {
@@ -216,6 +293,11 @@ pub unsafe extern "C" fn strcat(dst: *mut u8, src: *const u8) -> *mut u8 {
     dst
 }
 
+/// # Safety
+///
+/// Unless either is null, `dst` must be NUL-terminated with room for
+/// `strlen(dst) + strnlen(src, n) + 1` bytes, and `src` readable up to `n`
+/// bytes or its first NUL; no overlap.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strncat(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     if dst.is_null() || src.is_null() {

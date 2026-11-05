@@ -168,13 +168,12 @@ struct DynamicSlot(UnsafeCell<PhysRange>);
 // touch slots whose count has been published (release-acquire fence).
 unsafe impl Sync for DynamicSlot {}
 
-const EMPTY_SLOT: DynamicSlot = DynamicSlot(UnsafeCell::new(PhysRange {
-    base: PhysAddr::NULL,
-    len: 0,
-}));
-
-static DYNAMIC_RANGES: [DynamicSlot; MAX_DYNAMIC_RANGES] =
-    [const { EMPTY_SLOT }; MAX_DYNAMIC_RANGES];
+static DYNAMIC_RANGES: [DynamicSlot; MAX_DYNAMIC_RANGES] = [const {
+    DynamicSlot(UnsafeCell::new(PhysRange {
+        base: PhysAddr::NULL,
+        len: 0,
+    }))
+}; MAX_DYNAMIC_RANGES];
 static DYNAMIC_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Append a runtime-discovered insensitive range to the dynamic secondary

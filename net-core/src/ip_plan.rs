@@ -561,7 +561,7 @@ fn exactly_one_dev<'a>(operands: &[&'a [u8]]) -> Result<&'a [u8], IpError<'a>> {
 /// A cursor over one command's operand tokens.
 ///
 /// A named type rather than an `impl Iterator<Item = &'a [u8]>` bound: check 8
-/// of `scripts/check_task_ownership.sh` deliberately does not parse the `where`
+/// of the `task-ownership` gate deliberately does not parse the `where`
 /// clause, so an associated-type equality bound reads to it as a lifetime the
 /// caller may pick freely, and that over-report has no exemption mechanism.
 ///

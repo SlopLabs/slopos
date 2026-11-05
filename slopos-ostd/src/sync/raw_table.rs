@@ -83,6 +83,10 @@ impl<T: 'static> RawTable<T> {
     /// **Caller's contract:** holds exclusive access to slot `idx` for the
     /// returned reference's lifetime.
     #[inline]
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "the slot table is shared and indexed; exclusive access to slot `idx` is the documented caller contract"
+    )]
     pub fn get_mut(&self, idx: usize) -> Option<&mut T> {
         let base = self.base.load(Ordering::Acquire);
         if base.is_null() {

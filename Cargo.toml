@@ -71,7 +71,8 @@ members = [
   "tools/extension",
   "tools/icons",
   "tools/initramfs",
-  "tools/kallsyms"
+  "tools/kallsyms",
+  "tools/xtask"
 ]
 # Pinned TCB annexes: their content hash IS the pin (scripts/check_vendor_pin.sh),
 # so workspace tooling must not ask for an edit. Both still build, via path dep
@@ -100,8 +101,24 @@ non_upper_case_globals = "deny"
 non_kebab_case_bins = "allow"
 
 [workspace.lints.clippy]
-type_complexity = "warn"
-non_camel_case_types = "deny"
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+# Held back, not endorsed: the tree predates clippy and carries hundreds of
+# findings in each of these groups.
+style = { level = "allow", priority = -1 }
+complexity = { level = "allow", priority = -1 }
+perf = { level = "allow", priority = -1 }
+missing_safety_doc = "deny"
+# A `# Safety` section on a safe fn is a contract the compiler does not check.
+unnecessary_safety_doc = "deny"
+# The bans themselves live in kernel/clippy.toml, which `xtask clippy` applies
+# to the kernel's crate graph only.
+disallowed_fields = "deny"
+disallowed_macros = "deny"
+disallowed_methods = "deny"
+disallowed_names = "deny"
+disallowed_script_idents = "deny"
+disallowed_types = "deny"
 
 [workspace.dependencies]
 bitflags = { version = "2.4", default-features = false }

@@ -41,6 +41,9 @@ pub(crate) fn oflag_creates(oflag: c_int) -> bool {
     bits & slopos_abi::fs::O_CREAT != 0 || (oflag & O_TMPFILE) == O_TMPFILE
 }
 
+/// # Safety
+///
+/// `buf` must be valid for writes of `count` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssize_t {
     match Sys::read(fd, buf as *mut u8, count) {
@@ -52,6 +55,9 @@ pub unsafe extern "C" fn read(fd: c_int, buf: *mut c_void, count: size_t) -> ssi
     }
 }
 
+/// # Safety
+///
+/// `buf` must be valid for reads of `count` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: size_t) -> ssize_t {
     match Sys::write(fd, buf as *const u8, count) {
@@ -65,6 +71,11 @@ pub unsafe extern "C" fn write(fd: c_int, buf: *const c_void, count: size_t) -> 
 
 /// `open(2)`, variadic as C has it: the mode argument exists only for a call
 /// that can create.
+///
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string. When `oflag` includes `O_CREAT` or
+/// `O_TMPFILE`, a `mode_t` variadic argument must follow.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn open(path: *const c_char, oflag: c_int, mut args: ...) -> c_int {
     let mode = if oflag_creates(oflag) {
@@ -96,6 +107,10 @@ pub extern "C" fn close(fd: c_int) -> c_int {
 
 /// `brk(2)` as C declares it: 0 or -1, not the resulting break. A kernel that
 /// answers a break below the request could not satisfy it.
+///
+/// # Safety
+///
+/// Moving the break down must not release memory that is still in use.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn brk(addr: *mut c_void) -> c_int {
     match Sys::brk(addr as *mut u8) {
@@ -112,6 +127,10 @@ pub unsafe extern "C" fn brk(addr: *mut c_void) -> c_int {
 }
 
 /// `sbrk(3)`: answers the *old* break, or `(void *) -1` with `errno` set.
+///
+/// # Safety
+///
+/// Moving the break down must not release memory that is still in use.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sbrk(increment: isize) -> *mut c_void {
     let failure = usize::MAX as *mut c_void;
@@ -166,6 +185,11 @@ pub extern "C" fn calloc(nmemb: size_t, size: size_t) -> *mut c_void {
 /// `posix_memalign(3)`. Answers the errno rather than setting it, which is the
 /// one allocator entry point that does. `align` must be a power of two and a
 /// multiple of `sizeof(void *)`.
+///
+/// # Safety
+///
+/// `memptr` may be null (`EINVAL`); otherwise it must be valid for writes of
+/// a pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_memalign(
     memptr: *mut *mut c_void,
@@ -192,6 +216,11 @@ pub unsafe extern "C" fn posix_memalign(
 
 /// `memalign(3)`. Obsolete beside `posix_memalign`, and still what some
 /// callers reach for, so it is exported rather than aliased away.
+///
+/// # Safety
+///
+/// None: the arguments are plain integers; it is `unsafe` only as a C ABI
+/// export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn memalign(align: size_t, size: size_t) -> *mut c_void {
     if align == 0 || !align.is_power_of_two() {
@@ -208,6 +237,11 @@ pub unsafe extern "C" fn memalign(align: size_t, size: size_t) -> *mut c_void {
 /// `aligned_alloc(3)`. C11 requires the size to be a multiple of the
 /// alignment; a size that is not is an `EINVAL` refusal rather than a block
 /// whose tail the caller may not touch.
+///
+/// # Safety
+///
+/// None: the arguments are plain integers; it is `unsafe` only as a C ABI
+/// export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn aligned_alloc(align: size_t, size: size_t) -> *mut c_void {
     if align == 0 || !align.is_power_of_two() || size % align != 0 {
@@ -223,6 +257,11 @@ pub unsafe extern "C" fn aligned_alloc(align: size_t, size: size_t) -> *mut c_vo
 
 /// `malloc_usable_size(3)`: the bytes actually available in `ptr`'s block,
 /// which is at least what was asked for.
+///
+/// # Safety
+///
+/// `ptr` must be null or a live block from this allocator (`malloc`,
+/// `calloc`, `realloc`, the aligned allocators) not yet freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn malloc_usable_size(ptr: *mut c_void) -> size_t {
     heap::malloc_usable_size(ptr as *mut u8)

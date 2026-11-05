@@ -61,6 +61,21 @@ type EvKernelAbort struct {
 	Reason string
 }
 
+// EvFixture reports a phase fixture that ran and succeeded. It is not a test:
+// nothing counts it, and a failed one arrives as an EvBail.
+type EvFixture struct {
+	PhaseIdx int
+	Name     string
+}
+
+// EvShard reports that the open phase runs slice Index of Count, so its plan
+// counts that slice rather than the suite.
+type EvShard struct {
+	PhaseIdx int
+	Index    int
+	Count    int
+}
+
 func (*EvPhaseStart) event()  {}
 func (*EvPlan) event()        {}
 func (*EvTest) event()        {}
@@ -68,6 +83,8 @@ func (*EvPhaseEnd) event()    {}
 func (*EvBail) event()        {}
 func (*EvNonKtap) event()     {}
 func (*EvKernelAbort) event() {}
+func (*EvFixture) event()     {}
+func (*EvShard) event()       {}
 
 // parserState is the FSM state. The diag-vs-log split exists because a
 // `log: |` literal block is closed only by `KTAP\t  ...`; a `KTAP\t` substring
@@ -285,6 +302,24 @@ func (p *KtapParser) feedKtap(body string) []Event {
 		n, _ := strconv.Atoi(m[1])
 		events = append(events, &EvPlan{PhaseIdx: p.phaseIdx, N: n})
 		return events
+	}
+
+	if m := fixtureRE.FindStringSubmatch(body); m != nil {
+		var events []Event
+		if ev := p.commitCurrentRecord(); ev != nil {
+			events = append(events, ev)
+		}
+		return append(events, &EvFixture{PhaseIdx: p.phaseIdx, Name: m[1]})
+	}
+
+	if m := shardRE.FindStringSubmatch(body); m != nil {
+		var events []Event
+		if ev := p.commitCurrentRecord(); ev != nil {
+			events = append(events, ev)
+		}
+		index, _ := strconv.Atoi(m[1])
+		count, _ := strconv.Atoi(m[2])
+		return append(events, &EvShard{PhaseIdx: p.phaseIdx, Index: index, Count: count})
 	}
 
 	if m := footerRE.FindStringSubmatch(body); m != nil {

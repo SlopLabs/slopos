@@ -61,7 +61,7 @@ Any PR that touches `slopos-ostd/` must pass `just verify`. Proof
 regressions block merge. `just verify` is also part of the composite
 `just check-framekernel` gate.
 
-The sibling `scripts/check_no_kernel_async.sh` gate (also in
+The sibling `no-kernel-async` gate (`xtask lint no-kernel-async`, also in
 `check-framekernel`) enforces AD-8 / AD-9: no kernel crate — OSTD,
 services, or the future io_uring-style `ring/` crate — may contain an
 `async fn`. Async lives in userspace on top of the ring surface.

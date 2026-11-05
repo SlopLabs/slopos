@@ -39,62 +39,68 @@ pub mod utests;
 /// reaching the console as it is written: a host drives it. A test runs as
 /// uid 0 holding every capability unless it declares `caps`, the gated
 /// capabilities it holds beside the universal ones, and `uid`, which is its
-/// gid too.
+/// gid too. `rank = N` runs it after every lower-ranked test of its module,
+/// for a test that has to follow others whatever they are named.
 #[macro_export]
 macro_rules! utest {
     (name = $ident:ident, bin = $bin:literal $(, $($opt:tt)*)?) => {
         $crate::utest!(
-            @opts $ident, $bin, (&[$bin]), (0), ($crate::__ostd::authority::CAP_MASK_ALL), (0);
+            @opts $ident, $bin, (&[$bin]), (0), ($crate::__ostd::authority::CAP_MASK_ALL), (0), (0);
             $($($opt)*)?
         );
     };
 
-    (@opts $ident:ident, $bin:literal, ($argv:expr), ($flags:expr), ($caps:expr), ($uid:expr);) => {
-        $crate::utest!(@desc $ident, $bin, $argv, $flags, $caps, $uid);
+    (@opts $ident:ident, $bin:literal, ($argv:expr), ($flags:expr), ($caps:expr), ($uid:expr), ($rank:expr);) => {
+        $crate::utest!(@desc $ident, $bin, $argv, $flags, $caps, $uid, $rank);
     };
 
-    (@opts $ident:ident, $bin:literal, ($argv:expr), ($flags:expr), ($caps:expr), ($uid:expr);
+    (@opts $ident:ident, $bin:literal, ($argv:expr), ($flags:expr), ($caps:expr), ($uid:expr), ($rank:expr);
         argv = &[$($arg:literal),* $(,)?] $(, $($rest:tt)*)?) => {
-        $crate::utest!(@opts $ident, $bin, (&[$($arg),*]), ($flags), ($caps), ($uid); $($($rest)*)?);
+        $crate::utest!(@opts $ident, $bin, (&[$($arg),*]), ($flags), ($caps), ($uid), ($rank); $($($rest)*)?);
     };
 
-    (@opts $ident:ident, $bin:literal, ($argv:expr), ($flags:expr), ($caps:expr), ($uid:expr);
+    (@opts $ident:ident, $bin:literal, ($argv:expr), ($flags:expr), ($caps:expr), ($uid:expr), ($rank:expr);
         uncaptured $(, $($rest:tt)*)?) => {
         $crate::utest!(
-            @opts $ident, $bin, ($argv), ($flags | $crate::__testing::FLAG_UNCAPTURED), ($caps), ($uid);
+            @opts $ident, $bin, ($argv), ($flags | $crate::__testing::FLAG_UNCAPTURED), ($caps), ($uid), ($rank);
             $($($rest)*)?
         );
     };
 
-    (@opts $ident:ident, $bin:literal, ($argv:expr), ($flags:expr), ($caps:expr), ($uid:expr);
+    (@opts $ident:ident, $bin:literal, ($argv:expr), ($flags:expr), ($caps:expr), ($uid:expr), ($rank:expr);
         explicit $(, $($rest:tt)*)?) => {
         $crate::utest!(
             @opts $ident, $bin, ($argv),
             ($flags | $crate::__testing::FLAG_EXPLICIT | $crate::__testing::FLAG_UNCAPTURED),
-            ($caps), ($uid);
+            ($caps), ($uid), ($rank);
             $($($rest)*)?
         );
     };
 
-    (@opts $ident:ident, $bin:literal, ($argv:expr), ($flags:expr), ($caps:expr), ($uid:expr);
+    (@opts $ident:ident, $bin:literal, ($argv:expr), ($flags:expr), ($caps:expr), ($uid:expr), ($rank:expr);
         caps = none $(, $($rest:tt)*)?) => {
         $crate::utest!(
-            @opts $ident, $bin, ($argv), ($flags), ($crate::__ostd::authority::CAP_NONE), ($uid);
+            @opts $ident, $bin, ($argv), ($flags), ($crate::__ostd::authority::CAP_NONE), ($uid), ($rank);
             $($($rest)*)?
         );
     };
 
-    (@opts $ident:ident, $bin:literal, ($argv:expr), ($flags:expr), ($caps:expr), ($uid:expr);
+    (@opts $ident:ident, $bin:literal, ($argv:expr), ($flags:expr), ($caps:expr), ($uid:expr), ($rank:expr);
         caps = $declared:expr $(, $($rest:tt)*)?) => {
-        $crate::utest!(@opts $ident, $bin, ($argv), ($flags), ($declared), ($uid); $($($rest)*)?);
+        $crate::utest!(@opts $ident, $bin, ($argv), ($flags), ($declared), ($uid), ($rank); $($($rest)*)?);
     };
 
-    (@opts $ident:ident, $bin:literal, ($argv:expr), ($flags:expr), ($caps:expr), ($uid:expr);
+    (@opts $ident:ident, $bin:literal, ($argv:expr), ($flags:expr), ($caps:expr), ($uid:expr), ($rank:expr);
         uid = $declared:literal $(, $($rest:tt)*)?) => {
-        $crate::utest!(@opts $ident, $bin, ($argv), ($flags), ($caps), ($declared); $($($rest)*)?);
+        $crate::utest!(@opts $ident, $bin, ($argv), ($flags), ($caps), ($declared), ($rank); $($($rest)*)?);
     };
 
-    (@desc $ident:ident, $bin:literal, $argv:expr, $flags:expr, $caps:expr, $uid:expr) => {
+    (@opts $ident:ident, $bin:literal, ($argv:expr), ($flags:expr), ($caps:expr), ($uid:expr), ($rank:expr);
+        rank = $declared:literal $(, $($rest:tt)*)?) => {
+        $crate::utest!(@opts $ident, $bin, ($argv), ($flags), ($caps), ($uid), ($declared); $($($rest)*)?);
+    };
+
+    (@desc $ident:ident, $bin:literal, $argv:expr, $flags:expr, $caps:expr, $uid:expr, $rank:expr) => {
         $crate::__paste::paste! {
             fn [<__utest_thunk_ $ident>]() -> $crate::__testing::TestResult {
                 $crate::exec::utest::run_thunk(
@@ -117,6 +123,8 @@ macro_rules! utest {
                         line: line!(),
                         run: [<__utest_thunk_ $ident>],
                         kind: $crate::__testing::TestKind::Userland,
+                        order: $crate::__testing::TestOrder::Sorted,
+                        rank: $rank,
                         flags: $flags,
                         bin: ::core::option::Option::Some($bin),
                         argv: $argv,

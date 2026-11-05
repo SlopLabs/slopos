@@ -74,6 +74,10 @@ pub unsafe fn switch_stack_and_call_noreturn(
 /// and every consumer above this frame has already returned, so no reference
 /// into the previous stack is live.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "`idle_task` passes through to `target` uninterpreted; the scheduler crate calling this forbids unsafe code"
+)]
 pub fn enter_scheduler_loop_noreturn(
     stack_top: u64,
     target: extern "C" fn(usize, *mut ()) -> !,

@@ -18,312 +18,144 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+  # The `just ci-*` recipes put it on their build steps only: a gate that asks
+  # what a compiler does gets a fresh answer, never a cached one.
+  CI_RUSTC_WRAPPER: sccache
 
+# Every job is the shared setup and then one `just ci-*` recipe, so a red job
+# reproduces locally with the command it ran, and `just ci` runs them all.
 jobs:
-  # Only what reads the tests build or its boot capture: this job is the wall
-  # clock, and anything else runs beside it.
-  ci:
-    name: Build, Format & Test
+  gates:
+    name: Host tests, clippy and gates
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 35
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
 
-      - name: Install just
-        uses: extractions/setup-just@v4
-
-      - name: Setup Go toolchain
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: tools/run_tests/go.mod
-          cache-dependency-path: tools/run_tests/go.sum
-
-      - name: Setup Rust + Go toolchains
-        run: just setup
-
-      - name: Check formatting
-        run: just fmt
-
-      # clang/cmake/ninja/lld are the C++ runtime's cross-build, which the
-      # tests image needs: `libc++.so` and the two fixtures that prove a C++
-      # exception crosses a `dlopen` boundary. make and pkg-config build the
-      # e2fsprogs recipe every base carries. `toolchain/cxx/PIN` states a
-      # *floor* (`clang_major_min`) so a rolling host can build it at all, and
-      # the env vars below pin CI to the sources' own major regardless of what
-      # the runner image happens to default to — `scripts/cxx_host_tools.sh`
-      # treats them as an override that never falls back. openssh-client is
-      # for `ssh-keygen`, which stages the ladder's ssh fixture keys.
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            qemu-system-x86 \
-            xorriso \
-            e2fsprogs \
-            clang-18 \
-            lld-18 \
-            llvm-18 \
-            cmake \
-            ninja-build \
-            make \
-            pkg-config \
-            openssh-client
-          # Named, not aliased: `update-alternatives --install` with a missing
-          # target warns and exits 0, so a wrong package name would surface
-          # much later as a cross-build failure with nothing pointing here.
-          for tool in clang-18 clang++-18 ld.lld-18 llvm-ar-18; do
-            command -v "$tool" >/dev/null || { echo "::error::$tool not installed"; exit 1; }
-          done
-          {
-            echo "CLANG=clang-18"
-            echo "CLANGXX=clang++-18"
-            echo "LD_LLD=ld.lld-18"
-            echo "LLVM_AR=llvm-ar-18"
-          } >> "$GITHUB_ENV"
-
-      - name: Verify KVM availability
-        run: |
-          if [ ! -c /dev/kvm ]; then
-            echo "::error::/dev/kvm not present on runner — KVM is required"
-            exit 1
-          fi
-          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
-            sudo chmod 666 /dev/kvm
-          fi
-          ls -l /dev/kvm
-          qemu-system-x86_64 -accel help | grep -qw kvm || {
-            echo "::error::qemu-system-x86_64 does not list kvm under -accel help"
-            exit 1
-          }
-
-      - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ". -> builddir/target"
-          cache-directories: |
-            third_party/limine
-            third_party/ovmf
-          cache-on-failure: true
-
-      # The key only finds a tree; `make_slopos_cxx.sh`'s stamp still decides
-      # whether it is rebuilt.
-      - name: Key the C++ runtime cache
-        id: cxx
-        run: echo "compiler=$(clang++-18 --version | head -n 1 | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache the C++ runtime
-        uses: actions/cache@v6
-        with:
-          path: third_party/slopos-cxx
-          key: slopos-cxx-${{ runner.os }}-${{ steps.cxx.outputs.compiler }}-${{ hashFiles('toolchain/cxx/**', 'toolchain/cmake/**', 'scripts/make_slopos_cxx.sh', 'scripts/build_userland.sh', 'slibc/include/**', 'slibc/builtins/**', 'rust-toolchain.toml', 'toolchain/rust/**', 'toolchain/libc/**', 'targets/x86_64-unknown-slopos.json', 'Cargo.toml', 'Cargo.lock') }}
-          restore-keys: slopos-cxx-${{ runner.os }}-${{ steps.cxx.outputs.compiler }}-
-
-      # The self-hosting root carries it, so its guest builds the C++ runtime
-      # offline; a warm runtime cache never fetches it.
-      - name: Cache the pinned llvm-project tarball
-        uses: actions/cache@v6
-        with:
-          path: third_party/llvm-project-*.src.tar.xz
-          key: llvm-project-src-${{ hashFiles('toolchain/cxx/PIN') }}
-
-      # e2fsprogs's, which every base's programs are built from.
-      - name: Cache the pinned recipe tarballs
-        uses: actions/cache@v6
-        with:
-          path: third_party/recipes
-          key: recipes-src-${{ hashFiles('toolchain/recipes/**') }}
-          restore-keys: recipes-src-
-
-      - name: Restore the Rust compiler cache
-        uses: ./.github/actions/sccache-restore
-        with:
-          job: ci
-
-      # `--raw` rather than `just test`: the progress-bar renderer only surfaces
-      # klog on failure, so a green run's log carries no `LOCKDEP[...]` lines for
-      # the ratchets below to read. The verdict is unchanged — `ClassifyRun` sets
-      # the exit code independently of which renderer ran.
-      - name: Run tests
-        env:
-          RUSTC_WRAPPER: sccache
-        run: |
-          set -o pipefail
-          just _build-run-tests
-          builddir/run_tests --raw --no-color 2>&1 | tee ci-test.log
-
-      # The ratchets below parse the capture above rather than booting again:
-      # a boot per question costs a boot each, and a second boot could disagree
-      # with the one that was graded. The tests kernel is the only variant whose allowlist carries
-      # `run_userland_tests` — it powers the machine off to end the run. Gated
-      # here rather than from `check_kernel_elf_gates.sh` because the walk disassembles
-      # the whole ELF (~8 s), which does not belong on the interactive loop.
-      - name: Authority reachability ratchet (tests kernel)
-        run: scripts/check_authority_reachability.sh --variant tests builddir/kernel-tests.elf
-
-      - name: Test-count ratchet
-        run: scripts/check_test_count.sh --log ci-test.log
-
-      - name: Lockdep headroom ratchet
-        run: scripts/check_lockdep_headroom.sh --log ci-test.log
-
-      # Not a measured ceiling but a structural invariant: a CPU that is online
-      # is eligible for task placement. One that is not still dispatches what
-      # work stealing hands it, so the suite passes while one core takes every
-      # fork and wakeup; nothing else on the wire says so.
-      - name: SMP placement-eligibility gate
-        run: scripts/check_sched_spread.sh --log ci-test.log
-
-      # The image the run above just wrote to, held to e2fsck and to being at
-      # rest. Free: the image is already on disk and e2fsprogs is already
-      # installed. An image SlopOS wrote that e2fsck rejects is a bug in SlopOS.
-      - name: On-disk consistency of the image the suite wrote
-        run: just check-fs-image
-
-      # Two more boots, filtered to the persistence tests, on one image that
-      # is *not* rebuilt between them. Cannot reuse the capture above: the
-      # question is whether a write on boot N is readable on boot N+1, which
-      # one boot cannot answer. Kept in this job rather than a parallel one
-      # because a second job would rebuild the kernel, userland and images
-      # from scratch to save ~90 s of QEMU wall clock.
-      - name: Two-boot persistence check
-        run: just test-persist
-
-      # The host's e2fsck replaying what the kernel committed before the machine
-      # died; the suite grades the kernel's own replay.
-      - name: Rude-exit journal replay check
-        run: just test-rude-exit
-
-      # Sticks pulled and plugged through QMP on both QEMU xHCI models: a boot
-      # of its own, since the suite's capture carries no USB controller.
-      - name: USB check
-        run: just test-usb
-
-      # One boot of the self-hosting root, with no toolchain: the seeded
-      # clone, its vendored crates and the floor the root is grown to. Cannot
-      # ride the capture above, whose root carries no clone.
-      - name: Self-hosting root check
-        run: just test-toolchain
-
-      - name: Save the Rust compiler cache
-        if: always()
-        uses: ./.github/actions/sccache-save
-        with:
-          job: ci
-
-      - name: Upload test log on failure
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: ci-test-log
-          path: ci-test.log
-
-  gates:
-    name: Host tests and framekernel gates
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Install just
-        uses: extractions/setup-just@v4
-
-      - name: Setup Rust toolchain
-        run: scripts/ensure_toolchain.sh
-
-      # Not ~/.cargo/bin: a cached wild would be on PATH for the gates, which
-      # grade the shipping pair only.
-      - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ". -> builddir/target"
-          cache-bin: false
-          cache-on-failure: true
-
-      - name: Restore the Rust compiler cache
-        uses: ./.github/actions/sccache-restore
+      # A cached wild would answer a gate's question with a stale linker, so
+      # ~/.cargo/bin is not cached; `ci-candidates` installs its own under
+      # builddir/candidates, cached below.
+      - uses: ./.github/actions/setup
         with:
           job: gates
+          go: "true"
+          rust-cache-bin: "false"
 
-      - name: Host-side unit tests (fast fail — same tests KernMiri interprets, minus UB detection)
-        run: just test-host
+      - name: Gates lane
+        run: just ci-gates
 
-      - name: Build the dev kernel
-        env:
-          RUSTC_WRAPPER: sccache
-        run: just build-kernel-only
-
-      # Delegates to the justfile so the gate list has one home.
-      # `check-framekernel-gates` is the scripts only; the fmt / KernMiri /
-      # Verus steps that `check-framekernel` also runs are the boot lane's
-      # `Check formatting` step and the `ostd-verify` job below.
-      - name: Framekernel gates (vendor pin + unsafe/async/alloc/Drop/stack + wait purity + task ownership + TCB ratio)
-        run: just check-framekernel-gates
-
-      # The gates step above skips the pins because nothing has vendored yet;
-      # this step vendors, then builds from an empty CARGO_HOME so the
-      # runner's registry cache cannot answer for a missing crate.
-      - name: Offline build from vendored sources
-        run: just check-offline-build
-
-      # Release inlines away roughly seven eighths of the dev kernel's
-      # functions, so it is the only place small frames fused into one
-      # oversized frame can show up. `just build-kernel-only` runs the stack and
-      # soft-float gates on the ELF it produces; every self-test here ran with
-      # the gates above.
-      - name: Build and gate the release kernel
-        if: ${{ !cancelled() }}
-        env:
-          RUSTC_WRAPPER: sccache
-        run: |
-          KERNEL_RELEASE=1 just build-kernel-only
-          scripts/check_registry_sections.sh builddir/kernel-release.elf
-          # The variant that ships. Its allowlist is shorter than dev's only
-          # because optimisation inlines the handler closures; a *handler*
-          # appearing here that is not in dev's list is a shipped image
-          # reaching power by a path the dev build does not have.
-          scripts/check_authority_reachability.sh --variant release builddir/kernel-release.elf
-
-      # After the gates, so they grade the shipping pair with neither candidate
-      # on PATH. The probe directories under builddir/gates/ are not cached: a
-      # stale one would be a cached answer to the question the next step asks.
       - name: Cache the pinned wild binary
         if: ${{ !cancelled() }}
         uses: actions/cache@v6
         with:
-          path: ~/.cargo/bin/wild
+          path: builddir/candidates
           key: wild-linker-0.10.0-${{ runner.os }}
 
-      # The gates above grade the shipping pair, where both candidates report
-      # `skipped`. This installs them and grades the candidates only —
-      # re-asking whether a Rust-hosted toolchain can build this kernel yet,
-      # the measurement that keeps the toolchain LLVM's. wild is pinned so the
-      # answer moves when someone bumps it, not underneath a run. `-preview`
-      # components go missing from individual nightlies, and a day cg_clif did
-      # not build upstream must not be a red run with no SlopOS-side remedy;
-      # the pinned wild install fails loudly by contrast, and `--require` on it
-      # because a skip would mean CI stopped asking.
-      - name: Codegen backend and linker coverage
+      # `-preview` components go missing from individual nightlies, so a
+      # missing cranelift is a skip; a wild that fails to build is a failure.
+      - name: Candidate backends and linkers
         if: ${{ !cancelled() }}
-        run: |
-          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml)"
-          rustup component add rustc-codegen-cranelift-preview --toolchain "$channel" \
-            || echo "::warning::cranelift is not published for $channel — the gate will skip it"
-          command -v wild >/dev/null || cargo install wild-linker --locked --version 0.10.0
-          scripts/check_codegen_backend.sh --backend cranelift
-          scripts/check_linker_script.sh --linker wild --require
+        run: just ci-candidates
 
-      - name: Save the Rust compiler cache
-        if: always()
+      - if: always()
         uses: ./.github/actions/sccache-save
         with:
           job: gates
 
-  # Builds the tests userland itself rather than waiting on the boot lane's:
-  # that build costs less than the boot lane queueing these checks.
+  # The suite in shards, each boot on a machine of its own: one shard's state
+  # cannot reach another's, and a failing shard names its own tests.
+  suite:
+    name: Test suite (shard ${{ matrix.shard }})
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup
+        with:
+          job: suite-${{ matrix.shard }}
+          go: "true"
+          llvm: "true"
+          kvm: "true"
+          pinned-sources: "true"
+          apt: xorriso e2fsprogs cmake ninja-build make pkg-config openssh-client
+
+      - name: Suite lane
+        run: just ci-suite ${{ matrix.shard }}
+
+      - if: always()
+        uses: ./.github/actions/sccache-save
+        with:
+          job: suite-${{ matrix.shard }}
+
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: suite-shard-${{ matrix.shard }}
+          path: builddir/ci/shard-${{ matrix.shard }}.log
+          if-no-files-found: ignore
+
+  # Grades the shards' captures together: the tracked test list is a union
+  # over shards, and the ratchets read every boot.
+  grade:
+    name: Grade the suite's captures
+    needs: suite
+    if: ${{ !cancelled() }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: extractions/setup-just@v4
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: tools/run_tests/go.mod
+          cache-dependency-path: tools/run_tests/go.sum
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: suite-shard-*
+          path: builddir/ci
+          merge-multiple: true
+
+      - name: Log gates over every shard
+        run: just check-capture
+
+  # Each boot check needs its own image or its own devices, so each is a
+  # machine of its own rather than a step after the suite.
+  boot:
+    name: Boot check (${{ matrix.lane }})
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [persist, usb, selfhost-root]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup
+        with:
+          job: boot-${{ matrix.lane }}
+          go: "true"
+          llvm: "true"
+          kvm: "true"
+          pinned-sources: "true"
+          apt: xorriso e2fsprogs cmake ninja-build make pkg-config openssh-client
+
+      - name: Boot lane
+        run: just ci-boot ${{ matrix.lane }}
+
+      - if: always()
+        uses: ./.github/actions/sccache-save
+        with:
+          job: boot-${{ matrix.lane }}
+
   toolchain:
     name: Toolchain port
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -335,71 +167,30 @@ jobs:
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
       SLOPOS_CROSS_LAUNCHER: ccache
       CCACHE_MAXSIZE: 2G
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
 
-      - name: Install just
-        uses: extractions/setup-just@v4
+      - uses: ./.github/actions/setup
+        with:
+          job: toolchain
+          llvm: "true"
+          pinned-sources: "true"
+          apt: cmake meson ninja-build ccache pkg-config
 
-      - name: Setup Rust toolchain
-        run: scripts/ensure_toolchain.sh
-
-      - name: Install system dependencies
+      - name: Point ccache at its cache
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            clang-18 lld-18 llvm-18 cmake meson ninja-build ccache pkg-config
-          for tool in clang-18 clang++-18 ld.lld-18 llvm-ar-18 meson ccache pkg-config; do
-            command -v "$tool" >/dev/null || { echo "::error::$tool not installed"; exit 1; }
-          done
           {
-            echo "CLANG=clang-18"
-            echo "CLANGXX=clang++-18"
-            echo "LD_LLD=ld.lld-18"
-            echo "LLVM_AR=llvm-ar-18"
             echo "CCACHE_DIR=$HOME/.cache/ccache"
             echo "CCACHE_COMPILERCHECK=string:$(clang-18 --version | head -n 1)"
           } >> "$GITHUB_ENV"
 
-      - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ". -> builddir/target"
-          cache-on-failure: true
-
-      - name: Key the C++ runtime cache
-        id: cxx
-        run: echo "compiler=$(clang++-18 --version | head -n 1 | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache the C++ runtime
-        uses: actions/cache@v6
-        with:
-          path: third_party/slopos-cxx
-          key: slopos-cxx-${{ runner.os }}-${{ steps.cxx.outputs.compiler }}-${{ hashFiles('toolchain/cxx/**', 'toolchain/cmake/**', 'scripts/make_slopos_cxx.sh', 'scripts/build_userland.sh', 'slibc/include/**', 'slibc/builtins/**', 'rust-toolchain.toml', 'toolchain/rust/**', 'toolchain/libc/**', 'targets/x86_64-unknown-slopos.json', 'Cargo.toml', 'Cargo.lock') }}
-          restore-keys: slopos-cxx-${{ runner.os }}-${{ steps.cxx.outputs.compiler }}-
-
       # Tarballs only: the unpacked trees and the probes' build directories are
       # what the gates grade, and a cached one would be a cached answer.
-      - name: Cache the pinned llvm-project tarball
-        uses: actions/cache@v6
-        with:
-          path: third_party/llvm-project-*.src.tar.xz
-          key: llvm-project-src-${{ hashFiles('toolchain/cxx/PIN') }}
-
       - name: Cache the pinned rustc source tarball
         uses: actions/cache@v6
         with:
           path: third_party/rustc-src-*.tar.xz
           key: rustc-src-${{ hashFiles('rust-toolchain.toml') }}
-
-      - name: Cache the pinned recipe tarballs
-        uses: actions/cache@v6
-        with:
-          path: third_party/recipes
-          key: recipes-src-${{ hashFiles('toolchain/recipes/**') }}
-          restore-keys: recipes-src-
 
       - name: Restore the compiler cache
         uses: actions/cache/restore@v6
@@ -408,80 +199,10 @@ jobs:
           key: ccache-toolchain-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: ccache-toolchain-${{ runner.os }}-
 
-      - name: Zero the compiler cache statistics
-        run: ccache --zero-stats
+      - run: ccache --zero-stats
 
-      - name: Restore the Rust compiler cache
-        uses: ./.github/actions/sccache-restore
-        with:
-          job: toolchain
-
-      - name: Materialise the llvm-project sources
-        id: llvm-src
-        run: scripts/make_slopos_llvm_src.sh
-
-      - name: Build the tests userland
-        id: userland
-        env:
-          RUSTC_WRAPPER: sccache
-        run: just _build-userland-tests
-
-      - name: Materialise the compiler fork
-        id: rustc-src
-        run: scripts/make_rustc_src.sh
-
-      # Each check below names the inputs it reads, so a red one does not hide
-      # the rest. ccache makes an unchanged translation unit of the clang build
-      # a lookup; the libraries are still linked and the probe still runs.
-      - name: Clang driver link line
-        if: ${{ !cancelled() && steps.llvm-src.outcome == 'success' }}
-        run: |
-          scripts/check_clang_driver.sh --self-test
-          scripts/check_clang_driver.sh --require
-
-      - name: C++ runtime against the C library it links
-        if: ${{ !cancelled() && steps.userland.outcome == 'success' }}
-        run: scripts/check_cxx_pin.sh
-
-      # Here rather than only in the gates job, which has no libc.so and no
-      # clang: the self-test grades the layout extraction against this job's
-      # clang, and the real run holds the library this commit built.
-      - name: libc.so only grows
-        if: ${{ !cancelled() && steps.userland.outcome == 'success' }}
-        run: |
-          scripts/check_libc_exports.sh --self-test
-          scripts/check_libc_exports.sh --require builddir/libc.so
-
-      # Every recipe links `-z defs` against this commit's libc.so, so a
-      # symbol slibc lost fails here rather than hours into `just toolchain`.
-      - name: Recipes against slibc
-        if: ${{ !cancelled() && steps.userland.outcome == 'success' }}
-        run: |
-          scripts/build_recipes.sh
-          scripts/check_recipes.sh
-
-      # `--self-test` here rather than in the gates job: that job has no tree,
-      # where the self-test's rejection cases can only report themselves
-      # skipped — a gate CI has never seen reject.
-      - name: LLVM port against slibc and libc++
-        if: ${{ !cancelled() && steps.userland.outcome == 'success' && steps.llvm-src.outcome == 'success' }}
-        run: |
-          scripts/check_llvm_port.sh --self-test
-          scripts/check_llvm_port.sh --require
-
-      # Bootstrap's own dry run plus the compiler wrapper; the build it plans
-      # is hours and is not run here.
-      - name: Cross-build plan and compiler wrapper
-        if: ${{ !cancelled() && steps.userland.outcome == 'success' && steps.rustc-src.outcome == 'success' }}
-        run: |
-          scripts/check_bootstrap_config.sh --self-test
-          scripts/check_bootstrap_config.sh --require
-
-      - name: Built-in target against the JSON spec
-        if: ${{ !cancelled() && steps.rustc-src.outcome == 'success' }}
-        run: |
-          scripts/check_rustc_target.sh --self-test
-          scripts/check_rustc_target.sh --require
+      - name: Toolchain lane
+        run: just ci-toolchain
 
       - name: Count compiler cache misses
         id: ccache
@@ -495,8 +216,7 @@ jobs:
           path: ~/.cache/ccache
           key: ccache-toolchain-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: Save the Rust compiler cache
-        if: always()
+      - if: always()
         uses: ./.github/actions/sccache-save
         with:
           job: toolchain
@@ -505,23 +225,16 @@ jobs:
     name: OSTD verification (KernMiri + Verus)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 35
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
 
-      - name: Install just
-        uses: extractions/setup-just@v4
-
-      # Not `just setup`: KernMiri builds one host-target crate and interprets
-      # it, so the owned `slopos` sysroot and Go are pure cost here.
-      - name: Setup Rust toolchain
-        run: scripts/ensure_toolchain.sh --no-sysroot
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends unzip
+      # KernMiri builds one host-target crate and interprets it, so the owned
+      # `slopos` sysroot is pure cost here.
+      - uses: ./.github/actions/setup
+        with:
+          job: ostd-verify
+          sysroot: "false"
+          apt: unzip
 
       - name: Cache Miri sysroot
         uses: actions/cache@v6
@@ -529,25 +242,17 @@ jobs:
           path: ~/.cache/miri
           key: miri-sysroot-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}
 
-      - name: Cache Rust artifacts (Miri target dir)
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ". -> builddir/target"
-          prefix-key: "v0-miri"
-          cache-on-failure: true
-
       - name: Cache pinned Verus toolchain
         uses: actions/cache@v6
         with:
           path: third_party/verus
           key: verus-${{ runner.os }}-${{ hashFiles('verification/verus.toml') }}
 
-      - name: Run KernMiri suite
+      - name: KernMiri
         run: just check-miri
 
-      - name: Run Verus proofs
+      # Any change to slopos-ostd/ must pass: Verus is resolved and pinned by
+      # scripts/ensure_verus.sh, then every proof under verification/proofs/.
+      - name: Verus proofs
         if: ${{ !cancelled() }}
-        # Any PR touching slopos-ostd/ must pass `just verify`. It
-        # resolves + pins Verus via scripts/ensure_verus.sh, then checks
-        # every proof under verification/proofs/.
         run: just verify

@@ -40,13 +40,12 @@ const _: () = assert!(FUTEX_HASH_BUCKETS <= u8::MAX as usize + 1);
 /// `Task` is serialised by the bucket lock.
 type FutexBucket = KernelSync<IntrusiveDList<crate::task_struct::Task, FutexRole>>;
 
-static FUTEX_TABLE: [SpinLock<FutexBucket>; FUTEX_HASH_BUCKETS] = {
-    const BUCKET: SpinLock<FutexBucket> = SpinLock::new(
+static FUTEX_TABLE: [SpinLock<FutexBucket>; FUTEX_HASH_BUCKETS] = [const {
+    SpinLock::new(
         KernelSync::new(IntrusiveDList::new()),
         lock_class!("FUTEX_TABLE", LOCK_LEVEL_RESOURCE),
-    );
-    [BUCKET; FUTEX_HASH_BUCKETS]
-};
+    )
+}; FUTEX_HASH_BUCKETS];
 
 /// Unlink `task` from `bucket`, releasing the reference membership parked.
 /// The caller holds the bucket's lock. `false` when it was not a member.

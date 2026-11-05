@@ -308,6 +308,11 @@ impl Array {
 }
 
 /// `qsort(3)`.
+///
+/// # Safety
+///
+/// `base` must be null or valid for reads and writes of `nmemb * size` bytes, not aliased
+/// during the call; `compar` must be safe to call on any two elements.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qsort(
     base: *mut c_void,
@@ -332,6 +337,11 @@ pub unsafe extern "C" fn qsort(
 }
 
 /// `bsearch(3)`. `NULL` when no element compares equal to `key`.
+///
+/// # Safety
+///
+/// `key` must be valid for `compar`; `base` must be valid for reads of `nmemb * size` bytes,
+/// sorted per `compar`; `compar` must be safe to call on `key` and any element.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bsearch(
     key: *const c_void,

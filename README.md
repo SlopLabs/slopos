@@ -71,7 +71,8 @@ just boot-live      # spins the wheel, from RAM
 | `just boot` | Boot the development machine, wheel first: a persistent `/` carrying the toolchain and a clone of this checkout. Also needs clang, lld, cmake, ninja, util-linux (sfdisk), dosfstools and mtools |
 | `just boot-fast` | `just boot` without the Wheel of Fate (coward) |
 | `just boot-live` | Boot the live ISO from RAM in a window, as bare metal runs it; nothing persists. `ROULETTE=0` skips the wheel |
-| `just test` | Run the test suite — thousands of tests — under QEMU |
+| `just test` | Run the test suite — thousands of tests — under QEMU, split across parallel boots on a big host |
+| `just ci` | Run every CI lane locally, with the commands CI runs |
 | `just --list` | Everything else (there's a lot) |
 
 To build SlopOS inside SlopOS, cross-build the toolchain once (`just toolchain`,
@@ -168,13 +169,13 @@ the compiler actually saw** — zero executable `unsafe`, and `unsafe impl` /
 `link_section` / `no_mangle` only from a named list with a reason attached
 to each. Alongside it, gates inspect the final ELF: no stack frame over
 2 KiB, no SSE instruction anywhere in the kernel, every linker registry
-holding whole entries.
+tiled by entries of one size.
 
 The number worth defending is not the keyword count — folding `unsafe`
 behind a safe wrapper is the design, not a cheat. It is how much of OSTD's
 API you have to trust by reading rather than by type-checking: **52
 `pub unsafe fn`, 15 `pub unsafe trait`, and no safe function that carries a
-prose contract** — a CI ratchet keeps that last number at zero. `just
+prose contract** — clippy's `unnecessary_safety_doc`, denied in CI, keeps that last number at zero. `just
 tcb-ratio` reports unsafe-line density (0.31 %, gated at 1 %) — useful as a
 trend, not comparable to other projects' TCB fractions, which are measured
 differently.

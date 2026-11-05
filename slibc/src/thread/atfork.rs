@@ -31,6 +31,11 @@ static mut COUNT: usize = 0;
 
 /// `pthread_atfork(3)`. A registration lasts as long as the object its
 /// handlers are in, as glibc's does; 64 of them at most, `ENOMEM` past that.
+///
+/// # Safety
+///
+/// Each non-null handler must be a valid function callable on `fork`, and
+/// its code must stay mapped until `fork` runs it or `dlclose` unregisters it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_atfork(
     prepare: Option<unsafe extern "C" fn()>,

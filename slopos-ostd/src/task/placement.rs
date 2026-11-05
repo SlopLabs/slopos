@@ -167,7 +167,7 @@ pub fn task_placement_clone<K, U>(ptr: NonNull<TaskInner<K, U>>) -> KArc<TaskInn
 /// [`task_placement_clone`].
 #[inline]
 pub fn task_placement_retain<K, U>(ptr: NonNull<TaskInner<K, U>>) {
-    core::mem::forget(task_placement_clone(ptr));
+    let _ = KArc::into_raw(task_placement_clone(ptr));
 }
 
 /// Borrow a task through a reference some container has parked on it.

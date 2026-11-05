@@ -46,6 +46,9 @@ fn try_take(sem: &sem_t) -> bool {
     false
 }
 
+/// # Safety
+///
+/// `sem` must be null or valid for writes of a `sem_t` no thread is using.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sem_init(sem: *mut sem_t, pshared: c_int, value: c_uint) -> c_int {
     if sem.is_null() || value > SEM_VALUE_MAX {
@@ -60,6 +63,9 @@ pub unsafe extern "C" fn sem_init(sem: *mut sem_t, pshared: c_int, value: c_uint
     0
 }
 
+/// # Safety
+///
+/// None: `sem` is only null-checked, never dereferenced; `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sem_destroy(sem: *mut sem_t) -> c_int {
     if sem.is_null() {
@@ -69,6 +75,10 @@ pub unsafe extern "C" fn sem_destroy(sem: *mut sem_t) -> c_int {
 }
 
 /// Async-signal-safe, as POSIX requires: one atomic and at most one wake.
+///
+/// # Safety
+///
+/// `sem` must be null or point to a `sem_t` initialized by `sem_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sem_post(sem: *mut sem_t) -> c_int {
     let Some(sem) = sem.as_ref() else {
@@ -95,6 +105,9 @@ pub unsafe extern "C" fn sem_post(sem: *mut sem_t) -> c_int {
     0
 }
 
+/// # Safety
+///
+/// `sem` must be null or point to a `sem_t` initialized by `sem_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sem_trywait(sem: *mut sem_t) -> c_int {
     match sem.as_ref() {
@@ -162,11 +175,19 @@ fn remaining(deadline: Timespec) -> Option<Timespec> {
     })
 }
 
+/// # Safety
+///
+/// `sem` must be null or point to a `sem_t` initialized by `sem_init` that
+/// stays valid for the wait.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sem_wait(sem: *mut sem_t) -> c_int {
     wait(sem, None)
 }
 
+/// # Safety
+///
+/// `abstime` must be null or point to a readable `Timespec`; `sem` must be null
+/// or point to a `sem_t` initialized by `sem_init` that stays valid for the wait.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sem_timedwait(sem: *mut sem_t, abstime: *const Timespec) -> c_int {
     let Some(&deadline) = abstime.as_ref() else {
@@ -178,6 +199,10 @@ pub unsafe extern "C" fn sem_timedwait(sem: *mut sem_t, abstime: *const Timespec
     wait(sem, Some(deadline))
 }
 
+/// # Safety
+///
+/// `sem` must be null or point to a `sem_t` initialized by `sem_init`; `sval`
+/// must be null or valid for writing a `c_int`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sem_getvalue(sem: *mut sem_t, sval: *mut c_int) -> c_int {
     match (sem.as_ref(), sval.is_null()) {

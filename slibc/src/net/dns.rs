@@ -79,6 +79,11 @@ fn resolve_error(errno: Errno) -> i32 {
 
 /// IPv4-only getaddrinfo: a dotted-decimal literal, or one A record from the
 /// kernel's resolver.
+///
+/// # Safety
+///
+/// `node` and `service` must each be null or point to a NUL-terminated string; `hints` must be
+/// null or point to a valid `addrinfo`; `res` must be null or valid for writing one pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getaddrinfo(
     node: *const u8,
@@ -192,6 +197,10 @@ unsafe fn new_node(addr: u32, port: u16, sock_type: i32, protocol: i32) -> *mut 
 }
 
 /// Free the linked list allocated by `getaddrinfo`.
+///
+/// # Safety
+///
+/// `res` must be null or a list returned by `getaddrinfo` and not yet freed; it is invalid afterwards.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn freeaddrinfo(res: *mut AddrInfo) {
     let mut cur = res;

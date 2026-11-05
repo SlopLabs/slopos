@@ -3,7 +3,7 @@
 //!
 //! A caller may sequence `xmm_load_4` … kernel code … `xmm_read_4` and expect
 //! the register file to survive in between: the kernel is built `+soft-float`
-//! and never touches it (`check_kernel_softfloat.sh` enforces that), and plain
+//! and never touches it (the `softfloat` ELF gate enforces that), and plain
 //! `asm!` is volatile so the blocks cannot be reordered or elided. Callers must
 //! keep interrupts disabled across such a sequence — a context switch would
 //! legitimately save and restore the whole register file underneath them.

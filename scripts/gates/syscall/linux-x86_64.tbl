@@ -3,7 +3,7 @@
 #
 # ABI numbers are interface facts and carry no copyright; no kernel code,
 # comment or prose is reproduced here. This file is gate data for
-# scripts/check_syscall_abi.sh, which holds abi/src/syscall/numbers.rs to it.
+# the `syscall-abi` gate, which holds abi/src/syscall/numbers.rs to it.
 #
 # Regenerate:
 #   curl -sL https://raw.githubusercontent.com/torvalds/linux/master/\

@@ -24,6 +24,9 @@ fn fail<T>(e: crate::errno::Errno, sentinel: T) -> T {
 // Sequential and positional I/O
 // ---------------------------------------------------------------------------
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lseek(fd: c_int, offset: off_t, whence: c_int) -> off_t {
     match Sys::lseek(fd, offset, whence) {
@@ -32,6 +35,9 @@ pub unsafe extern "C" fn lseek(fd: c_int, offset: off_t, whence: c_int) -> off_t
     }
 }
 
+/// # Safety
+///
+/// `buf` must be valid for writes of `count` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pread(fd: c_int, buf: *mut c_void, count: usize, offset: off_t) -> isize {
     match Sys::pread64(fd, buf as *mut u8, count, offset) {
@@ -40,6 +46,9 @@ pub unsafe extern "C" fn pread(fd: c_int, buf: *mut c_void, count: usize, offset
     }
 }
 
+/// # Safety
+///
+/// `buf` must be valid for reads of `count` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pwrite(
     fd: c_int,
@@ -53,6 +62,10 @@ pub unsafe extern "C" fn pwrite(
     }
 }
 
+/// # Safety
+///
+/// `iov` must point to `iovcnt` readable `iovec`s, each `iov_base` valid for
+/// writes of its `iov_len` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn readv(fd: c_int, iov: *const Iovec, iovcnt: c_int) -> isize {
     match Sys::readv(fd, iov, iovcnt) {
@@ -61,6 +74,10 @@ pub unsafe extern "C" fn readv(fd: c_int, iov: *const Iovec, iovcnt: c_int) -> i
     }
 }
 
+/// # Safety
+///
+/// `iov` must point to `iovcnt` readable `iovec`s, each `iov_base` valid for
+/// reads of its `iov_len` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn writev(fd: c_int, iov: *const Iovec, iovcnt: c_int) -> isize {
     match Sys::writev(fd, iov, iovcnt) {
@@ -75,6 +92,11 @@ pub unsafe extern "C" fn writev(fd: c_int, iov: *const Iovec, iovcnt: c_int) -> 
 ///
 /// A short read ends the call, as POSIX permits: the alternative is to keep
 /// reading past a hole the caller has not been told about.
+///
+/// # Safety
+///
+/// `iov` may be null (`EINVAL`); otherwise it must point to `iovcnt` readable
+/// `iovec`s, each `iov_base` valid for writes of its `iov_len` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn preadv(
     fd: c_int,
@@ -114,6 +136,11 @@ pub unsafe extern "C" fn preadv(
 }
 
 /// As [`preadv`], over `pwrite`.
+///
+/// # Safety
+///
+/// `iov` may be null (`EINVAL`); otherwise it must point to `iovcnt` readable
+/// `iovec`s, each `iov_base` valid for reads of its `iov_len` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pwritev(
     fd: c_int,
@@ -152,6 +179,9 @@ pub unsafe extern "C" fn pwritev(
     total as isize
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fsync(fd: c_int) -> c_int {
     match Sys::fsync(fd) {
@@ -160,6 +190,9 @@ pub unsafe extern "C" fn fsync(fd: c_int) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdatasync(fd: c_int) -> c_int {
     match Sys::fdatasync(fd) {
@@ -169,11 +202,18 @@ pub unsafe extern "C" fn fdatasync(fd: c_int) -> c_int {
 }
 
 /// `sync(2)` returns nothing and cannot fail from the caller's point of view.
+///
+/// # Safety
+///
+/// None: it takes no arguments; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sync() {
     let _ = Sys::sync();
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ftruncate(fd: c_int, length: off_t) -> c_int {
     if length < 0 {
@@ -185,6 +225,9 @@ pub unsafe extern "C" fn ftruncate(fd: c_int, length: off_t) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn truncate(path: *const c_char, length: off_t) -> c_int {
     if length < 0 {
@@ -196,6 +239,9 @@ pub unsafe extern "C" fn truncate(path: *const c_char, length: off_t) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn flock(fd: c_int, operation: c_int) -> c_int {
     match Sys::flock(fd, operation as u32) {
@@ -206,6 +252,11 @@ pub unsafe extern "C" fn flock(fd: c_int, operation: c_int) -> c_int {
 
 /// `openat(2)`, variadic: the mode argument exists only for a call that can
 /// create.
+///
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string. When `oflag` includes `O_CREAT`
+/// or `O_TMPFILE`, a `mode_t` variadic argument must follow.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openat(
     dirfd: c_int,
@@ -226,6 +277,10 @@ pub unsafe extern "C" fn openat(
 
 /// `creat(path, mode)` is `open(path, O_WRONLY|O_CREAT|O_TRUNC, mode)`, which
 /// is all it has ever been.
+///
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn creat(path: *const c_char, mode: mode_t) -> c_int {
     let flags =
@@ -240,6 +295,10 @@ pub unsafe extern "C" fn creat(path: *const c_char, mode: mode_t) -> c_int {
 // Metadata
 // ---------------------------------------------------------------------------
 
+/// # Safety
+///
+/// `buf` may be null (`EFAULT`); otherwise it must be valid for writes of a
+/// `struct stat`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fstat(fd: c_int, buf: *mut Stat) -> c_int {
     if buf.is_null() {
@@ -251,6 +310,10 @@ pub unsafe extern "C" fn fstat(fd: c_int, buf: *mut Stat) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string. `buf` may be null (`EFAULT`); otherwise it
+/// must be valid for writes of a `struct stat`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn stat(path: *const c_char, buf: *mut Stat) -> c_int {
     if buf.is_null() {
@@ -262,11 +325,19 @@ pub unsafe extern "C" fn stat(path: *const c_char, buf: *mut Stat) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string. `buf` may be null (`EFAULT`); otherwise it
+/// must be valid for writes of a `struct stat`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lstat(path: *const c_char, buf: *mut Stat) -> c_int {
     fstatat(AT_FDCWD, path, buf, AT_SYMLINK_NOFOLLOW as c_int)
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string. `buf` may be null (`EFAULT`);
+/// otherwise it must be valid for writes of a `struct stat`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fstatat(
     dirfd: c_int,
@@ -283,6 +354,10 @@ pub unsafe extern "C" fn fstatat(
     }
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string. `buf` may be null (`EFAULT`); otherwise it
+/// must be valid for writes of a `struct statfs`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn statfs(path: *const c_char, buf: *mut Statfs) -> c_int {
     if buf.is_null() {
@@ -294,6 +369,10 @@ pub unsafe extern "C" fn statfs(path: *const c_char, buf: *mut Statfs) -> c_int 
     }
 }
 
+/// # Safety
+///
+/// `buf` may be null (`EFAULT`); otherwise it must be valid for writes of a
+/// `struct statfs`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fstatfs(fd: c_int, buf: *mut Statfs) -> c_int {
     if buf.is_null() {
@@ -330,6 +409,10 @@ fn statvfs_from_statfs(src: &Statfs) -> Statvfs {
     }
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string. `buf` may be null (`EFAULT`); otherwise it
+/// must be valid for writes of a `struct statvfs`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn statvfs(path: *const c_char, buf: *mut Statvfs) -> c_int {
     if buf.is_null() {
@@ -345,6 +428,10 @@ pub unsafe extern "C" fn statvfs(path: *const c_char, buf: *mut Statvfs) -> c_in
     }
 }
 
+/// # Safety
+///
+/// `buf` may be null (`EFAULT`); otherwise it must be valid for writes of a
+/// `struct statvfs`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fstatvfs(fd: c_int, buf: *mut Statvfs) -> c_int {
     if buf.is_null() {
@@ -360,6 +447,9 @@ pub unsafe extern "C" fn fstatvfs(fd: c_int, buf: *mut Statvfs) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn faccessat(
     dirfd: c_int,
@@ -373,6 +463,9 @@ pub unsafe extern "C" fn faccessat(
     }
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fchmod(fd: c_int, mode: mode_t) -> c_int {
     match Sys::fchmod(fd, mode) {
@@ -381,6 +474,9 @@ pub unsafe extern "C" fn fchmod(fd: c_int, mode: mode_t) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fchmodat(
     dirfd: c_int,
@@ -394,16 +490,25 @@ pub unsafe extern "C" fn fchmodat(
     }
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chown(path: *const c_char, uid: uid_t, gid: gid_t) -> c_int {
     fchownat(AT_FDCWD, path, uid, gid, 0)
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lchown(path: *const c_char, uid: uid_t, gid: gid_t) -> c_int {
     fchownat(AT_FDCWD, path, uid, gid, AT_SYMLINK_NOFOLLOW as c_int)
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fchown(fd: c_int, uid: uid_t, gid: gid_t) -> c_int {
     match Sys::fchown(fd, uid, gid) {
@@ -412,6 +517,9 @@ pub unsafe extern "C" fn fchown(fd: c_int, uid: uid_t, gid: gid_t) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fchownat(
     dirfd: c_int,
@@ -426,6 +534,10 @@ pub unsafe extern "C" fn fchownat(
     }
 }
 
+/// # Safety
+///
+/// `path` must be null or point to a NUL-terminated string. `times` must be
+/// null or point to two readable `struct timespec`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn utimensat(
     dirfd: c_int,
@@ -446,6 +558,10 @@ pub unsafe extern "C" fn utimensat(
 
 /// `utimensat` with a NULL path names the descriptor, which is precisely what
 /// `futimens` is.
+///
+/// # Safety
+///
+/// `times` must be null or point to two readable `struct timespec`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn futimens(fd: c_int, times: *const Timespec) -> c_int {
     utimensat(fd, core::ptr::null(), times, 0)
@@ -455,6 +571,9 @@ pub unsafe extern "C" fn futimens(fd: c_int, times: *const Timespec) -> c_int {
 // Names
 // ---------------------------------------------------------------------------
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mkdir(path: *const c_char, mode: mode_t) -> c_int {
     match Sys::mkdir(path as *const u8, mode) {
@@ -463,6 +582,9 @@ pub unsafe extern "C" fn mkdir(path: *const c_char, mode: mode_t) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: mode_t) -> c_int {
     match Sys::mkdirat(dirfd, path as *const u8, mode) {
@@ -471,6 +593,9 @@ pub unsafe extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: mode_t
     }
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
     match Sys::rmdir(path as *const u8) {
@@ -479,6 +604,9 @@ pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
     match Sys::unlink(path as *const u8) {
@@ -487,6 +615,9 @@ pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int {
     match Sys::unlinkat(dirfd, path as *const u8, flags as u32) {
@@ -498,6 +629,10 @@ pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_in
 /// `remove(3)`: `unlink` for anything but a directory, `rmdir` for one. C
 /// gives one entry point for both, and the caller cannot know which it has
 /// without a `stat` it did not ask for.
+///
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn remove(path: *const c_char) -> c_int {
     let unlinked = match Sys::unlink(path as *const u8) {
@@ -517,6 +652,9 @@ pub unsafe extern "C" fn remove(path: *const c_char) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// `oldpath` and `newpath` must point to NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rename(oldpath: *const c_char, newpath: *const c_char) -> c_int {
     match Sys::rename(oldpath as *const u8, newpath as *const u8) {
@@ -525,6 +663,9 @@ pub unsafe extern "C" fn rename(oldpath: *const c_char, newpath: *const c_char) 
     }
 }
 
+/// # Safety
+///
+/// `oldpath` and `newpath` must point to NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn renameat(
     olddirfd: c_int,
@@ -543,6 +684,9 @@ pub unsafe extern "C" fn renameat(
     }
 }
 
+/// # Safety
+///
+/// `src` and `dst` must point to NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn link(src: *const c_char, dst: *const c_char) -> c_int {
     match Sys::link(src as *const u8, dst as *const u8) {
@@ -551,6 +695,9 @@ pub unsafe extern "C" fn link(src: *const c_char, dst: *const c_char) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// `src` and `dst` must point to NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn linkat(
     srcdirfd: c_int,
@@ -571,6 +718,9 @@ pub unsafe extern "C" fn linkat(
     }
 }
 
+/// # Safety
+///
+/// `target` and `linkpath` must point to NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn symlink(target: *const c_char, linkpath: *const c_char) -> c_int {
     match Sys::symlink(target as *const u8, linkpath as *const u8) {
@@ -579,6 +729,9 @@ pub unsafe extern "C" fn symlink(target: *const c_char, linkpath: *const c_char)
     }
 }
 
+/// # Safety
+///
+/// `target` and `linkpath` must point to NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn symlinkat(
     target: *const c_char,
@@ -592,6 +745,11 @@ pub unsafe extern "C" fn symlinkat(
 }
 
 /// Answers the byte count and never NUL-terminates, per POSIX.
+///
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string. `buf` must be valid for writes of
+/// `bufsiz` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn readlink(path: *const c_char, buf: *mut c_char, bufsiz: usize) -> isize {
     match Sys::readlink(path as *const u8, buf as *mut u8, bufsiz) {
@@ -600,6 +758,10 @@ pub unsafe extern "C" fn readlink(path: *const c_char, buf: *mut c_char, bufsiz:
     }
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string. `buf` must be valid for writes of
+/// `bufsiz` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn readlinkat(
     dirfd: c_int,
@@ -626,6 +788,11 @@ const SYMLOOP_MAX: u32 = 40;
 /// prefix is reported where it happens, and re-reading through every symlink
 /// until the count runs out. `resolved` may be null, in which case a
 /// `PATH_MAX` buffer is allocated for the caller to `free`.
+///
+/// # Safety
+///
+/// `path` may be null (`EINVAL`); otherwise it must point to a NUL-terminated
+/// string. `resolved` must be null or valid for writes of `PATH_MAX` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char {
     if path.is_null() {
@@ -804,6 +971,9 @@ unsafe fn canonicalize(
     Ok(resolved_len)
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mkfifo(path: *const c_char, mode: mode_t) -> c_int {
     mknodat(
@@ -814,11 +984,17 @@ pub unsafe extern "C" fn mkfifo(path: *const c_char, mode: mode_t) -> c_int {
     )
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mknod(path: *const c_char, mode: mode_t, dev: dev_t) -> c_int {
     mknodat(AT_FDCWD, path, mode, dev)
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mknodat(
     dirfd: c_int,
@@ -832,6 +1008,9 @@ pub unsafe extern "C" fn mknodat(
     }
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fchdir(fd: c_int) -> c_int {
     match Sys::fchdir(fd) {
@@ -842,6 +1021,10 @@ pub unsafe extern "C" fn fchdir(fd: c_int) -> c_int {
 
 /// There is no per-process root: the mount table is global, so a `chroot`
 /// would confine nothing.
+///
+/// # Safety
+///
+/// None: `_path` is never read; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chroot(_path: *const c_char) -> c_int {
     fail(ENOSYS, -1)
@@ -851,6 +1034,11 @@ pub unsafe extern "C" fn chroot(_path: *const c_char) -> c_int {
 // Memory mappings
 // ---------------------------------------------------------------------------
 
+/// # Safety
+///
+/// With `MAP_FIXED`, `[addr, addr + len)` must hold no live object the caller
+/// still uses, since the existing mapping there is replaced. Otherwise `addr`
+/// is only a hint.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mmap(
     addr: *mut c_void,
@@ -891,6 +1079,10 @@ pub unsafe extern "C" fn memfd_create(name: *const c_char, flags: c_uint) -> c_i
     }
 }
 
+/// # Safety
+///
+/// `[addr, addr + len)` must hold no live object still in use: those pages
+/// become inaccessible.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn munmap(addr: *mut c_void, len: usize) -> c_int {
     match Sys::munmap(addr as *mut u8, len) {
@@ -899,6 +1091,10 @@ pub unsafe extern "C" fn munmap(addr: *mut c_void, len: usize) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// `[addr, addr + len)` must hold no live object the caller still accesses in
+/// a way `prot` no longer permits.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mprotect(addr: *mut c_void, len: usize, prot: c_int) -> c_int {
     match Sys::mprotect(addr as *mut u8, len, prot as u32 as u64) {
@@ -911,6 +1107,11 @@ pub unsafe extern "C" fn mprotect(addr: *mut c_void, len: usize, prot: c_int) ->
 /// what "advice" means. `MADV_DONTNEED` and `MADV_FREE` are *not* advisory —
 /// a caller that gets success believes the pages now read as zero — and there
 /// is no syscall that can do that, so they are refused.
+///
+/// # Safety
+///
+/// None: `addr` is never dereferenced and the advice is not applied; it is
+/// `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn madvise(addr: *mut c_void, len: usize, advice: c_int) -> c_int {
     const MADV_DONTNEED: c_int = 4;
@@ -924,6 +1125,10 @@ pub unsafe extern "C" fn madvise(addr: *mut c_void, len: usize, advice: c_int) -
     0
 }
 
+/// # Safety
+///
+/// None: the range is passed to the kernel, which validates it, and nothing is
+/// dereferenced; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c_int {
     match Sys::msync(addr as *mut u8, len, flags as u32 as u64) {
@@ -934,11 +1139,20 @@ pub unsafe extern "C" fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c
 
 /// With no swap every mapped page is already resident, so only POSIX's
 /// `ENOMEM` for a range that is not wholly mapped remains.
+///
+/// # Safety
+///
+/// None: the range is only checked by the kernel, never dereferenced; it is
+/// `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mlock(addr: *const c_void, len: usize) -> c_int {
     require_mapped(addr, len)
 }
 
+/// # Safety
+///
+/// None: the range is only checked by the kernel, never dereferenced; it is
+/// `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn munlock(addr: *const c_void, len: usize) -> c_int {
     require_mapped(addr, len)
@@ -963,6 +1177,10 @@ unsafe fn require_mapped(addr: *const c_void, len: usize) -> c_int {
 // System identity, randomness, ids
 // ---------------------------------------------------------------------------
 
+/// # Safety
+///
+/// `buf` may be null (`EFAULT`); otherwise it must be valid for writes of a
+/// `struct utsname`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uname(buf: *mut Utsname) -> c_int {
     if buf.is_null() {
@@ -974,6 +1192,10 @@ pub unsafe extern "C" fn uname(buf: *mut Utsname) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// `tp` may be null (`EFAULT`); otherwise it must point to a readable
+/// `struct timespec`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clock_settime(clk_id: c_int, tp: *const Timespec) -> c_int {
     if tp.is_null() {
@@ -986,6 +1208,10 @@ pub unsafe extern "C" fn clock_settime(clk_id: c_int, tp: *const Timespec) -> c_
 }
 
 /// A short fill is legal; a caller wanting a full buffer loops.
+///
+/// # Safety
+///
+/// `buf` must be valid for writes of `buflen` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getrandom(buf: *mut c_void, buflen: usize, flags: c_uint) -> isize {
     match Sys::getrandom(buf as *mut u8, buflen, flags) {
@@ -1089,6 +1315,10 @@ const POSIX_FADV_NOREUSE: c_int = 5;
 /// advice changes nothing; what POSIX makes observable — a bad descriptor, a
 /// pipe, an unknown advice value, a negative length — is still answered.
 /// Returns the error number rather than setting `errno`.
+///
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_fadvise(
     fd: c_int,
@@ -1115,6 +1345,10 @@ pub unsafe extern "C" fn posix_fadvise(
 /// where the block reads as zero (it may be a hole) or lies past the end,
 /// and nothing where it already holds data. Returns the error number rather
 /// than setting `errno`.
+///
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_fallocate(fd: c_int, offset: off_t, len: off_t) -> c_int {
     if offset < 0 || len <= 0 {

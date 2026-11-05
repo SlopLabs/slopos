@@ -482,22 +482,15 @@ fn strand_sweep_task(task: &super::task::Task, now: u64) {
 
 /// Previous sweep's suspect class per task id — the persistence filter that
 /// stops a one-off transient from logging.
-static STRAND_SUSPECT: [core::sync::atomic::AtomicU8; MAX_TASKS] = {
-    const ZERO: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
-    [ZERO; MAX_TASKS]
-};
+static STRAND_SUSPECT: [core::sync::atomic::AtomicU8; MAX_TASKS] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; MAX_TASKS];
 
-static STRAND_TASK_ID: [AtomicU32; MAX_TASKS] = {
-    const EMPTY: AtomicU32 = AtomicU32::new(INVALID_TASK_ID);
-    [EMPTY; MAX_TASKS]
-};
+static STRAND_TASK_ID: [AtomicU32; MAX_TASKS] =
+    [const { AtomicU32::new(INVALID_TASK_ID) }; MAX_TASKS];
 
 /// Previous sweep's state-word epoch per task id; a change means the task moved
 /// and the suspicion is stale.
-static STRAND_EPOCH: [AtomicU32; MAX_TASKS] = {
-    const ZERO: AtomicU32 = AtomicU32::new(0);
-    [ZERO; MAX_TASKS]
-};
+static STRAND_EPOCH: [AtomicU32; MAX_TASKS] = [const { AtomicU32::new(0) }; MAX_TASKS];
 
 /// Snapshot before the queue lock: the stop registry is the same lock level.
 pub fn reset_sleep_queue() {

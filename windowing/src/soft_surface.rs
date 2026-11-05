@@ -81,7 +81,7 @@ impl SoftSurface {
     /// `frame()` picks the same slot this reads, by the same rule.
     pub fn buffer_age(&self) -> u32 {
         let age = self.age[self.pick_slot()];
-        if age >= AGE_UNDEFINED { 0 } else { age }
+        if age == AGE_UNDEFINED { 0 } else { age }
     }
 
     pub fn release_buffer(&mut self, buffer_id: u32) {

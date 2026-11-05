@@ -318,10 +318,8 @@ impl ProcessTlbInfo {
     }
 }
 
-static PROCESS_TLB_INFO: [ProcessTlbInfo; MAX_PROCESSES] = {
-    const INIT: ProcessTlbInfo = ProcessTlbInfo::new();
-    [INIT; MAX_PROCESSES]
-};
+static PROCESS_TLB_INFO: [ProcessTlbInfo; MAX_PROCESSES] =
+    [const { ProcessTlbInfo::new() }; MAX_PROCESSES];
 
 /// A bounds-proved index into the per-process shootdown table.
 ///
@@ -421,9 +419,8 @@ struct TlbShootdownState {
 
 impl TlbShootdownState {
     const fn new() -> Self {
-        const INIT_STATE: PerCpuTlbState = PerCpuTlbState::new();
         Self {
-            cpu_state: [INIT_STATE; MAX_CPUS],
+            cpu_state: [const { PerCpuTlbState::new() }; MAX_CPUS],
             online_cpus: CpuMask::new(),
             sequence: AtomicU64::new(0),
         }
@@ -971,7 +968,7 @@ pub fn flush_asid(asid: u64) {
     handle_tlb_result(try_flush_asid(asid), "flush_asid");
 }
 
-/// # Safety
+/// # Context
 ///
 /// Must be called from interrupt context with interrupts disabled.
 pub fn handle_shootdown_ipi(cpu_idx: usize) {

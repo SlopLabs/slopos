@@ -57,7 +57,10 @@ pub fn memalign(alignment: usize, size: usize) -> *mut u8 {
     p
 }
 
-pub fn malloc_usable_size(ptr: *mut u8) -> usize {
+/// # Safety
+///
+/// `ptr` must be null or a live allocation of this allocator (not yet freed).
+pub unsafe fn malloc_usable_size(ptr: *mut u8) -> usize {
     // SAFETY: `malloc_usable_size`'s contract: `ptr` is null or live.
     unsafe { heap::usable_size(ptr) }
 }

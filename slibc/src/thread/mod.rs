@@ -96,6 +96,9 @@ impl pthread_attr_t {
     }
 }
 
+/// # Safety
+///
+/// `attr` must be null or valid for writes of a `pthread_attr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_init(attr: *mut pthread_attr_t) -> c_int {
     if attr.is_null() {
@@ -107,6 +110,9 @@ pub unsafe extern "C" fn pthread_attr_init(attr: *mut pthread_attr_t) -> c_int {
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or valid for writes of a `pthread_attr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_destroy(attr: *mut pthread_attr_t) -> c_int {
     if attr.is_null() {
@@ -116,6 +122,9 @@ pub unsafe extern "C" fn pthread_attr_destroy(attr: *mut pthread_attr_t) -> c_in
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or point to an initialized, writable `pthread_attr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_setstacksize(
     attr: *mut pthread_attr_t,
@@ -128,6 +137,10 @@ pub unsafe extern "C" fn pthread_attr_setstacksize(
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or point to an initialized `pthread_attr_t`; `stacksize`
+/// must be null or valid for writing a `usize`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_getstacksize(
     attr: *const pthread_attr_t,
@@ -142,6 +155,11 @@ pub unsafe extern "C" fn pthread_attr_getstacksize(
 
 /// Reports the *usable* stack: the guard page sits immediately below
 /// `stackaddr`, which is the convention `pthread_attr_getguardsize` documents.
+///
+/// # Safety
+///
+/// `attr` must be null or point to an initialized `pthread_attr_t`; `stackaddr`
+/// and `stacksize` must each be null or valid for writing one value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_getstack(
     attr: *const pthread_attr_t,
@@ -156,6 +174,10 @@ pub unsafe extern "C" fn pthread_attr_getstack(
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or point to an initialized `pthread_attr_t`; `guardsize`
+/// must be null or valid for writing a `usize`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_getguardsize(
     attr: *const pthread_attr_t,
@@ -170,6 +192,10 @@ pub unsafe extern "C" fn pthread_attr_getguardsize(
 
 /// The guard is one unmapped page or none; a request in between is rounded up
 /// to a page, as POSIX permits.
+///
+/// # Safety
+///
+/// `attr` must be null or point to an initialized, writable `pthread_attr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_setguardsize(
     attr: *mut pthread_attr_t,
@@ -186,6 +212,9 @@ pub unsafe extern "C" fn pthread_attr_setguardsize(
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or point to an initialized, writable `pthread_attr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_setdetachstate(
     attr: *mut pthread_attr_t,
@@ -201,6 +230,10 @@ pub unsafe extern "C" fn pthread_attr_setdetachstate(
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or point to an initialized `pthread_attr_t`;
+/// `detachstate` must be null or valid for writing a `c_int`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_attr_getdetachstate(
     attr: *const pthread_attr_t,
@@ -220,6 +253,11 @@ pub unsafe extern "C" fn pthread_attr_getdetachstate(
 /// guard are not knowable from here. Failing is the correct answer rather than
 /// a guess: a caller that believes a wrong guard range mis-attributes the next
 /// fault in it.
+///
+/// # Safety
+///
+/// `native` must be 0 or a live thread's `pthread_t` (its TCB is read); `attr`
+/// must be null or valid for writes of a `pthread_attr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_getattr_np(native: pthread_t, attr: *mut pthread_attr_t) -> c_int {
     if attr.is_null() {
@@ -250,6 +288,11 @@ pub unsafe extern "C" fn pthread_getattr_np(native: pthread_t, attr: *mut pthrea
 
 /// Names are kept in the TCB: there is no `PR_SET_NAME` here, so a name is
 /// libc-visible only.
+///
+/// # Safety
+///
+/// `thread` must be 0 or a live thread's `pthread_t`; `name` must be null or
+/// point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_setname_np(thread: pthread_t, name: *const c_char) -> c_int {
     if thread == 0 || name.is_null() {
@@ -265,6 +308,10 @@ pub unsafe extern "C" fn pthread_setname_np(thread: pthread_t, name: *const c_ch
     0
 }
 
+/// # Safety
+///
+/// `thread` must be 0 or a live thread's `pthread_t`; `name` must be null or
+/// valid for writes of `len` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_getname_np(
     thread: pthread_t,
@@ -307,6 +354,10 @@ unsafe fn swap_cancel(slot: *mut u8, value: c_int, old: *mut c_int) -> c_int {
 
 /// `pthread_setcancelstate(3)`. There is no `pthread_cancel`, so nothing
 /// ever requests cancellation; the state is kept only to be reported back.
+///
+/// # Safety
+///
+/// `oldstate` must be null or valid for writing a `c_int`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_setcancelstate(state: c_int, oldstate: *mut c_int) -> c_int {
     let slot = if tls::tls_is_initialized() {
@@ -319,6 +370,10 @@ pub unsafe extern "C" fn pthread_setcancelstate(state: c_int, oldstate: *mut c_i
 
 /// `pthread_setcanceltype(3)`. Kept and reported back, as
 /// [`pthread_setcancelstate`].
+///
+/// # Safety
+///
+/// `oldtype` must be null or valid for writing a `c_int`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_setcanceltype(kind: c_int, oldtype: *mut c_int) -> c_int {
     let slot = if tls::tls_is_initialized() {
@@ -329,6 +384,10 @@ pub unsafe extern "C" fn pthread_setcanceltype(kind: c_int, oldtype: *mut c_int)
     swap_cancel(slot, kind, oldtype)
 }
 
+/// # Safety
+///
+/// `thread` must be 0 or a `pthread_t` from `pthread_create` whose TCB has not
+/// been freed by join or detach.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_kill(thread: pthread_t, sig: c_int) -> c_int {
     if thread == 0 {
@@ -345,6 +404,9 @@ pub unsafe extern "C" fn pthread_kill(thread: pthread_t, sig: c_int) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// None: it takes no arguments; `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sched_yield() -> c_int {
     Sys::yield_now();
@@ -354,6 +416,10 @@ pub unsafe extern "C" fn sched_yield() -> c_int {
 /// Writes the CPUs the task may run on. The kernel's mask is one `unsigned
 /// long`, so a larger `cpusetsize` is zero-filled above it rather than
 /// refused.
+///
+/// # Safety
+///
+/// `cpuset` must be null or valid for writes of `cpusetsize` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sched_getaffinity(
     pid: c_int,

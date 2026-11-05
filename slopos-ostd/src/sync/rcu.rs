@@ -544,6 +544,10 @@ pub fn rcu_call_typed<T: Send + 'static>(arg: crate::mm::KBox<T>, drop_fn: fn(cr
         _phantom: core::marker::PhantomData<T>,
     }
     impl<T: Send + 'static> Trampoline<T> {
+        /// # Safety
+        ///
+        /// `ptr` must be the `TypedRcuPack<T>` allocation `rcu_call_typed`
+        /// made for this `T`, and is consumed: it may be passed only once.
         unsafe fn run(ptr: *mut u8) {
             let pack = ptr as *mut TypedRcuPack<T>;
             // SAFETY: `pack` was allocated by the matching path in

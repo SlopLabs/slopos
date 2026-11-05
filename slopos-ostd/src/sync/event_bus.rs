@@ -94,6 +94,10 @@ pub struct EventBus {
     base_generation: WaitQueue,
 }
 
+#[expect(
+    clippy::declare_interior_mutable_const,
+    reason = "only ever copied into a static (the production and the test bus), each of which owns its own queues"
+)]
 const EMPTY_BUS: EventBus = EventBus {
     socket_recv: [const { WaitQueue::new(lock_class!("evbus.socket_recv", LOCK_LEVEL_RESOURCE)) };
         MAX_SOCKETS],

@@ -36,6 +36,10 @@ impl Default for FdSet {
 /// count and caps it at its own `SELECT_MAX_FDS`, so a count that cannot be
 /// narrowed without loss is `EINVAL` here rather than a silently truncated
 /// array walk.
+///
+/// # Safety
+///
+/// `fds` must be valid for reads and writes of `nfds` `pollfd`s.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: crate::types::nfds_t, timeout: i32) -> i32 {
     let Ok(count) = u32::try_from(nfds) else {
@@ -51,6 +55,10 @@ pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: crate::types::nfds_t, time
     }
 }
 
+/// # Safety
+///
+/// Each of `readfds`/`writefds`/`exceptfds` must be null or valid for reads and writes of an
+/// `fd_set`; `timeout` must be null or valid for reads and writes of a `timeval`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn select(
     nfds: i32,
@@ -87,6 +95,11 @@ fn wait_mask(sigmask: *const crate::types::sigset_t, storage: &mut u64) -> *cons
 /// `ppoll(2)`: [`poll`] with a `timespec` timeout it leaves unchanged and,
 /// when `sigmask` is not null, that mask blocked for the wait alone, swapped
 /// in and out atomically.
+///
+/// # Safety
+///
+/// `fds` must be valid for reads and writes of `nfds` `pollfd`s; `timeout` must be null or
+/// point to a valid `timespec`; `sigmask` must be null or point to a valid `sigset_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ppoll(
     fds: *mut Pollfd,
@@ -117,6 +130,12 @@ pub unsafe extern "C" fn ppoll(
 
 /// `pselect(2)`: [`select`] with a `timespec` timeout it leaves unchanged and,
 /// as [`ppoll`], a mask for the wait alone.
+///
+/// # Safety
+///
+/// Each of `readfds`/`writefds`/`exceptfds` must be null or valid for reads and writes of an
+/// `fd_set`; `timeout` must be null or point to a valid `timespec`; `sigmask` must be null
+/// or point to a valid `sigset_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pselect(
     nfds: i32,

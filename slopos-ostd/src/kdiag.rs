@@ -207,6 +207,10 @@ pub fn kdiag_dump_cpu_state() {
     );
     crate::klog_info!("=== END CPU STATE DUMP ===");
 }
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "takes the exception trampoline's frame pointer as the boot crate, which forbids unsafe code, receives it; null is checked"
+)]
 pub fn kdiag_dump_interrupt_frame(frame: *const InterruptFrame) {
     if frame.is_null() {
         return;
@@ -264,6 +268,10 @@ pub fn kdiag_dump_stack_trace_from_rbp(rbp: u64) {
         );
     }
 }
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "takes the exception trampoline's frame pointer as the boot crate, which forbids unsafe code, receives it; null is checked"
+)]
 pub fn kdiag_dump_stack_trace_from_frame(frame: *const InterruptFrame) {
     if frame.is_null() {
         return;

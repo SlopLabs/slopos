@@ -22,10 +22,7 @@ const MAX_CPUS: usize = 256;
 
 /// Per-CPU completion signals, indexed by the slot the BSP passes each AP via
 /// `MpInfo::bootstrap`. The AP stores `AP_STARTED_MAGIC` once fully initialised.
-static AP_SIGNALS: [AtomicU64; MAX_CPUS] = {
-    const ZERO: AtomicU64 = AtomicU64::new(0);
-    [ZERO; MAX_CPUS]
-};
+static AP_SIGNALS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 /// Kernel-side AP late entry; the OSTD `ap_early_entry` tail-calls this once
 /// the AP's GS_BASE is installed.

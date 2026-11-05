@@ -77,6 +77,10 @@ pub extern "C" fn ntohl(x: u32) -> u32 {
 
 /// Parse dotted-decimal IPv4 into a network-byte-order `u32`, or
 /// `INADDR_NONE` if the string does not parse, which 255.255.255.255 also is.
+///
+/// # Safety
+///
+/// `cp` must be null or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn inet_addr(cp: *const u8) -> u32 {
     parse_ipv4(cp).unwrap_or(INADDR_NONE)
@@ -131,6 +135,10 @@ static mut INET_NTOA_BUF: [u8; 16] = [0u8; 16];
 
 /// Format a network-byte-order IPv4 `u32` as dotted decimal. The result points
 /// into a shared static buffer — NOT thread-safe.
+///
+/// # Safety
+///
+/// None for the caller; the result is overwritten by the next call, so concurrent calls race on it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn inet_ntoa(addr: u32) -> *const u8 {
     let bytes = addr.to_ne_bytes();

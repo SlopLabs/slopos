@@ -65,6 +65,9 @@ pub unsafe extern "C" fn openlog(ident: *const c_char, option: c_int, facility: 
     }
 }
 
+/// # Safety
+///
+/// None: it only resets library state; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn closelog() {
     IDENT.store(core::ptr::null_mut(), Ordering::Relaxed);

@@ -46,7 +46,7 @@ mod imp {
     /// Decode the 12-byte prologue.
     pub fn header() -> UnwindIndexHeader {
         let base = hdr_base();
-        // SAFETY: `check_registry_sections.sh` fails the build unless the
+        // SAFETY: the `registry-sections` gate fails the build unless the
         // bracketed section holds a prologue plus one entry.
         let raw = unsafe { core::slice::from_raw_parts(base, 12) };
         let ptr_rel = i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);

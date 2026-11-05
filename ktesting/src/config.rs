@@ -38,6 +38,18 @@ impl core::fmt::Display for Verbosity {
     }
 }
 
+/// Which slice of the selected tests this boot runs, from `tests.shard=K/N`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Shard {
+    #[default]
+    Whole,
+    /// The `index`-th (1-based) of `count` slices, `1 <= index <= count`.
+    Part { index: u32, count: u32 },
+    /// `tests.shard=` was present but not `K/N` with `1 <= K <= N`; every
+    /// phase fails rather than silently running everything or nothing.
+    Invalid,
+}
+
 /// Test-harness runtime configuration. Globs are stored owned so the parsing
 /// path can synthesise patterns without juggling lifetimes.
 #[derive(Clone, Debug, Default)]
@@ -48,11 +60,22 @@ pub struct TestConfig {
     pub shutdown: bool,
     pub run_globs: KVec<KVec<u8>>,
     pub skip_globs: KVec<KVec<u8>>,
+    pub shard: Shard,
 }
 
 impl Default for Verbosity {
     fn default() -> Self {
         DEFAULT_VERBOSITY
+    }
+}
+
+fn parse_shard(value: &str) -> Shard {
+    let Some((index, count)) = value.split_once('/') else {
+        return Shard::Invalid;
+    };
+    match (index.parse::<u32>(), count.parse::<u32>()) {
+        (Ok(index), Ok(count)) if index >= 1 && index <= count => Shard::Part { index, count },
+        _ => Shard::Invalid,
     }
 }
 
@@ -107,6 +130,7 @@ pub fn config_from_cmdline(cmdline: Option<&str>) -> TestConfig {
         shutdown: DEFAULT_SHUTDOWN,
         run_globs: KVec::new(),
         skip_globs: KVec::new(),
+        shard: Shard::Whole,
     };
     if let Some(cmdline) = cmdline {
         for token in cmdline.split_whitespace() {
@@ -139,6 +163,8 @@ pub fn config_from_cmdline(cmdline: Option<&str>) -> TestConfig {
                 if let Some(shutdown) = parse_bool(value) {
                     cfg.shutdown = shutdown;
                 }
+            } else if let Some(value) = match_tests_prefix(token, "shard=") {
+                cfg.shard = parse_shard(value);
             }
         }
     }

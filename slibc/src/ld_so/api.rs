@@ -258,6 +258,11 @@ pub unsafe extern "C" fn dlclose(handle: *mut c_void) -> c_int {
 }
 
 /// `dlerror(3)`. Reading clears, as POSIX requires.
+///
+/// # Safety
+///
+/// None: it dereferences nothing the caller supplies; it is `unsafe` only as a
+/// C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dlerror() -> *const c_char {
     let code = LAST_ERROR.swap(0, Ordering::Relaxed);

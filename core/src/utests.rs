@@ -196,8 +196,9 @@ crate::utest!(
 
 // Nothing below is ordered by its position in this file. The userland phase
 // walks `ktesting::registry::registry_sorted()`, which orders by
-// `(module, name)`, and every utest here shares one module — so the sorted
-// `name` is the running order, and this file's order is presentation only.
+// `(order, module, rank, name)`, and every utest here shares one module, order
+// and rank — so the sorted `name` is the running order, and this file's order
+// is presentation only. A shard runs a contiguous run of that order.
 //
 // `libc_abi` opens AF_UNIX endpoints, and the kernel phase has a known bug
 // where exercising unix sockets leaves UDP dead for the rest of the run (see

@@ -112,8 +112,7 @@ pub struct BootstrapTaskArrayCell(pub [BootstrapTaskAbi; MAX_STATIC_APS]);
 impl BootstrapTaskArrayCell {
     #[inline]
     pub const fn new() -> Self {
-        const INIT: BootstrapTaskAbi = BootstrapTaskAbi::new();
-        Self([INIT; MAX_STATIC_APS])
+        Self([const { BootstrapTaskAbi::new() }; MAX_STATIC_APS])
     }
 
     #[inline]

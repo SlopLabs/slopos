@@ -10,6 +10,10 @@
 
 use core::arch::asm;
 
+/// # Safety
+///
+/// `num` must name a valid SlopOS syscall whose side effects (e.g. exit, yield) do not
+/// violate invariants the caller relies on.
 #[inline(always)]
 pub unsafe fn syscall0(num: u64) -> u64 {
     let ret: u64;
@@ -41,6 +45,11 @@ pub unsafe fn syscall0(num: u64) -> u64 {
     ret
 }
 
+/// # Safety
+///
+/// `num` and the argument must form a valid SlopOS syscall: an argument the call treats as a
+/// pointer must be valid for the access that syscall performs, and the call's side effects
+/// (memory unmapping, fd closing, exit) must not violate invariants the caller relies on.
 #[inline(always)]
 pub unsafe fn syscall1(num: u64, arg0: u64) -> u64 {
     let ret: u64;
@@ -73,6 +82,11 @@ pub unsafe fn syscall1(num: u64, arg0: u64) -> u64 {
     ret
 }
 
+/// # Safety
+///
+/// `num` and the arguments must form a valid SlopOS syscall: any argument the call treats as a
+/// pointer must be valid for the access that syscall performs, and the call's side effects
+/// (memory unmapping, fd closing, exit) must not violate invariants the caller relies on.
 #[inline(always)]
 pub unsafe fn syscall2(num: u64, arg0: u64, arg1: u64) -> u64 {
     let ret: u64;
@@ -106,6 +120,11 @@ pub unsafe fn syscall2(num: u64, arg0: u64, arg1: u64) -> u64 {
     ret
 }
 
+/// # Safety
+///
+/// `num` and the arguments must form a valid SlopOS syscall: any argument the call treats as a
+/// pointer must be valid for the access that syscall performs, and the call's side effects
+/// (memory unmapping, fd closing, exit) must not violate invariants the caller relies on.
 #[inline(always)]
 pub unsafe fn syscall3(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     let ret: u64;
@@ -140,6 +159,11 @@ pub unsafe fn syscall3(num: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     ret
 }
 
+/// # Safety
+///
+/// `num` and the arguments must form a valid SlopOS syscall: any argument the call treats as a
+/// pointer must be valid for the access that syscall performs, and the call's side effects
+/// (memory unmapping, fd closing, exit) must not violate invariants the caller relies on.
 #[inline(always)]
 pub unsafe fn syscall4(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> u64 {
     let ret: u64;
@@ -175,6 +199,11 @@ pub unsafe fn syscall4(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> 
     ret
 }
 
+/// # Safety
+///
+/// `num` and the arguments must form a valid SlopOS syscall: any argument the call treats as a
+/// pointer must be valid for the access that syscall performs, and the call's side effects
+/// (memory unmapping, fd closing, exit) must not violate invariants the caller relies on.
 #[inline(always)]
 pub unsafe fn syscall5(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
     let ret: u64;
@@ -211,6 +240,11 @@ pub unsafe fn syscall5(num: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg
     ret
 }
 
+/// # Safety
+///
+/// `num` and the arguments must form a valid SlopOS syscall: any argument the call treats as a
+/// pointer must be valid for the access that syscall performs, and the call's side effects
+/// (memory unmapping, fd closing, exit) must not violate invariants the caller relies on.
 #[inline(always)]
 pub unsafe fn syscall6(
     num: u64,

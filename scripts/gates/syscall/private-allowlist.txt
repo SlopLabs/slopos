@@ -1,5 +1,5 @@
 # Private syscall constants whose lowercased name is also a Linux x86-64
-# syscall name. Data for scripts/check_syscall_abi.sh.
+# syscall name. Data for the `syscall-abi` gate.
 #
 # Normally that is a failure: a call Linux already names belongs on Linux's
 # number, because the number is what promises the signature. An entry here is

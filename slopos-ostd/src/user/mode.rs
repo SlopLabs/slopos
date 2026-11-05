@@ -75,6 +75,10 @@ impl<'a> UserMode<'a> {
 /// before this function returns, through the cell that holds its register
 /// file.
 pub unsafe trait UserModeBackend: Send + Sync + 'static {
+    /// # Safety
+    ///
+    /// `ctx` must stay borrowed for the whole round trip: its register file is
+    /// published to the trampoline, which writes the next user state into it.
     unsafe fn execute_round_trip(&self, ctx: &UserContext);
 }
 
@@ -283,6 +287,11 @@ const SEL_USER_DATA_RPL3: u64 = 0x1B;
 #[cfg(all(target_arch = "x86_64", not(test)))]
 const _: () = assert!(core::mem::size_of::<UserRegs>() >= 144);
 
+/// # Safety
+///
+/// `_user_regs` must be the `regs_ptr()` of a `UserContext` that stays live
+/// for the whole round trip, since `__ostd_user_return` writes the next user
+/// state into it; only [`UserModeBackend::execute_round_trip`] calls it.
 #[cfg(all(target_arch = "x86_64", not(test)))]
 #[unsafe(naked)]
 pub unsafe extern "sysv64" fn user_mode_round_trip_asm(_user_regs: *const UserRegs) {

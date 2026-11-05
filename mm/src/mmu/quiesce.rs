@@ -29,10 +29,7 @@ use super::asid;
 static EPOCH: AtomicU64 = AtomicU64::new(1);
 
 /// Highest epoch each CPU has flushed at. `0` = never acked, i.e. not booted.
-static CPU_ACKED: [AtomicU64; MAX_CPUS] = {
-    const Z: AtomicU64 = AtomicU64::new(0);
-    [Z; MAX_CPUS]
-};
+static CPU_ACKED: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 /// Until the tick runs nothing can ack, so quarantining would park frames with
 /// no way to release them. Early boot frees straight through.

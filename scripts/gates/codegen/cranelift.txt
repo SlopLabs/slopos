@@ -24,7 +24,7 @@
 #                 software-float lowering, so this is a property of the
 #                 backend rather than a missing flag.
 #   stack-sizes   -Zemit-stack-sizes is accepted and produces no section.
-#                 check_stack_sizes.sh fails closed on it through
+#                 The stack-sizes ELF gate fails closed on it through
 #                 min-records, which is the only reason S-5 is not silently
 #                 unenforced.
 #   safestack     cg_clif takes -Cllvm-args as its own option namespace and

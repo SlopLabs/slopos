@@ -66,7 +66,8 @@ fn fixture_fs<'a>(
     Some(Ext4Fs::new(device, cache, sb, geom))
 }
 
-// Idempotent, so no test has to depend on the lex order that put it first.
+// Idempotent: the `vfs_ready` fixture runs it ahead of the kernel phase, and a
+// test that needs the VFS calls it again rather than trusting that it ran.
 fn ensure_vfs_ready() -> bool {
     if vfs_init_builtin_filesystems().is_err() {
         klog_info!("VFS_TEST: failed to initialize VFS");
@@ -1794,13 +1795,7 @@ pub fn test_ext4_remove_path_not_file() -> TestResult {
     }
 }
 
-fn test_ext4_aaa_init() -> TestResult {
-    if ensure_vfs_ready() {
-        TestResult::Pass
-    } else {
-        TestResult::Fail
-    }
-}
+slopos_testing::fixture!(name = vfs_ready, phase = kernel, setup = ensure_vfs_ready);
 
 /// Lay out `n` blocks of `bs` bytes plus a verity trailer in `img`, in the
 /// shape `gen_verity.py` writes. `corrupt_block` is flipped *after* its hash
@@ -2258,7 +2253,6 @@ slopos_testing::stest!(name = test_verity_trailer_must_lie_beyond_filesystem);
 slopos_testing::stest!(name = test_verity_partial_read_skips);
 slopos_testing::stest!(name = test_verity_multiblock_span_detects);
 
-slopos_testing::stest!(name = test_ext4_aaa_init);
 slopos_testing::stest!(name = test_vfs_initialized);
 slopos_testing::stest!(name = test_vfs_root_stat);
 slopos_testing::stest!(name = test_vfs_file_roundtrip);
@@ -3020,11 +3014,12 @@ pub fn test_quota_fdslot_cross_process_isolation() -> TestResult {
 
 slopos_testing::stest!(name = test_quota_fdslot_cross_process_isolation);
 
-/// The ledger agrees with itself immediately after an exhaustion run. Named
-/// `zzz` so it sorts after the tests that drive the ceilings and unwind them.
-/// The type system guarantees a charge token is unique, never that the number
-/// matches reality, so only this audit can see a forgotten or skipped charge.
-pub fn test_zzz_quota_ledger_is_consistent_after_exhaustion() -> TestResult {
+/// The ledger agrees with itself immediately after an exhaustion run. Ranked
+/// after the rest of this module, the tests that drive the ceilings and unwind
+/// them. The type system guarantees a charge token is unique, never that the
+/// number matches reality, so only this audit can see a forgotten or skipped
+/// charge.
+pub fn test_quota_ledger_is_consistent_after_exhaustion() -> TestResult {
     use slopos_ostd::process::quota::{LedgerFault, ledger_audit};
 
     let mut first: Option<LedgerFault> = None;
@@ -3044,7 +3039,10 @@ pub fn test_zzz_quota_ledger_is_consistent_after_exhaustion() -> TestResult {
     TestResult::Pass
 }
 
-slopos_testing::stest!(name = test_zzz_quota_ledger_is_consistent_after_exhaustion);
+slopos_testing::stest!(
+    name = test_quota_ledger_is_consistent_after_exhaustion,
+    rank = 1
+);
 
 /// A file to open repeatedly, or `None` if the scratch tree is unavailable.
 fn scratch_file(path: &'static [u8]) -> Option<&'static [u8]> {
@@ -5370,7 +5368,6 @@ pub fn test_vfs_unlink_defers_while_open() -> TestResult {
     if seed.write(0, b"held-open").is_err() {
         return slopos_testing::fail!("could not seed the fixture");
     }
-    drop(seed);
 
     // A descriptor-level handle, which is what takes the open reference; the
     // `VfsHandle` above deliberately does not.

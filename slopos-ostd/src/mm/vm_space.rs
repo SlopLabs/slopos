@@ -425,6 +425,12 @@ impl VmSpace {
 
     /// Switch the current CPU to this address space. The only
     /// sanctioned CR3 write path.
+    ///
+    /// # Safety
+    ///
+    /// The space's kernel half (PML4 indices 256..512) must match the kernel
+    /// master's, as it does for the master and for every space prepopulated
+    /// from it; otherwise the CPU loses its own code mapping at the CR3 write.
     pub unsafe fn activate(&self) {
         let ctx = self.mm_ctx_handle.load(Ordering::Acquire);
         let hook = current_cursor_unmap_hook();

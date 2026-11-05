@@ -12,6 +12,10 @@ const PTS_DIR: &[u8] = b"/dev/pts/";
 
 /// `posix_openpt(3)`: a new master, opened with `flags` (`O_RDWR`,
 /// `O_NOCTTY`).
+///
+/// # Safety
+///
+/// None: `flags` is a plain integer the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn posix_openpt(flags: c_int) -> c_int {
     match Sys::open(PTMX.as_ptr(), flags, 0) {
@@ -97,6 +101,11 @@ const PTSNAME_MAX: usize = PTS_DIR.len() + SLAVE_DIGITS_MAX + 1;
 static mut PTSNAME: [u8; PTSNAME_MAX] = [0; PTSNAME_MAX];
 
 /// `ptsname(3)`: [`ptsname_r`] into static storage; `NULL` with `errno` set.
+///
+/// # Safety
+///
+/// None for the caller; the answer points to static storage overwritten by the
+/// next call, so concurrent calls race on it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ptsname(fd: c_int) -> *mut c_char {
     let buf = (&raw mut PTSNAME).cast::<c_char>();

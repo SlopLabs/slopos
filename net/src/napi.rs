@@ -33,10 +33,9 @@ impl NapiContext {
     }
 }
 
-// The wait-predicate purity gate (`scripts/check_wait_predicate_purity.sh`)
-// forbids calling the NAPI dispatch function inside a
-// `wait_event{,_timeout,_until}` closure — predicates must observe state, not
-// side-effect.
+// The `wait-predicate-purity` gate forbids calling the NAPI dispatch function
+// inside a `wait_event{,_timeout,_until}` closure — predicates must observe
+// state, not side-effect.
 //
 // There is deliberately no synchronous-drain counterpart to `wake_napi`: a
 // caller that drains on its own behalf is compensating for the netpoll kthread

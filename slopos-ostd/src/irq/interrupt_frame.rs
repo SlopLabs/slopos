@@ -38,6 +38,10 @@ impl InterruptFrame {
     /// alive for exactly one handler invocation: a lifetime the caller names is
     /// one it could name twice, and two `&mut` to one frame is aliasing UB.
     #[inline]
+    #[expect(
+        clippy::not_unsafe_ptr_arg_deref,
+        reason = "the IDT trampoline's frame stays live for the handler, the anchor bounds the borrow, and the handler crates forbid unsafe code"
+    )]
     pub fn from_ptr<'a, A: ?Sized>(
         anchor: &'a A,
         ptr: *const InterruptFrame,
@@ -56,6 +60,10 @@ impl InterruptFrame {
     /// Mutable variant of [`InterruptFrame::from_ptr`]. Takes `&mut A`, so the
     /// exclusivity of the frame is the exclusivity of the anchor.
     #[inline]
+    #[expect(
+        clippy::not_unsafe_ptr_arg_deref,
+        reason = "the IDT trampoline's frame stays live for the handler, the anchor's `&mut` makes the borrow exclusive, and the handler crates forbid unsafe code"
+    )]
     pub fn from_ptr_mut<'a, A: ?Sized>(
         anchor: &'a mut A,
         ptr: *mut InterruptFrame,

@@ -477,7 +477,7 @@ pub(crate) fn build_user_task_entry_frame(kernel_stack_top: u64) -> SwitchContex
 ///
 /// An **id**, not an address: a task handle parked in a saved register file
 /// until first dispatch would be a handle with no owner — what checks 3a and 3b
-/// of `check_task_ownership.sh` name. The task is re-derived from the PCR,
+/// of the `task-ownership` gate name. The task is re-derived from the PCR,
 /// authoritative because by the time this runs the task *is* this CPU's
 /// current; a registry lookup would take the global cli-spinlock to learn what
 /// the PCR already publishes. The id survives only as a `debug_assert`

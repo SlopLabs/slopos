@@ -316,7 +316,7 @@ impl Drop for VnodeBacking {
 
 /// Remove a vnode table row and release the open reference it held.
 ///
-/// Panic-free by construction, which `check_drop_panic_free.sh` scans for:
+/// Panic-free by construction, which the `drop-panic-free` gate scans for:
 /// every step is a table removal, a bounded scan, a relaxed atomic, or a
 /// filesystem's own non-blocking reclaim.
 ///

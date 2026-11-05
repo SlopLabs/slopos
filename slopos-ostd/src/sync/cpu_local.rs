@@ -94,6 +94,10 @@ impl<T> CpuLocal<T> {
     /// other thread is simultaneously borrowing slot `cpu_id` (typical use:
     /// shutdown drain, where SMP has already been quiesced).
     #[inline]
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "the slot's exclusivity is this unsafe fn's documented caller obligation, as with UnsafeCell::get"
+    )]
     pub unsafe fn get_for_cpu_mut(&self, cpu_id: usize) -> &mut T {
         debug_assert!(cpu_id < MAX_CPUS);
         // SAFETY: caller certifies cpu_id is in range and exclusive.
@@ -131,6 +135,10 @@ impl<T> CpuLocal<T> {
     /// Cheaper than `get_mut()` for a hot path that pins once and then
     /// dispatches through the same cache repeatedly: no per-call guard.
     #[inline]
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "a per-CPU slot reached by its own CPU under a held PreemptGuard has no other accessor"
+    )]
     pub fn get_pinned_mut(&self, cpu: usize) -> &mut T {
         debug_assert!(
             PreemptGuard::is_active(),

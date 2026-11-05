@@ -6,6 +6,9 @@ use crate::errno::{EINVAL, ENODEV, ENOTTY, ERANGE, errno_set};
 use crate::pal::{Pal, Sys};
 use crate::types::stat;
 
+/// # Safety
+///
+/// `path` must be null or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn access(path: *const u8, mode: i32) -> i32 {
     if path.is_null() {
@@ -27,6 +30,9 @@ pub extern "C" fn umask(mask: u32) -> u32 {
     Sys::umask(mask)
 }
 
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chmod(path: *const u8, mode: u32) -> i32 {
     match Sys::chmod(path, mode) {
@@ -38,6 +44,9 @@ pub unsafe extern "C" fn chmod(path: *const u8, mode: u32) -> i32 {
     }
 }
 
+/// # Safety
+///
+/// `pipefd` must be null or valid for writes of two `i32`s.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pipe(pipefd: *mut i32) -> i32 {
     if pipefd.is_null() {
@@ -54,6 +63,9 @@ pub unsafe extern "C" fn pipe(pipefd: *mut i32) -> i32 {
     }
 }
 
+/// # Safety
+///
+/// `pipefd` must be null or valid for writes of two `c_int`s.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pipe2(pipefd: *mut c_int, flags: c_int) -> c_int {
     if pipefd.is_null() {
@@ -70,6 +82,9 @@ pub unsafe extern "C" fn pipe2(pipefd: *mut c_int, flags: c_int) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dup(oldfd: i32) -> i32 {
     match Sys::dup(oldfd) {
@@ -81,6 +96,9 @@ pub unsafe extern "C" fn dup(oldfd: i32) -> i32 {
     }
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dup2(oldfd: i32, newfd: i32) -> i32 {
     match Sys::dup2(oldfd, newfd) {
@@ -92,6 +110,9 @@ pub unsafe extern "C" fn dup2(oldfd: i32, newfd: i32) -> i32 {
     }
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dup3(oldfd: c_int, newfd: c_int, flags: c_int) -> c_int {
     match Sys::dup3(oldfd, newfd, flags) {
@@ -109,6 +130,11 @@ pub unsafe extern "C" fn dup3(oldfd: c_int, newfd: c_int, flags: c_int) -> c_int
 /// for the descriptor-flag and duplication commands, a `struct flock *` for
 /// the record locks. A command that takes none — `F_GETFD`, `F_GETFL` — must
 /// not pull a `va_arg` that the caller never pushed.
+///
+/// # Safety
+///
+/// For `F_DUPFD`/`F_DUPFD_CLOEXEC`/`F_SETFD`/`F_SETFL` an `int` third argument must be passed;
+/// for `F_GETLK`/`F_SETLK`/`F_SETLKW` a pointer to a valid `struct flock`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fcntl(fd: c_int, cmd: c_int, mut args: ...) -> c_int {
     use slopos_abi::syscall::{F_DUPFD, F_GETLK, F_SETFD, F_SETFL, F_SETLK, F_SETLKW};
@@ -143,6 +169,10 @@ pub(crate) fn is_terminal(fd: i32) -> bool {
 }
 
 /// Returns 1 if `fd` is a terminal, 0 otherwise.
+///
+/// # Safety
+///
+/// None: `fd` is a plain integer the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn isatty(fd: i32) -> i32 {
     is_terminal(fd) as i32
@@ -153,6 +183,11 @@ pub unsafe extern "C" fn isatty(fd: i32) -> i32 {
 /// One argument is always read, which is what every libc does and what every
 /// caller passes: the requests that take none are vanishingly rare and pass a
 /// harmless unused register slot.
+///
+/// # Safety
+///
+/// The variadic argument must be present and, for a request that takes a pointer,
+/// point to memory valid for that request's argument type (e.g. a `struct ifreq`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ioctl(fd: c_int, request: c_ulong, mut args: ...) -> c_int {
     let arg = args.next_arg::<*mut c_void>();
@@ -202,6 +237,10 @@ const TTY_SEARCH_DIRS: [&[u8]; 2] = [b"/dev\0", b"/dev/pts\0"];
 /// fit, and `ENODEV` when `fd` *is* a terminal whose device node is not
 /// reachable under the directories above — which is the honest answer, since
 /// without `/proc/self/fd` there is nothing else to consult.
+///
+/// # Safety
+///
+/// `buf` must be null or valid for writes of `buflen` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ttyname_r(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
     if buf.is_null() || buflen == 0 {
@@ -275,6 +314,11 @@ const TTYNAME_MAX: usize = b"/dev/pts/".len() + slopos_abi::fs::USER_NAME_MAX + 
 static mut TTYNAME: [u8; TTYNAME_MAX] = [0; TTYNAME_MAX];
 
 /// `ttyname(3)`: [`ttyname_r`] into static storage; `NULL` with `errno` set.
+///
+/// # Safety
+///
+/// None for the caller; the answer points to static storage overwritten by the
+/// next call, so concurrent calls race on it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ttyname(fd: c_int) -> *mut c_char {
     let buf = (&raw mut TTYNAME).cast::<c_char>();

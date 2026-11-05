@@ -1,0 +1,27 @@
+[package]
+name = "slopos-xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The tree's checks: source gates over syn, kernel ELF gates over object and iced-x86, and clippy over every target"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+syn = { workspace = true, features = ["full", "visit", "visit-mut", "extra-traits", "parsing", "printing"] }
+proc-macro2 = { workspace = true, features = ["span-locations"] }
+quote = { workspace = true }
+object = { version = "0.39", default-features = false, features = ["read_core", "elf", "std"] }
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "instr_info", "intel"] }
+rustc-demangle = "0.1"
+serde_json = "1"
+
+# Tests assemble the ELF images they hold the gates against.
+[dev-dependencies]
+object = { version = "0.39", default-features = false, features = ["read_core", "elf", "std", "write_std"] }

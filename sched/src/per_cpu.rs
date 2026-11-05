@@ -74,6 +74,10 @@ impl ReadyQueue {
                 // Re-linking here would push onto the list this loop drains.
                 preserved[kept] = Some(node);
                 kept += 1;
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "the queue's owning reference moves with `node` into `preserved` and is re-linked after the drain; dropping `task` would release it"
+                )]
                 core::mem::forget(task);
                 continue;
             }
@@ -217,8 +221,6 @@ impl ReadyQueue {
     }
 }
 
-const EMPTY_QUEUE: ReadyQueue = ReadyQueue::new();
-
 #[repr(C, align(64))]
 pub struct PriorityRunQueue {
     /// Owning CPU id, written once during `init`.
@@ -254,7 +256,7 @@ impl PriorityRunQueue {
     pub const fn new() -> Self {
         Self {
             cpu_id_atom: AtomicUsize::new(0),
-            ready_queues: [EMPTY_QUEUE; NUM_PRIORITY_LEVELS],
+            ready_queues: [const { ReadyQueue::new() }; NUM_PRIORITY_LEVELS],
             aging: KernelSync::new(fair::AgingState::new()),
             queue_lock: SpinLock::new(
                 (),
@@ -854,12 +856,12 @@ pub struct PriorityScheduler {
     pub enabled: AtomicBool,
 }
 
-const PRIORITY_RQ_INIT: CacheAligned<PriorityRunQueue> = CacheAligned(PriorityRunQueue::new());
-
 impl PriorityScheduler {
     pub const fn new() -> Self {
         Self {
-            runqueues: CpuLocal::new_with([PRIORITY_RQ_INIT; MAX_CPUS]),
+            runqueues: CpuLocal::new_with(
+                [const { CacheAligned(PriorityRunQueue::new()) }; MAX_CPUS],
+            ),
             enabled: AtomicBool::new(false),
         }
     }
@@ -1615,7 +1617,7 @@ fn wait_for_aps_to_park(cpu_count: usize) -> Result<(), ApPauseError> {
         return Ok(());
     };
     // One `u64`, never an array: `[u64; MAX_CPUS]` is 2048 bytes, the whole of
-    // `check_stack_sizes.sh`'s cap, before a single other local.
+    // the `stack-sizes` ELF gate's cap, before a single other local.
     let blamed_beat_before = slopos_ostd::cpu::x86_64::pcr::heartbeat_for_cpu(blamed);
 
     // An AP holds `executing_task` for as long as its task runs, so waiting

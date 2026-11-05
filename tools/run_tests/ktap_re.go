@@ -44,6 +44,12 @@ var (
 
 	skipRE = regexp.MustCompile(`^SKIP(?: (.*))?$`)
 
+	// Neither a test nor a footer: a fixture that ran ahead of the phase's
+	// tests, and the slice of the suite a sharded boot runs. A fixture that
+	// failed is a `Bail out!` line instead.
+	fixtureRE = regexp.MustCompile(`^# fixture (\S+) ok$`)
+	shardRE   = regexp.MustCompile(`^# shard (\d+)/(\d+)$`)
+
 	// The kernel emits no colour today; stripped anyway so a future
 	// kernel-side colour change doesn't break the parser.
 	ansiRE = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)

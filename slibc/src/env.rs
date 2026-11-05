@@ -21,6 +21,13 @@ static mut ENVIRON_CAP: usize = 0;
 /// `getenv`, unless the process runs with `AT_SECURE`: a program started
 /// with authority its caller lacks takes nothing from the environment that
 /// caller wrote.
+///
+/// # Safety
+///
+/// `name` must be null or point to a NUL-terminated string.
+/// No other thread may modify the environment (`setenv`, `unsetenv`, `putenv`,
+/// writing `environ`) concurrently; `environ` must be null or a valid
+/// null-terminated array of NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn secure_getenv(name: *const u8) -> *mut u8 {
     if crate::auxv::tag(slopos_abi::auxv::AT_SECURE).is_some_and(|v| v != 0) {
@@ -30,6 +37,13 @@ pub unsafe extern "C" fn secure_getenv(name: *const u8) -> *mut u8 {
 }
 
 /// Pointer to `name`'s value (the part after `=`), or null if not set.
+///
+/// # Safety
+///
+/// `name` must be null or point to a NUL-terminated string.
+/// No other thread may modify the environment (`setenv`, `unsetenv`, `putenv`,
+/// writing `environ`) concurrently; `environ` must be null or a valid
+/// null-terminated array of NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getenv(name: *const u8) -> *mut u8 {
     if name.is_null() || *name == 0 {
@@ -67,6 +81,14 @@ pub unsafe extern "C" fn getenv(name: *const u8) -> *mut u8 {
 
 /// Set `name` to `value`; a zero `overwrite` leaves an existing variable
 /// alone. Returns 0, or -1 with errno set.
+///
+/// # Safety
+///
+/// `name` must be null or point to a NUL-terminated string; `value` must be
+/// null (empty value) or point to a NUL-terminated string.
+/// No other thread may modify the environment (`setenv`, `unsetenv`, `putenv`,
+/// writing `environ`) concurrently; `environ` must be null or a valid
+/// null-terminated array of NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setenv(name: *const u8, value: *const u8, overwrite: i32) -> i32 {
     if name.is_null() || *name == 0 {
@@ -114,6 +136,13 @@ pub unsafe extern "C" fn setenv(name: *const u8, value: *const u8, overwrite: i3
 }
 
 /// Remove `name`. Returns 0, or -1 with errno set.
+///
+/// # Safety
+///
+/// `name` must be null or point to a NUL-terminated string.
+/// No other thread may modify the environment (`setenv`, `unsetenv`, `putenv`,
+/// writing `environ`) concurrently; `environ` must be null or a valid
+/// null-terminated array of NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unsetenv(name: *const u8) -> i32 {
     if name.is_null() || *name == 0 {
@@ -155,6 +184,14 @@ pub unsafe extern "C" fn unsetenv(name: *const u8) -> i32 {
 
 /// Add or replace the `"NAME=VALUE"` string directly in the environment. The
 /// string is NOT copied; the caller keeps it alive. Returns 0, or -1.
+///
+/// # Safety
+///
+/// `string` must be null or point to a NUL-terminated string that stays alive
+/// and unmodified (except through the environment) while it is in `environ`.
+/// No other thread may modify the environment (`setenv`, `unsetenv`, `putenv`,
+/// writing `environ`) concurrently; `environ` must be null or a valid
+/// null-terminated array of NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn putenv(string: *mut u8) -> i32 {
     if string.is_null() {
@@ -194,6 +231,10 @@ pub unsafe extern "C" fn putenv(string: *mut u8) -> i32 {
 /// the NUL). Returns `buf`, or null with errno set. A null `buf` is an
 /// allocation the caller frees, of `size` bytes, or of what the path needs when
 /// `size` is 0, as glibc and musl answer.
+///
+/// # Safety
+///
+/// `buf` must be null or valid for writes of `size` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getcwd(buf: *mut u8, size: usize) -> *mut u8 {
     if !buf.is_null() {
@@ -230,6 +271,10 @@ pub unsafe extern "C" fn getcwd(buf: *mut u8, size: usize) -> *mut u8 {
 }
 
 /// Change the working directory. Returns 0, or -1 with errno set.
+///
+/// # Safety
+///
+/// `path` must be null (`EINVAL`) or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn chdir(path: *const u8) -> i32 {
     if path.is_null() {

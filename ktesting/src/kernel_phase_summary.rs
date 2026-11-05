@@ -32,6 +32,7 @@ static KERNEL_CONFIG: SpinLock<TestConfig> = SpinLock::new(
         shutdown: false,
         run_globs: KVec::new(),
         skip_globs: KVec::new(),
+        shard: crate::config::Shard::Whole,
     },
     slopos_ostd::lock_class!("KERNEL_CONFIG", slopos_ostd::sync::LOCK_LEVEL_RESOURCE),
 );

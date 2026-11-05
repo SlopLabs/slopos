@@ -128,10 +128,8 @@ pub fn kernel_unmap_4kb(va: VirtAddr) -> PhysAddr {
             Ok(c) => c,
             Err(_) => return PhysAddr::NULL,
         };
-        match cur.unmap_kernel::<Size4Kb, KernelMeta>() {
-            Ok(frame) => frame,
-            Err(_) => None,
-        }
+        cur.unmap_kernel::<Size4Kb, KernelMeta>()
+            .unwrap_or_default()
     };
     let Some(frame) = unmapped else {
         return PhysAddr::NULL;

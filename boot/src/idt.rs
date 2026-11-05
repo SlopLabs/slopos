@@ -38,8 +38,7 @@ mod handler_tables {
     use core::sync::atomic::{AtomicPtr, Ordering};
     use slopos_ostd::arch::x86_64::kernel_ptr::fn_ptr;
 
-    const NULL_SLOT: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
-    static PANIC: [AtomicPtr<()>; 32] = [NULL_SLOT; 32];
+    static PANIC: [AtomicPtr<()>; 32] = [const { AtomicPtr::new(core::ptr::null_mut()) }; 32];
 
     pub fn install_panic(vector: u8, handler: ExceptionHandler) {
         PANIC[vector as usize].store(

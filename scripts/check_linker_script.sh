@@ -4,8 +4,8 @@
 # direction.
 #
 # The kernel's image is not a default layout with a base address applied: it
-# is twelve linker registries whose spans check_registry_sections.sh holds to
-# whole entries, a .limine_requests section the bootloader only finds in the
+# is twelve linker registries the `registry-sections` gate holds to being tiled
+# by entries of one size, a .limine_requests section the bootloader only finds in the
 # first LOAD segment, three PHDRS with declared flags, and four early page
 # tables carved out of the location counter past _bss_end. A linker that
 # accepts `-T link.ld` and lays the image out its own way produces a kernel

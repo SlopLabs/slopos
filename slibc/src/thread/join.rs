@@ -4,6 +4,11 @@ use crate::pal::{Pal, Sys};
 use super::pthread_t;
 use super::tcb::Tcb;
 
+/// # Safety
+///
+/// `thread` must be 0 or a `pthread_t` from `pthread_create` whose resources
+/// have not been released by a prior join or detach; `retval` must be null or
+/// valid for writing a pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_join(thread: pthread_t, retval: *mut *mut u8) -> i32 {
     if thread == 0 {
@@ -50,6 +55,10 @@ pub unsafe extern "C" fn pthread_join(thread: pthread_t, retval: *mut *mut u8) -
     0
 }
 
+/// # Safety
+///
+/// `thread` must be 0 or a `pthread_t` from `pthread_create` not already joined
+/// or detached; its resources may be freed, so it must not be used afterwards.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_detach(thread: pthread_t) -> i32 {
     if thread == 0 {
@@ -72,6 +81,10 @@ pub unsafe extern "C" fn pthread_detach(thread: pthread_t) -> i32 {
     0
 }
 
+/// # Safety
+///
+/// Runs TLS and key destructors on the calling thread and never returns, so
+/// nothing on the caller's stack may rely on its destructors running.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_exit(retval: *mut u8) -> ! {
     if super::tls::tls_is_initialized() {
@@ -84,6 +97,9 @@ pub unsafe extern "C" fn pthread_exit(retval: *mut u8) -> ! {
     Sys::exit(0)
 }
 
+/// # Safety
+///
+/// None: it reads only the calling thread's TCB; `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_self() -> pthread_t {
     if super::tls::tls_is_initialized() {
@@ -93,6 +109,9 @@ pub unsafe extern "C" fn pthread_self() -> pthread_t {
     }
 }
 
+/// # Safety
+///
+/// None: the arguments are compared as plain integers; `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_equal(t1: pthread_t, t2: pthread_t) -> i32 {
     if t1 == t2 { 1 } else { 0 }

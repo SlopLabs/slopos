@@ -41,7 +41,7 @@ pub type RawFd = i32;
 pub struct OwnedFd(RawFd);
 
 impl OwnedFd {
-    /// # Safety contract
+    /// # Safety
     /// The caller must ensure `fd` is a valid, open file descriptor that
     /// is not owned by any other `OwnedFd`.
     pub unsafe fn from_raw(fd: RawFd) -> Self {

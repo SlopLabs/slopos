@@ -18,7 +18,7 @@ set -euo pipefail
 #   QEMU_PCI_DEVICES,
 #   OVMF_DIR, OVMF_VARS_FILE,
 #   BOOT_DISK_IMG, INSTALL_STICK, INSTALL_STICK_WRITABLE, INSTALL_CDROM, QEMU_ALLOW_REBOOT,
-#   QEMU_TEST_DISKS,
+#   QEMU_TEST_DISKS, SCRATCH_DIR,
 #   NET, NET_PORTS,
 #   ECHO_PEER_ADDR, ECHO_PEER_PORT, ECHO_PEER_CMD,
 #   GIT_PUSH_REPO, GIT_SSH_PEER, QEMU_QMP,
@@ -300,6 +300,10 @@ ADD_NO_REBOOT=0
 #            a fixed address past every other device, so usb-storage stays
 #            graded and adding it moves nothing else on the bus.
 # Each test-mode disk has a `serial=`, which `/dev/disk/by-id` names it by.
+# Every one the guest writes lives under SCRATCH_DIR (default builddir), so
+# concurrent boots with distinct SCRATCH_DIRs share nothing writable but the
+# root image they are handed; vda's `snapshot=on` takes only a shared read
+# lock, so any number of them can attach the same verified image.
 ADD_SCRATCH_DISK=0
 ADD_VERIFIED_DISK=0
 ADD_CAPACITY_DISK=0
@@ -333,7 +337,7 @@ case "$MODE" in
                 truncate -s 8M "$SCRATCH_DIR/$scratch.img"
             done
             ADD_SCRATCH_DISK=1
-            MEDIA_IMG="${REPO_ROOT}/builddir/media-disk.img"
+            MEDIA_IMG="$SCRATCH_DIR/media-disk.img"
             media_stage="$(mktemp -d)"
             echo "slopos-media: the test harness's labelled volume" >"$media_stage/SLOPOS-MEDIA"
             rm -f "$MEDIA_IMG"

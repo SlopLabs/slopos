@@ -184,11 +184,6 @@ impl Elf64Header {
     pub const PHDR_SIZE: u16 = 56;
 
     /// Parse and validate an ELF header from raw bytes.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure `data` points to valid memory of at least
-    /// `MIN_ELF_SIZE` bytes.
     pub fn parse(data: &[u8]) -> ElfResult<Self> {
         if data.len() < MIN_ELF_SIZE {
             return Err(ElfError::BufferTooSmall);
@@ -639,6 +634,10 @@ impl<'a> ElfValidator<'a> {
             return Err(ElfError::KernelAddressViolation);
         }
 
+        #[expect(
+            clippy::absurd_extreme_comparisons,
+            reason = "USER_SPACE_START_VA is 0 today; the lower bound stays so moving it needs no audit"
+        )]
         if vaddr < USER_SPACE_START_VA || mem_end > USER_SPACE_END_VA {
             return Err(ElfError::AddressOutOfBounds);
         }

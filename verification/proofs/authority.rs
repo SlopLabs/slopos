@@ -68,7 +68,7 @@
 //     has no ids.
 //   - That the dispatcher actually consults the mask before calling a handler.
 //     That is a `rustc` totality assert over the syscall table plus
-//     `scripts/check_authority_reachability.sh`, not a Verus obligation.
+//     the `authority` ELF gate, not a Verus obligation.
 
 use vstd::prelude::*;
 

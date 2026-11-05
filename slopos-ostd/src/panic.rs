@@ -50,6 +50,10 @@ pub fn fatal_abort_count() -> u32 {
 /// `info_ptr` is the panicking `&PanicInfo` stashed before the emergency-stack
 /// switch; the switch only moves `RSP`, so the `PanicInfo` and the format args
 /// it borrows remain live in memory.
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "only reached with the PanicInfo pointer stashed before the emergency-stack switch, which leaves it live; null is checked, and the boot crate calling it forbids unsafe code"
+)]
 pub fn format_panic_location_message(info_ptr: *const PanicInfo, out: &mut dyn Write) {
     if info_ptr.is_null() {
         let _ = out.write_str("<panic info unavailable>");

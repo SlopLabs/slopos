@@ -742,3 +742,109 @@ func TestKernelAbortRecorderTakesTheFirstNonEmptyReason(t *testing.T) {
 		t.Fatalf("reason not backfilled: %q", r.Summary.KernelAbortReason)
 	}
 }
+
+func TestKtapFixtureAndShardLinesAreNeitherTestsNorFooters(t *testing.T) {
+	p := NewKtapParser()
+	events := feedAll(p, []string{
+		"KTAP\tTAP version 14",
+		"KTAP\t1..2",
+		"KTAP\t# shard 2/3",
+		"KTAP\t# fixture slopos_fs::tests::vfs_ready ok",
+		"KTAP\tok 1 - mod::a # time_ms=1",
+		"KTAP\tok 2 - mod::b # time_ms=2",
+		"KTAP\t# elapsed_ms=3 pass=2 fail=0 skip=0 over_time=0",
+	})
+	events = append(events, p.Flush()...)
+	if got := len(filterTests(events)); got != 2 {
+		t.Errorf("tests: got %d, want 2", got)
+	}
+	if got := len(filterPhaseEnds(events)); got != 1 {
+		t.Errorf("phase ends: got %d, want 1", got)
+	}
+	var fixtures []*EvFixture
+	var shards []*EvShard
+	for _, e := range events {
+		switch e := e.(type) {
+		case *EvFixture:
+			fixtures = append(fixtures, e)
+		case *EvShard:
+			shards = append(shards, e)
+		}
+	}
+	if len(fixtures) != 1 || fixtures[0].Name != "slopos_fs::tests::vfs_ready" || fixtures[0].PhaseIdx != 1 {
+		t.Errorf("fixtures: got %+v", fixtures)
+	}
+	if len(shards) != 1 || shards[0].Index != 2 || shards[0].Count != 3 || shards[0].PhaseIdx != 1 {
+		t.Errorf("shards: got %+v", shards)
+	}
+
+	rec := NewRecorder()
+	for _, ev := range events {
+		rec.Record(ev)
+	}
+	zero := 0
+	rec.Finalize(&zero)
+	if rec.Summary.Truncated || rec.Summary.Total() != 2 || rec.Summary.PlannedTotal() != 2 {
+		t.Errorf("summary: truncated=%v total=%d planned=%d, want false/2/2",
+			rec.Summary.Truncated, rec.Summary.Total(), rec.Summary.PlannedTotal())
+	}
+}
+
+// A fixture line after a result commits that result rather than swallowing
+// it into a diag block that never closes.
+func TestKtapFixtureLineCommitsPendingRecord(t *testing.T) {
+	p := NewKtapParser()
+	events := feedAll(p, []string{
+		"KTAP\tTAP version 14",
+		"KTAP\t1..1",
+		"KTAP\tok 1 - mod::a # time_ms=1",
+		"KTAP\t# fixture mod::later ok",
+	})
+	tests := filterTests(events)
+	if len(tests) != 1 || tests[0].Record.Name != "mod::a" {
+		t.Errorf("tests: got %+v", tests)
+	}
+}
+
+func TestKtapFailedFixtureIsABail(t *testing.T) {
+	p := NewKtapParser()
+	events := feedAll(p, []string{
+		"KTAP\tTAP version 14",
+		"KTAP\t1..5",
+		"KTAP\tBail out! fixture slopos_fs::tests::vfs_ready failed",
+		"KTAP\t# elapsed_ms=0 pass=0 fail=1 skip=0 over_time=0",
+	})
+	bails := filterBails(events)
+	if len(bails) != 1 || bails[0].Reason != "fixture slopos_fs::tests::vfs_ready failed" {
+		t.Errorf("bail: got %+v", bails)
+	}
+	if len(filterTests(events)) != 0 {
+		t.Errorf("a failed fixture is not a test")
+	}
+	rec := NewRecorder()
+	for _, ev := range events {
+		rec.Record(ev)
+	}
+	rec.Finalize(nil)
+	v := ClassifyRun(rec.Summary, DriverResult{}, false)
+	if v.Code != 1 {
+		t.Errorf("exit: got %d, want 1", v.Code)
+	}
+}
+
+// Malformed shard and fixture comments fall through as unrecognised lines.
+func TestKtapMalformedShardAndFixtureLinesAreIgnored(t *testing.T) {
+	p := NewKtapParser()
+	events := feedAll(p, []string{
+		"KTAP\tTAP version 14",
+		"KTAP\t1..0",
+		"KTAP\t# shard two/three",
+		"KTAP\t# fixture vfs_ready",
+	})
+	for _, e := range events {
+		switch e.(type) {
+		case *EvFixture, *EvShard, *EvTest, *EvPhaseEnd:
+			t.Errorf("unexpected %T", e)
+		}
+	}
+}

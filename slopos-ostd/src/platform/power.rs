@@ -9,7 +9,7 @@
 //!
 //! Kernel-initiated shutdowns have no caller to check and mint through
 //! [`kernel_authority`]. That is the one seam in the compile-error claim, held
-//! closed by `scripts/check_authority_reachability.sh` rather than by types.
+//! closed by the `authority` ELF gate rather than by types.
 
 use crate::authority::{Cap, Power};
 use crate::sync::OnceLock;

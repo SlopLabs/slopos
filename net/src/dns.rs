@@ -766,19 +766,16 @@ impl Slot {
     }
 }
 
-static SLOTS: [SpinLock<Slot>; MAX_INFLIGHT] = {
-    const SLOT: SpinLock<Slot> = SpinLock::new(
+static SLOTS: [SpinLock<Slot>; MAX_INFLIGHT] = [const {
+    SpinLock::new(
         Slot::new(),
         lock_class!("DNS_QUERY_SLOT", LOCK_LEVEL_RESOURCE),
-    );
-    [SLOT; MAX_INFLIGHT]
-};
+    )
+}; MAX_INFLIGHT];
 static ANSWERED: [AtomicBool; MAX_INFLIGHT] = [const { AtomicBool::new(false) }; MAX_INFLIGHT];
-static WAITERS: [WaitQueue; MAX_INFLIGHT] = {
-    const WQ: WaitQueue =
-        WaitQueue::new(lock_class!("DNS_QUERY_SLOT.waiters", LOCK_LEVEL_RESOURCE));
-    [WQ; MAX_INFLIGHT]
-};
+static WAITERS: [WaitQueue; MAX_INFLIGHT] =
+    [const { WaitQueue::new(lock_class!("DNS_QUERY_SLOT.waiters", LOCK_LEVEL_RESOURCE)) };
+        MAX_INFLIGHT];
 
 /// One lookup's claim on a slot and a source port, given back on drop.
 pub struct Inflight {

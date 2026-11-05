@@ -163,6 +163,9 @@ pub unsafe extern "C" fn ungetc_unlocked(c: i32, stream: *mut FILE) -> i32 {
     c & 0xff
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live `FILE` from `fopen`/`fdopen`/the std streams, not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fgetc(stream: *mut FILE) -> i32 {
     if stream.is_null() {
@@ -174,6 +177,9 @@ pub unsafe extern "C" fn fgetc(stream: *mut FILE) -> i32 {
     c
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live `FILE` from `fopen`/`fdopen`/the std streams, not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fputc(c: i32, stream: *mut FILE) -> i32 {
     if stream.is_null() {
@@ -185,6 +191,9 @@ pub unsafe extern "C" fn fputc(c: i32, stream: *mut FILE) -> i32 {
     r
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live, unclosed `FILE`; `s` must be valid for writes of `n` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fgets(s: *mut u8, n: i32, stream: *mut FILE) -> *mut u8 {
     if stream.is_null() {
@@ -196,6 +205,9 @@ pub unsafe extern "C" fn fgets(s: *mut u8, n: i32, stream: *mut FILE) -> *mut u8
     r
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live, unclosed `FILE`; `s` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fputs(s: *const u8, stream: *mut FILE) -> i32 {
     if stream.is_null() {
@@ -226,6 +238,9 @@ pub unsafe extern "C" fn perror(s: *const u8) {
     (*stream).lock.unlock();
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live `FILE` from `fopen`/`fdopen`/the std streams, not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ungetc(c: i32, stream: *mut FILE) -> i32 {
     if stream.is_null() {
@@ -237,6 +252,9 @@ pub unsafe extern "C" fn ungetc(c: i32, stream: *mut FILE) -> i32 {
     r
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live `FILE` from `fopen`/`fdopen`/the std streams, not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getc(stream: *mut FILE) -> i32 {
     fgetc(stream)
@@ -249,6 +267,9 @@ pub unsafe extern "C" fn getc_unlocked(stream: *mut FILE) -> i32 {
     fgetc_unlocked(stream)
 }
 
+/// # Safety
+///
+/// `stream` must be null or a live `FILE` from `fopen`/`fdopen`/the std streams, not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn putc(c: i32, stream: *mut FILE) -> i32 {
     fputc(c, stream)
@@ -261,6 +282,9 @@ pub unsafe extern "C" fn putc_unlocked(c: i32, stream: *mut FILE) -> i32 {
     fputc_unlocked(c, stream)
 }
 
+/// # Safety
+///
+/// None: reads the library-owned stdin; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getchar() -> i32 {
     fgetc(super::streams::stdin_file())
@@ -273,6 +297,9 @@ pub unsafe extern "C" fn getchar_unlocked() -> i32 {
     fgetc_unlocked(super::streams::stdin_file())
 }
 
+/// # Safety
+///
+/// None: writes to the library-owned stdout; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn putchar(c: i32) -> i32 {
     fputc(c, super::streams::stdout_file())
@@ -287,6 +314,10 @@ pub unsafe extern "C" fn putchar_unlocked(c: i32) -> i32 {
 
 /// `puts` writes the string and a newline as one unit: POSIX §2.5.1 makes the
 /// whole call atomic with respect to other stdio calls on the same stream.
+///
+/// # Safety
+///
+/// `s` must be null or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn puts(s: *const u8) -> i32 {
     if s.is_null() {

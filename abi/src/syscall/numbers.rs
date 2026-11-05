@@ -13,7 +13,7 @@
 //! negated errno. `rcx` and `r11` are clobbered by the `syscall` instruction.
 //! That is the Linux x86-64 convention exactly.
 //!
-//! `scripts/check_syscall_abi.sh` holds every constant below the private base
+//! The `syscall-abi` gate holds every constant below the private base
 //! to Linux's own `syscall_64.tbl`, so a number here cannot drift from the name
 //! it claims.
 

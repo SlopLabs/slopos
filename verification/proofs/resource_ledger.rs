@@ -43,7 +43,7 @@
 //
 //   * The `Charge` token's *placement* — that it lives in exactly one field
 //     for exactly the object's lifetime, which is syntactic and enforced by
-//     `scripts/check_charge_linearity.sh`.
+//     the `charge-linearity` gate.
 //
 // Flat scalars rather than a `Map`: a three-level chain (root, parent, leaf)
 // instantiated concretely, enough to exhibit every partial-batch shape because

@@ -31,6 +31,11 @@ pub(crate) unsafe fn capture(auxv: *const usize) {
 /// kernel chose to say, not a fixed table. `errno` is left alone, because 0 is
 /// a legitimate value for several tags and a caller cannot distinguish the two
 /// cases anyway.
+///
+/// # Safety
+///
+/// None: the argument is a plain integer and the recorded auxv is valid for the
+/// process lifetime; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getauxval(type_: c_ulong) -> c_ulong {
     tag(type_ as u64).unwrap_or(0) as c_ulong

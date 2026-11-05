@@ -238,23 +238,6 @@ struct PageSet {
 }
 
 impl PageSet {
-    const EMPTY: Self = Self {
-        fs: None,
-        inode: 0,
-        first_page: 0,
-        pages: KVec::new(),
-        populated: 0,
-        refs: 0,
-        generation: 0,
-        dirtyable: false,
-        pending_release: false,
-        pending_flush: false,
-        forgotten: false,
-        owner: AccountId::NONE,
-        charge: ChargeSlot::empty(),
-        idle_since: 0,
-    };
-
     /// Deliberately `false` once forgotten: the inode number may already have
     /// been reallocated to a different file.
     fn holds(&self, fs: &'static dyn FileSystem, inode: InodeId) -> bool {
@@ -415,17 +398,32 @@ fn find_set(sets: &[PageSet], fs: &'static dyn FileSystem, inode: InodeId) -> Op
 /// an inode's stripe orders a fault's read of it against a `write(2)` to it and
 /// against a rebuild of its extent; faults and writebacks of other files run
 /// alongside. A holder never takes a second stripe.
-static FILEMAP_IO: [Mutex<()>; IO_STRIPES] = {
-    const INIT: Mutex<()> = Mutex::new((), lock_class!("FILEMAP_IO", LOCK_LEVEL_RESOURCE));
-    [INIT; IO_STRIPES]
-};
+static FILEMAP_IO: [Mutex<()>; IO_STRIPES] =
+    [const { Mutex::new((), lock_class!("FILEMAP_IO", LOCK_LEVEL_RESOURCE)) }; IO_STRIPES];
 
 const IO_STRIPES: usize = 64;
 
 /// Spinning, and must stay so: [`release`] runs from a `Drop` the task-exit
 /// path reaches under a preempt guard. No filesystem call is made under it.
 static FILEMAP: SpinLock<[PageSet; MAX_MAPPED_INODES]> = SpinLock::new(
-    [const { PageSet::EMPTY }; MAX_MAPPED_INODES],
+    [const {
+        PageSet {
+            fs: None,
+            inode: 0,
+            first_page: 0,
+            pages: KVec::new(),
+            populated: 0,
+            refs: 0,
+            generation: 0,
+            dirtyable: false,
+            pending_release: false,
+            pending_flush: false,
+            forgotten: false,
+            owner: AccountId::NONE,
+            charge: ChargeSlot::empty(),
+            idle_since: 0,
+        }
+    }; MAX_MAPPED_INODES],
     lock_class!("FILEMAP", LOCK_LEVEL_RESOURCE),
 );
 

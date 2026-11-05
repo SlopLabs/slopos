@@ -1,9 +1,9 @@
-# check_stack_sizes allowlist — variant: tests
+# stack-sizes allowlist — variant: tests
 #
 # Frames above STACK_SIZE_THRESHOLD (2048 B) that are permitted, each capped
 # at its measured size so growth still fails.
 #
-#     scripts/check_stack_sizes.sh --variant tests --emit-allowlist builddir/kernel-tests.elf
+#     xtask elf --variant tests builddir/kernel-tests.elf --emit-allowlist stack-sizes
 #
 # Every entry must match at least one over-threshold frame; a dead exemption
 # fails the gate. No entry may exceed the 4096 B guard page.

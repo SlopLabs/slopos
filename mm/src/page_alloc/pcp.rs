@@ -47,10 +47,8 @@ impl PerCpuPageCache {
     }
 }
 
-pub(super) static PER_CPU_CACHES: CpuLocal<PerCpuPageCache> = {
-    const INIT: CacheAligned<PerCpuPageCache> = CacheAligned(PerCpuPageCache::new());
-    CpuLocal::new_with([INIT; MAX_CPUS])
-};
+pub(super) static PER_CPU_CACHES: CpuLocal<PerCpuPageCache> =
+    CpuLocal::new_with([const { CacheAligned(PerCpuPageCache::new()) }; MAX_CPUS]);
 
 /// Gates the order-0 fast path: until set, allocations bypass the PCP and go
 /// straight to the buddy free-lists.

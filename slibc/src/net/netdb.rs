@@ -33,6 +33,9 @@ pub const NO_DATA: c_int = 4;
 #[thread_local]
 static mut H_ERRNO: c_int = 0;
 
+/// # Safety
+///
+/// None: it takes no arguments; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __h_errno_location() -> *mut c_int {
     &raw mut H_ERRNO

@@ -129,6 +129,10 @@ pub fn errno_get() -> i32 {
     }
 }
 
+/// # Safety
+///
+/// None: it takes no arguments; it is `unsafe` only as a C ABI export. The
+/// returned pointer is valid only on the calling thread, for its lifetime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __errno_location() -> *mut i32 {
     if crate::thread::tls::tls_is_initialized() {

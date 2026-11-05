@@ -34,6 +34,10 @@ impl HermeticVTable {
     }
 }
 
+/// # Safety
+///
+/// None: it calls only safe code; `unsafe` only to fit the vtable's
+/// `snapshot` slot.
 unsafe fn snapshot_thunk<S: HermeticState>() -> Result<NonNull<()>, AllocError> {
     let snap = <S as HermeticState>::snapshot()?;
     let boxed = KBox::try_new(snap)?;
@@ -42,6 +46,11 @@ unsafe fn snapshot_thunk<S: HermeticState>() -> Result<NonNull<()>, AllocError> 
     Ok(unsafe { NonNull::new_unchecked(raw) })
 }
 
+/// # Safety
+///
+/// `payload` must come from `snapshot_thunk::<S>` for the same `S` and is
+/// consumed, and the call must come from `KernelTestScope`'s drop, as
+/// `HermeticState::restore` requires.
 unsafe fn restore_thunk<S: HermeticState>(payload: NonNull<()>) {
     // SAFETY: `payload` came from `snapshot_thunk::<S>` for the same `S` —
     // `hermetic_state! { S { ... } }` emits the pair together.

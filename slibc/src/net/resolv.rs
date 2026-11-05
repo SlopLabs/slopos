@@ -62,6 +62,10 @@ pub static mut _res: __res_state = __res_state {
 /// `_res`, keeping the option bits a caller set. The kernel answers the
 /// query only for a caller that may inspect the system, so another gets -1
 /// and `EPERM`.
+///
+/// # Safety
+///
+/// Writes the global `_res` unsynchronised: must not run concurrently with other users of `_res`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn res_init() -> c_int {
     let config = match Records::fetch(NET_Q_RESOLVER) {
@@ -98,6 +102,11 @@ pub unsafe extern "C" fn res_init() -> c_int {
 /// `h_errno` set when no reply answers: `HOST_NOT_FOUND` for a name that does
 /// not exist, `NO_DATA` for one with no such records, `TRY_AGAIN` when no
 /// server replied or the one that did failed, and `NO_RECOVERY` otherwise.
+///
+/// # Safety
+///
+/// `dname` must be null or point to a NUL-terminated string; `answer` must be null or valid for
+/// writes of `anslen` bytes. Must not run concurrently with other users of `_res`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn res_query(
     dname: *const c_char,
@@ -369,6 +378,11 @@ fn ready(fd: c_int, events: i16, wait_ms: c_int) -> bool {
 /// Writes the name at `src` in the message `msg..eom` to `dst` as text, in at
 /// most `dstsiz` octets with the NUL, and returns how many octets the name
 /// occupies at `src`; -1 for a name that is malformed or does not fit.
+///
+/// # Safety
+///
+/// `msg..eom` must be one readable message buffer, with `src` inside it; `dst` must be null
+/// or valid for writes of `dstsiz` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dn_expand(
     msg: *const c_uchar,

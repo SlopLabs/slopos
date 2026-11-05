@@ -288,7 +288,15 @@ fn register_cascade(gsi: u32, edge: bool, active_low: bool) -> bool {
         Err(_) => return false,
     };
     // Forget the handle before the line: it borrows `line`.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the cascade interrupt stays registered for the machine's life; dropping the handle would unregister the callback"
+    )]
     core::mem::forget(handle);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the cascade interrupt stays registered for the machine's life; dropping the line would free its vector under the live callback"
+    )]
     core::mem::forget(line);
     let _ = crate::ioapic::unmask_gsi(gsi);
     true

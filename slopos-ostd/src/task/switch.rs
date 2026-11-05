@@ -107,6 +107,10 @@ pub unsafe extern "sysv64" fn switch_registers(
 /// - The calling CPU must be the sole accessor of both contexts (Inv. 8).
 /// - `next` must point to a valid, initialised [`SwitchContext`]; `prev`
 ///   must be null or point to a valid, exclusively-owned context.
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "safe so the scheduler crate, which forbids unsafe code, can switch; the contexts' validity is the caller obligation documented above"
+)]
 pub fn switch_context(prev: *mut SwitchContext, next: *const SwitchContext) {
     // Always-on: an IRQ interleaving the count swap and the register switch
     // corrupts the per-task preempt_count, and only surfaces frames later as an
@@ -445,7 +449,7 @@ pub fn user_task_entry_addr() -> u64 {
 ///
 /// Must only be called from the entry trampoline after the entry
 /// function has returned. Diverges (`!`).
-extern "sysv64" fn dispatch_task_exit() -> ! {
+unsafe extern "sysv64" fn dispatch_task_exit() -> ! {
     if !EXIT_HOOK_INSTALLED.load(Ordering::Acquire) {
         panic!("slopos_ostd::task: task entry returned with no exit hook registered");
     }

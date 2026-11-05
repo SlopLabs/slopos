@@ -538,7 +538,6 @@ impl Ext4Mount {
         let new_superblock = fs.superblock();
         let new_superblock_dirty = fs.superblock_dirty();
         let corrupted = fs.corruption_seen();
-        drop(fs);
 
         // Deliberately no per-op flush: dirty blocks stay in the persistent
         // cache until eviction, the background flusher, `sync`, or shutdown.

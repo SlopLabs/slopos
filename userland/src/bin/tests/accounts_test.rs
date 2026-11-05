@@ -504,7 +504,7 @@ fn plant_an_unreadable_file() -> bool {
     let made = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0)
+        .mode(0o000)
         .open(PLANTED);
     made.is_ok() || fail(format!("a DacOverride holder made no file at {PLANTED}"))
 }

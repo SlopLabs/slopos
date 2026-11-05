@@ -66,6 +66,9 @@ unsafe fn state_store(ps: *mut mbstate_t, state: MbState) {
     (*ps).__size = state.to_raw();
 }
 
+/// # Safety
+///
+/// `s` must be null or point to a NUL-terminated wide string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcslen(s: *const wchar_t) -> size_t {
     if s.is_null() {
@@ -74,6 +77,10 @@ pub unsafe extern "C" fn wcslen(s: *const wchar_t) -> size_t {
     crate::string::vector::wide_len(s.cast())
 }
 
+/// # Safety
+///
+/// `s` must be null or valid for reads up to `maxlen` wide characters or its
+/// first NUL, whichever comes first.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcsnlen(s: *const wchar_t, maxlen: size_t) -> size_t {
     if s.is_null() {
@@ -86,6 +93,10 @@ pub unsafe extern "C" fn wcsnlen(s: *const wchar_t, maxlen: size_t) -> size_t {
     n
 }
 
+/// # Safety
+///
+/// Unless either is null, `src` must be valid for reads and `dst` for writes
+/// of `n` wide characters, and the two ranges must not overlap.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wmemcpy(
     dst: *mut wchar_t,
@@ -99,6 +110,10 @@ pub unsafe extern "C" fn wmemcpy(
     dst
 }
 
+/// # Safety
+///
+/// Unless either is null, `src` must be valid for reads and `dst` for writes
+/// of `n` wide characters; the ranges may overlap.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wmemmove(
     dst: *mut wchar_t,
@@ -112,6 +127,9 @@ pub unsafe extern "C" fn wmemmove(
     dst
 }
 
+/// # Safety
+///
+/// `dst` must be null or valid for writes of `n` wide characters.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wmemset(dst: *mut wchar_t, c: wchar_t, n: size_t) -> *mut wchar_t {
     if dst.is_null() {
@@ -121,6 +139,10 @@ pub unsafe extern "C" fn wmemset(dst: *mut wchar_t, c: wchar_t, n: size_t) -> *m
     dst
 }
 
+/// # Safety
+///
+/// Unless either is null, `a` and `b` must be valid for reads of `n` wide
+/// characters (or up to the first difference).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wmemcmp(a: *const wchar_t, b: *const wchar_t, n: size_t) -> c_int {
     if a.is_null() || b.is_null() {
@@ -135,6 +157,10 @@ pub unsafe extern "C" fn wmemcmp(a: *const wchar_t, b: *const wchar_t, n: size_t
     0
 }
 
+/// # Safety
+///
+/// `s` must be null or valid for reads of `n` wide characters (or up to the
+/// first match).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wmemchr(s: *const wchar_t, c: wchar_t, n: size_t) -> *const wchar_t {
     if s.is_null() {
@@ -148,6 +174,10 @@ pub unsafe extern "C" fn wmemchr(s: *const wchar_t, c: wchar_t, n: size_t) -> *c
     core::ptr::null()
 }
 
+/// # Safety
+///
+/// Unless either is null, `src` must be a NUL-terminated wide string and `dst`
+/// valid for writes of `wcslen(src) + 1` wide characters, not overlapping `src`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcscpy(dst: *mut wchar_t, src: *const wchar_t) -> *mut wchar_t {
     if dst.is_null() || src.is_null() {
@@ -164,6 +194,11 @@ pub unsafe extern "C" fn wcscpy(dst: *mut wchar_t, src: *const wchar_t) -> *mut 
     }
 }
 
+/// # Safety
+///
+/// Unless either is null, `dst` must be valid for writes of `n` wide
+/// characters and `src` readable up to `n` characters or its first NUL; the
+/// ranges must not overlap.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcsncpy(
     dst: *mut wchar_t,
@@ -189,6 +224,10 @@ pub unsafe extern "C" fn wcsncpy(
     dst
 }
 
+/// # Safety
+///
+/// Unless either is null, both must be NUL-terminated wide strings, `dst`
+/// with room for `wcslen(dst) + wcslen(src) + 1` characters, not overlapping.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcscat(dst: *mut wchar_t, src: *const wchar_t) -> *mut wchar_t {
     if dst.is_null() || src.is_null() {
@@ -199,6 +238,11 @@ pub unsafe extern "C" fn wcscat(dst: *mut wchar_t, src: *const wchar_t) -> *mut 
     dst
 }
 
+/// # Safety
+///
+/// Unless either is null, `dst` must be NUL-terminated with room for
+/// `wcslen(dst) + min(n, wcsnlen(src, n)) + 1` characters, and `src` readable
+/// up to `n` characters or its first NUL; the ranges must not overlap.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcsncat(
     dst: *mut wchar_t,
@@ -222,6 +266,9 @@ pub unsafe extern "C" fn wcsncat(
     dst
 }
 
+/// # Safety
+///
+/// `a` and `b` must be non-null NUL-terminated wide strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcscmp(a: *const wchar_t, b: *const wchar_t) -> c_int {
     let mut i = 0usize;
@@ -237,6 +284,10 @@ pub unsafe extern "C" fn wcscmp(a: *const wchar_t, b: *const wchar_t) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// `a` and `b` must be non-null and readable up to `n` wide characters or
+/// their first NUL.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcsncmp(a: *const wchar_t, b: *const wchar_t, n: size_t) -> c_int {
     let mut i = 0usize;
@@ -253,6 +304,9 @@ pub unsafe extern "C" fn wcsncmp(a: *const wchar_t, b: *const wchar_t, n: size_t
     0
 }
 
+/// # Safety
+///
+/// `s` must be null or point to a NUL-terminated wide string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcschr(s: *const wchar_t, c: wchar_t) -> *const wchar_t {
     if s.is_null() {
@@ -271,6 +325,9 @@ pub unsafe extern "C" fn wcschr(s: *const wchar_t, c: wchar_t) -> *const wchar_t
     }
 }
 
+/// # Safety
+///
+/// `s` must be null or point to a NUL-terminated wide string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcsrchr(s: *const wchar_t, c: wchar_t) -> *const wchar_t {
     if s.is_null() {
@@ -290,6 +347,10 @@ pub unsafe extern "C" fn wcsrchr(s: *const wchar_t, c: wchar_t) -> *const wchar_
     }
 }
 
+/// # Safety
+///
+/// Each of `haystack` and `needle` must be null or a NUL-terminated wide
+/// string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcsstr(
     haystack: *const wchar_t,
@@ -337,6 +398,9 @@ unsafe fn in_set(set: *const wchar_t, wc: wchar_t) -> bool {
     }
 }
 
+/// # Safety
+///
+/// Each of `s` and `accept` must be null or a NUL-terminated wide string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcsspn(s: *const wchar_t, accept: *const wchar_t) -> size_t {
     if s.is_null() || accept.is_null() {
@@ -349,6 +413,9 @@ pub unsafe extern "C" fn wcsspn(s: *const wchar_t, accept: *const wchar_t) -> si
     n
 }
 
+/// # Safety
+///
+/// Each of `s` and `reject` must be null or a NUL-terminated wide string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcscspn(s: *const wchar_t, reject: *const wchar_t) -> size_t {
     if s.is_null() || reject.is_null() {
@@ -361,6 +428,9 @@ pub unsafe extern "C" fn wcscspn(s: *const wchar_t, reject: *const wchar_t) -> s
     n
 }
 
+/// # Safety
+///
+/// Each of `s` and `accept` must be null or a NUL-terminated wide string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcspbrk(s: *const wchar_t, accept: *const wchar_t) -> *const wchar_t {
     if s.is_null() || accept.is_null() {
@@ -379,6 +449,12 @@ pub unsafe extern "C" fn wcspbrk(s: *const wchar_t, accept: *const wchar_t) -> *
     }
 }
 
+/// # Safety
+///
+/// `delim` must be null or a NUL-terminated wide string; `save` must be null
+/// or valid for reads and writes. `s` (or, when `s` is null, `*save`) must be
+/// null or a writable NUL-terminated wide string; `*save` must hold the value
+/// a previous call stored there.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcstok(
     s: *mut wchar_t,
@@ -414,6 +490,10 @@ pub unsafe extern "C" fn wcstok(
 /// `wcscoll(3)`. SlopOS has the C locale only, where the collation order is
 /// the wide-character order, so this is `wcscmp` rather than a pretence at
 /// collating.
+///
+/// # Safety
+///
+/// `a` and `b` must be non-null NUL-terminated wide strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcscoll(a: *const wchar_t, b: *const wchar_t) -> c_int {
     wcscmp(a, b)
@@ -422,6 +502,11 @@ pub unsafe extern "C" fn wcscoll(a: *const wchar_t, b: *const wchar_t) -> c_int 
 /// `wcsxfrm(3)`. In the C locale the transformation that makes `wcscmp` agree
 /// with `wcscoll` is the identity, so this copies and answers the source
 /// length — which is what tells the caller its buffer was too small.
+///
+/// # Safety
+///
+/// `src` must be null or a NUL-terminated wide string; `dst` must be null or
+/// valid for writes of `n` wide characters, not overlapping `src`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcsxfrm(dst: *mut wchar_t, src: *const wchar_t, n: size_t) -> size_t {
     if src.is_null() {
@@ -440,6 +525,9 @@ pub unsafe extern "C" fn wcsxfrm(dst: *mut wchar_t, src: *const wchar_t, n: size
     len
 }
 
+/// # Safety
+///
+/// `s` must be null or point to a NUL-terminated wide string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcsdup(s: *const wchar_t) -> *mut wchar_t {
     if s.is_null() {
@@ -582,6 +670,12 @@ unsafe fn wide_to_bytes(
 /// the bytes consumed; `(size_t)-2` when `n` bytes are a valid but incomplete
 /// prefix, and `(size_t)-1` with `EILSEQ` when they cannot begin a character.
 /// A null `s` means `mbrtowc(NULL, "", 1, ps)`, which resets `*ps`.
+///
+/// # Safety
+///
+/// `s` must be null or valid for reads of `n` bytes; `pwc` must be null or
+/// valid for a `wchar_t` write; `ps` must be null or a valid `mbstate_t`. A
+/// null `ps` uses a static state, so such calls must not run concurrently.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mbrtowc(
     pwc: *mut wchar_t,
@@ -618,6 +712,12 @@ pub unsafe extern "C" fn mbrtowc(
 
 /// `mbrlen(3)` — `mbrtowc` without the output, and with its own state when
 /// `ps` is null.
+///
+/// # Safety
+///
+/// `s` must be null or valid for reads of `n` bytes; `ps` must be null or a
+/// valid `mbstate_t`. A null `ps` uses a static state, so such calls must not
+/// run concurrently.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mbrlen(s: *const c_char, n: size_t, ps: *mut mbstate_t) -> size_t {
     let ps = if ps.is_null() {
@@ -631,6 +731,12 @@ pub unsafe extern "C" fn mbrlen(s: *const c_char, n: size_t, ps: *mut mbstate_t)
 /// `wcrtomb(3)`. Answers the bytes written, or `(size_t)-1` with `EILSEQ` for
 /// anything that is not a Unicode scalar value. A null `s` is
 /// `wcrtomb(buf, L'\0', ps)` and answers 1 without storing.
+///
+/// # Safety
+///
+/// `s` must be null or valid for writes of `MB_CUR_MAX` (4) bytes; `ps` must be
+/// null or valid for writes. A null `ps` uses a static state, so such calls
+/// must not run concurrently.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcrtomb(s: *mut c_char, wc: wchar_t, ps: *mut mbstate_t) -> size_t {
     let ps = if ps.is_null() {
@@ -659,6 +765,13 @@ pub unsafe extern "C" fn wcrtomb(s: *mut c_char, wc: wchar_t, ps: *mut mbstate_t
 /// characters, and leaves `*src` at the first unconverted byte — NULL once the
 /// terminating NUL has been converted. A null `dst` counts without storing and
 /// without touching `*src`.
+///
+/// # Safety
+///
+/// `src` must be null or valid for reads and writes, and `*src` null or
+/// readable up to `nmc` bytes or its NUL; `dst` must be null or valid for
+/// writes of `len` wide characters; `ps` must be null or a valid `mbstate_t`.
+/// A null `ps` uses a static state, so such calls must not run concurrently.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mbsnrtowcs(
     dst: *mut wchar_t,
@@ -683,6 +796,10 @@ pub unsafe extern "C" fn mbsnrtowcs(
 }
 
 /// `mbsrtowcs(3)` — `mbsnrtowcs` over a NUL-terminated source.
+///
+/// # Safety
+///
+/// As [`mbsnrtowcs`], with `*src` a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mbsrtowcs(
     dst: *mut wchar_t,
@@ -696,6 +813,13 @@ pub unsafe extern "C" fn mbsrtowcs(
 /// `wcsnrtombs(3)`. Converts at most `nwc` wide characters into at most `len`
 /// bytes and leaves `*src` at the first unconverted wide character — NULL once
 /// the terminating NUL has been converted. A null `dst` counts the bytes the
+///
+/// # Safety
+///
+/// `src` must be null or valid for reads and writes, and `*src` null or
+/// readable up to `nwc` wide characters or its NUL; `dst` must be null or
+/// valid for writes of `len` bytes; `ps` must be null or valid for writes. A
+/// null `ps` uses a static state, so such calls must not run concurrently.
 /// conversion would need.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcsnrtombs(
@@ -719,6 +843,10 @@ pub unsafe extern "C" fn wcsnrtombs(
 }
 
 /// `wcsrtombs(3)` — `wcsnrtombs` over a NUL-terminated source.
+///
+/// # Safety
+///
+/// As [`wcsnrtombs`], with `*src` a NUL-terminated wide string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcsrtombs(
     dst: *mut c_char,
@@ -729,6 +857,9 @@ pub unsafe extern "C" fn wcsrtombs(
     wcsnrtombs(dst, src, size_t::MAX, len, ps)
 }
 
+/// # Safety
+///
+/// `ps` must be null or point to a valid `mbstate_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mbsinit(ps: *const mbstate_t) -> c_int {
     if ps.is_null() {
@@ -759,6 +890,11 @@ pub extern "C" fn wctob(c: wint_t) -> c_int {
 ///
 /// UTF-8 carries no shift state, so `mbtowc(NULL, ...)` has nothing to reset
 /// and answers 0, meaning state-independent.
+///
+/// # Safety
+///
+/// `s` must be null or valid for reads of `n` bytes; `pwc` must be null or
+/// valid for a `wchar_t` write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mbtowc(pwc: *mut wchar_t, s: *const c_char, n: size_t) -> c_int {
     if s.is_null() {
@@ -780,6 +916,10 @@ pub unsafe extern "C" fn mbtowc(pwc: *mut wchar_t, s: *const c_char, n: size_t) 
 }
 
 /// `mblen(3)` — `mbtowc` without the output.
+///
+/// # Safety
+///
+/// `s` must be null or valid for reads of `n` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mblen(s: *const c_char, n: size_t) -> c_int {
     mbtowc(core::ptr::null_mut(), s, n)
@@ -787,6 +927,10 @@ pub unsafe extern "C" fn mblen(s: *const c_char, n: size_t) -> c_int {
 
 /// `wctomb(3)`. Answers the bytes written, or -1 with `EILSEQ`. A null `s`
 /// answers 0: the encoding is not state-dependent.
+///
+/// # Safety
+///
+/// `s` must be null or valid for writes of `MB_CUR_MAX` (4) bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wctomb(s: *mut c_char, wc: wchar_t) -> c_int {
     if s.is_null() {
@@ -808,6 +952,11 @@ pub unsafe extern "C" fn wctomb(s: *mut c_char, wc: wchar_t) -> c_int {
 /// `mbstowcs(3)`. Begins in the initial conversion state each call, stores at
 /// most `len` wide characters, and answers `(size_t)-1` with `EILSEQ` for an
 /// invalid or truncated sequence. A null `dst` counts instead of storing.
+///
+/// # Safety
+///
+/// `src` must be null or a NUL-terminated string; `dst` must be null or valid
+/// for writes of `len` wide characters.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mbstowcs(dst: *mut wchar_t, src: *const c_char, len: size_t) -> size_t {
     if src.is_null() {
@@ -828,6 +977,11 @@ pub unsafe extern "C" fn mbstowcs(dst: *mut wchar_t, src: *const c_char, len: si
 /// `wcstombs(3)`. Stores at most `len` bytes and answers `(size_t)-1` with
 /// `EILSEQ` for a wide character that is not a scalar value. A null `dst`
 /// counts the bytes the conversion would need.
+///
+/// # Safety
+///
+/// `src` must be null or a NUL-terminated wide string; `dst` must be null or
+/// valid for writes of `len` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcstombs(dst: *mut c_char, src: *const wchar_t, len: size_t) -> size_t {
     if src.is_null() {
@@ -949,6 +1103,10 @@ impl Subject {
     }
 }
 
+/// # Safety
+///
+/// `s` must be null or a NUL-terminated wide string; `endptr` must be null or
+/// valid for a pointer write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcstol(
     s: *const wchar_t,
@@ -968,6 +1126,10 @@ pub unsafe extern "C" fn wcstol(
     }
 }
 
+/// # Safety
+///
+/// `s` must be null or a NUL-terminated wide string; `endptr` must be null or
+/// valid for a pointer write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcstoul(
     s: *const wchar_t,
@@ -987,6 +1149,10 @@ pub unsafe extern "C" fn wcstoul(
     }
 }
 
+/// # Safety
+///
+/// `s` must be null or a NUL-terminated wide string; `endptr` must be null or
+/// valid for a pointer write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcstoll(
     s: *const wchar_t,
@@ -1006,6 +1172,10 @@ pub unsafe extern "C" fn wcstoll(
     }
 }
 
+/// # Safety
+///
+/// `s` must be null or a NUL-terminated wide string; `endptr` must be null or
+/// valid for a pointer write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcstoull(
     s: *const wchar_t,
@@ -1025,6 +1195,10 @@ pub unsafe extern "C" fn wcstoull(
     }
 }
 
+/// # Safety
+///
+/// `s` must be null or a NUL-terminated wide string; `endptr` must be null or
+/// valid for a pointer write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcstod(s: *const wchar_t, endptr: *mut *const wchar_t) -> f64 {
     let mut buf = [0u8; NUMERIC_STACK];
@@ -1042,6 +1216,11 @@ pub unsafe extern "C" fn wcstod(s: *const wchar_t, endptr: *mut *const wchar_t) 
 
 /// `wcstof(3)`. Delegates to the narrow `strtof` rather than narrowing
 /// `wcstod`'s `double`, so the result is rounded once.
+///
+/// # Safety
+///
+/// `s` must be null or a NUL-terminated wide string; `endptr` must be null or
+/// valid for a pointer write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn wcstof(s: *const wchar_t, endptr: *mut *const wchar_t) -> f32 {
     let mut buf = [0u8; NUMERIC_STACK];

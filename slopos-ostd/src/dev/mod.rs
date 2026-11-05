@@ -46,6 +46,10 @@ pub trait FromRawPtr: Sized + 'static {
 
 impl<T: 'static> FromRawPtr for T {
     #[inline]
+    #[expect(
+        clippy::not_unsafe_ptr_arg_deref,
+        reason = "the trait contract, not the signature, carries the pointer's validity so drivers forbidding unsafe code can reborrow device memory"
+    )]
     fn from_ptr(ptr: *const Self) -> Option<&'static Self> {
         if ptr.is_null() {
             None
@@ -57,6 +61,10 @@ impl<T: 'static> FromRawPtr for T {
     }
 
     #[inline]
+    #[expect(
+        clippy::not_unsafe_ptr_arg_deref,
+        reason = "the trait contract, not the signature, carries the pointer's validity so drivers forbidding unsafe code can reborrow device memory"
+    )]
     fn from_ptr_unchecked(ptr: *const Self) -> &'static Self {
         // SAFETY: caller asserts the contract documented on
         // `from_ptr_unchecked`.

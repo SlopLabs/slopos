@@ -1,6 +1,6 @@
-# check_quota_headroom gate data — variant: tests
+# quota gate data — variant: tests
 #
-#     scripts/check_quota_headroom.sh --variant tests --emit-allowlist
+#     run_tests gate quota --variant tests --emit-allowlist --log RUN.log [--log SHARD.log...] > scripts/gates/quota/tests.txt
 #
 # One line per <phase> <TAB> <kind> <TAB> <cap>, where the cap is the
 # highest peak any single account row reached for that kind. Measured,
@@ -16,7 +16,9 @@
 # higher); every other row is deterministic and carries its exact peak.
 # The two kernelmeta rows after the tests are the largest of 33 KVM
 # captures, 28 of them beside other guests; captures without KVM had
-# peaked 8455 and 90858.
+# peaked 8455 and 90858. CI grades the suite as two shards, whose kernel
+# phases group modules differently: the kernel-phase kernelmeta row is the
+# largest of six two-shard KVM captures (8694 to 8795; unsharded 8620).
 
 # The peak of a kind nobody exercised is zero, and a cap derived from
 # it would bound nothing. Every listed kind must have been reached.
@@ -71,7 +73,7 @@ post-kernel-tests	commitpages	2564
 post-kernel-tests	custody	8
 post-kernel-tests	diskblocks	6
 post-kernel-tests	fdslot	256
-post-kernel-tests	kernelmeta	8680
+post-kernel-tests	kernelmeta	8795
 post-kernel-tests	objectrow	257
 post-kernel-tests	pages	539050
 post-kernel-tests	pinnedbytes	4

@@ -127,7 +127,7 @@ pub fn test_tcp_parse_with_options() -> TestResult {
 
 pub fn test_tcp_parse_data_offset_exceeds_buffer() -> TestResult {
     let mut buf = make_wire_header(1, 2, 0, 0, 5, 0, 0);
-    buf[12] = (15 << 4) & 0xF0;
+    buf[12] = 15 << 4;
     assert_test!(
         tcp::parse_header(&buf).is_none(),
         "data_offset=15 with 20-byte buf should fail"

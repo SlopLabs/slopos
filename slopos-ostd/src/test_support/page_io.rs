@@ -41,6 +41,10 @@ pub fn verify_indexed(ptr: *const u8, len: usize, f: impl Fn(usize) -> u8) -> Op
 
 /// Non-volatile.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "test-only HHDM helper under the module contract; the mm tests calling it forbid unsafe code"
+)]
 pub fn write_byte(ptr: *mut u8, offset: usize, byte: u8) {
     // SAFETY: caller upholds module-level contract; one-byte write.
     unsafe {
@@ -50,6 +54,10 @@ pub fn write_byte(ptr: *mut u8, offset: usize, byte: u8) {
 
 /// Non-volatile.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "test-only HHDM helper under the module contract; the mm tests calling it forbid unsafe code"
+)]
 pub fn read_byte(ptr: *const u8, offset: usize) -> u8 {
     // SAFETY: caller upholds module-level contract; one-byte read.
     unsafe { ptr.add(offset).read() }
@@ -58,6 +66,10 @@ pub fn read_byte(ptr: *const u8, offset: usize) -> u8 {
 /// For tests that must defeat compiler load elision when reading back through
 /// the HHDM alias.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "test-only HHDM helper under the module contract; the mm tests calling it forbid unsafe code"
+)]
 pub fn fill_volatile(ptr: *mut u8, byte: u8, len: usize) {
     for i in 0..len {
         // SAFETY: caller upholds module-level contract; volatile write
@@ -69,6 +81,10 @@ pub fn fill_volatile(ptr: *mut u8, byte: u8, len: usize) {
 }
 
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "test-only HHDM helper under the module contract; the mm tests calling it forbid unsafe code"
+)]
 pub fn write_volatile_byte(ptr: *mut u8, offset: usize, byte: u8) {
     // SAFETY: caller upholds module-level contract.
     unsafe {
@@ -77,6 +93,10 @@ pub fn write_volatile_byte(ptr: *mut u8, offset: usize, byte: u8) {
 }
 
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "test-only HHDM helper under the module contract; the mm tests calling it forbid unsafe code"
+)]
 pub fn read_volatile_byte(ptr: *const u8, offset: usize) -> u8 {
     // SAFETY: caller upholds module-level contract.
     unsafe { ptr.add(offset).read_volatile() }
@@ -85,6 +105,10 @@ pub fn read_volatile_byte(ptr: *const u8, offset: usize) -> u8 {
 /// Equivalent in effect to [`fill_pattern`], but emits the compiler's builtin
 /// memset path (single `rep stosb` on x86_64).
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "test-only HHDM helper under the module contract; the mm tests calling it forbid unsafe code"
+)]
 pub fn write_bytes(ptr: *mut u8, byte: u8, len: usize) {
     // SAFETY: caller upholds module-level contract.
     unsafe {

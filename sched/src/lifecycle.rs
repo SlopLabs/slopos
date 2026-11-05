@@ -96,7 +96,7 @@ pub fn get_total_ready_tasks_all_cpus() -> u32 {
 }
 
 /// Emit the per-CPU scheduler participation report for `phase`, which
-/// `scripts/check_sched_spread.sh` grades.
+/// `run_tests gate sched` grades.
 ///
 /// A CPU that is online but not placement-eligible still dispatches whatever
 /// work stealing hands it, so nothing else on the wire distinguishes it.

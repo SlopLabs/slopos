@@ -38,6 +38,10 @@ pub const SYMLOOP_MAX: c_long = 40;
 /// An unrecognised name is `-1` with `EINVAL` rather than `-1` alone: a limit
 /// this library does not know about must not be indistinguishable from one it
 /// knows to be unbounded.
+///
+/// # Safety
+///
+/// None: the argument is a plain integer; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sysconf(name: c_int) -> c_long {
     match name {
@@ -86,6 +90,12 @@ pub unsafe extern "C" fn sysconf(name: c_int) -> c_long {
 /// the caller did not fill is defined; and the kernel reads only the arguments
 /// the handler for `num` declares, so the surplus registers are ignored
 /// exactly as they are for a hand-written `syscall` instruction.
+///
+/// # Safety
+///
+/// The variadic arguments must be what syscall `num` expects; any pointer among
+/// them must be valid for the access that syscall makes, and the call must not
+/// break invariants this library or the program relies on (e.g. unmapping live memory).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn syscall(num: c_long, mut args: ...) -> c_long {
     let a0 = args.next_arg::<c_long>() as u64;
@@ -107,6 +117,11 @@ pub unsafe extern "C" fn syscall(num: c_long, mut args: ...) -> c_long {
 
 /// `gethostname(2)`, from `uname`'s `nodename` — the only name the kernel
 /// keeps.
+///
+/// # Safety
+///
+/// `name` may be null (`EINVAL`); otherwise it must be valid for writes of
+/// `len` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gethostname(name: *mut c_char, len: usize) -> c_int {
     if name.is_null() {
@@ -160,6 +175,11 @@ pub unsafe extern "C" fn getentropy(buf: *mut core::ffi::c_void, len: usize) -> 
 }
 
 /// `strerror_r(3)`, the XSI form: 0, or an errno.
+///
+/// # Safety
+///
+/// `buf` may be null (`EINVAL`); otherwise it must be valid for writes of
+/// `buflen` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strerror_r(n: c_int, buf: *mut c_char, buflen: usize) -> c_int {
     if buf.is_null() || buflen == 0 {
@@ -189,6 +209,11 @@ static mut STRERROR_FALLBACK: [u8; STRERROR_BUF] = [0; STRERROR_BUF];
 /// The buffer is per-thread: `as_str` hands back a `&'static str` with no
 /// NUL, so the text must be copied, and one process-wide copy would let two
 /// threads in `strerror` at once read each other's answer.
+///
+/// # Safety
+///
+/// None: the argument is a plain integer. The returned buffer is overwritten by
+/// the next `strerror` call on this thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strerror(n: c_int) -> *mut c_char {
     let text = crate::error::SyscallError::from_errno(n)

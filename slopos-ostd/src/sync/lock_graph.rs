@@ -601,11 +601,9 @@ static CHAIN_COUNT: AtomicU32 = AtomicU32::new(0);
 static CHAIN_HASH: StaticTable<AtomicU16, CHAIN_HASH_BUCKETS> =
     StaticTable::new([const { AtomicU16::new(NONE_IDX) }; CHAIN_HASH_BUCKETS]);
 
-static HELD: StaticTable<CacheAligned<PerCpuHeldStack>, MAX_CPUS> = StaticTable::new({
-    const INIT: CacheAligned<PerCpuHeldStack> =
-        CacheAligned(PerCpuHeldStack(UnsafeCell::new(HeldStack::new())));
-    [INIT; MAX_CPUS]
-});
+static HELD: StaticTable<CacheAligned<PerCpuHeldStack>, MAX_CPUS> = StaticTable::new(
+    [const { CacheAligned(PerCpuHeldStack(UnsafeCell::new(HeldStack::new()))) }; MAX_CPUS],
+);
 
 /// Master enable. When `false`, all hooks short-circuit. Production boot
 /// flips this on after PCR init via [`enable_lock_tracking`].
@@ -1885,7 +1883,7 @@ fn add_edge(from: u16, to: u16) -> Result<(), ()> {
 /// BFS from `src`: is `target` reachable via `edges_after` edges?
 ///
 /// Out of line and `#[cold]` so its ~600 bytes of scratch are not hoisted into
-/// `LockCore::acquire`'s frame, which `check_stack_sizes.sh` holds to 2 KiB.
+/// `LockCore::acquire`'s frame, which the `stack-sizes` ELF gate holds to 2 KiB.
 #[cold]
 #[inline(never)]
 fn path_exists(src: u16, target: u16) -> bool {
@@ -1993,6 +1991,10 @@ fn iterate_chain_key(key: u64, idx: u16) -> u64 {
 }
 
 /// No-op poison function used as the sentinel for empty held-stack entries.
+///
+/// # Safety
+///
+/// None: `_addr` is never read; `unsafe` only to fit the poison callback type.
 unsafe fn noop_poison(_addr: *const ()) {}
 
 /// What a report should do about a finding.
@@ -2381,6 +2383,10 @@ pub struct SelfTestGuard(());
 /// `poison_unlock_all_held`, where there is no lock at a synthetic address to
 /// unlock; OSTD supplies it so the "nothing ever dereferences a self-test
 /// address" half of [`push_lock`]'s contract is not a caller's to get wrong.
+///
+/// # Safety
+///
+/// None: `_addr` is never read; `unsafe` only to fit the poison callback type.
 #[cfg(any(test, feature = "test-helpers"))]
 unsafe fn self_test_noop_poison(_addr: *const ()) {}
 

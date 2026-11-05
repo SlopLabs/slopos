@@ -24,21 +24,34 @@ fn digit_value(b: u8) -> i32 {
     }
 }
 
+/// # Safety
+///
+/// `s` must be null or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn atoi(s: *const u8) -> i32 {
     strtol(s, core::ptr::null_mut(), 10) as i32
 }
 
+/// # Safety
+///
+/// `s` must be null or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn atol(s: *const u8) -> i64 {
     strtol(s, core::ptr::null_mut(), 10)
 }
 
+/// # Safety
+///
+/// `s` must be null or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn atoll(s: *const u8) -> i64 {
     strtol(s, core::ptr::null_mut(), 10)
 }
 
+/// # Safety
+///
+/// `s` must be null or point to a NUL-terminated string; `endptr` must be null
+/// or valid for a pointer write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtol(s: *const u8, endptr: *mut *const u8, base: i32) -> i64 {
     if s.is_null() {
@@ -153,6 +166,10 @@ pub unsafe extern "C" fn strtol(s: *const u8, endptr: *mut *const u8, base: i32)
     }
 }
 
+/// # Safety
+///
+/// `s` must be null or point to a NUL-terminated string; `endptr` must be null
+/// or valid for a pointer write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtoul(s: *const u8, endptr: *mut *const u8, base: i32) -> u64 {
     if s.is_null() {
@@ -257,11 +274,17 @@ pub unsafe extern "C" fn strtoul(s: *const u8, endptr: *mut *const u8, base: i32
     if neg { value.wrapping_neg() } else { value }
 }
 
+/// # Safety
+///
+/// As [`strtol`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtoll(s: *const u8, endptr: *mut *const u8, base: i32) -> i64 {
     strtol(s, endptr, base)
 }
 
+/// # Safety
+///
+/// As [`strtoul`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strtoull(s: *const u8, endptr: *mut *const u8, base: i32) -> u64 {
     strtoul(s, endptr, base)

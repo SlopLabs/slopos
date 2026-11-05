@@ -274,6 +274,12 @@ pub unsafe extern "C" fn getpwnam(name: *const c_char) -> *mut passwd {
 }
 
 /// `getpwuid(3)`.
+///
+/// # Safety
+///
+/// Not thread-safe: no other call returning the shared static `passwd`
+/// (`getpwent`, `getpwnam`, `getpwuid`) may run concurrently; the next such
+/// call overwrites the returned entry.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getpwuid(uid: uid_t) -> *mut passwd {
     passwd_static(|pwd, buf, len, result| getpwuid_r(uid, pwd, buf, len, result))
@@ -339,6 +345,12 @@ pub unsafe extern "C" fn getgrnam_r(
 }
 
 /// `getgrgid(3)`.
+///
+/// # Safety
+///
+/// Not thread-safe: no other call returning the shared static `group`
+/// (`getgrent`, `getgrgid`, `getgrnam`) may run concurrently; the next such
+/// call overwrites the returned entry.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getgrgid(gid: gid_t) -> *mut group {
     group_static(|grp, buf, len, result| getgrgid_r(gid, grp, buf, len, result))
@@ -440,6 +452,12 @@ pub extern "C" fn endpwent() {
 }
 
 /// `getpwent(3)`: the database's entries in turn, then `NULL`.
+///
+/// # Safety
+///
+/// Not thread-safe: no other call returning the shared static `passwd`
+/// (`getpwent`, `getpwnam`, `getpwuid`) may run concurrently; the next such
+/// call overwrites the returned entry.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getpwent() -> *mut passwd {
     let wanted = PW_NEXT.fetch_add(1, Ordering::Relaxed);
@@ -471,6 +489,12 @@ pub extern "C" fn endgrent() {
 }
 
 /// `getgrent(3)`: the database's entries in turn, then `NULL`.
+///
+/// # Safety
+///
+/// Not thread-safe: no other call returning the shared static `group`
+/// (`getgrent`, `getgrgid`, `getgrnam`) may run concurrently; the next such
+/// call overwrites the returned entry.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getgrent() -> *mut group {
     let wanted = GR_NEXT.fetch_add(1, Ordering::Relaxed);
@@ -561,6 +585,11 @@ static mut LOGIN: [u8; LOGIN_MAX + 1] = [0; LOGIN_MAX + 1];
 
 /// `getlogin(3)`: as [`getlogin_r`], into static storage the next call
 /// overwrites; `NULL` with `errno` set otherwise.
+///
+/// # Safety
+///
+/// Not thread-safe: no other `getlogin` call may run concurrently, and a
+/// previously returned pointer is invalidated by the next call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getlogin() -> *mut c_char {
     let buf: *mut c_char = (&raw mut LOGIN).cast();

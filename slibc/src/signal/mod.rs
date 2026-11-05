@@ -88,6 +88,11 @@ fn signal_in_range(sig: c_int) -> bool {
 
 /// Install a handler, BSD-style. Returns the previous handler, or `SIG_ERR`
 /// (`usize::MAX` cast) on error.
+///
+/// # Safety
+///
+/// `handler` must be `SIG_DFL`, `SIG_IGN` or the address of an
+/// `extern "C" fn(c_int)` that stays valid while installed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn signal(signum: c_int, handler: usize) -> usize {
     let mut act: UserSigaction = mem::zeroed();
@@ -122,6 +127,13 @@ pub unsafe extern "C" fn signal(signum: c_int, handler: usize) -> usize {
 /// every signal that exists. A catchable handler returns through slibc's own
 /// restorer whatever the caller's `sa_restorer` holds, as glibc and musl have
 /// it: the field is no part of POSIX, so a C caller leaves it uninitialised.
+///
+/// # Safety
+///
+/// `act` must be null or point to a valid `sigaction` whose handler is
+/// `SIG_DFL`, `SIG_IGN` or a function of the signature `sa_flags` selects,
+/// valid while installed; `oldact` must be null or valid for writes of one
+/// `sigaction`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaction(
     signum: c_int,
@@ -184,6 +196,12 @@ pub unsafe extern "C" fn sigaction(
 
 /// `sigaltstack(2)`. The kernel's `stack_t` already *is* Linux's, so this is a
 /// straight call with the C return convention put back on.
+///
+/// # Safety
+///
+/// `ss` must be null or point to a valid `stack_t` whose `ss_sp` addresses
+/// `ss_size` writable bytes that stay valid while installed; `oss` must be
+/// null or valid for writes of one `stack_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaltstack(ss: *const stack_t, oss: *mut stack_t) -> c_int {
     match Sys::sigaltstack(ss as *const UserSigAltStack, oss as *mut UserSigAltStack) {
@@ -195,6 +213,9 @@ pub unsafe extern "C" fn sigaltstack(ss: *const stack_t, oss: *mut stack_t) -> c
     }
 }
 
+/// # Safety
+///
+/// `set` must be null or valid for writes of one `sigset_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigemptyset(set: *mut sigset_t) -> c_int {
     if set.is_null() {
@@ -206,6 +227,10 @@ pub unsafe extern "C" fn sigemptyset(set: *mut sigset_t) -> c_int {
 }
 
 /// Only the 64 signals that exist: a bit past them names nothing.
+///
+/// # Safety
+///
+/// `set` must be null or valid for writes of one `sigset_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigfillset(set: *mut sigset_t) -> c_int {
     if set.is_null() {
@@ -216,6 +241,9 @@ pub unsafe extern "C" fn sigfillset(set: *mut sigset_t) -> c_int {
     0
 }
 
+/// # Safety
+///
+/// `set` must be null or point to a valid `sigset_t`, readable and writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaddset(set: *mut sigset_t, sig: c_int) -> c_int {
     if set.is_null() || !signal_in_range(sig) {
@@ -226,6 +254,9 @@ pub unsafe extern "C" fn sigaddset(set: *mut sigset_t, sig: c_int) -> c_int {
     0
 }
 
+/// # Safety
+///
+/// `set` must be null or point to a valid `sigset_t`, readable and writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigdelset(set: *mut sigset_t, sig: c_int) -> c_int {
     if set.is_null() || !signal_in_range(sig) {
@@ -236,6 +267,9 @@ pub unsafe extern "C" fn sigdelset(set: *mut sigset_t, sig: c_int) -> c_int {
     0
 }
 
+/// # Safety
+///
+/// `set` must be null or point to a valid, initialized `sigset_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigismember(set: *const sigset_t, sig: c_int) -> c_int {
     if set.is_null() || !signal_in_range(sig) {
@@ -251,6 +285,11 @@ pub unsafe extern "C" fn sigismember(set: *const sigset_t, sig: c_int) -> c_int 
 
 /// Examine or change the blocked signal mask. `how` is `SIG_BLOCK`,
 /// `SIG_UNBLOCK` or `SIG_SETMASK`.
+///
+/// # Safety
+///
+/// `set` must be null or point to a valid `sigset_t`; `oldset` must be null
+/// or valid for writes of one `sigset_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigprocmask(
     how: c_int,
@@ -269,6 +308,11 @@ pub unsafe extern "C" fn sigprocmask(
 /// Every task here is a thread of one process and the kernel keeps one mask
 /// per task, so this is `sigprocmask` with the errno returned rather than set
 /// — which is the only difference POSIX draws between the two.
+///
+/// # Safety
+///
+/// `set` must be null or point to a valid `sigset_t`; `oldset` must be null
+/// or valid for writes of one `sigset_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_sigmask(
     how: c_int,
@@ -315,6 +359,9 @@ unsafe fn mask_op(how: c_int, set: *const sigset_t, oldset: *mut sigset_t) -> c_
     }
 }
 
+/// # Safety
+///
+/// `set` must be null or valid for writes of one `sigset_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigpending(set: *mut sigset_t) -> c_int {
     if set.is_null() {
@@ -331,6 +378,10 @@ pub unsafe extern "C" fn sigpending(set: *mut sigset_t) -> c_int {
 
 /// `sigsuspend(2)`: swap in `set` atomically and wait until a signal is
 /// caught; the previous mask is back once the handler has returned.
+///
+/// # Safety
+///
+/// `set` must be null or point to a valid, initialized `sigset_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigsuspend(set: *const sigset_t) -> c_int {
     if set.is_null() {
@@ -343,6 +394,10 @@ pub unsafe extern "C" fn sigsuspend(set: *const sigset_t) -> c_int {
 }
 
 /// Send a signal to a process. Returns 0, or -1 with errno set.
+///
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kill(pid: i32, sig: c_int) -> c_int {
     match Sys::kill(pid, sig) {
@@ -356,6 +411,10 @@ pub unsafe extern "C" fn kill(pid: i32, sig: c_int) -> c_int {
 
 /// `kill(-pgrp)`, which is how the process-group fan-out is spelled at the
 /// syscall. A zero `pgrp` means the caller's own group, which `kill(0)` is.
+///
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn killpg(pgrp: i32, sig: c_int) -> c_int {
     if pgrp < 0 {
@@ -365,6 +424,10 @@ pub unsafe extern "C" fn killpg(pgrp: i32, sig: c_int) -> c_int {
     kill(if pgrp == 0 { 0 } else { -pgrp }, sig)
 }
 
+/// # Safety
+///
+/// None: the arguments are passed by value and `value` is never dereferenced
+/// here; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigqueue(pid: i32, sig: c_int, value: sigval) -> c_int {
     let info = UserSiginfo::from_info(sig, &SigInfo::sent(SI_QUEUE, 0, 0, value.sival_ptr as u64));
@@ -391,6 +454,11 @@ pub extern "C" fn __libc_current_sigrtmax() -> c_int {
 
 /// Signals the calling thread, as POSIX asks, so the handler runs before
 /// `raise` returns; a `kill` of the pid could be taken by any thread.
+///
+/// # Safety
+///
+/// None: `sig` is a plain integer the kernel validates; it is `unsafe` only
+/// as a C ABI export. An installed handler for `sig` runs before return.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn raise(sig: c_int) -> c_int {
     match Sys::tgkill(Sys::getpid(), Sys::gettid(), sig) {
@@ -403,6 +471,11 @@ pub unsafe extern "C" fn raise(sig: c_int) -> c_int {
 }
 
 /// Abort the process — sends SIGABRT, then force-exits if the handler returns.
+///
+/// # Safety
+///
+/// None: it takes no arguments; it is `unsafe` only as a C ABI export. Any
+/// `SIGABRT` handler installed runs, under that handler's own contract.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn abort() -> ! {
     let _ = raise(SIGABRT);

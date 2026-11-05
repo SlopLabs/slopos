@@ -133,6 +133,10 @@ pub fn read_volatile_canonical_kernel_u64(addr: u64) -> Option<u64> {
 /// returns `None` on failure; the residual unmapped-page risk is
 /// accepted for the panic-time forensic value.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "validated as a canonical, aligned kernel window; the unmapped-page residue is accepted for panic-time forensics, and the boot crate calling it forbids unsafe code"
+)]
 pub fn read_iret_frame(ptr: *const u64) -> Option<[u64; 5]> {
     let addr = ptr as u64;
     if !is_canonical_kernel(addr, 8, 40) {
@@ -151,6 +155,10 @@ pub fn read_iret_frame(ptr: *const u64) -> Option<[u64; 5]> {
 /// `[ptr, ptr + 8)` lies inside `[lo, hi)`. Returns `None` when the
 /// window escapes the supplied bounds.
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "the read is bounds-checked against the caller's [lo, hi), which names a live mapped region; the boot crate calling it forbids unsafe code"
+)]
 pub fn read_unaligned_u64_in_range(ptr: *const u64, lo: usize, hi: usize) -> Option<u64> {
     let addr = ptr as usize;
     let end = addr.checked_add(8)?;

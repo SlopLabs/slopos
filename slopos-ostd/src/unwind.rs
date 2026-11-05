@@ -187,6 +187,10 @@ mod bare_metal {
     }
 
     pub fn begin_panic(info: &PanicInfo) -> Result<Infallible, UnwindReasonCode> {
+        /// # Safety
+        ///
+        /// `exception` must be one allocated below and not yet freed; the
+        /// unwinder calls this once, to free it.
         unsafe extern "C" fn exception_cleanup(
             _unwind_code: UnwindReasonCode,
             exception: *mut UnwindException,

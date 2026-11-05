@@ -40,7 +40,7 @@ own doc-comments — not duplicated here.
 > reached some other way. So every `VmSpace` shared across CPUs lives behind
 > the lock that is the sole minter of the `&mut` — `PROCESS_VMS[slot]` per
 > process, `KERNEL_VM_SPACE` for the kernel master — and no other writer of
-> those tables exists. `scripts/check_kernel_pml4_writer.sh` holds the kernel
+> those tables exists. The `kernel-pml4-writer` gate holds the kernel
 > master to one writer — outside OSTD only `slopos_mm::kernel_mappings` takes a
 > `CursorMut` on it — so the tier-2 argument is enforced there, not in prose.
 >
@@ -128,9 +128,8 @@ own doc-comments — not duplicated here.
 > `CAP_MASK_ALL` and the utest runner what a test declares); the ids a spawn
 > gives its child, POSIX's rule over `Cred`, which the kernel's `cred` tests
 > hold; and whether the dispatcher consults the mask at all — that is the
-> `const` totality assert over the syscall table plus
-> `scripts/check_authority_reachability.sh`, neither of which is a Verus
-> obligation.
+> `const` totality assert over the syscall table plus the `authority` ELF
+> gate, neither of which is a Verus obligation.
 
 > `slopos_ostd::task` verifies the **ownership state-machine LOGIC only** — the
 > strong-count ledger split by owner class, the existence-reference flag
@@ -227,7 +226,7 @@ logic only**. What it does not reach, and what is audited instead:
   and the audit's `AncestorUnderCount`, not by Verus.
 - That a `Charge` lives in exactly one field for exactly its object's
   lifetime. That is a syntactic property of the tree, enforced by
-  `scripts/check_charge_linearity.sh`, not a property of the state machine.
+  the `charge-linearity` gate, not a property of the state machine.
 - That `used` matches physical reality. A linear token guarantees the *token*
   is unique, never that the resource it names is; the in-kernel `quotacheck`
   audit (`ledger_audit`) is the runtime cross-check, and there is no third
@@ -242,7 +241,7 @@ logic only**. What it does not reach, and what is audited instead:
   the ext4 reclaimer takes: whether declining to block is enough to keep the
   reclaim path free of the deadlock its own allocation failure could cause is
   a lock-order argument, checked by lockdep and by
-  `scripts/check_lockdep_headroom.sh`, not by Verus.
+  `run_tests gate lockdep`, not by Verus.
 
 ## The soundness invariants
 
@@ -259,7 +258,7 @@ tree* is:
 | **Inv. 3** | An `asm!` block's operand widths and clobbers match the instruction it names. |
 | **Inv. 4** | Page-table walks stay well-formed: every present entry names a real table or frame, and map/unmap are balanced. |
 | **Inv. 5** | A user-visible leaf mapping only ever names an insensitive frame — never kernel-sensitive memory. |
-| **Inv. 5'** | No stack frame exceeds 2 KiB. Enforced by `check_stack_sizes.sh` against the final ELF of every build variant, each against its own measured allowlist, with a second ceiling at the 4 KiB guard page that no allowlist can raise. |
+| **Inv. 5'** | No stack frame exceeds 2 KiB. Enforced by the `stack-sizes` ELF gate against the final ELF of every build variant, each against its own measured allowlist, with a second ceiling at the 4 KiB guard page that no allowlist can raise. |
 | **Inv. 6** | A DMA or IOMMU mapping is only used through the handle that created it, for as long as the device may still read it. |
 | **Inv. 7** | Only I/O ports the platform has marked insensitive are reachable, and only through `IoPortRegistry`. |
 | **Inv. 8** | The calling CPU is the sole accessor of the task state it touches. |
@@ -280,15 +279,15 @@ names no enforcement mechanism at all.
 
 Three gates carry the claim between them:
 
-- `check_unsafe_outside_ostd.sh` — no `unsafe` keyword is *authored* outside
+- `unsafe-outside-ostd` — no `unsafe` keyword is *authored* outside
   `slopos-ostd`, and every crate in the kernel binary's dependency closure
   carries the lint attribute.
-- `check_unsafe_expansion.sh` — no `unsafe` *reaches the compiler* in a
+- `unsafe-expansion` — no `unsafe` *reaches the compiler* in a
   kernel crate beyond an allowlisted `unsafe impl`, `link_section` or
   `no_mangle`, each with a recorded reason. Run over each crate's feature
   configurations, because the `stest!` registrations live behind test
   features.
-- `check_registry_sections.sh` — `kernel.elf` holds only the sections
+- `registry-sections` — `kernel.elf` holds only the sections
   `link.ld` declares, each registry a whole number of entries. This is the
   only gate that sees a *dependency's* `link_section`.
 
@@ -306,11 +305,12 @@ evasion. It is how much of OSTD's exported API has to be trusted by reading:
 
 The last row is the one that matters most and the one being driven down:
 a `# Safety` section on a function that is not `unsafe fn` is a written
-admission that a safe caller can break it. `check_safe_contract_surface.sh`
-ratchets it.
+admission that a safe caller can break it. Clippy's `unnecessary_safety_doc`,
+denied in `[workspace.lints.clippy]` and run by `xtask clippy`, ratchets it.
 
-`scripts/tcb_ratio.sh` reports 0.52 % unsafe-line density over the kernel
-binary's dependency closure. Read it as a trend. It is **not** comparable to
+The `tcb-ratio` gate (`xtask lint tcb-ratio`, printed by `just tcb-ratio`)
+reports 0.52 % unsafe-line density over the kernel binary's dependency
+closure. Read it as a trend. It is **not** comparable to
 the TCB fractions other projects publish: Asterinas's ~14 % is LCS over
 post-LTO linked code including its dependency closure, while this
 denominator is raw first-party LoC — and 41 kLoC of it is the vendored DWARF

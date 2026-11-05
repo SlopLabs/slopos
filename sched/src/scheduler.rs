@@ -16,10 +16,8 @@ use core::sync::atomic::{AtomicBool, AtomicPtr};
 
 /// Per-CPU: this CPU's idle path armed a LAPIC one-shot for the next sleep-queue
 /// deadline. The first timer ISR restores periodic mode and clears the flag.
-static ONESHOT_ARMED: [AtomicBool; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS] = {
-    const FALSE: AtomicBool = AtomicBool::new(false);
-    [FALSE; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS]
-};
+static ONESHOT_ARMED: [AtomicBool; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; slopos_ostd::cpu::x86_64::pcr::MAX_CPUS];
 
 /// Must match `boot/src/boot_drivers.rs::LAPIC_TIMER_PERIOD_MS`.
 const LAPIC_TIMER_PERIOD_MS: u32 = 10;

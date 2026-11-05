@@ -993,16 +993,28 @@ unsafe fn vfscanf_core(stream: *mut FILE, fmt: *const u8, ap: &mut VaList<'_>) -
     matched
 }
 
+/// # Safety
+///
+/// `buf` and `fmt` must point to NUL-terminated strings; each conversion's argument must be
+/// a valid, writable pointer of the matching type, large enough for what it stores.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sscanf(buf: *const u8, fmt: *const u8, mut args: ...) -> i32 {
     vsscanf_impl(buf, fmt, &mut args)
 }
 
+/// # Safety
+///
+/// `stream` must be a live, unclosed `FILE`; `fmt` must be a NUL-terminated format whose
+/// conversions' arguments are valid, writable pointers of the matching type and size.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fscanf(stream: *mut FILE, fmt: *const u8, mut args: ...) -> i32 {
     vfscanf_impl(stream, fmt, &mut args)
 }
 
+/// # Safety
+///
+/// `fmt` must be a NUL-terminated format; each conversion's argument must be a valid,
+/// writable pointer of the matching type, large enough for what it stores.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn scanf(fmt: *const u8, mut args: ...) -> i32 {
     vfscanf_impl(streams::stdin_file(), fmt, &mut args)

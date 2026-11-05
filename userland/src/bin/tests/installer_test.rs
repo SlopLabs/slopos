@@ -124,7 +124,7 @@ const GIB: u64 = 1 << 30;
 const MIB: u64 = 1 << 20;
 /// What the installed system boots with: this test again, and a slot that
 /// panics falls back.
-const INSTALLED_CMDLINE: &str = "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=off roulette=skip panic=reboot watchdog.miss_threshold=300 tests.run=*ext4_aaa*,*installer*";
+const INSTALLED_CMDLINE: &str = "tests=on tests.shutdown=on tests.verbosity=summary boot.debug=off roulette=skip panic=reboot watchdog.miss_threshold=300 tests.run=*installer*";
 
 fn var(name: &str) -> Option<Vec<u8>> {
     let mut buf = [0u8; 64];

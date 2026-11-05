@@ -1,0 +1,15 @@
+# Clippy configuration for the kernel's crate graph. `xtask clippy kernel`
+# points CLIPPY_CONF_DIR here for every crate the `kernel` binary links, so
+# userland and the host tools are not held to these bans. A crate the host or
+# userland runs also check (OSTD) states its exceptions as
+# `#[cfg_attr(target_os = "none", expect(...))]`: the kernel target is the only
+# one this file reaches.
+
+# The doc lints also cover crate-private items: a `pub(crate)` fn in OSTD
+# with a `# Safety` section is the same unchecked contract as a `pub` one.
+check-private-items = true
+
+disallowed-methods = [
+    { path = "core::mem::forget", reason = "a kernel object's destructor gives back what it owns (a frame, a charge, a registration, a reference); hand ownership on through the type's own API, or `#[expect]` this with why the destructor must not run" },
+    { path = "core::mem::ManuallyDrop::new", reason = "a kernel object's destructor gives back what it owns (a frame, a charge, a registration, a reference); hand ownership on through the type's own API, or `#[expect]` this with why the destructor must not run" },
+]

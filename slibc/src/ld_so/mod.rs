@@ -140,7 +140,11 @@ pub unsafe fn loader() -> &'static mut Loader {
     &mut *LOADER.get()
 }
 
-pub fn streq(a: *const u8, b: *const u8) -> bool {
+/// # Safety
+///
+/// `a` and `b` must each point to a NUL-terminated string readable up to its
+/// NUL (reading stops at the first mismatch or the shared NUL).
+pub unsafe fn streq(a: *const u8, b: *const u8) -> bool {
     unsafe {
         let mut i = 0usize;
         loop {
@@ -156,7 +160,11 @@ pub fn streq(a: *const u8, b: *const u8) -> bool {
     }
 }
 
-pub fn strlen(s: *const u8) -> usize {
+/// # Safety
+///
+/// `s` must be non-null and point to a NUL-terminated string readable up to
+/// its NUL.
+pub unsafe fn strlen(s: *const u8) -> usize {
     unsafe {
         let mut i = 0usize;
         while *s.add(i) != 0 {
@@ -277,7 +285,10 @@ impl Loader {
             if !self.is_live(i) || dso.name.is_null() {
                 continue;
             }
-            if streq(name, dso.name) {
+            // SAFETY: `name` is the NUL-terminated object name the loader's
+            // caller passed (or its basename), and `dso.name` is a non-null,
+            // NUL-terminated name the loader stored for a live object.
+            if unsafe { streq(name, dso.name) } {
                 return Some(i as u16);
             }
         }
@@ -686,7 +697,9 @@ impl Loader {
         requester: u16,
         out: &mut [u8; DL_PATH_MAX],
     ) -> Result<*const u8, DlError> {
-        let len = strlen(name);
+        // SAFETY: `name` is the NUL-terminated `DT_NEEDED`/`dlopen` name
+        // `load`'s caller passed.
+        let len = unsafe { strlen(name) };
         if len == 0 || len >= DL_PATH_MAX {
             return Err(DlError::NotFound);
         }

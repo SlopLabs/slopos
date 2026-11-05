@@ -39,6 +39,10 @@ impl UserVirtAddr {
         if !VirtAddr::is_canonical(addr) {
             return Err(UserPtrError::NonCanonical);
         }
+        #[expect(
+            clippy::absurd_extreme_comparisons,
+            reason = "USER_SPACE_START_VA is 0 today; the lower bound stays so moving it needs no audit"
+        )]
         if addr < USER_SPACE_START_VA || addr >= USER_SPACE_END_VA {
             return Err(UserPtrError::OutOfUserRange);
         }

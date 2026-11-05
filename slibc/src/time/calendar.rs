@@ -122,6 +122,10 @@ unsafe fn store_parts(dst: *mut tm, parts: &Tm) {
     (*dst).tm_zone = UTC.as_ptr();
 }
 
+/// # Safety
+///
+/// `timep` must be null or point to a readable `time_t`; `result` must be null
+/// or valid for writes of a `tm`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gmtime_r(timep: *const time_t, result: *mut tm) -> *mut tm {
     if timep.is_null() || result.is_null() {
@@ -138,16 +142,27 @@ pub unsafe extern "C" fn gmtime_r(timep: *const time_t, result: *mut tm) -> *mut
     result
 }
 
+/// # Safety
+///
+/// As `gmtime_r`: `timep` null or readable, `result` null or writable `tm`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn localtime_r(timep: *const time_t, result: *mut tm) -> *mut tm {
     gmtime_r(timep, result)
 }
 
+/// # Safety
+///
+/// `timep` must be null or point to a readable `time_t`. The result is a shared
+/// static, overwritten by the next `gmtime`/`localtime` call (not thread-safe).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gmtime(timep: *const time_t) -> *mut tm {
     gmtime_r(timep, shared_tm())
 }
 
+/// # Safety
+///
+/// `timep` must be null or point to a readable `time_t`. The result is a shared
+/// static, overwritten by the next `gmtime`/`localtime` call (not thread-safe).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn localtime(timep: *const time_t) -> *mut tm {
     gmtime_r(timep, shared_tm())
@@ -155,6 +170,10 @@ pub unsafe extern "C" fn localtime(timep: *const time_t) -> *mut tm {
 
 /// `timegm(3)`: the epoch second `tmp` names, with every field normalised in
 /// place. `tm_isdst` is neither read nor honoured — there is no DST here.
+///
+/// # Safety
+///
+/// `tmp` must be null or point to an initialized, writable `tm`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn timegm(tmp: *mut tm) -> time_t {
     if tmp.is_null() {
@@ -172,6 +191,9 @@ pub unsafe extern "C" fn timegm(tmp: *mut tm) -> time_t {
     secs
 }
 
+/// # Safety
+///
+/// `tmp` must be null or point to an initialized, writable `tm`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mktime(tmp: *mut tm) -> time_t {
     timegm(tmp)
@@ -183,6 +205,11 @@ pub extern "C" fn difftime(time1: time_t, time0: time_t) -> f64 {
 }
 
 /// `asctime_r(3)`. `buf` must have room for 26 bytes.
+///
+/// # Safety
+///
+/// `tmp` must be null or point to an initialized `tm`; `buf` must be null or
+/// valid for writes of 26 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asctime_r(tmp: *const tm, buf: *mut c_char) -> *mut c_char {
     if tmp.is_null() || buf.is_null() {
@@ -201,11 +228,19 @@ pub unsafe extern "C" fn asctime_r(tmp: *const tm, buf: *mut c_char) -> *mut c_c
     buf
 }
 
+/// # Safety
+///
+/// `tmp` must be null or point to an initialized `tm`. The result is a shared
+/// static buffer, overwritten by the next `asctime`/`ctime` call (not thread-safe).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn asctime(tmp: *const tm) -> *mut c_char {
     asctime_r(tmp, shared_buf())
 }
 
+/// # Safety
+///
+/// `timep` must be null or point to a readable `time_t`; `buf` must be null or
+/// valid for writes of 26 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ctime_r(timep: *const time_t, buf: *mut c_char) -> *mut c_char {
     let mut broken = tm::empty();
@@ -215,6 +250,10 @@ pub unsafe extern "C" fn ctime_r(timep: *const time_t, buf: *mut c_char) -> *mut
     asctime_r(&broken, buf)
 }
 
+/// # Safety
+///
+/// `timep` must be null or point to a readable `time_t`. The result is a shared
+/// static buffer, overwritten by the next `asctime`/`ctime` call (not thread-safe).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ctime(timep: *const time_t) -> *mut c_char {
     ctime_r(timep, shared_buf())
@@ -239,6 +278,12 @@ impl strftime::Zone for TmZone {
 /// `strftime(3)`. Answers the length written, excluding the NUL, and 0 when
 /// the result does not fit — in which case `s` holds unspecified bytes, as C
 /// says.
+///
+/// # Safety
+///
+/// `s` must be null or valid for writes of `max` bytes; `format` must be null or
+/// a NUL-terminated string; `tmp` must be null or point to an initialized `tm`
+/// whose `tm_zone` is null or a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strftime(
     s: *mut c_char,
@@ -267,6 +312,11 @@ pub static mut tzname: [*mut c_char; 2] = [UTC.as_ptr().cast_mut(); 2];
 
 /// `tzset(3)`. There is one zone and it never changes, so this only restates
 /// the globals a program is allowed to have overwritten.
+///
+/// # Safety
+///
+/// Writes the `timezone`/`daylight`/`tzname` globals; must not race other
+/// accesses to them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tzset() {
     timezone = 0;

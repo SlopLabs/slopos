@@ -201,8 +201,8 @@ shows every component in each of its states. Its pages are
 - **Name roles, never values.** An app never makes a colour (`Color32`), sets
   a font size, or uses a number for spacing or an inset. It names a `Tone`, a
   `Surface`, a `TextRole`, a `theme::space` step or a `theme::inset`.
-  `scripts/check_ui_literals.sh` enforces this. A file whose colours are its
-  content, such as a syntax palette, needs a line in
+  The `ui-literals` gate (`xtask lint ui-literals`) enforces this. A file whose
+  colours are its content, such as a syntax palette, needs a line in
   `scripts/gates/ui-literals.txt` that says why.
 - **One name per app.** The app entry's `name`, the window title and the About
   box all use the same name, and `apps_test` holds each title to its entry.

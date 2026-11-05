@@ -1,4 +1,4 @@
-# check_authority_reachability allowlist — variant: dev
+# authority allowlist — variant: dev
 #
 # Syscall handlers that can reach a terminal power primitive
 # (`slopos_ostd::platform::power::{shutdown,reboot}`).
@@ -12,8 +12,7 @@
 # in; they are the same code and appear because the walk reads the ELF rather
 # than the source.
 #
-#     scripts/check_authority_reachability.sh --variant dev \
-#         --emit-allowlist builddir/kernel-dev.elf
+#     xtask elf --variant dev builddir/kernel-dev.elf --emit-allowlist authority
 
 # Classified `Power`. The witness `slopos_ostd::platform::power` demands is
 # minted from the caller's own mask, so these cannot be reached unchecked.

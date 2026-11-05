@@ -453,7 +453,10 @@ beside it. Neither OFL family declares a Reserved Font Name.
 
 QEMU, OVMF / EDK II, Verus and Z3, Miri, rr, `just`, and the Go toolchain
 (including `golang.org/x/term` and `golang.org/x/sys`) are used to build, run,
-verify and test SlopOS. None of their code is incorporated into SlopOS or
+verify and test SlopOS. So are the crates the tree's checks (`tools/xtask`)
+are built from — `syn`, `proc-macro2`, `quote`, `object`, `iced-x86`,
+`rustc-demangle` and `serde_json`, with their dependencies, each under MIT or
+`MIT OR Apache-2.0`. None of their code is incorporated into SlopOS or
 distributed with it, and their licenses impose no terms on SlopOS output.
 
 The `caveman-commit` agent skill in

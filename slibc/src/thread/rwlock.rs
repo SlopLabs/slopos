@@ -45,6 +45,10 @@ pub struct pthread_rwlockattr_t {
     pub _pad: u32,
 }
 
+#[expect(
+    clippy::declare_interior_mutable_const,
+    reason = "POSIX's static initializer: each use is meant to be a fresh, unshared lock"
+)]
 pub const PTHREAD_RWLOCK_INITIALIZER: pthread_rwlock_t = pthread_rwlock_t {
     state: AtomicI32::new(0),
     pshared: 0,
@@ -56,6 +60,10 @@ unsafe fn scope_of(rwlock: *const pthread_rwlock_t) -> FutexScope {
     FutexScope::of_pshared((*rwlock).pshared != 0)
 }
 
+/// # Safety
+///
+/// `rwlock` must be null or valid for writes of a `pthread_rwlock_t` no thread
+/// is using; `attr` must be null or point to an initialized `pthread_rwlockattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_rwlock_init(
     rwlock: *mut pthread_rwlock_t,
@@ -73,6 +81,11 @@ pub unsafe extern "C" fn pthread_rwlock_init(
 /// A reader is admitted only when no writer holds the lock and none is
 /// waiting: a waiting writer closing the door on new readers is what keeps a
 /// stream of readers from starving it.
+///
+/// # Safety
+///
+/// `rwlock` must be null or point to an initialized `pthread_rwlock_t` that
+/// stays valid while waited on or held.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_rwlock_rdlock(rwlock: *mut pthread_rwlock_t) -> c_int {
     if rwlock.is_null() {
@@ -101,6 +114,9 @@ pub unsafe extern "C" fn pthread_rwlock_rdlock(rwlock: *mut pthread_rwlock_t) ->
     }
 }
 
+/// # Safety
+///
+/// `rwlock` must be null or point to an initialized `pthread_rwlock_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_rwlock_tryrdlock(rwlock: *mut pthread_rwlock_t) -> c_int {
     if rwlock.is_null() {
@@ -124,6 +140,10 @@ pub unsafe extern "C" fn pthread_rwlock_tryrdlock(rwlock: *mut pthread_rwlock_t)
     }
 }
 
+/// # Safety
+///
+/// `rwlock` must be null or point to an initialized `pthread_rwlock_t` that
+/// stays valid while waited on or held.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_rwlock_wrlock(rwlock: *mut pthread_rwlock_t) -> c_int {
     if rwlock.is_null() {
@@ -179,6 +199,9 @@ pub unsafe extern "C" fn pthread_rwlock_wrlock(rwlock: *mut pthread_rwlock_t) ->
     }
 }
 
+/// # Safety
+///
+/// `rwlock` must be null or point to an initialized `pthread_rwlock_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_rwlock_trywrlock(rwlock: *mut pthread_rwlock_t) -> c_int {
     if rwlock.is_null() {
@@ -198,6 +221,10 @@ pub unsafe extern "C" fn pthread_rwlock_trywrlock(rwlock: *mut pthread_rwlock_t)
     }
 }
 
+/// # Safety
+///
+/// `rwlock` must be null or point to an initialized `pthread_rwlock_t` the
+/// caller holds.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_rwlock_unlock(rwlock: *mut pthread_rwlock_t) -> c_int {
     if rwlock.is_null() {
@@ -244,6 +271,10 @@ pub unsafe extern "C" fn pthread_rwlock_unlock(rwlock: *mut pthread_rwlock_t) ->
     }
 }
 
+/// # Safety
+///
+/// `rwlock` must be null or point to an initialized `pthread_rwlock_t` no
+/// thread is waiting on.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_rwlock_destroy(rwlock: *mut pthread_rwlock_t) -> c_int {
     if rwlock.is_null() {
@@ -256,6 +287,9 @@ pub unsafe extern "C" fn pthread_rwlock_destroy(rwlock: *mut pthread_rwlock_t) -
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or valid for writes of a `pthread_rwlockattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_rwlockattr_init(attr: *mut pthread_rwlockattr_t) -> c_int {
     if attr.is_null() {
@@ -266,6 +300,9 @@ pub unsafe extern "C" fn pthread_rwlockattr_init(attr: *mut pthread_rwlockattr_t
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or valid for writes of a `pthread_rwlockattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_rwlockattr_destroy(attr: *mut pthread_rwlockattr_t) -> c_int {
     if attr.is_null() {
@@ -275,6 +312,9 @@ pub unsafe extern "C" fn pthread_rwlockattr_destroy(attr: *mut pthread_rwlockatt
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or valid for writes of a `pthread_rwlockattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_rwlockattr_setpshared(
     attr: *mut pthread_rwlockattr_t,
@@ -290,6 +330,10 @@ pub unsafe extern "C" fn pthread_rwlockattr_setpshared(
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or point to an initialized `pthread_rwlockattr_t`;
+/// `pshared` must be null or valid for writing a `c_int`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_rwlockattr_getpshared(
     attr: *const pthread_rwlockattr_t,

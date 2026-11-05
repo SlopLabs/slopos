@@ -86,6 +86,9 @@ pub unsafe extern "C" fn getwc(stream: *mut FILE) -> wint_t {
     fgetwc(stream)
 }
 
+/// # Safety
+///
+/// None: reads the library-owned stdin; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getwchar() -> wint_t {
     fgetwc(streams::stdin_file())
@@ -108,6 +111,9 @@ pub unsafe extern "C" fn putwc(wc: wchar_t, stream: *mut FILE) -> wint_t {
     fputwc(wc, stream)
 }
 
+/// # Safety
+///
+/// None: writes to the library-owned stdout; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn putwchar(wc: wchar_t) -> wint_t {
     fputwc(wc, streams::stdout_file())

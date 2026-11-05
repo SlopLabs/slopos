@@ -1,6 +1,6 @@
 //! The measured cost of a write, and of mounting a large volume.
 //!
-//! Two report lines, graded by `scripts/check_fs_throughput.sh`:
+//! Two report lines, graded by `run_tests gate fsperf`:
 //!
 //! ```text
 //! FSPERF[tests]: bytes=N txns=N commits=N devwrites=N devblocks=N barriers=N ns=N rawbytes=N rawns=N
@@ -16,9 +16,8 @@
 //! a ramfs and no `/dev` node exists: both tests claim their device, mount it
 //! themselves, and give the claim back to the boot step that follows.
 //!
-//! `slopos_fs::tests::fsperf` sorts after `slopos_fs::tests` and the registry
-//! runs in `(module, name)` order, so `test_ext4_aaa_init` has brought the VFS
-//! up before either of these.
+//! The `vfs_ready` fixture in `slopos_fs::tests` has brought the VFS up before
+//! any kernel test runs, whatever the filter or shard.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

@@ -160,6 +160,11 @@ pub unsafe extern "C" fn __cxa_finalize(dso: *mut c_void) {
 /// linked into every object, slibc's is one shared copy with no per-caller
 /// handle to record. Otherwise an `atexit` from inside a `dlopen`ed object
 /// outlives its own code and is called at `exit` through an unmapped address.
+///
+/// # Safety
+///
+/// Must be called before `[start, start + len)` is unmapped, so every handler
+/// registered from that span is still callable with its recorded argument.
 pub unsafe fn finalize_range(start: usize, len: usize) {
     let end = start.saturating_add(len);
     let inside = move |addr: usize| addr >= start && addr < end;

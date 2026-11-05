@@ -18,6 +18,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"run_tests/gates"
 )
 
 // PostAbortSilenceSec is how long a run gets after a kernel abort: long enough
@@ -67,6 +69,9 @@ func main() {
 }
 
 func run(rawArgv []string) int {
+	if len(rawArgv) > 0 && rawArgv[0] == "gate" {
+		return gates.Main(rawArgv[1:], repoRoot())
+	}
 	args, err := parseArgs(preprocessArgv(rawArgv))
 	if err != nil {
 		// flag.Parse already printed usage on parse errors.
@@ -110,6 +115,19 @@ func run(rawArgv []string) int {
 			return 64
 		}
 		cmdline = assembleTestCmdline(base, filters, args.Skips, verbosity, extra)
+	}
+
+	if args.Shards > 1 {
+		return runSharded(&shardedRun{
+			args:         args,
+			root:         root,
+			cmdline:      cmdline,
+			fsImage:      pickPath(args.FsImage, defaultFsImage),
+			captureDir:   pickPath(args.CaptureDir, filepath.Join(buildDir, "shards")),
+			shardsDir:    filepath.Join(buildDir, "shards"),
+			lastFailList: lastFailList,
+			hasSelection: len(filters) > 0 || len(args.Skips) > 0,
+		})
 	}
 
 	if args.DryRun {
@@ -190,7 +208,7 @@ func run(rawArgv []string) int {
 			driver.TightenSilence(PostAbortSilenceSec * time.Second)
 		}
 		if jsonlSink != nil {
-			if err := jsonlSink.Write(ev, recorder.Summary); err != nil {
+			if err := jsonlSink.Write(ev, 0); err != nil {
 				fmt.Fprintln(os.Stderr, "run_tests: jsonl:", err)
 			}
 		}
@@ -240,22 +258,7 @@ func run(rawArgv []string) int {
 	exitCode := verdict.Code
 
 	if !driverRes.UserAborted {
-		if err := writeLastFailList(lastFailList, failures); err != nil {
-			fmt.Fprintln(os.Stderr, "run_tests:", err)
-		}
-		if !rawPassthrough {
-			rel, _ := filepath.Rel(root, lastFailList)
-			n := len(failures)
-			plural := "ies"
-			if n == 1 {
-				plural = "y"
-			}
-			if n > 0 {
-				fmt.Printf("last-fail.list updated → %s (%d entr%s)\n", rel, n, plural)
-			} else {
-				fmt.Printf("last-fail.list cleared → %s\n", rel)
-			}
-		}
+		updateLastFailList(root, lastFailList, failures, !rawPassthrough)
 	}
 
 	if !rawPassthrough {
@@ -268,6 +271,27 @@ func run(rawArgv []string) int {
 		}
 	}
 	return exitCode
+}
+
+// updateLastFailList rewrites the rerun list, announcing it when `announce`.
+func updateLastFailList(root, path string, failures []*TestRecord, announce bool) {
+	if err := writeLastFailList(path, failures); err != nil {
+		fmt.Fprintln(os.Stderr, "run_tests:", err)
+	}
+	if !announce {
+		return
+	}
+	rel, _ := filepath.Rel(root, path)
+	n := len(failures)
+	plural := "ies"
+	if n == 1 {
+		plural = "y"
+	}
+	if n > 0 {
+		fmt.Printf("last-fail.list updated → %s (%d entr%s)\n", rel, n, plural)
+	} else {
+		fmt.Printf("last-fail.list cleared → %s\n", rel)
+	}
 }
 
 func pickPath(override, fallback string) string {

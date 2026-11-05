@@ -170,13 +170,12 @@ pub struct ProcessVmRef {
 }
 
 /// Independently lockable, so unrelated processes never contend.
-static PROCESS_VMS: [VmLock; MAX_PROCESSES] = {
-    const INIT: VmLock = VmLock::new(SpinLock::new(
+static PROCESS_VMS: [VmLock; MAX_PROCESSES] = [const {
+    VmLock::new(SpinLock::new(
         ProcessVm::new(),
         lock_class!("PROCESS_VMS", LOCK_LEVEL_RESOURCE),
-    ));
-    [INIT; MAX_PROCESSES]
-};
+    ))
+}; MAX_PROCESSES];
 
 fn vma_range_valid(start: u64, end: u64) -> bool {
     start < end && (start & (PAGE_SIZE_4KB - 1)) == 0 && (end & (PAGE_SIZE_4KB - 1)) == 0

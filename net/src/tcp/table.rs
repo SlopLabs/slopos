@@ -312,17 +312,13 @@ pub static TCP_SHARDS_INDEX: [RcuCell<TcpShardIndex>; NUM_SHARDS] =
 pub static TCP_LISTENERS_INDEX: RcuCell<ListenerIndex> = RcuCell::empty();
 
 /// Per-slot PCB locks. Index = `shard * SLOTS_PER_SHARD + slot`.
-pub static TCP_PCB_SLOTS: [SpinLock<Option<PcbSlot>>; TOTAL_PCB_SLOTS] = {
-    const SLOT: SpinLock<Option<PcbSlot>> =
-        SpinLock::new(None, lock_class!("TCP_PCB_SLOTS", LOCK_LEVEL_RESOURCE));
-    [SLOT; TOTAL_PCB_SLOTS]
-};
+pub static TCP_PCB_SLOTS: [SpinLock<Option<PcbSlot>>; TOTAL_PCB_SLOTS] =
+    [const { SpinLock::new(None, lock_class!("TCP_PCB_SLOTS", LOCK_LEVEL_RESOURCE)) };
+        TOTAL_PCB_SLOTS];
 
-pub static TCP_LISTENER_SLOTS: [SpinLock<Option<ListenerSlot>>; MAX_LISTENERS] = {
-    const SLOT: SpinLock<Option<ListenerSlot>> =
-        SpinLock::new(None, lock_class!("TCP_LISTENER_SLOTS", LOCK_LEVEL_RESOURCE));
-    [SLOT; MAX_LISTENERS]
-};
+pub static TCP_LISTENER_SLOTS: [SpinLock<Option<ListenerSlot>>; MAX_LISTENERS] =
+    [const { SpinLock::new(None, lock_class!("TCP_LISTENER_SLOTS", LOCK_LEVEL_RESOURCE)) };
+        MAX_LISTENERS];
 
 /// Lookups rejected because the id named an occupant the slot no longer holds.
 /// Non-zero means slot reuse raced a holder of a stale id.
@@ -358,11 +354,8 @@ fn note_stale_lookup(id: ConnId, live_generation: u16) {
 
 /// Per-shard write-serialisation locks, held only across "pick-slot →
 /// install/clear PCB → publish new index". Mutation-only paths do not take it.
-static TCP_SHARDS_WRITE: [SpinLock<()>; NUM_SHARDS] = {
-    const WL: SpinLock<()> =
-        SpinLock::new((), lock_class!("TCP_SHARDS_WRITE", LOCK_LEVEL_RESOURCE));
-    [WL; NUM_SHARDS]
-};
+static TCP_SHARDS_WRITE: [SpinLock<()>; NUM_SHARDS] =
+    [const { SpinLock::new((), lock_class!("TCP_SHARDS_WRITE", LOCK_LEVEL_RESOURCE)) }; NUM_SHARDS];
 
 /// Listener-side write-serialisation lock.
 static TCP_LISTENERS_WRITE: SpinLock<()> =

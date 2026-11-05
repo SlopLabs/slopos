@@ -4,7 +4,7 @@
 //! Under `tests=on`, `/sbin/init` exits above the compositor, shell and
 //! terminal spawns, so no automated boot otherwise holds a desktop descriptor
 //! population. Asserts only that the population was built, never a number:
-//! the gate file holds the peaks and `check_quota_headroom.sh` compares them.
+//! the gate file holds the peaks and `run_tests gate quota` compares them.
 
 use slopos_userland as _;
 

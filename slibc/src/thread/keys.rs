@@ -11,6 +11,10 @@ static mut KEY_DESTRUCTORS: [Option<unsafe extern "C" fn(*mut u8)>; PTHREAD_KEYS
     [None; PTHREAD_KEYS_MAX];
 static mut KEY_USED: [bool; PTHREAD_KEYS_MAX] = [false; PTHREAD_KEYS_MAX];
 
+/// # Safety
+///
+/// `key` must be null or valid for writing a `pthread_key_t`; must not race
+/// another `pthread_key_create`/`pthread_key_delete` (the key table is unlocked).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_key_create(
     key: *mut pthread_key_t,
@@ -32,6 +36,9 @@ pub unsafe extern "C" fn pthread_key_create(
     crate::errno::EAGAIN.raw()
 }
 
+/// # Safety
+///
+/// Must not race another `pthread_key_create`/`pthread_key_delete` (the key table is unlocked).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_key_delete(key: pthread_key_t) -> i32 {
     let idx = key as usize;
@@ -43,6 +50,10 @@ pub unsafe extern "C" fn pthread_key_delete(key: pthread_key_t) -> i32 {
     0
 }
 
+/// # Safety
+///
+/// Must not race `pthread_key_delete` of `key`; `key` is range-checked and only
+/// the calling thread's TCB is read.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_getspecific(key: pthread_key_t) -> *mut u8 {
     let idx = key as usize;
@@ -56,6 +67,10 @@ pub unsafe extern "C" fn pthread_getspecific(key: pthread_key_t) -> *mut u8 {
     (*tcb).thread_local_keys[idx]
 }
 
+/// # Safety
+///
+/// Must not race `pthread_key_delete` of `key`; `key` is range-checked and
+/// `value` is stored, never dereferenced.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_setspecific(key: pthread_key_t, value: *mut u8) -> i32 {
     let idx = key as usize;

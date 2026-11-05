@@ -42,6 +42,10 @@ unsafe fn scope_of(cond: *const pthread_cond_t) -> FutexScope {
     FutexScope::of_pshared((*cond).pshared != 0)
 }
 
+#[expect(
+    clippy::declare_interior_mutable_const,
+    reason = "POSIX's static initializer: each use is meant to be a fresh, unshared condition variable"
+)]
 pub const PTHREAD_COND_INITIALIZER: pthread_cond_t = pthread_cond_t {
     seq: AtomicU32::new(0),
     clock: crate::time::CLOCK_REALTIME,
@@ -51,6 +55,10 @@ pub const PTHREAD_COND_INITIALIZER: pthread_cond_t = pthread_cond_t {
     _reserved: [0; 3],
 };
 
+/// # Safety
+///
+/// `cond` must be null or valid for writes of a `pthread_cond_t`; `attr` must be
+/// null (defaults) or point to an initialized `pthread_condattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_init(
     cond: *mut pthread_cond_t,
@@ -73,6 +81,10 @@ pub unsafe extern "C" fn pthread_cond_init(
     0
 }
 
+/// # Safety
+///
+/// `cond` and `mutex` must be null or point to initialized objects that stay
+/// valid across the wait; the calling thread must hold `mutex`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_wait(
     cond: *mut pthread_cond_t,
@@ -100,6 +112,12 @@ pub unsafe extern "C" fn pthread_cond_wait(
 /// relative timeout, so the deadline is converted against that clock's current
 /// reading. A deadline already past is `ETIMEDOUT` without unblocking anyone,
 /// but the mutex is still dropped and re-taken, which is what POSIX requires.
+///
+/// # Safety
+///
+/// `cond` and `mutex` must be null or point to initialized objects that stay
+/// valid across the wait, the caller holding `mutex`; `abstime` must be null or
+/// point to a readable `Timespec`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_timedwait(
     cond: *mut pthread_cond_t,
@@ -160,6 +178,9 @@ pub unsafe extern "C" fn pthread_cond_timedwait(
     }
 }
 
+/// # Safety
+///
+/// `cond` must be null or point to an initialized `pthread_cond_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_signal(cond: *mut pthread_cond_t) -> c_int {
     if cond.is_null() {
@@ -170,6 +191,9 @@ pub unsafe extern "C" fn pthread_cond_signal(cond: *mut pthread_cond_t) -> c_int
     0
 }
 
+/// # Safety
+///
+/// `cond` must be null or point to an initialized `pthread_cond_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_broadcast(cond: *mut pthread_cond_t) -> c_int {
     if cond.is_null() {
@@ -184,6 +208,9 @@ pub unsafe extern "C" fn pthread_cond_broadcast(cond: *mut pthread_cond_t) -> c_
     0
 }
 
+/// # Safety
+///
+/// `cond` must be null or valid for writes of a `pthread_cond_t` no thread is waiting on.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_destroy(cond: *mut pthread_cond_t) -> c_int {
     if cond.is_null() {
@@ -195,6 +222,9 @@ pub unsafe extern "C" fn pthread_cond_destroy(cond: *mut pthread_cond_t) -> c_in
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or valid for writes of a `pthread_condattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_condattr_init(attr: *mut pthread_condattr_t) -> c_int {
     if attr.is_null() {
@@ -204,6 +234,9 @@ pub unsafe extern "C" fn pthread_condattr_init(attr: *mut pthread_condattr_t) ->
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or valid for writes of a `pthread_condattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_condattr_destroy(attr: *mut pthread_condattr_t) -> c_int {
     if attr.is_null() {
@@ -216,6 +249,10 @@ pub unsafe extern "C" fn pthread_condattr_destroy(attr: *mut pthread_condattr_t)
 /// Only the two clocks `clock_gettime` serves are accepted: a condvar whose
 /// deadline is measured against a clock this kernel cannot read would block
 /// for the wrong length of time.
+///
+/// # Safety
+///
+/// `attr` must be null or point to an initialized `pthread_condattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_condattr_setclock(
     attr: *mut pthread_condattr_t,
@@ -231,6 +268,9 @@ pub unsafe extern "C" fn pthread_condattr_setclock(
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or point to an initialized `pthread_condattr_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_condattr_setpshared(
     attr: *mut pthread_condattr_t,
@@ -251,6 +291,10 @@ pub unsafe extern "C" fn pthread_condattr_setpshared(
     0
 }
 
+/// # Safety
+///
+/// `attr` must be null or point to an initialized `pthread_condattr_t`;
+/// `pshared` must be null or valid for writing a `c_int`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_condattr_getpshared(
     attr: *const pthread_condattr_t,

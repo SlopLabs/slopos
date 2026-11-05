@@ -20,6 +20,9 @@ pub struct Timeval {
     pub tv_usec: i64,
 }
 
+/// # Safety
+///
+/// `tp` must be null or valid for writes of a `Timespec`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clock_gettime(clk_id: i32, tp: *mut Timespec) -> i32 {
     if tp.is_null() {
@@ -45,6 +48,9 @@ pub unsafe extern "C" fn clock_gettime(clk_id: i32, tp: *mut Timespec) -> i32 {
     }
 }
 
+/// # Safety
+///
+/// `tv` must be null or valid for writes of a `Timeval`; `_tz` is ignored.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gettimeofday(tv: *mut Timeval, _tz: *mut u8) -> i32 {
     if tv.is_null() {
@@ -65,6 +71,9 @@ pub unsafe extern "C" fn gettimeofday(tv: *mut Timeval, _tz: *mut u8) -> i32 {
     0
 }
 
+/// # Safety
+///
+/// `tloc` must be null or valid for writing an `i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn time(tloc: *mut i64) -> i64 {
     let mut ts = Timespec {
@@ -113,6 +122,11 @@ pub extern "C" fn clock() -> c_long {
 
 /// `nanosleep(2)`. Interruptible: a delivered signal ends the sleep with
 /// `EINTR` and, for a non-null `rem`, the time that was left.
+///
+/// # Safety
+///
+/// `req` must be null or point to a readable `Timespec`; `rem` must be null or
+/// valid for writes of a `Timespec`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32 {
     if req.is_null() {
@@ -134,6 +148,10 @@ pub unsafe extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> 
 /// reading the clock itself rather than against a list here that could drift
 /// from the kernel's. One nanosecond is the denomination `clock_gettime`
 /// answers in, not the counter's real step.
+///
+/// # Safety
+///
+/// `tp` must be null or valid for writes of a `Timespec`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clock_getres(clk_id: i32, tp: *mut Timespec) -> i32 {
     let mut probe = Timespec {
@@ -159,6 +177,11 @@ pub const TIMER_ABSTIME: i32 = 1;
 /// Answers the errno directly rather than setting it, as POSIX specifies for
 /// this call. An absolute deadline is converted against the named clock's
 /// current reading, because the kernel's sleep takes an interval.
+///
+/// # Safety
+///
+/// `rqtp` must be null or point to a readable `Timespec`; `rmtp` must be null or
+/// valid for writes of a `Timespec`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clock_nanosleep(
     clk_id: i32,
@@ -219,6 +242,9 @@ pub unsafe extern "C" fn clock_nanosleep(
     }
 }
 
+/// # Safety
+///
+/// None: the argument is a plain integer; `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn usleep(usec: u32) -> i32 {
     let ts = Timespec {
@@ -230,6 +256,10 @@ pub unsafe extern "C" fn usleep(usec: u32) -> i32 {
 
 /// Answers the seconds left when a signal cut the sleep short, as POSIX
 /// requires.
+///
+/// # Safety
+///
+/// None: the argument is a plain integer; `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sleep(seconds: u32) -> u32 {
     let ts = Timespec {

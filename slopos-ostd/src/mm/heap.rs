@@ -4,7 +4,7 @@
 //!
 //! The in-place [`Init<T, E>`] / [`Zeroable`] constructors exist so a large `T`
 //! never materialises on a caller's stack; the by-value ones are for small `T`,
-//! with `scripts/check_stack_sizes.sh` enforcing the bound. That surface is
+//! with the `stack-sizes` ELF gate enforcing the bound. That surface is
 //! in-house (see [`super::init`]) because SlopOS has no self-referential kernel
 //! types and no in-kernel async.
 
@@ -246,7 +246,7 @@ impl<T> PinBox<T> {
     ///
     /// For **small** `T` only: `value` briefly materialises on the caller's
     /// stack. Anything near or above 1 KiB should use [`PinBox::try_init`] or
-    /// [`PinBox::zeroed`]; `scripts/check_stack_sizes.sh` fails the build for an
+    /// [`PinBox::zeroed`]; the `stack-sizes` ELF gate fails the build for an
     /// over-threshold frame whichever constructor produced it.
     pub fn try_new(value: T) -> Result<Self, AllocError> {
         let boxed = Box::try_new(value)?;
@@ -919,6 +919,13 @@ impl<T> KArc<T> {
             let value = data_fn(&weak);
             core::ptr::addr_of_mut!((*inner).data).write(value);
             (*inner).strong.store(1, Ordering::Release);
+            #[cfg_attr(
+                target_os = "none",
+                expect(
+                    clippy::disallowed_methods,
+                    reason = "the temporary KWeak's implicit weak count passes to the strong set once published"
+                )
+            )]
             core::mem::forget(weak);
             Ok(Self {
                 ptr: NonNull::new_unchecked(inner),
@@ -1048,6 +1055,13 @@ impl<T: ?Sized> KArc<T> {
         // SAFETY: `this` owns a live strong reference, so its initialized data
         // field has a stable address for the duration of this operation.
         let data = unsafe { core::ptr::addr_of!((*this.ptr.as_ptr()).data) };
+        #[cfg_attr(
+            target_os = "none",
+            expect(
+                clippy::disallowed_methods,
+                reason = "the strong reference moves into the returned raw pointer, which `from_raw` takes back"
+            )
+        )]
         core::mem::forget(this);
         data
     }
@@ -1094,6 +1108,13 @@ impl<T: ?Sized> KArc<T> {
         let ptr = this.ptr;
         let release = refcount_release(&this.inner().strong);
         // The release above is this handle's; `Drop` must not repeat it.
+        #[cfg_attr(
+            target_os = "none",
+            expect(
+                clippy::disallowed_methods,
+                reason = "the strong reference was released above; Drop would release it again"
+            )
+        )]
         core::mem::forget(this);
         match release {
             RefcountRelease::Remaining | RefcountRelease::Saturated => None,

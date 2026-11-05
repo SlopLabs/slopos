@@ -1,7 +1,8 @@
-//! Self-tests for the test framework itself.
+//! Self-tests for the test framework itself, `order = first` so broken
+//! plumbing bails the phase before any subsystem test spends time on it.
 //!
-//! The `aaa`/`bbb`/`ccc`/`ddd` suffixes fix the lex order: the panic-isolation
-//! check must run after the canary.
+//! `isolation_check` reads what the canary's panic left behind, so it ranks
+//! after the rest of this module rather than relying on how names sort.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -11,7 +12,8 @@ use crate::filter::glob_match;
 use crate::TestResult;
 
 /// Incremented on entry to every bootstrap test, including the canary before it
-/// panics; the isolation check reads it to confirm prior tests ran.
+/// panics; the isolation check reads it to confirm the harness ran every one
+/// ahead of it, through the panic.
 static BOOTSTRAP_CTR: AtomicU32 = AtomicU32::new(0);
 static BOOTSTRAP_DROP_CTR: AtomicU32 = AtomicU32::new(0);
 
@@ -23,7 +25,7 @@ impl Drop for PanicCanaryGuard {
     }
 }
 
-fn bootstrap_aaa_glob_match() -> TestResult {
+fn glob_matches() -> TestResult {
     BOOTSTRAP_CTR.fetch_add(1, Ordering::Relaxed);
     if !glob_match(b"a::*", b"a::b") {
         return TestResult::Fail;
@@ -46,7 +48,7 @@ fn bootstrap_aaa_glob_match() -> TestResult {
     TestResult::Pass
 }
 
-fn bootstrap_aab_unwind_backtrace_nonempty() -> TestResult {
+fn unwind_backtrace_nonempty() -> TestResult {
     BOOTSTRAP_CTR.fetch_add(1, Ordering::Relaxed);
     let backtrace = slopos_ostd::unwind::capture_backtrace();
     if backtrace.as_slice().is_empty() {
@@ -56,7 +58,7 @@ fn bootstrap_aab_unwind_backtrace_nonempty() -> TestResult {
     TestResult::Pass
 }
 
-fn bootstrap_bbb_capture_roundtrip() -> TestResult {
+fn capture_roundtrip() -> TestResult {
     BOOTSTRAP_CTR.fetch_add(1, Ordering::Relaxed);
     {
         let _g = crate::capture::begin();
@@ -78,14 +80,14 @@ fn bootstrap_bbb_capture_roundtrip() -> TestResult {
 }
 
 /// Panics on purpose to exercise the harness's panic-isolation path.
-fn bootstrap_ccc_panic_canary() -> TestResult {
+fn panic_canary() -> TestResult {
     BOOTSTRAP_CTR.fetch_add(1, Ordering::Relaxed);
     let _guard = PanicCanaryGuard;
     panic!("intentional bootstrap canary panic");
 }
 
-/// Verifies the harness recovered cleanly from `bootstrap_ccc`'s panic.
-fn bootstrap_ddd_isolation_check() -> TestResult {
+/// Verifies the harness recovered cleanly from `panic_canary`'s panic.
+fn isolation_check() -> TestResult {
     let n = BOOTSTRAP_CTR.fetch_add(1, Ordering::Relaxed);
     if n < 4 {
         klog_info!(
@@ -115,11 +117,12 @@ fn bootstrap_ddd_isolation_check() -> TestResult {
     }
 }
 
-crate::stest!(name = bootstrap_aaa_glob_match);
-crate::stest!(name = bootstrap_aab_unwind_backtrace_nonempty);
-crate::stest!(name = bootstrap_bbb_capture_roundtrip);
+crate::stest!(name = glob_matches, order = first);
+crate::stest!(name = unwind_backtrace_nonempty, order = first);
+crate::stest!(name = capture_roundtrip, order = first);
 crate::stest!(
-    name = bootstrap_ccc_panic_canary,
-    flags = crate::FLAG_EXPECTED_PANIC
+    name = panic_canary,
+    flags = crate::FLAG_EXPECTED_PANIC,
+    order = first
 );
-crate::stest!(name = bootstrap_ddd_isolation_check);
+crate::stest!(name = isolation_check, order = first, rank = 1);

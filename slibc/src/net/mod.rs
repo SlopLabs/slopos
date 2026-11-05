@@ -13,6 +13,9 @@ use crate::pal::{Pal, Sys};
 
 pub use addr::*;
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
     match Sys::socket(domain, sock_type, protocol) {
@@ -24,6 +27,9 @@ pub unsafe extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i
     }
 }
 
+/// # Safety
+///
+/// `addr` must be valid for reads of `addrlen` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bind(fd: i32, addr: *const SockAddr, addrlen: u32) -> i32 {
     match Sys::bind(fd, addr as *const u8, addrlen) {
@@ -35,6 +41,9 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const SockAddr, addrlen: u32) -> i
     }
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn listen(fd: i32, backlog: i32) -> i32 {
     match Sys::listen(fd, backlog) {
@@ -46,6 +55,10 @@ pub unsafe extern "C" fn listen(fd: i32, backlog: i32) -> i32 {
     }
 }
 
+/// # Safety
+///
+/// `addr` must be null or valid for writes of `*addrlen` bytes, with `addrlen` then valid for
+/// reads and writes of a `u32`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn accept(fd: i32, addr: *mut SockAddr, addrlen: *mut u32) -> i32 {
     match Sys::accept(fd, addr as *mut u8, addrlen) {
@@ -57,6 +70,9 @@ pub unsafe extern "C" fn accept(fd: i32, addr: *mut SockAddr, addrlen: *mut u32)
     }
 }
 
+/// # Safety
+///
+/// `addr` must be valid for reads of `addrlen` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn connect(fd: i32, addr: *const SockAddr, addrlen: u32) -> i32 {
     match Sys::connect(fd, addr as *const u8, addrlen) {
@@ -68,6 +84,9 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const SockAddr, addrlen: u32) -
     }
 }
 
+/// # Safety
+///
+/// `buf` must be valid for reads of `len` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -> isize {
     match Sys::send(fd, buf, len, flags) {
@@ -79,6 +98,9 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -
     }
 }
 
+/// # Safety
+///
+/// `buf` must be valid for writes of `len` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> isize {
     match Sys::recv(fd, buf, len, flags) {
@@ -90,6 +112,10 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> 
     }
 }
 
+/// # Safety
+///
+/// `buf` must be valid for reads of `len` bytes; `dest_addr` must be null or valid for reads of
+/// `addrlen` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sendto(
     fd: i32,
@@ -108,6 +134,10 @@ pub unsafe extern "C" fn sendto(
     }
 }
 
+/// # Safety
+///
+/// `buf` must be valid for writes of `len` bytes; `src_addr` must be null or valid for writes of
+/// `*addrlen` bytes, with `addrlen` then valid for reads and writes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn recvfrom(
     fd: i32,
@@ -126,6 +156,9 @@ pub unsafe extern "C" fn recvfrom(
     }
 }
 
+/// # Safety
+///
+/// `optval` must be valid for reads of `optlen` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setsockopt(
     fd: i32,
@@ -143,6 +176,9 @@ pub unsafe extern "C" fn setsockopt(
     }
 }
 
+/// # Safety
+///
+/// `optval` must be valid for writes of `*optlen` bytes; `optlen` must be valid for reads and writes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getsockopt(
     fd: i32,
@@ -160,6 +196,9 @@ pub unsafe extern "C" fn getsockopt(
     }
 }
 
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
     match Sys::shutdown(fd, how) {
@@ -171,6 +210,9 @@ pub unsafe extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
     }
 }
 
+/// # Safety
+///
+/// `addr` must be valid for writes of `*addrlen` bytes; `addrlen` must be valid for reads and writes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getpeername(fd: i32, addr: *mut SockAddr, addrlen: *mut u32) -> i32 {
     match Sys::getpeername(fd, addr as *mut u8, addrlen) {
@@ -182,6 +224,9 @@ pub unsafe extern "C" fn getpeername(fd: i32, addr: *mut SockAddr, addrlen: *mut
     }
 }
 
+/// # Safety
+///
+/// `addr` must be valid for writes of `*addrlen` bytes; `addrlen` must be valid for reads and writes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getsockname(fd: i32, addr: *mut SockAddr, addrlen: *mut u32) -> i32 {
     match Sys::getsockname(fd, addr as *mut u8, addrlen) {
@@ -193,6 +238,9 @@ pub unsafe extern "C" fn getsockname(fd: i32, addr: *mut SockAddr, addrlen: *mut
     }
 }
 
+/// # Safety
+///
+/// `sv` must be valid for writes of two `i32`s.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn socketpair(domain: i32, ty: i32, protocol: i32, sv: *mut i32) -> i32 {
     match Sys::socketpair(domain, ty, protocol, sv) {
@@ -204,6 +252,10 @@ pub unsafe extern "C" fn socketpair(domain: i32, ty: i32, protocol: i32, sv: *mu
     }
 }
 
+/// # Safety
+///
+/// `addr` must be null or valid for writes of `*addrlen` bytes, with `addrlen` then valid for
+/// reads and writes of a `u32`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn accept4(
     sockfd: i32,
@@ -224,6 +276,11 @@ pub unsafe extern "C" fn accept4(
 /// the target's `libc` declares, so there is nothing to translate — the
 /// ancillary-data helpers (`CMSG_*`) live in `abi` and are shared with the
 /// kernel side for the same reason.
+///
+/// # Safety
+///
+/// `msg` must be null or point to a valid `msghdr` whose `msg_name`, `msg_iov` buffers and
+/// `msg_control` are valid for reads of their stated lengths.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sendmsg(
     sockfd: i32,
@@ -245,6 +302,11 @@ pub unsafe extern "C" fn sendmsg(
 
 /// `recvmsg(2)`. The kernel writes `msg_namelen`, `msg_controllen` and
 /// `msg_flags` back, so the caller's header is updated in place.
+///
+/// # Safety
+///
+/// `msg` must be null or point to a valid `msghdr` whose `msg_name`, `msg_iov` buffers and
+/// `msg_control` are valid for writes of their stated lengths.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn recvmsg(sockfd: i32, msg: *mut crate::types::msghdr, flags: i32) -> isize {
     if msg.is_null() {
@@ -304,6 +366,10 @@ unsafe fn with_ifaces<T>(
 
 /// `if_nametoindex(3)`. Answers 0 with `errno` set, which is how this one
 /// reports failure: index 0 is `NET_IFINDEX_NONE` and names nothing.
+///
+/// # Safety
+///
+/// `ifname` must be null or point to a NUL-terminated string (read up to `IF_NAMESIZE` bytes).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn if_nametoindex(ifname: *const core::ffi::c_char) -> u32 {
     if ifname.is_null() {
@@ -339,6 +405,10 @@ pub unsafe extern "C" fn if_nametoindex(ifname: *const core::ffi::c_char) -> u32
 }
 
 /// `if_indextoname(3)`. `ifname` must have room for `IF_NAMESIZE` bytes.
+///
+/// # Safety
+///
+/// `ifname` must be null or valid for writes of `IF_NAMESIZE` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn if_indextoname(
     ifindex: u32,

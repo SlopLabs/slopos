@@ -239,7 +239,7 @@ pub fn test_syscall_lookup_empty_slot() -> TestResult {
 }
 
 /// Each name a Linux number carries resolves to a registered handler. The
-/// number-to-name agreement itself is `check_syscall_abi.sh`'s, over the whole
+/// number-to-name agreement itself is the `syscall-abi` gate's, over the whole
 /// table against `syscall_64.tbl`; what no script can see is the dispatcher,
 /// which is this.
 pub fn test_adopted_numbers_are_linux_numbers() -> TestResult {
@@ -2098,7 +2098,6 @@ pub fn test_task_cwd_round_trips_through_the_cell() -> TestResult {
         .with_cwd(|cwd| cwd.len() == MAX && cwd[..MAX - 1] == LONGEST[..] && cwd[MAX - 1] == 0);
     assert_test!(longest_ok, "the longest cwd did not round-trip whole");
 
-    drop(current);
     task_terminate(task_id);
     TestResult::Pass
 }
@@ -8936,7 +8935,7 @@ pub fn test_sendmsg_recvmsg_linux_layouts() -> TestResult {
 
 /// The data half of [`test_sendmsg_recvmsg_linux_layouts`], split out because
 /// its assertions' format temporaries put the whole test past the 2 KiB frame
-/// cap `check_stack_sizes.sh` enforces.
+/// cap the `stack-sizes` ELF gate enforces.
 #[inline(never)]
 fn verify_recvmsg_payload(table: FdTable, recv: &MsgScratch) -> TestResult {
     use slopos_abi::syscall::MsgHdr;

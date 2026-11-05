@@ -89,6 +89,10 @@ pub unsafe extern "C" fn setjmp(_env: *mut JmpBufTag) -> c_int {
 /// A tail jump rather than a call: it leaves RSP and the return address at
 /// [RSP] exactly as this function was entered with, so what [`setjmp`]
 /// captures is still this function's caller.
+///
+/// # Safety
+///
+/// As [`setjmp`].
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _setjmp(_env: *mut JmpBufTag) -> c_int {
@@ -100,6 +104,10 @@ pub unsafe extern "C" fn _setjmp(_env: *mut JmpBufTag) -> c_int {
 /// `<setjmp.h>` does not declare it, because clang's builtin table carries
 /// `returns_twice` for `setjmp`, `_setjmp` and `sigsetjmp` and not for this
 /// spelling — as in glibc and musl, it is a link-time symbol only.
+///
+/// # Safety
+///
+/// As [`setjmp`].
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __setjmp(_env: *mut JmpBufTag) -> c_int {
@@ -137,6 +145,11 @@ pub unsafe extern "C" fn longjmp(_env: *mut JmpBufTag, _val: c_int) -> ! {
 }
 
 /// `_longjmp(3)`, the name that pairs with [`_setjmp`].
+///
+/// # Safety
+///
+/// As [`longjmp`]: `env` must have been filled by a `setjmp` whose frame is
+/// still live, and every frame skipped leaks whatever it was holding.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _longjmp(_env: *mut JmpBufTag, _val: c_int) -> ! {

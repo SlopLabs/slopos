@@ -58,6 +58,10 @@ use core::ffi::{c_char, c_int, c_long, c_longlong};
 /// `rsp` for the `call`, which the return address has already offset by 8.
 macro_rules! widen1 {
     ($name:ident, $inner:ident) => {
+        /// # Safety
+        ///
+        /// Must be called as `long double f(long double)`: the argument in its
+        /// System V stack slot, the result taken from `st(0)`.
         #[unsafe(naked)]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name() {
@@ -80,6 +84,10 @@ macro_rules! widen1 {
 /// `long double fool(long double, long double)`, otherwise as [`widen1`].
 macro_rules! widen2 {
     ($name:ident, $inner:ident) => {
+        /// # Safety
+        ///
+        /// Must be called as `long double f(long double, long double)`: the
+        /// arguments in their System V stack slots, the result taken from `st(0)`.
         #[unsafe(naked)]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name() {
@@ -106,6 +114,10 @@ macro_rules! widen2 {
 /// [`widen1`].
 macro_rules! widen3 {
     ($name:ident, $inner:ident) => {
+        /// # Safety
+        ///
+        /// Must be called as `long double f(long double, long double, long double)`:
+        /// the arguments in their System V stack slots, the result taken from `st(0)`.
         #[unsafe(naked)]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name() {
@@ -187,6 +199,11 @@ pub unsafe extern "C" fn remquol(_quo: *mut c_int) {
 }
 
 /// `long double fabsl(long double)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fabsl() {
@@ -194,6 +211,11 @@ pub unsafe extern "C" fn fabsl() {
 }
 
 /// `long double sqrtl(long double)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sqrtl() {
@@ -201,6 +223,11 @@ pub unsafe extern "C" fn sqrtl() {
 }
 
 /// `long double copysignl(long double x, long double y)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` arguments
+/// in their System V stack slots, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn copysignl() {
@@ -221,6 +248,11 @@ pub unsafe extern "C" fn copysignl() {
 }
 
 /// `long double fmodl(long double x, long double y)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` arguments
+/// in their System V stack slots, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmodl() {
@@ -240,6 +272,11 @@ pub unsafe extern "C" fn fmodl() {
 }
 
 /// `long double remainderl(long double x, long double y)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` arguments
+/// in their System V stack slots, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn remainderl() {
@@ -257,6 +294,11 @@ pub unsafe extern "C" fn remainderl() {
 }
 
 /// `long double ceill(long double)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ceill() {
@@ -277,6 +319,11 @@ pub unsafe extern "C" fn ceill() {
 }
 
 /// `long double floorl(long double)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn floorl() {
@@ -297,6 +344,11 @@ pub unsafe extern "C" fn floorl() {
 }
 
 /// `long double truncl(long double)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn truncl() {
@@ -317,6 +369,11 @@ pub unsafe extern "C" fn truncl() {
 }
 
 /// `long double rintl(long double)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rintl() {
@@ -324,6 +381,11 @@ pub unsafe extern "C" fn rintl() {
 }
 
 /// `long double nearbyintl(long double)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nearbyintl() {
@@ -332,6 +394,11 @@ pub unsafe extern "C" fn nearbyintl() {
 
 /// `long double roundl(long double)`: halfway cases go away from zero, which
 /// no x87 rounding mode does, so the fraction is compared against a half.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn roundl() {
@@ -384,6 +451,11 @@ pub unsafe extern "C" fn roundl() {
 }
 
 /// `long lrintl(long double)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lrintl() -> c_long {
@@ -398,6 +470,11 @@ pub unsafe extern "C" fn lrintl() -> c_long {
 }
 
 /// `long long llrintl(long double)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llrintl() -> c_longlong {
@@ -414,6 +491,11 @@ pub unsafe extern "C" fn llrintl() -> c_longlong {
 /// `long lroundl(long double)`. The 24-byte frame holds the forwarded
 /// argument and realigns `rsp`; the rounded value is integral, so the
 /// rounding mode FISTP uses cannot change it.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lroundl() -> c_long {
@@ -433,6 +515,11 @@ pub unsafe extern "C" fn lroundl() -> c_long {
 }
 
 /// `long long llroundl(long double)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llroundl() -> c_longlong {
@@ -455,6 +542,11 @@ pub unsafe extern "C" fn llroundl() -> c_longlong {
 /// spans 16 bits of exponent, short of the x87's 32830-wide range, so `n`
 /// saturates at ±65534 and goes in two steps, remainder first: any
 /// intermediate that rounds is one the second step then drives to zero.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ldexpl(_n: c_int) {
@@ -489,6 +581,11 @@ pub unsafe extern "C" fn ldexpl(_n: c_int) {
 
 /// `long double scalbnl(long double x, int n)`, `n` in `edi`, otherwise as
 /// [`ldexpl`].
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn scalbnl(_n: c_int) {
@@ -523,6 +620,11 @@ pub unsafe extern "C" fn scalbnl(_n: c_int) {
 
 /// `long double scalblnl(long double x, long n)`, `n` in `rdi`, otherwise as
 /// [`ldexpl`].
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn scalblnl(_n: c_long) {
@@ -674,6 +776,11 @@ pub unsafe extern "C" fn modfl(_iptr: *mut c_char) {
 }
 
 /// `long double logbl(long double)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn logbl() {
@@ -709,6 +816,11 @@ pub unsafe extern "C" fn logbl() {
 
 /// `int ilogbl(long double)`, answering `INT_MIN` for zero and for a NaN and
 /// `INT_MAX` for an infinity, as `ilogb` does.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` argument
+/// in its System V stack slot.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ilogbl() -> c_int {
@@ -744,6 +856,11 @@ pub unsafe extern "C" fn ilogbl() -> c_int {
 }
 
 /// `long double fmaxl(long double x, long double y)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` arguments
+/// in their System V stack slots, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fmaxl() {
@@ -778,6 +895,11 @@ pub unsafe extern "C" fn fmaxl() {
 }
 
 /// `long double fminl(long double x, long double y)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` arguments
+/// in their System V stack slots, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fminl() {
@@ -810,6 +932,11 @@ pub unsafe extern "C" fn fminl() {
 }
 
 /// `long double fdiml(long double x, long double y)`.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` arguments
+/// in their System V stack slots, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdiml() {
@@ -835,6 +962,11 @@ pub unsafe extern "C" fn fdiml() {
 
 /// `long double hypotl(long double x, long double y)`. The larger operand is
 /// scaled to [1, 2) before squaring, so no representable result overflows.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` arguments
+/// in their System V stack slots, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hypotl() {
@@ -914,6 +1046,11 @@ pub unsafe extern "C" fn hypotl() {
 /// the significand with the two boundaries that redundancy creates handled by
 /// hand: a carry out of the significand bumps the exponent, and the smallest
 /// normal borrows into the subnormals without renormalising.
+///
+/// # Safety
+///
+/// Must be called through the C prototype above: the `long double` arguments
+/// in their System V stack slots, the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nextafterl() {
@@ -981,6 +1118,11 @@ pub unsafe extern "C" fn nextafterl() {
 }
 
 /// `long double nanl(const char *tag)`. The tag is ignored, which C permits.
+///
+/// # Safety
+///
+/// `tag` is never dereferenced. Must be called through the C prototype above,
+/// the result taken from `st(0)`.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nanl(_tag: *const c_char) {

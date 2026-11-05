@@ -68,59 +68,57 @@ impl<'a> Iterator for Opts<'a> {
         if self.ended {
             return None;
         }
-        loop {
-            let word = *self.argv.get(self.word)?;
+        let word = *self.argv.get(self.word)?;
 
-            if self.byte == 0 {
-                if word == b"--" {
-                    self.word += 1;
-                    self.ended = true;
-                    return None;
-                }
-                if word.len() >= 2 && word[0] == b'-' && word[1] == b'-' {
-                    self.word += 1;
-                    let body = &word[2..];
-                    return Some(match body.iter().position(|&b| b == b'=') {
-                        Some(eq) => Opt::Long(&body[..eq], Some(&body[eq + 1..])),
-                        None => Opt::Long(body, None),
-                    });
-                }
-                if word.len() < 2 || word[0] != b'-' {
-                    self.ended = true;
-                    return None;
-                }
-                self.byte = 1;
-            }
-
-            let flag = word[self.byte];
-            self.byte += 1;
-            let cluster_done = self.byte >= word.len();
-            if cluster_done {
-                self.byte = 0;
+        if self.byte == 0 {
+            if word == b"--" {
                 self.word += 1;
+                self.ended = true;
+                return None;
             }
-
-            if !self.known(flag) {
-                return Some(Opt::Unknown(flag));
-            }
-            if !self.takes_value(flag) {
-                return Some(Opt::Flag(flag));
-            }
-
-            // Attached (`-n5`) beats separate (`-n 5`), as getopt has it.
-            if !cluster_done {
-                let value = &word[self.byte..];
-                self.byte = 0;
+            if word.len() >= 2 && word[0] == b'-' && word[1] == b'-' {
                 self.word += 1;
-                return Some(Opt::Value(flag, value));
+                let body = &word[2..];
+                return Some(match body.iter().position(|&b| b == b'=') {
+                    Some(eq) => Opt::Long(&body[..eq], Some(&body[eq + 1..])),
+                    None => Opt::Long(body, None),
+                });
             }
-            return match self.argv.get(self.word) {
-                Some(value) => {
-                    self.word += 1;
-                    Some(Opt::Value(flag, value))
-                }
-                None => Some(Opt::Missing(flag)),
-            };
+            if word.len() < 2 || word[0] != b'-' {
+                self.ended = true;
+                return None;
+            }
+            self.byte = 1;
+        }
+
+        let flag = word[self.byte];
+        self.byte += 1;
+        let cluster_done = self.byte >= word.len();
+        if cluster_done {
+            self.byte = 0;
+            self.word += 1;
+        }
+
+        if !self.known(flag) {
+            return Some(Opt::Unknown(flag));
+        }
+        if !self.takes_value(flag) {
+            return Some(Opt::Flag(flag));
+        }
+
+        // Attached (`-n5`) beats separate (`-n 5`), as getopt has it.
+        if !cluster_done {
+            let value = &word[self.byte..];
+            self.byte = 0;
+            self.word += 1;
+            return Some(Opt::Value(flag, value));
+        }
+        match self.argv.get(self.word) {
+            Some(value) => {
+                self.word += 1;
+                Some(Opt::Value(flag, value))
+            }
+            None => Some(Opt::Missing(flag)),
         }
     }
 }

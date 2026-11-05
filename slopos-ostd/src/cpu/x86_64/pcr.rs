@@ -453,10 +453,7 @@ pub static BSP_PCR: SyncUnsafeCell<ProcessorControlRegion> =
 /// and not a power of two.
 #[unsafe(no_mangle)]
 pub static AP_PCRS: SyncUnsafeCell<[ProcessorControlRegion; MAX_STATIC_APS]> =
-    SyncUnsafeCell::new({
-        const INIT: ProcessorControlRegion = ProcessorControlRegion::new();
-        [INIT; MAX_STATIC_APS]
-    });
+    SyncUnsafeCell::new([const { ProcessorControlRegion::new() }; MAX_STATIC_APS]);
 
 /// Lookup table mapping AP slot index to the corresponding `AP_PCRS` entry
 /// pointer, populated on the BSP by [`init_ap_pcr_lookup`] before any AP is
@@ -528,10 +525,8 @@ static GS_BASE_SET: InitFlag = InitFlag::new();
 
 const INVALID_CPU_IDX: u32 = u32::MAX;
 
-static APIC_ID_TO_CPU_IDX: [AtomicU32; MAX_CPUS] = {
-    const INIT: AtomicU32 = AtomicU32::new(INVALID_CPU_IDX);
-    [INIT; MAX_CPUS]
-};
+static APIC_ID_TO_CPU_IDX: [AtomicU32; MAX_CPUS] =
+    [const { AtomicU32::new(INVALID_CPU_IDX) }; MAX_CPUS];
 
 static BSP_APIC_ID: AtomicU32 = AtomicU32::new(0);
 

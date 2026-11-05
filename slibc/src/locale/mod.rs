@@ -206,6 +206,10 @@ static T_FMT_AMPM_STR: NlStr = cstr(strftime::T_FMT_AMPM);
 /// `setlocale(3)`. A NULL `locale` queries and always answers `"C"`; `""`,
 /// `"C"` and `"POSIX"` select it; anything else fails with no state change.
 /// The answer is a static, so it outlives every later call.
+///
+/// # Safety
+///
+/// `locale` must be null or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setlocale(category: c_int, locale: *const c_char) -> *mut c_char {
     if !(LC_CTYPE..=LC_ALL).contains(&category) {

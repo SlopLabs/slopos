@@ -1,60 +1,32 @@
-# check_lockdep_headroom gate data — variant: tests
+# lockdep gate data — variant: tests
 #
-# The lock-order validator must be ACTIVE at every phase it reports, report no
-# violation, and keep every pool clear of its ceiling. Re-measure with
+#     run_tests gate lockdep --variant tests --emit-allowlist --log RUN.log [--log SHARD.log...] > scripts/gates/lockdep/tests.txt
 #
-#     scripts/check_lockdep_headroom.sh --variant tests --emit-allowlist \
-#         --log RUN1.log --log RUN2.log --log RUN3.log
+# Graded on every boot (every --log on its own): each required phase reports
+# the lock validator ACTIVE with no violation; each pool (classes, edges,
+# chains) stays under max-fill-pct of its size; and each phase clears the
+# floors, so a validator that stopped recording fails instead of satisfying
+# every ceiling.
 #
-# and say in the commit message which lock moved a value. Two kinds of entry:
+# Counts are not graded. Exact class caps and edge/chain caps and bands
+# graded totals that moved between runs of identical code (which classes a
+# phase registers and which orderings it observes depend on what the suite
+# reached and how it was scheduled) and failed CI on docs-only commits
+# 407d1d69 and 38465620, whose parents passed. A lock-order defect fails as
+# violations=; a lock array landing without a class key adds classes by the
+# hundred and fails max-fill-pct.
 #
-#   <phase> <TAB> <pool> <TAB> <cap>   exceeding it FAILS the run
-#   band <phase> <pool> <lo> <hi>      leaving it prints DRIFT and passes
-#
-# Either kind matching no LOCKDEP[...] line is a dead entry and fails the gate:
-# a phase that stopped reporting looks exactly like a phase that passed.
+# max-fill-pct mirrors MAX_POOL_FILL_PCT and min-classes MIN_CLASSES in
+# ktesting/src/lockdep_tests.rs. The fill comparison is val*100 against
+# max-fill-pct*pool_size, so the ceilings are 355 of 508 classes, 716 of 1024 edges, 1433 of 2048 chains.
+# The floors are chosen far under every observation; the required phases are
+# measured.
 
-# Every pool stays this far below its size, mirroring MAX_POOL_FILL_PCT in
-# ktesting/src/zz_lockdep_tests.rs. The comparison is `val * 100` against
-# `max-fill-pct * pool_size`, so the ceilings are exactly 355 of 508 classes,
-# 716 of 1024 edges and 1433 of 2048 chains. It catches an array-of-locks
-# static landing without a class key, which adds classes by the hundred.
 max-fill-pct 70
-
-# Floors: without them "0 classes" satisfies every ceiling, and a validator
-# that stopped registering reads as healthy. Mirrors MIN_CLASSES there.
 min-classes 32
-
-# The floors of the banded pools, far under every observation, so they fail a
-# validator that stopped recording and nothing else. A band without its floor
-# is a gate-file error.
 min-edges 16
 min-chains 32
 
 require-phase boot
 require-phase post-kernel-tests
 require-phase post-userland-tests
-
-
-# Class caps, exact: a class registers on the first acquire of a declaration
-# site, so by a phase's end the count is a property of the kernel. One more is
-# a new lock, or a lock reached a phase earlier; each phase's
-# `LOCKDEP-CLASS[<phase>]:` lines name its classes.
-boot	classes	106
-post-kernel-tests	classes	268
-post-userland-tests	classes	283
-
-# Boot's edges and chains are caps too: boot reaches its report by a fixed
-# sequence with no test dispatch in it.
-boot	edges	59
-boot	chains	156
-
-# The test phases' edges and chains count the orderings a run happened to
-# observe, which move between runs of identical code, so they carry bands: the
-# measured range widened by its own width on each side. A band has no upper
-# failure of its own — max-fill-pct, roughly 3.5x the observed values, is the
-# ceiling above it — and an inverted order is still a `violations=` failure.
-band post-kernel-tests edges 173 218
-band post-userland-tests edges 197 335
-band post-kernel-tests chains 408 488
-band post-userland-tests chains 449 635

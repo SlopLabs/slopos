@@ -1,5 +1,5 @@
 # Files whose colours are their content, exempt from one check of
-# scripts/check_ui_literals.sh: `<check> <path> <why>`. An entry that matches
+# the `ui-literals` gate: `<check> <path> <why>`. An entry that matches
 # nothing fails the gate.
 colour apps/src/editor/syntax.rs the code view's syntax palette
 colour appkit/src/widgets/picture.rs the checks a picture's transparent pixels are judged against

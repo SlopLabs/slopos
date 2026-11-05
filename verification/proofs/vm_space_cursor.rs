@@ -28,7 +28,7 @@
 // per object, and for a space shared across CPUs the sole minter of that
 // `&mut` is `PROCESS_VMS[slot]` or `KERNEL_VM_SPACE`. That the kernel master
 // tables have no second writer is enforced by
-// `scripts/check_kernel_pml4_writer.sh`, not by this proof.
+// the `kernel-pml4-writer` gate, not by this proof.
 //
 // Each cursor operation is one `Step` over the abstract path PML4 -> PDPT ->
 // PD -> PT -> leaf at one vaddr; the exclusive borrow serializes all mutators

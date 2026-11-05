@@ -26,7 +26,13 @@
 //! enforces `#[repr(C)]`/`transparent`, rejects `#[repr(packed)]`,
 //! and adds a `T: Pod` bound on every field.
 
-/// See module-level docs for safety requirements.
+/// A type any byte sequence of its size is a valid value of.
+///
+/// # Safety
+///
+/// The implementor must be `#[repr(C)]` (or `#[repr(transparent)]` over a
+/// `Pod`), accept every bit pattern of `size_of::<Self>()` bytes as a valid
+/// value, and have no padding; the module docs list the types this excludes.
 pub unsafe trait Pod: Copy + 'static {}
 
 macro_rules! impl_pod_prims {

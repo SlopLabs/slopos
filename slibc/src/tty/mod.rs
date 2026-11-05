@@ -23,6 +23,9 @@ pub const TCSANOW: i32 = 0;
 pub const TCSADRAIN: i32 = 1;
 pub const TCSAFLUSH: i32 = 2;
 
+/// # Safety
+///
+/// `termios` must be null or valid for writes of a `termios`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcgetattr(fd: i32, termios: *mut UserTermios) -> i32 {
     if termios.is_null() {
@@ -41,6 +44,10 @@ pub unsafe extern "C" fn tcgetattr(fd: i32, termios: *mut UserTermios) -> i32 {
 /// `optional_actions` selects when the change takes effect: `TCSANOW`
 /// immediately, `TCSADRAIN` after pending output drains, `TCSAFLUSH` after
 /// output drains and pending input is discarded.
+///
+/// # Safety
+///
+/// `termios` must be null or point to a valid `termios`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcsetattr(
     fd: i32,
@@ -71,6 +78,9 @@ pub unsafe extern "C" fn tcsetattr(
     }
 }
 
+/// # Safety
+///
+/// `termios` must be null or point to a valid `termios`, valid for reads and writes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cfmakeraw(termios: *mut UserTermios) {
     if termios.is_null() {
@@ -95,6 +105,9 @@ pub unsafe extern "C" fn cfmakeraw(termios: *mut UserTermios) {
     (*termios).c_cc[VTIME] = 0;
 }
 
+/// # Safety
+///
+/// `termios` must be null or point to a valid `termios`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cfgetispeed(termios: *const UserTermios) -> u32 {
     if termios.is_null() {
@@ -103,6 +116,9 @@ pub unsafe extern "C" fn cfgetispeed(termios: *const UserTermios) -> u32 {
     (*termios).c_ispeed
 }
 
+/// # Safety
+///
+/// `termios` must be null or valid for writes of a `termios`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cfsetispeed(termios: *mut UserTermios, speed: u32) -> i32 {
     if termios.is_null() {
@@ -113,6 +129,9 @@ pub unsafe extern "C" fn cfsetispeed(termios: *mut UserTermios, speed: u32) -> i
     0
 }
 
+/// # Safety
+///
+/// `termios` must be null or point to a valid `termios`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cfgetospeed(termios: *const UserTermios) -> u32 {
     if termios.is_null() {
@@ -121,6 +140,9 @@ pub unsafe extern "C" fn cfgetospeed(termios: *const UserTermios) -> u32 {
     (*termios).c_ospeed
 }
 
+/// # Safety
+///
+/// `termios` must be null or valid for writes of a `termios`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cfsetospeed(termios: *mut UserTermios, speed: u32) -> i32 {
     if termios.is_null() {
@@ -167,6 +189,10 @@ pub extern "C" fn tcsendbreak(fd: i32, _duration: i32) -> i32 {
 }
 
 /// `tcgetpgrp(3)`: the terminal's foreground process group.
+///
+/// # Safety
+///
+/// None: `fd` is a plain integer the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcgetpgrp(fd: i32) -> i32 {
     let mut pgrp = 0i32;
@@ -180,6 +206,10 @@ pub unsafe extern "C" fn tcgetpgrp(fd: i32) -> i32 {
 }
 
 /// `tcsetpgrp(3)`: make `pgrp` the terminal's foreground process group.
+///
+/// # Safety
+///
+/// None: the arguments are plain integers the kernel validates; it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcsetpgrp(fd: i32, pgrp: i32) -> i32 {
     match Sys::ioctl(fd, slopos_abi::syscall::TIOCSPGRP, (&raw const pgrp) as u64) {

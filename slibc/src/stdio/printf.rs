@@ -629,41 +629,71 @@ pub(crate) unsafe fn vsnprintf_impl(
     total
 }
 
+/// # Safety
+///
+/// `fmt` must be a NUL-terminated format whose conversions match the variadic arguments.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn printf(fmt: *const u8, mut args: ...) -> i32 {
     vfprintf_impl(streams::stdout_file(), fmt, &mut args)
 }
 
+/// # Safety
+///
+/// `stream` must be a live, unclosed `FILE`; `fmt` must be a NUL-terminated format whose
+/// conversions match the variadic arguments.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fprintf(stream: *mut FILE, fmt: *const u8, mut args: ...) -> i32 {
     vfprintf_impl(stream, fmt, &mut args)
 }
 
+/// # Safety
+///
+/// `fmt` must be a NUL-terminated format whose conversions match the variadic arguments;
+/// `buf` must be valid for writes of the whole formatted output plus its NUL.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sprintf(buf: *mut u8, fmt: *const u8, mut args: ...) -> i32 {
     vsnprintf_impl(buf, usize::MAX, fmt, &mut args)
 }
 
+/// # Safety
+///
+/// `fmt` must be a NUL-terminated format whose conversions match the variadic arguments;
+/// `buf` must be valid for writes of `n` bytes (may be null only when `n` is 0).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn snprintf(buf: *mut u8, n: usize, fmt: *const u8, mut args: ...) -> i32 {
     vsnprintf_impl(buf, n, fmt, &mut args)
 }
 
+/// # Safety
+///
+/// `fmt` must be a NUL-terminated format whose conversions match `ap`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vprintf(fmt: *const u8, mut ap: VaList<'_>) -> i32 {
     vfprintf_impl(streams::stdout_file(), fmt, &mut ap)
 }
 
+/// # Safety
+///
+/// `stream` must be a live, unclosed `FILE`; `fmt` must be a NUL-terminated format whose
+/// conversions match `ap`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vfprintf(stream: *mut FILE, fmt: *const u8, mut ap: VaList<'_>) -> i32 {
     vfprintf_impl(stream, fmt, &mut ap)
 }
 
+/// # Safety
+///
+/// `fmt` must be a NUL-terminated format whose conversions match `ap`; `buf` must be valid
+/// for writes of the whole formatted output plus its NUL.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vsprintf(buf: *mut u8, fmt: *const u8, mut ap: VaList<'_>) -> i32 {
     vsnprintf_impl(buf, usize::MAX, fmt, &mut ap)
 }
 
+/// # Safety
+///
+/// `fmt` must be a NUL-terminated format whose conversions match `ap`; `buf` must be valid
+/// for writes of `n` bytes (may be null only when `n` is 0).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vsnprintf(
     buf: *mut u8,

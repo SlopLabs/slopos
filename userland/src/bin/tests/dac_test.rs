@@ -211,6 +211,7 @@ fn etc_refuses_a_new_name_and_a_writer() -> bool {
         let created = OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(false)
             .mode(0o644)
             .open(ETC_NEW);
         let written = OpenOptions::new().write(true).open(ETC_FILE);

@@ -122,6 +122,10 @@ fn try_steal_from_cpu(victim: usize, thief: usize) -> Option<TaskRef> {
 
     // Assumes an invariant TSC: timestamps taken on different cores are
     // compared directly, which is inaccurate on a CPU without one.
+    #[expect(
+        clippy::absurd_extreme_comparisons,
+        reason = "MIGRATION_COST_CYCLES is a tunable whose value 0 turns the cost check off"
+    )]
     if MIGRATION_COST_CYCLES > 0 {
         let last_run = task.last_run_timestamp();
         if last_run != 0 {

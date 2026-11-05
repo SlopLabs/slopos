@@ -1254,6 +1254,10 @@ mod tests {
                 }
                 samples += 1;
                 reader_started.store(true, StdOrdering::Release);
+                #[expect(
+                    clippy::absurd_extreme_comparisons,
+                    reason = "SAMPLE_CAP is u64::MAX outside miri, where only `reader_stop` ends the loop"
+                )]
                 if samples >= SAMPLE_CAP || reader_stop.load(StdOrdering::Acquire) {
                     return samples;
                 }

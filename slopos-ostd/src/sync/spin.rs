@@ -31,10 +31,8 @@ static SPIN_RELAX_HOOK: AtomicUsize = AtomicUsize::new(0);
 
 /// Per-CPU re-entrancy latch: the hook takes a (TLB queue) SpinLock itself, so
 /// a contended acquire inside it must spin plainly rather than recurse.
-static SPIN_RELAX_IN_HOOK: [AtomicBool; crate::cpu::x86_64::pcr::MAX_CPUS] = {
-    const FALSE: AtomicBool = AtomicBool::new(false);
-    [FALSE; crate::cpu::x86_64::pcr::MAX_CPUS]
-};
+static SPIN_RELAX_IN_HOOK: [AtomicBool; crate::cpu::x86_64::pcr::MAX_CPUS] =
+    [const { AtomicBool::new(false) }; crate::cpu::x86_64::pcr::MAX_CPUS];
 
 /// Register the contended-spin relax callback. Overwriting is harmless: the
 /// slot is only ever set to the same function.
@@ -138,8 +136,8 @@ impl LockCore {
     ///
     /// One out-of-line non-generic call, deliberately covering the uncontended
     /// path too: `SpinLock::lock` is inlined at ~850 call sites and everything
-    /// it keeps inline lands in each caller's frame, which
-    /// `check_stack_sizes.sh --variant release` has no allowlist to absorb.
+    /// it keeps inline lands in each caller's frame, which the `stack-sizes`
+    /// ELF gate at `--variant release` has no allowlist to absorb.
     /// Splitting the wait from the publish would leave `my_ticket` live across
     /// two calls; folded, nothing but `&self` is live across the call.
     #[inline(never)]
@@ -497,7 +495,7 @@ impl<T> SpinLock<T> {
 /// Report a spin whose queue has stopped moving. Cold, never inlined,
 /// non-generic, and with no `format_args!` at the call site: `SpinLock::lock`
 /// is the most-monomorphised function in the kernel and its frame is held to
-/// 2048 bytes by `check_stack_sizes.sh`.
+/// 2048 bytes by the `stack-sizes` ELF gate.
 #[cold]
 #[inline(never)]
 fn report_spin_stall(core: &LockCore, my_ticket: u16) {

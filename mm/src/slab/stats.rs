@@ -34,7 +34,7 @@ pub fn snapshot() -> HeapStats {
 
     // One reused loop body rather than eight inlined expansions: in a debug
     // build the per-expansion temporaries pushed this frame past the 2 KiB
-    // ceiling check_stack_sizes.sh enforces.
+    // ceiling the `stack-sizes` ELF gate enforces.
     let class_stats: [&SlabClassStats; SIZE_CLASSES.len()] = [
         &KERNEL_SLAB.slab16.stats,
         &KERNEL_SLAB.slab32.stats,

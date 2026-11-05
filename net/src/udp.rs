@@ -180,13 +180,13 @@ pub mod demux {
     }
 }
 
-static UDP_DEMUX_BUCKETS_TABLE: [SpinLock<UdpDemuxBucket>; UDP_DEMUX_BUCKETS] = {
-    const BUCKET: SpinLock<UdpDemuxBucket> = SpinLock::new(
+static UDP_DEMUX_BUCKETS_TABLE: [SpinLock<UdpDemuxBucket>; UDP_DEMUX_BUCKETS] = [const {
+    SpinLock::new(
         UdpDemuxBucket::new(),
         lock_class!("UDP_DEMUX_BUCKETS", LOCK_LEVEL_REGISTRY),
-    );
-    [BUCKET; UDP_DEMUX_BUCKETS]
+    )
 };
+    UDP_DEMUX_BUCKETS];
 
 pub(crate) fn parse_udp_header(payload: &[u8]) -> Option<(u16, u16, &[u8])> {
     if payload.len() < 8 {

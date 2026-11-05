@@ -74,10 +74,8 @@ impl PerCpuAsids {
 /// `forget_context_local` takes a caller-supplied index, so nothing about the
 /// signature confines a caller to its own slot; `PerCpuSlot` checks the
 /// exclusivity the discipline assumes.
-static PER_CPU: [PerCpuSlot<PerCpuAsids>; MAX_CPUS] = {
-    const INIT: PerCpuSlot<PerCpuAsids> = PerCpuSlot::new(PerCpuAsids::new());
-    [INIT; MAX_CPUS]
-};
+static PER_CPU: [PerCpuSlot<PerCpuAsids>; MAX_CPUS] =
+    [const { PerCpuSlot::new(PerCpuAsids::new()) }; MAX_CPUS];
 
 /// Software mirror of `CR4.PCIDE`, set once at BSP boot, so the
 /// context-switch hot path never reads `CR4`.

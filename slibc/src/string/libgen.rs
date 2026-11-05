@@ -11,6 +11,11 @@ static mut SLASH: [u8; 2] = *b"/\0";
 
 /// The final component of `path`, its trailing slashes cut off in place: "."
 /// for a null or empty path, "/" for one of slashes alone.
+///
+/// # Safety
+///
+/// `path` must be null or a writable NUL-terminated string. The result may be
+/// static storage shared by every caller and must not be written through.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn basename(path: *mut c_char) -> *mut c_char {
     let path = path.cast::<u8>();
@@ -34,6 +39,11 @@ pub unsafe extern "C" fn basename(path: *mut c_char) -> *mut c_char {
 
 /// Everything of `path` before its final component, cut off in place: "."
 /// for a path with no slash, "/" for one directly below the root.
+///
+/// # Safety
+///
+/// `path` must be null or a writable NUL-terminated string. The result may be
+/// static storage shared by every caller and must not be written through.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dirname(path: *mut c_char) -> *mut c_char {
     let path = path.cast::<u8>();

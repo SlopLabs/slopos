@@ -468,7 +468,7 @@ pub fn emergency_stack_guard_fault(fault_addr: u64) -> Option<usize> {
 /// # Panics
 /// Panics if memory allocation or mapping fails.
 ///
-/// # Safety
+/// # Ordering
 /// Must be called after:
 /// - Memory subsystem is initialized (page allocator, paging)
 /// - GDT/TSS is initialized

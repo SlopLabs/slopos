@@ -461,6 +461,10 @@ pub fn test_dispatch_publishes_current_priority() -> TestResult {
         return TestResult::Fail;
     }
 
+    #[expect(
+        clippy::absurd_extreme_comparisons,
+        reason = "pins the ordering, not today's value: PRIORITY_NONE must lose to every real priority whatever it is set to"
+    )]
     if TaskPriority::Idle.as_u8() >= slopos_ostd::cpu::x86_64::pcr::PRIORITY_NONE {
         klog_info!("SCHED_TEST: PRIORITY_NONE does not lose to every real priority");
         let _ = task_terminate(task_id);

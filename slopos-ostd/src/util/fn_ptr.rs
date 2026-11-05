@@ -17,6 +17,10 @@ pub fn encode(f: fn()) -> *mut () {
 /// Caller invariant: the pointer was published by a prior `encode`
 /// for the same `fn()` ABI (i.e. `fn()`, no arguments, no return).
 #[inline]
+#[expect(
+    clippy::not_unsafe_ptr_arg_deref,
+    reason = "the pointer is one `encode` published for the same ABI; the crates decoding it forbid unsafe code"
+)]
 pub fn decode(ptr: *mut ()) -> Option<fn()> {
     if ptr.is_null() {
         return None;

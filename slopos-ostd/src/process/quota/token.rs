@@ -6,7 +6,7 @@
 //! ordinary refund. Committing one yields a [`Charge`], which lives in exactly
 //! one place for exactly the lifetime of the thing it accounts for — never
 //! `Option<Charge<_>>`, and no accessor hands one back by value.
-//! `scripts/check_charge_linearity.sh` is what keeps that invariant true.
+//! The `charge-linearity` gate is what keeps that invariant true.
 
 use core::marker::PhantomData;
 use core::sync::atomic::Ordering;
@@ -54,6 +54,13 @@ impl<A: Refundable> Reservation<A> {
     #[inline]
     fn into_parts(self) -> (AccountId, u32) {
         let parts = (self.account, self.amount);
+        #[cfg_attr(
+            target_os = "none",
+            expect(
+                clippy::disallowed_methods,
+                reason = "the debit moves on to the caller (a Charge or a ChargeSlot); Drop would refund it"
+            )
+        )]
         core::mem::forget(self);
         parts
     }
@@ -173,6 +180,13 @@ impl<A: Refundable> Charge<A> {
     #[inline]
     fn into_parts(self) -> (AccountId, u32) {
         let parts = (self.account, self.amount);
+        #[cfg_attr(
+            target_os = "none",
+            expect(
+                clippy::disallowed_methods,
+                reason = "the debit moves on to the caller (a grown Charge, a ChargeSlot or an explicit refund); Drop would refund it"
+            )
+        )]
         core::mem::forget(self);
         parts
     }

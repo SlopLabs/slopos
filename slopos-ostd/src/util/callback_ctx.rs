@@ -20,9 +20,11 @@ pub struct CallbackCtx<'a, T> {
 impl<'a, T> CallbackCtx<'a, T> {
     /// Wrap a raw `*mut c_void` for typed access.
     ///
-    /// SAFETY (caller): the pointer must either be null or carry a
-    /// live `&mut T` borrow that outlives `'a`. Mismatching `T`
-    /// against the original cast is undefined behavior.
+    /// # Safety
+    ///
+    /// The pointer must either be null or carry a live `&mut T` borrow that
+    /// outlives `'a`. Mismatching `T` against the original cast is undefined
+    /// behavior.
     #[inline]
     pub unsafe fn from_raw(ptr: *mut c_void) -> Self {
         Self {

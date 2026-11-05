@@ -3,7 +3,7 @@
 
 //! SlopRing — io_uring-style submission/completion ring (kernel side).
 //!
-//! Sync only: there is no `async fn` here — `scripts/check_no_kernel_async.sh`
+//! Sync only: there is no `async fn` here — the `no-kernel-async` gate
 //! enforces it (AD-8/AD-9). Async lives in the userland runtime that drives
 //! this ring.
 

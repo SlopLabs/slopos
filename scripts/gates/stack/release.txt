@@ -1,9 +1,9 @@
-# check_stack_sizes allowlist — variant: release
+# stack-sizes allowlist — variant: release
 #
 # Frames above STACK_SIZE_THRESHOLD (2048 B) that are permitted, each capped
 # at its measured size so growth still fails.
 #
-#     scripts/check_stack_sizes.sh --variant release --emit-allowlist builddir/kernel-release.elf
+#     xtask elf --variant release builddir/kernel-release.elf --emit-allowlist stack-sizes
 #
 # No entries: at opt-level 3 the largest frame is well under the ceiling,
 # including the vendored unwinder frames that need exemptions in the dev

@@ -63,6 +63,9 @@ unsafe fn dir_from_fd(fd: c_int) -> *mut DIR {
     raw as *mut DIR
 }
 
+/// # Safety
+///
+/// `path` must be null or point to a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut DIR {
     if path.is_null() {
@@ -83,6 +86,11 @@ pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut DIR {
 
 /// Takes ownership of `fd`, as POSIX requires: after a successful call the
 /// descriptor must only be used through the `DIR`, and `closedir` closes it.
+///
+/// # Safety
+///
+/// None beyond the ownership transfer above: `fd` is a plain integer the kernel validates;
+/// it is `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdopendir(fd: c_int) -> *mut DIR {
     let mut st = stat::default();
@@ -100,6 +108,11 @@ pub unsafe extern "C" fn fdopendir(fd: c_int) -> *mut DIR {
 /// Answers the next entry, or null at the end of the directory — at which
 /// point `errno` is left alone, so a caller distinguishing end-of-directory
 /// from failure zeroes `errno` first, exactly as POSIX describes.
+///
+/// # Safety
+///
+/// `dirp` must be null or a `DIR` returned by `opendir`/`fdopendir` and not yet closed,
+/// not used concurrently. The returned entry is overwritten by the next call and freed by `closedir`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn readdir(dirp: *mut DIR) -> *mut dirent {
     let dir = dirp as *mut Dir;
@@ -108,80 +121,86 @@ pub unsafe extern "C" fn readdir(dirp: *mut DIR) -> *mut dirent {
         return core::ptr::null_mut();
     }
 
-    loop {
-        if (*dir).pos >= (*dir).filled {
-            match Sys::getdents64((*dir).fd, (*dir).buf.as_mut_ptr(), DIR_BUF_SIZE) {
-                Ok(0) => {
-                    (*dir).filled = 0;
-                    (*dir).pos = 0;
-                    return core::ptr::null_mut();
-                }
-                Ok(n) => {
-                    (*dir).filled = n.min(DIR_BUF_SIZE);
-                    (*dir).pos = 0;
-                }
-                Err(e) => {
-                    errno_set(e.raw());
-                    return core::ptr::null_mut();
-                }
+    if (*dir).pos >= (*dir).filled {
+        match Sys::getdents64((*dir).fd, (*dir).buf.as_mut_ptr(), DIR_BUF_SIZE) {
+            Ok(0) => {
+                (*dir).filled = 0;
+                (*dir).pos = 0;
+                return core::ptr::null_mut();
+            }
+            Ok(n) => {
+                (*dir).filled = n.min(DIR_BUF_SIZE);
+                (*dir).pos = 0;
+            }
+            Err(e) => {
+                errno_set(e.raw());
+                return core::ptr::null_mut();
             }
         }
-
-        // Name and metadata are copied out before anything in `*dir` is
-        // written, so the borrow of `buf` ends before `entry` is touched.
-        let mut name = [0u8; DIR_NAME_MAX + 1];
-        let (d_ino, d_off, d_type, name_len, consumed) = {
-            let window = core::slice::from_raw_parts(
-                (*dir).buf.as_ptr().add((*dir).pos),
-                (*dir).filled - (*dir).pos,
-            );
-            let mut walker = DirentIter::new(window);
-            let Some(record) = walker.next() else {
-                // `d_reclen` is what says where the next record starts, so a
-                // malformed one cannot be stepped over and the stream cannot
-                // be resynchronised. That is an I/O error, not an end.
-                errno_set(EIO.raw());
-                return core::ptr::null_mut();
-            };
-            let len = record.name.len().min(DIR_NAME_MAX);
-            name[..len].copy_from_slice(&record.name[..len]);
-            (
-                record.d_ino,
-                record.d_off,
-                record.d_type,
-                len,
-                walker.byte_offset(),
-            )
-        };
-        (*dir).pos += consumed;
-        (*dir).tell = d_off;
-
-        let entry = &raw mut (*dir).entry;
-        (*entry).d_ino = d_ino;
-        (*entry).d_off = d_off;
-        (*entry).d_type = d_type;
-        (*entry).d_name = [0; 256];
-        core::ptr::copy_nonoverlapping(
-            name.as_ptr(),
-            (&raw mut (*entry).d_name) as *mut u8,
-            name_len,
-        );
-        // `d_reclen` describes *this* record in *this* struct: the libc header
-        // plus the NUL-terminated name, rounded to the struct's alignment.
-        (*entry).d_reclen = align_up(DIRENT_D_NAME_OFFSET + name_len + 1, 8) as u16;
-
-        return entry;
     }
+
+    // Name and metadata are copied out before anything in `*dir` is
+    // written, so the borrow of `buf` ends before `entry` is touched.
+    let mut name = [0u8; DIR_NAME_MAX + 1];
+    let (d_ino, d_off, d_type, name_len, consumed) = {
+        let window = core::slice::from_raw_parts(
+            (*dir).buf.as_ptr().add((*dir).pos),
+            (*dir).filled - (*dir).pos,
+        );
+        let mut walker = DirentIter::new(window);
+        let Some(record) = walker.next() else {
+            // `d_reclen` is what says where the next record starts, so a
+            // malformed one cannot be stepped over and the stream cannot
+            // be resynchronised. That is an I/O error, not an end.
+            errno_set(EIO.raw());
+            return core::ptr::null_mut();
+        };
+        let len = record.name.len().min(DIR_NAME_MAX);
+        name[..len].copy_from_slice(&record.name[..len]);
+        (
+            record.d_ino,
+            record.d_off,
+            record.d_type,
+            len,
+            walker.byte_offset(),
+        )
+    };
+    (*dir).pos += consumed;
+    (*dir).tell = d_off;
+
+    let entry = &raw mut (*dir).entry;
+    (*entry).d_ino = d_ino;
+    (*entry).d_off = d_off;
+    (*entry).d_type = d_type;
+    (*entry).d_name = [0; 256];
+    core::ptr::copy_nonoverlapping(
+        name.as_ptr(),
+        (&raw mut (*entry).d_name) as *mut u8,
+        name_len,
+    );
+    // `d_reclen` describes *this* record in *this* struct: the libc header
+    // plus the NUL-terminated name, rounded to the struct's alignment.
+    (*entry).d_reclen = align_up(DIRENT_D_NAME_OFFSET + name_len + 1, 8) as u16;
+
+    entry
 }
 
 /// `struct dirent64` is `struct dirent` on a target whose `ino_t` and `off_t`
 /// are already 64-bit, so this is the same stream under the name a
 /// `_LARGEFILE64_SOURCE` consumer links against.
+///
+/// # Safety
+///
+/// Same as [`readdir`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn readdir64(dirp: *mut DIR) -> *mut dirent64 {
     readdir(dirp)
 }
 
+/// # Safety
+///
+/// `dirp` must be null or a `DIR` returned by `opendir`/`fdopendir` and not yet closed;
+/// it and any `dirent` obtained from it are invalid after the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn closedir(dirp: *mut DIR) -> c_int {
     let dir = dirp as *mut Dir;
@@ -200,6 +219,9 @@ pub unsafe extern "C" fn closedir(dirp: *mut DIR) -> c_int {
     }
 }
 
+/// # Safety
+///
+/// `dirp` must be null or a `DIR` returned by `opendir`/`fdopendir` and not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rewinddir(dirp: *mut DIR) {
     let dir = dirp as *mut Dir;
@@ -211,6 +233,10 @@ pub unsafe extern "C" fn rewinddir(dirp: *mut DIR) {
 
 /// `telldir(3)`: the position [`seekdir`] returns to, which is the `d_off`
 /// cookie of the entry last read.
+///
+/// # Safety
+///
+/// `dirp` must be null or a `DIR` returned by `opendir`/`fdopendir` and not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn telldir(dirp: *mut DIR) -> core::ffi::c_long {
     let dir = dirp as *mut Dir;
@@ -223,6 +249,10 @@ pub unsafe extern "C" fn telldir(dirp: *mut DIR) -> core::ffi::c_long {
 
 /// `seekdir(3)`. The buffered records are dropped rather than re-walked: the
 /// kernel's own cursor is what `lseek` moved.
+///
+/// # Safety
+///
+/// `dirp` must be null or a `DIR` returned by `opendir`/`fdopendir` and not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn seekdir(dirp: *mut DIR, loc: core::ffi::c_long) {
     let dir = dirp as *mut Dir;
@@ -235,6 +265,9 @@ pub unsafe extern "C" fn seekdir(dirp: *mut DIR, loc: core::ffi::c_long) {
     (*dir).tell = loc;
 }
 
+/// # Safety
+///
+/// `dirp` must be null or a `DIR` returned by `opendir`/`fdopendir` and not yet closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dirfd(dirp: *mut DIR) -> c_int {
     let dir = dirp as *mut Dir;
