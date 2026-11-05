@@ -106,23 +106,23 @@ func TestLockdepGateFileErrors(t *testing.T) {
 	expect(t, "no gate data", f.run("lockdep", []string{clean}), 2, "no gate data")
 }
 
-func TestLockdepShards(t *testing.T) {
+func TestLockdepLogs(t *testing.T) {
 	f := lockdepFixture(t, "require-phase post-kernel-tests\n")
-	shard := func(name string, kernelChains, violations int) string {
+	capture := func(name string, kernelChains, violations int) string {
 		return f.log(name, lockdepLine("boot", "ACTIVE", 106, 20, 54, 148, 0)+lockdepLine("post-kernel-tests", "ACTIVE", 268, 52, 200, kernelChains, violations))
 	}
-	a, b, c := shard("a.log", 400, 0), shard("b.log", 466, 0), shard("c.log", 430, 0)
+	a, b, c := capture("a.log", 400, 0), capture("b.log", 466, 0), capture("c.log", 430, 0)
 	r := f.run("lockdep", []string{a, b})
-	expect(t, "two shards", r, 0, "peak over 2 log(s)", "chains=466/2048")
+	expect(t, "two logs", r, 0, "peak over 2 log(s)", "chains=466/2048")
 	r = f.run("lockdep", []string{a, b, c})
-	expect(t, "three shards", r, 0, "peak over 3 log(s)", "chains=466/2048")
+	expect(t, "three logs", r, 0, "peak over 3 log(s)", "chains=466/2048")
 
-	bad := shard("bad.log", 400, 1)
-	expect(t, "a violation in one shard fails the run and names the shard",
+	bad := capture("bad.log", 400, 1)
+	expect(t, "a violation in one log fails the run and names the log",
 		f.run("lockdep", []string{a, bad, c}), 1, "bad.log: LOCKDEP[post-kernel-tests] reported 1 violation(s)")
 
 	short := f.log("short.log", lockdepLine("boot", "ACTIVE", 106, 20, 54, 148, 0))
-	expect(t, "a shard missing a phase fails",
+	expect(t, "a log missing a phase fails",
 		f.run("lockdep", []string{a, short}), 1, "short.log: gate requires phase 'post-kernel-tests'")
 }
 

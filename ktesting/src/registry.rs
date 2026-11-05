@@ -23,11 +23,11 @@ pub enum TestKind {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TestOrder {
-    /// Ahead of every other test, in every shard; a failure bails the phase,
-    /// so broken plumbing stops the run before anything spends time on it.
+    /// Ahead of every other test; a failure bails the phase, so broken
+    /// plumbing stops the run before anything spends time on it.
     First = 0,
     Sorted = 1,
-    /// After every `First` and `Sorted` test of its shard.
+    /// After every `First` and `Sorted` test of its phase.
     Last = 2,
 }
 
@@ -69,8 +69,8 @@ pub const FLAG_UNCAPTURED: u32 = 0x2;
 pub const FLAG_EXPLICIT: u32 = 0x4;
 
 /// `flags` bit: the entry is a `fixture!`, not a test. It runs before the
-/// first test of its phase whenever that phase runs any, whatever the filter
-/// or shard, and is neither counted nor reported as a test.
+/// first test of its phase whenever that phase runs any, whatever the filter,
+/// and is neither counted nor reported as a test.
 pub const FLAG_FIXTURE: u32 = 0x8;
 
 impl TestDesc {

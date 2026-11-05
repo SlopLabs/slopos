@@ -115,9 +115,10 @@ func TestQuotaSelfTestCases(t *testing.T) {
 	expect(t, "15 missing gate data rejected", f.run("quota", []string{clean}), 2, "no gate data")
 }
 
-// quotaShards builds n shard logs of one run: each boots (boot row), and the
-// suite's refusals are spread across the shards that ran the refusing tests.
-func quotaShards(f *fixture, prefix string, kernelDenials, userDenials []int, costIn int) []string {
+// quotaLogs builds one whole run per entry: each boots (boot row), refuses
+// its own count, and measures the charge cost unless withCost says not to.
+// Peaks grow with the run's index.
+func quotaLogs(f *fixture, prefix string, kernelDenials, userDenials []int, withCost []bool) []string {
 	var out []string
 	for i := range kernelDenials {
 		text := quotaLine("boot", "enforce", 0, "kernelmeta", 1701, 1701, -1, 0) +
@@ -125,7 +126,7 @@ func quotaShards(f *fixture, prefix string, kernelDenials, userDenials []int, co
 			quotaLine("post-kernel-tests", "enforce", 0, "fdslot", 0, 256, -1, 0) +
 			quotaLine(pu, "enforce", 0, "commitpages", 0, 170000+i, 178935, kernelDenials[i]+userDenials[i]) +
 			quotaLine(pu, "enforce", 0, "fdslot", 0, 800+i, -1, 0)
-		if i == costIn {
+		if withCost == nil || withCost[i] {
 			text += cost(1, 3893) + cost(7, 10792) + ref(131)
 		}
 		out = append(out, f.log(fmt.Sprintf("%s-%d.log", prefix, i), text))
@@ -133,7 +134,7 @@ func quotaShards(f *fixture, prefix string, kernelDenials, userDenials []int, co
 	return out
 }
 
-const quotaShardGate = `min-kinds 2
+const quotaLogsGate = `min-kinds 2
 min-kinds-for boot 1
 max-denials 0
 expect-denials post-kernel-tests commitpages 4
@@ -152,46 +153,53 @@ max-depth-cost-ratio 7 478
 min-reference-cycles 20
 `
 
-func TestQuotaShards(t *testing.T) {
+func TestQuotaLogs(t *testing.T) {
 	f := newFixture(t)
-	f.gateFile("quota", "tests", quotaShardGate)
+	f.gateFile("quota", "tests", quotaLogsGate)
 
-	single := quotaShards(f, "one", []int{4}, []int{3}, 0)
+	single := quotaLogs(f, "one", []int{4}, []int{3}, nil)
 	expect(t, "one log", f.run("quota", single), 0, "post-userland-tests/commitpages peak=170000 denials=7")
 
-	two := quotaShards(f, "two", []int{3, 1}, []int{0, 3}, 1)
-	expect(t, "two shards: denials summed, peaks maxed", f.run("quota", two), 0,
-		"post-kernel-tests/commitpages peak=2001 denials=4", "post-userland-tests/commitpages peak=170001 denials=7", "two-1.log: charge cost at depth 1")
+	two := quotaLogs(f, "two", []int{4, 4}, []int{3, 3}, nil)
+	expect(t, "two runs: denials per run, peaks maxed", f.run("quota", two), 0,
+		"post-kernel-tests/commitpages peak=2001 denials=4", "post-userland-tests/commitpages peak=170001 denials=7",
+		"two-0.log: charge cost at depth 1", "two-1.log: charge cost at depth 1")
 
-	three := quotaShards(f, "three", []int{0, 4, 0}, []int{2, 0, 1}, 2)
-	expect(t, "three shards", f.run("quota", three), 0, "post-userland-tests/commitpages peak=170002 denials=7")
+	three := quotaLogs(f, "three", []int{4, 4, 4}, []int{3, 3, 3}, nil)
+	expect(t, "three runs", f.run("quota", three), 0, "post-userland-tests/commitpages peak=170002 denials=7")
 
-	short := quotaShards(f, "short", []int{3, 0}, []int{0, 3}, 0)
-	expect(t, "a refusal missing from the shard set fails", f.run("quota", short), 1, "post-kernel-tests/commitpages recorded 3 denial(s), want exactly 4")
+	// Denials are never summed: a run that refused less fails on its own.
+	short := quotaLogs(f, "short", []int{4, 3}, []int{3, 0}, nil)
+	expect(t, "a run short of a refusal fails", f.run("quota", short), 1,
+		"short-1.log: post-kernel-tests/commitpages recorded 3 denial(s), want exactly 4")
 
-	over := quotaShards(f, "over", []int{4, 0}, []int{3, 0}, 0)
+	over := quotaLogs(f, "over", []int{4, 4}, []int{3, 3}, nil)
 	over = append(over, f.log("over-hot.log", quotaLine("boot", "enforce", 0, "kernelmeta", 1, 1803, -1, 0)+
 		quotaLine("post-kernel-tests", "enforce", 0, "fdslot", 0, 1, -1, 0)+quotaLine(pu, "enforce", 0, "fdslot", 0, 1, -1, 0)))
-	expect(t, "one shard's peak over its cap fails", f.run("quota", over), 1, "boot/kernelmeta peaked at 1803, over the recorded cap 1802")
+	expect(t, "one log's peak over its cap fails", f.run("quota", over), 1, "boot/kernelmeta peaked at 1803, over the recorded cap 1802")
 
-	noUser := quotaShards(f, "nouser", []int{4, 0}, []int{3, 0}, 0)
+	noUser := quotaLogs(f, "nouser", []int{4}, []int{3}, nil)
 	noUser = append(noUser, f.log("nouser-x.log", quotaLine("boot", "enforce", 0, "kernelmeta", 1, 1701, -1, 0)))
 	expect(t, "every boot prints every required phase", f.run("quota", noUser), 1, "nouser-x.log: gate requires phase 'post-kernel-tests'")
 
-	noCost := quotaShards(f, "nocost", []int{4, 0}, []int{3, 0}, -1)
-	expect(t, "a cost floor fails when no shard carries the measurement", f.run("quota", noCost), 1, "every log: no QUOTACOST reference line")
+	noCost := quotaLogs(f, "nocost", []int{4, 4}, []int{3, 3}, []bool{false, false})
+	expect(t, "a cost floor fails when no log carries the measurement", f.run("quota", noCost), 1, "every log: no QUOTACOST reference line")
 
-	// Every shard replays the same boot and the later rows count from it, so
-	// a boot denial cannot be summed: it fails loudly in a sharded run.
-	bootDenied := quotaShards(f, "bootdenied", []int{4, 0}, []int{3, 0}, 0)
+	// A boot denial is graded in the run that had it, like any other row.
+	bootDenied := quotaLogs(f, "bootdenied", []int{4, 4}, []int{3, 3}, nil)
 	bootDenied[1] = f.log("bootdenied-1.log", quotaLine("boot", "enforce", 0, "commitpages", 1, 5, 9, 1)+
 		quotaLine("boot", "enforce", 0, "kernelmeta", 1701, 1701, -1, 0)+
-		quotaLine("post-kernel-tests", "enforce", 0, "fdslot", 0, 256, -1, 0)+quotaLine(pu, "enforce", 0, "fdslot", 0, 800, -1, 0))
-	expect(t, "a boot denial in a sharded run is refused", f.run("quota", bootDenied), 1, "boot/commitpages recorded 1 denial(s) in a run of 2 logs")
-	f.gateFile("quota", "single", "min-kinds 1\nmax-denials 0\nexpect-denials boot commitpages 1\nrequire-phase boot\nboot\tcommitpages\t5\nboot\tkernelmeta\t1802\n")
-	expect(t, "...while one log grades it as before", f.run("quota", bootDenied[1:], "--variant", "single"), 0, "boot/commitpages peak=5 denials=1")
+		quotaLine("post-kernel-tests", "enforce", 0, "commitpages", 0, 2000, 178935, 4)+
+		quotaLine("post-kernel-tests", "enforce", 0, "fdslot", 0, 256, -1, 0)+
+		quotaLine(pu, "enforce", 0, "commitpages", 0, 170000, 178935, 7)+
+		quotaLine(pu, "enforce", 0, "fdslot", 0, 800, -1, 0)+cost(1, 3893)+cost(7, 10792)+ref(131))
+	expect(t, "a boot denial fails in the run that had it", f.run("quota", bootDenied), 1,
+		"bootdenied-1.log: boot/commitpages recorded 1 denial(s), over max-denials 0")
 
-	// The emitter over shards writes the suite-wide sums and passes them.
+	// The emitter over several runs records the largest peak and the runs'
+	// shared denial counts, and passes them.
 	f.emitInto("quota", "merged", three)
-	expect(t, "emit over shards round-trips", f.run("quota", three, "--variant", "merged"), 0, "denials=7")
+	expect(t, "emit over several runs round-trips", f.run("quota", three, "--variant", "merged"), 0, "denials=7", "peak=170002")
+	expect(t, "emit refuses runs that disagree on a refusal count", f.run("quota", short, "--emit-allowlist"), 1,
+		"expect-denials is exact, so the runs must agree")
 }

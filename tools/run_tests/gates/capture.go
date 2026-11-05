@@ -84,7 +84,7 @@ func gateRel(gate, variant string) string {
 
 // emitCommand is the documented way to (re)measure a gate file.
 func emitCommand(gate, variant string) string {
-	return fmt.Sprintf("run_tests gate %s --variant %s --emit-allowlist --log RUN.log [--log SHARD.log...] > %s",
+	return fmt.Sprintf("run_tests gate %s --variant %s --emit-allowlist --log RUN.log [--log RUN.log...] > %s",
 		gate, variant, gateRel(gate, variant))
 }
 

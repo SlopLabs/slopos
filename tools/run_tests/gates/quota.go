@@ -18,13 +18,10 @@ package gates
 // samples whatever is live at that instant, and a peak of zero means the kind
 // was never exercised, so a cap on it would bound nothing.
 //
-// Aggregation over shard logs: every boot must print each required phase;
-// peaks are the max across logs; the test phases' denials are summed, so
-// expect-denials still describes the whole suite. Boot-phase rows are the
-// same boot in every shard and the later phases' rows count from boot, so a
-// boot denial would be counted once per shard: in a run of several logs any
-// boot denial fails as unattributable. The charge cost is measured by one
-// test, so it is graded in whichever log carries the QUOTACOST lines.
+// Several logs are several whole runs of the suite: every log must print
+// each required phase, and denials and the charge cost are graded per log.
+// Peaks are the max across logs, so --emit-allowlist over N runs records
+// the largest any run reached.
 
 import (
 	"fmt"
@@ -54,7 +51,7 @@ var quotaDirectiveFields = map[string]int{
 	"max-depth-cost-ratio": 3, "require-phase": 2,
 }
 
-// quotaBootPhase is the phase every shard replays identically.
+// quotaBootPhase is the phase every log replays identically.
 const quotaBootPhase = "boot"
 
 var (
@@ -120,7 +117,8 @@ func parseQuota(c capture) (*quotaLog, error) {
 	return l, nil
 }
 
-// quotaRun is every log folded into one suite-wide account table.
+// quotaRun is every log's account table folded together: peaks and denials
+// are the maximum over the logs, each log being one whole run.
 type quotaRun struct {
 	logs     []*quotaLog
 	seenIn   map[string]int
@@ -130,7 +128,7 @@ type quotaRun struct {
 	costLogs []*quotaLog
 }
 
-func foldQuota(logs []*quotaLog) (*quotaRun, findings) {
+func foldQuota(logs []*quotaLog) *quotaRun {
 	r := &quotaRun{
 		logs:    logs,
 		seenIn:  map[string]int{},
@@ -138,7 +136,6 @@ func foldQuota(logs []*quotaLog) (*quotaRun, findings) {
 		peak:    map[string]int64{},
 		denials: map[string]int64{},
 	}
-	var fail findings
 	for _, l := range logs {
 		for phase := range l.seen {
 			r.seenIn[phase]++
@@ -149,18 +146,34 @@ func foldQuota(logs []*quotaLog) (*quotaRun, findings) {
 				r.peak[key] = p
 			}
 		}
-		for _, key := range sortedKeys(l.denials) {
-			d := l.denials[key]
-			if len(logs) > 1 && d != 0 && strings.HasPrefix(key, quotaBootPhase+"/") {
-				fail.add("%s: %s recorded %d denial(s) in a run of %d logs. Every shard replays the same boot, and the later phases' rows count from it, so a boot denial cannot be attributed to one boot or summed: grade this on one unsharded log, or make boot stop refusing.", l.path, key, d, len(logs))
-			}
-			r.denials[key] += d
+		for key, d := range l.denials {
+			r.denials[key] = max(r.denials[key], d)
 		}
 		if l.hasCost {
 			r.costLogs = append(r.costLogs, l)
 		}
 	}
-	return r, fail
+	return r
+}
+
+// quotaDenialsAgree refuses to emit an exact expect-denials count that the
+// runs being measured do not all share: the file would fail one of them.
+func quotaDenialsAgree(run *quotaRun) error {
+	var fail findings
+	for _, key := range sortedKeys(run.denials) {
+		if _, kind, _ := strings.Cut(key, "/"); !slices.Contains(quotaRefusalTestedKinds, kind) {
+			continue
+		}
+		for _, l := range run.logs {
+			if d := l.denials[key]; d != run.denials[key] {
+				fail.add("%s: %s recorded %d denial(s) where another log recorded %d — expect-denials is exact, so the runs must agree before it can be recorded.", l.path, key, d, run.denials[key])
+			}
+		}
+	}
+	if len(fail) > 0 {
+		return fail.err()
+	}
+	return nil
 }
 
 type quotaGate struct {
@@ -260,14 +273,15 @@ func runQuota(cfg Config) error {
 			return err
 		}
 	}
-	run, fail := foldQuota(logs)
-	if len(fail) > 0 {
-		return fail.err()
-	}
+	run := foldQuota(logs)
 	if cfg.Emit {
+		if err := quotaDenialsAgree(run); err != nil {
+			return err
+		}
 		emitQuota(cfg, run)
 		return nil
 	}
+	var fail findings
 	g, err := readQuotaGate(cfg)
 	if err != nil {
 		return err
@@ -310,18 +324,22 @@ func runQuota(cfg Config) error {
 		if !slices.Contains(g.required, phase) {
 			continue
 		}
-		peak, denials := run.peak[key], run.denials[key]
+		peak := run.peak[key]
 		if peak == 0 {
 			fail.add("%s peaked at 0 — the kind was never exercised, so a cap on it bounds nothing.", key)
 		}
-		if want, ok := expect[key]; ok {
-			if denials != want {
-				fail.add("%s recorded %d denial(s), want exactly %d. Fewer: a deliberate refusal stopped happening. More: something refused that no test meant to.", key, denials, want)
+		want, expected := expect[key]
+		for _, l := range logs {
+			denials := l.denials[key]
+			if expected {
+				if denials != want {
+					fail.add("%s: %s recorded %d denial(s), want exactly %d. Fewer: a deliberate refusal stopped happening. More: something refused that no test meant to.", l.path, key, denials, want)
+				}
+			} else if denials > g.maxDenials {
+				fail.add("%s: %s recorded %d denial(s), over max-denials %d. Under quota=warn these were granted; under quota=enforce they would refuse.", l.path, key, denials, g.maxDenials)
 			}
-			delete(expect, key)
-		} else if denials > g.maxDenials {
-			fail.add("%s recorded %d denial(s), over max-denials %d. Under quota=warn these were granted; under quota=enforce they would refuse.", key, denials, g.maxDenials)
 		}
+		delete(expect, key)
 		if limit, ok := unmatchedCaps[key]; ok {
 			if peak > limit {
 				fail.add("%s peaked at %d, over the recorded cap %d. Re-measure with --emit-allowlist and say what started consuming more.", key, peak, limit)

@@ -2,10 +2,11 @@
 
 ## The model
 
-Two costs, and both count: the wall clock, which is the longest chain of
-jobs, and the runner minutes, which are the sum of every job — setup
-included, since each job pays ~20–45 s of checkout, toolchain install and
-cache restore before it does any work.
+Two costs, and both count: the wall clock, which is the longest job, and the
+runner minutes, which are the sum of every job. A job pays its setup — checkout,
+toolchain, apt, cache restore, ~1.3 min for the suite's — and whatever it must
+build before it does any work, so a check joins a job that already has its
+inputs rather than getting a machine of its own.
 
 Every job is `.github/actions/setup` followed by one `just ci-*` recipe, so
 the YAML carries no logic and a red job reproduces locally with the command
@@ -14,22 +15,20 @@ it ran; `just ci` runs every lane in CI's order.
 | Job | Recipe | Chain |
 |-----|--------|-------|
 | `gates` | `ci-gates`, `ci-candidates` | fmt → host tests (Rust and Go) → clippy → dev kernel and its ELF gates → `check-framekernel-gates` → offline build → release kernel and its gates → candidate backends |
-| `suite` ×2 | `ci-suite K` | tests system build → boot of shard K of 2 → its image held to e2fsck and the map → the tests kernel's authority gate |
-| `grade` | `check-capture` | after both shards: every log gate over both captures |
-| `boot` ×3 | `ci-boot LANE` | `persist` (test-persist, test-rude-exit), `usb` (test-usb), `selfhost-root` (test-toolchain), each building what its boots need |
+| `suite` | `ci-suite` | tests system build → the suite's boot, captured → test list, lockdep and SMP gates → its image held to e2fsck and the map → the tests kernel's authority gate → test-persist → test-rude-exit → test-usb → test-toolchain |
 | `toolchain` | `ci-toolchain` | llvm-project, tests userland, rustc source → clang driver, C++ pin, libc exports, recipes, LLVM port, cross-build plan, built-in target |
 | `ostd-verify` | `check-miri`, `verify` | KernMiri → Verus |
 
-The boot checks used to queue behind the suite in one job; each is now a
-machine of its own, so the wall clock is the build plus the longest single
-boot rather than the build plus every boot in a row, and a failing USB boot
-no longer skips the self-hosting root check. The price is runner minutes:
-five jobs build the tests system where one did, each from a warm sccache.
+Before clippy, the last ten green runs on `develop` took, median: suite 11.3
+min, gates 8.3, toolchain 7.7, ostd-verify 5.2 — 32.6 runner-minutes, 11.3 of
+wall clock. Of the suite's 11.3, the four boot checks after the suite are 1.6.
+Clippy adds ~2.6 min to `gates` (cold on four cores: `builddir/clippy-*` is not
+cached), which keeps it under the suite.
 
 The rules that keep it there:
 
-- A check joins the lane whose inputs it reads; a boot that needs its own
-  image or devices is a lane of its own.
+- A check joins the job whose inputs it reads. Another machine costs a setup
+  and a build — several minutes — to save a boot of under one.
 - Compiler output is cached by content, never by mtime, so a run pays only for
   the translation units whose inputs moved: ccache for the C++ builds, sccache
   for the Rust ones. Both restore by prefix and save only from a run that
@@ -39,26 +38,23 @@ The rules that keep it there:
   (`unsafe-expansion`, the codegen and linker probes, the bootstrap and target
   checks) gets no cache, since a hit would be a cached answer.
 - A check whose inputs are ready runs even when an unrelated check before it
-  in the same lane failed (`ci-toolchain` collects failures and fails at the
-  end), so merging checks into a lane costs no signal.
+  in the same lane failed (`ci-suite` and `ci-toolchain` collect failures and
+  fail at the end), so merging checks into a lane costs no signal.
 
 ## Open work
 
-### The suite's shards build the same system twice
+### The suite's time is eleven userland tests
 
-Each `suite` job builds the tests kernel, userland and images before booting
-its half. Building once and handing the ISO, base and image to the shard jobs
-as an artifact would save a warm build per shard, at the cost of moving a few
-hundred MB through the artifact store.
+A KVM capture's tests take ~350 s: all 3031 kernel tests ~44 s, the userland
+phase ~306 s, and eleven utests ~263 s of it — `priv` 56 s, `privd` 53 s,
+`sessions` 31 s, `apps_trees`, `extension_service`, `accounts`,
+`extension_action` and `live_base` ~16 s each, `extension` 15 s, `rename` 12 s,
+`shell_script` 10 s. Where each waits — a consent or password timeout, a
+drain, a backoff — is the next thing to measure; it is most of the suite's
+wall clock and none of it is the kernel's.
 
 ### Every job pays its own setup
 
 Each job installs the pinned nightly with all six `rust-toolchain.toml`
 components and its apt packages. A runner image with the toolchain baked in
 removes both from every job's wall clock.
-
-### The suite's tail is three stress utests
-
-`mm_stress`, `bigprog` and `exit_stress` are ~17 s of the userland phase; the
-userland phase splits at test granularity, so a third shard would cut it,
-for another runner's setup.

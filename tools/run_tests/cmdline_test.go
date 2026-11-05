@@ -141,68 +141,6 @@ func TestParseArgsVerbosityModesMutuallyExclusive(t *testing.T) {
 	}
 }
 
-func TestParseArgsShardsDefaultToOneBoot(t *testing.T) {
-	args, err := parseArgs(preprocessArgv(nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if args.Shards != 1 || args.Jobs != 0 || args.OnlyShard != 0 || args.CaptureDir != "" {
-		t.Errorf("got shards=%d jobs=%d only=%d dir=%q, want 1/0/0/\"\"",
-			args.Shards, args.Jobs, args.OnlyShard, args.CaptureDir)
-	}
-}
-
-func TestParseArgsShardFlags(t *testing.T) {
-	args, err := parseArgs(preprocessArgv([]string{
-		"--shards", "3", "--jobs", "2", "--capture-dir", "/tmp/caps", "--raw",
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if args.Shards != 3 || args.Jobs != 2 || args.CaptureDir != "/tmp/caps" || !args.Raw {
-		t.Errorf("got %+v", args)
-	}
-}
-
-func TestParseArgsOnlyShardRunsOneOfN(t *testing.T) {
-	args, err := parseArgs(preprocessArgv([]string{"--shards", "4", "--only-shard", "3"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if args.Shards != 4 || args.OnlyShard != 3 {
-		t.Errorf("got shards=%d only=%d, want 4/3", args.Shards, args.OnlyShard)
-	}
-	if got := shardIndices(args.Shards, args.OnlyShard); !equalInts(got, []int{3}) {
-		t.Errorf("boots: got %v, want [3]", got)
-	}
-}
-
-func TestParseArgsRejectsBadShardFlags(t *testing.T) {
-	for _, argv := range [][]string{
-		{"--shards", "0"},
-		{"--shards=-2"},
-		{"--jobs=-1"},
-		{"--shards", "2", "--only-shard", "3"},
-		{"--only-shard", "2"},
-		{"--shards=2", "--only-shard=-1"},
-		{"--shards", "2", "--iso", "x.iso"},
-	} {
-		if _, err := parseArgs(preprocessArgv(argv)); err == nil {
-			t.Errorf("%v: expected an error", argv)
-		}
-	}
-}
-
-func TestParseArgsOnlyShardOfOneIsTheWholeRun(t *testing.T) {
-	args, err := parseArgs(preprocessArgv([]string{"--shards", "1", "--only-shard", "1"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if args.Shards != 1 {
-		t.Errorf("shards: got %d", args.Shards)
-	}
-}
-
 func equalSlices(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

@@ -2,11 +2,6 @@
 //! phase's fixtures and then each selected `TestDesc` under `catch_panic!`
 //! with klog capture installed, and emits KTAP per-test lines plus a final
 //! `TESTS SUMMARY:` log line.
-//!
-//! `tests.shard=K/N` runs the K-th of N contiguous slices of the selected
-//! tests, balanced by count: whole modules in the kernel phase, so tests that
-//! hand each other state stay together in their order, single tests in the
-//! userland phase. `order = first` tests and every fixture run in every shard.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -19,16 +14,11 @@ use slopos_ostd::KVec;
 use crate::config::TestConfig;
 
 #[cfg(feature = "tests")]
-use crate::config::Shard;
-#[cfg(feature = "tests")]
 use crate::config::Verbosity;
 #[cfg(feature = "tests")]
 use crate::registry::{registry_sorted, TestDesc, TestKind, TestOrder};
 #[cfg(feature = "tests")]
 use crate::result::TestResult;
-
-#[cfg(feature = "tests")]
-mod shard_tests;
 
 /// HPET window the TSC ratio is measured over; paid once at first use.
 const CALIBRATION_NS: u64 = 1_000_000;
@@ -193,18 +183,6 @@ fn run_phase(
     klog_info!("TESTS: Starting {} phase", phase_label);
     register_panic_klog_cleanup();
 
-    let shard = match cfg.shard {
-        Shard::Whole => None,
-        Shard::Part { index, count } => Some((index, count)),
-        Shard::Invalid => {
-            klog_info!(
-                "TESTS: tests.shard must be K/N with 1 <= K <= N; failing the {} phase",
-                phase_label
-            );
-            return fail_phase(summary, phase_label, "invalid tests.shard");
-        }
-    };
-
     let descs = match registry_sorted() {
         Ok(v) => v,
         Err(_) => {
@@ -212,7 +190,7 @@ fn run_phase(
             return -1;
         }
     };
-    let plan = match select_tests(&descs, cfg, kind_filter, shard) {
+    let plan = match select_tests(&descs, cfg, kind_filter) {
         Ok(v) => v,
         Err(_) => {
             klog_info!("TESTS: test selection alloc failed");
@@ -221,9 +199,6 @@ fn run_phase(
     };
 
     crate::ktap::emit_header(plan.len() as u32);
-    if let Some((index, count)) = shard {
-        crate::ktap::emit_shard(index, count);
-    }
 
     let phase_start_ns = monotonic_ns();
     let mut idx: u32 = 0;
@@ -287,13 +262,12 @@ fn run_phase(
     }
 }
 
-/// The phase's tests in running order: those `cfg` selects, cut to `shard`.
+/// The phase's tests in running order: those `cfg` selects.
 #[cfg(feature = "tests")]
 fn select_tests(
     descs: &[&'static TestDesc],
     cfg: &TestConfig,
     kind: TestKind,
-    shard: Option<(u32, u32)>,
 ) -> Result<KVec<&'static TestDesc>, slopos_ostd::AllocError> {
     let mut name_buf = [0u8; FQN_BUF_BYTES];
     let mut selected: KVec<&'static TestDesc> = KVec::new();
@@ -305,89 +279,7 @@ fn select_tests(
             selected.push(desc)?;
         }
     }
-    let Some((index, count)) = shard else {
-        return Ok(selected);
-    };
-    let want = index - 1;
-    let total = selected
-        .iter()
-        .filter(|d| d.order != TestOrder::First)
-        .count();
-    let mut out: KVec<&'static TestDesc> = KVec::new();
-    match kind {
-        TestKind::Userland => {
-            let mut pos = 0usize;
-            for &desc in selected.iter() {
-                if desc.order == TestOrder::First {
-                    out.push(desc)?;
-                    continue;
-                }
-                if slice_of(pos, 1, total, count) == want {
-                    out.push(desc)?;
-                }
-                pos += 1;
-            }
-        }
-        TestKind::Kernel => {
-            let modules = module_slices(&selected, total, count)?;
-            for &desc in selected.iter() {
-                let keep = desc.order == TestOrder::First
-                    || modules
-                        .binary_search_by(|m| m.module.as_bytes().cmp(desc.module.as_bytes()))
-                        .is_ok_and(|i| modules[i].shard == want);
-                if keep {
-                    out.push(desc)?;
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-
-#[cfg(feature = "tests")]
-struct ModuleSlice {
-    module: &'static str,
-    tests: usize,
-    shard: u32,
-}
-
-/// Every module with a test outside `order = first`, sorted by name, with
-/// the 0-based shard its tests run in.
-#[cfg(feature = "tests")]
-fn module_slices(
-    selected: &[&'static TestDesc],
-    total: usize,
-    count: u32,
-) -> Result<KVec<ModuleSlice>, slopos_ostd::AllocError> {
-    let mut modules: KVec<ModuleSlice> = KVec::new();
-    for desc in selected.iter().filter(|d| d.order != TestOrder::First) {
-        match modules.binary_search_by(|m| m.module.as_bytes().cmp(desc.module.as_bytes())) {
-            Ok(i) => modules[i].tests += 1,
-            Err(i) => modules.insert(
-                i,
-                ModuleSlice {
-                    module: desc.module,
-                    tests: 1,
-                    shard: 0,
-                },
-            )?,
-        }
-    }
-    let mut before = 0usize;
-    for m in modules.iter_mut() {
-        m.shard = slice_of(before, m.tests, total, count);
-        before += m.tests;
-    }
-    Ok(modules)
-}
-
-/// The 0-based slice of `count` that a run of `len` items starting `before`
-/// items into a list of `total` lands in, by where its midpoint falls: the
-/// slices stay contiguous and each holds about `total / count` items.
-#[cfg(feature = "tests")]
-fn slice_of(before: usize, len: usize, total: usize, count: u32) -> u32 {
-    let count = count as usize;
-    (((2 * before + len) * count) / (2 * total)).min(count - 1) as u32
+    Ok(selected)
 }
 
 /// Runs the phase's fixtures in order, stopping at the first that fails.
@@ -403,15 +295,6 @@ fn run_fixtures(descs: &[&'static TestDesc], kind: TestKind) -> bool {
             crate::ktap::emit_fixture(fixture.module, fixture.name, ok);
             ok
         })
-}
-
-#[cfg(feature = "tests")]
-fn fail_phase(summary: &mut TestRunSummary, phase_label: &str, reason: &str) -> i32 {
-    crate::ktap::emit_header(0);
-    crate::ktap::emit_bail(reason);
-    summary.failed = 1;
-    finish_phase(summary, phase_label, Some(0));
-    -1
 }
 
 #[cfg(feature = "tests")]

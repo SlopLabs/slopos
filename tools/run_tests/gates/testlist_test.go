@@ -54,7 +54,7 @@ func TestTestListAccepts(t *testing.T) {
 		"helloKTAP\tok 9 - fake::inside_a_literal",
 		"KTAP\t  ...",
 		"\x1b[AhelloKTAP\tok 2 - a::two # SKIP not on this machine",
-		"KTAP\tTAP version 14", "KTAP\t1..1", "KTAP\t# shard 1/1", "KTAP\t# fixture vfs_ready ok",
+		"KTAP\tTAP version 14", "KTAP\t1..1", "KTAP\t# fixture vfs_ready ok",
 		"KTAP\t  ok 1 - a subtest name with spaces",
 		"KTAP\t  not ok 2 - another_subtest",
 		"KTAP\tok 1 - core::utests::utest_x # time_ms=85",
@@ -69,7 +69,7 @@ func TestTestListAccepts(t *testing.T) {
 func TestTestListRejects(t *testing.T) {
 	f := testListFixture(t)
 	r := f.run("tests", []string{f.log("missing.log", ktapRun([]string{"a::one"}, userlandNames))})
-	expect(t, "a listed test that ran nowhere", r, 1, "1 listed test(s) ran in no log", "kernel a::two")
+	expect(t, "a listed test that did not run", r, 1, "1 listed test(s) did not run", "kernel a::two")
 
 	r = f.run("tests", []string{f.log("extra.log", ktapRun(append(kernelNames, "a::three"), userlandNames))})
 	expect(t, "an unlisted test", r, 1, "1 test(s) ran but are not listed", "kernel a::three",
@@ -109,26 +109,29 @@ func TestTestListGateFileErrors(t *testing.T) {
 	expect(t, "no gate data", f.run("tests", []string{f.log("ok.log", ktapRun(kernelNames, userlandNames))}), 2, "no gate data")
 }
 
-func TestTestListShards(t *testing.T) {
+func TestTestListLogs(t *testing.T) {
 	f := testListFixture(t)
-	a := f.log("a.log", ktapRun([]string{"a::one"}, nil))
-	b := f.log("b.log", ktapRun([]string{"a::two"}, userlandNames))
-	c := f.log("c.log", ktapRun(nil, nil))
-	expect(t, "two shards", f.run("tests", []string{a, b}), 0, "over 2 log(s)")
-	expect(t, "three shards, one empty", f.run("tests", []string{a, b, c}), 0, "over 3 log(s)")
-	expect(t, "a missing shard loses its tests", f.run("tests", []string{a, c}), 1, "kernel a::two", "userland core::utests::utest_x")
+	a := f.log("a.log", ktapRun(kernelNames, userlandNames))
+	b := f.log("b.log", ktapRun(kernelNames, userlandNames))
+	expect(t, "two complete runs", f.run("tests", []string{a, b}), 0, "in each of 2 log(s)")
+
+	// Every log is a whole run, so two partial ones do not add up to one.
+	half1 := f.log("half1.log", ktapRun([]string{"a::one"}, nil))
+	half2 := f.log("half2.log", ktapRun([]string{"a::two"}, userlandNames))
+	expect(t, "partial runs fail on their own", f.run("tests", []string{half1, half2}), 1,
+		"kernel a::two in", "half1.log", "kernel a::one in", "half2.log")
 
 	dead := f.log("dead.log", "boot panic\n")
-	expect(t, "a shard with no plan line fails the run", f.run("tests", []string{a, b, dead}), 1, "dead.log: no KTAP plan line")
+	expect(t, "a log with no plan line fails the run", f.run("tests", []string{a, b, dead}), 1, "dead.log: no KTAP plan line")
 
-	dupInShard := f.log("dup.log", ktapRun([]string{"a::two", "a::two"}, userlandNames))
-	expect(t, "a duplicate within one shard", f.run("tests", []string{a, dupInShard}), 1, "kernel a::two ×2 in")
+	dupInLog := f.log("dup.log", ktapRun([]string{"a::one", "a::two", "a::two"}, userlandNames))
+	expect(t, "a duplicate within one log", f.run("tests", []string{a, dupInLog}), 1, "kernel a::two ×2 in")
 }
 
 func TestTestListEmitRoundTrips(t *testing.T) {
 	f := newFixture(t)
-	a := f.log("a.log", ktapRun([]string{"z::last", "a::first"}, nil))
-	b := f.log("b.log", ktapRun([]string{"m::mid"}, userlandNames))
+	a := f.log("a.log", ktapRun([]string{"z::last", "a::first", "m::mid"}, userlandNames))
+	b := f.log("b.log", ktapRun([]string{"z::last", "a::first", "m::mid"}, userlandNames))
 	out := f.emitInto("tests", "tests", []string{a, b})
 	body := out[strings.Index(out, "\nkernel"):]
 	if want := "\nkernel\ta::first\nkernel\tm::mid\nkernel\tz::last\nuserland\tcore::utests::utest_x\n"; body != want {
@@ -140,4 +143,7 @@ func TestTestListEmitRoundTrips(t *testing.T) {
 	expect(t, "emitted list accepts its own logs", f.run("tests", []string{a, b}), 0)
 	expect(t, "emit refuses a log that measured nothing",
 		f.run("tests", []string{f.log("dead.log", "panic\n")}, "--emit-allowlist"), 1, "no KTAP plan line")
+	short := f.log("short.log", ktapRun([]string{"a::first"}, userlandNames))
+	expect(t, "emit refuses runs that ran different tests",
+		f.run("tests", []string{a, short}, "--emit-allowlist"), 1, "ran different tests")
 }

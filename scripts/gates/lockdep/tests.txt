@@ -1,6 +1,6 @@
 # lockdep gate data — variant: tests
 #
-#     run_tests gate lockdep --variant tests --emit-allowlist --log RUN.log [--log SHARD.log...] > scripts/gates/lockdep/tests.txt
+#     run_tests gate lockdep --variant tests --emit-allowlist --log RUN.log [--log RUN.log...] > scripts/gates/lockdep/tests.txt
 #
 # Graded on every boot (every --log on its own): each required phase reports
 # the lock validator ACTIVE with no violation; each pool (classes, edges,

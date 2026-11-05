@@ -1,4 +1,4 @@
-# Measured by: run_tests gate sched --variant tests --emit-allowlist --log RUN.log [--log SHARD.log...] > scripts/gates/sched/tests.txt
+# Measured by: run_tests gate sched --variant tests --emit-allowlist --log RUN.log [--log RUN.log...] > scripts/gates/sched/tests.txt
 #
 # eligible-lag     <phase> <n>  online CPUs allowed to be ineligible
 # allow-ineligible <phase> <m>  which CPUs that lag may name

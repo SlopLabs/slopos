@@ -743,12 +743,11 @@ func TestKernelAbortRecorderTakesTheFirstNonEmptyReason(t *testing.T) {
 	}
 }
 
-func TestKtapFixtureAndShardLinesAreNeitherTestsNorFooters(t *testing.T) {
+func TestKtapFixtureLinesAreNeitherTestsNorFooters(t *testing.T) {
 	p := NewKtapParser()
 	events := feedAll(p, []string{
 		"KTAP\tTAP version 14",
 		"KTAP\t1..2",
-		"KTAP\t# shard 2/3",
 		"KTAP\t# fixture slopos_fs::tests::vfs_ready ok",
 		"KTAP\tok 1 - mod::a # time_ms=1",
 		"KTAP\tok 2 - mod::b # time_ms=2",
@@ -762,20 +761,13 @@ func TestKtapFixtureAndShardLinesAreNeitherTestsNorFooters(t *testing.T) {
 		t.Errorf("phase ends: got %d, want 1", got)
 	}
 	var fixtures []*EvFixture
-	var shards []*EvShard
 	for _, e := range events {
-		switch e := e.(type) {
-		case *EvFixture:
+		if e, ok := e.(*EvFixture); ok {
 			fixtures = append(fixtures, e)
-		case *EvShard:
-			shards = append(shards, e)
 		}
 	}
 	if len(fixtures) != 1 || fixtures[0].Name != "slopos_fs::tests::vfs_ready" || fixtures[0].PhaseIdx != 1 {
 		t.Errorf("fixtures: got %+v", fixtures)
-	}
-	if len(shards) != 1 || shards[0].Index != 2 || shards[0].Count != 3 || shards[0].PhaseIdx != 1 {
-		t.Errorf("shards: got %+v", shards)
 	}
 
 	rec := NewRecorder()
@@ -832,18 +824,17 @@ func TestKtapFailedFixtureIsABail(t *testing.T) {
 	}
 }
 
-// Malformed shard and fixture comments fall through as unrecognised lines.
-func TestKtapMalformedShardAndFixtureLinesAreIgnored(t *testing.T) {
+// Malformed fixture comments fall through as unrecognised lines.
+func TestKtapMalformedFixtureLinesAreIgnored(t *testing.T) {
 	p := NewKtapParser()
 	events := feedAll(p, []string{
 		"KTAP\tTAP version 14",
 		"KTAP\t1..0",
-		"KTAP\t# shard two/three",
 		"KTAP\t# fixture vfs_ready",
 	})
 	for _, e := range events {
 		switch e.(type) {
-		case *EvFixture, *EvShard, *EvTest, *EvPhaseEnd:
+		case *EvFixture, *EvTest, *EvPhaseEnd:
 			t.Errorf("unexpected %T", e)
 		}
 	}

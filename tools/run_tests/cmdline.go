@@ -26,14 +26,6 @@ type Args struct {
 	FsImage     string
 	NoBuild     bool
 	DryRun      bool
-	// Shards splits the run over this many concurrent boots; 1 is one boot
-	// with no `tests.shard=` on its command line.
-	Shards int
-	// Jobs bounds how many shard boots run at once; 0 means all of them.
-	Jobs int
-	// OnlyShard runs that one shard of Shards (1-based); 0 runs every one.
-	OnlyShard  int
-	CaptureDir string
 }
 
 // stringSlice implements flag.Value to accept repeatable flags
@@ -102,8 +94,7 @@ func parseArgs(argv []string) (*Args, error) {
 	fs.BoolVar(&a.RerunFailed, "rerun-failed", false, "Use builddir/last-fail.list as the filter set.")
 	fs.BoolVar(&a.Verbose, "verbose", false, "Pass tests.verbosity=verbose; dump captured klog of every test.")
 	fs.BoolVar(&a.Quiet, "quiet", false, "Pass tests.verbosity=quiet; render only failures + summary.")
-	fs.BoolVar(&a.Raw, "raw", false, "Passthrough QEMU stdout; no rendering. With --shards > 1 the boots' "+
-		"output is not interleaved: each goes to its own log under --capture-dir and the log paths are printed.")
+	fs.BoolVar(&a.Raw, "raw", false, "Passthrough QEMU stdout; no rendering.")
 	fs.StringVar(&a.JsonPath, "json", "", "Append one JSON event per line to PATH.")
 	fs.StringVar(&a.ColorMode, "color", "auto", "Colour mode: auto|always.")
 	fs.BoolVar(&a.NoColor, "no-color", false, "Never colour the output.")
@@ -114,13 +105,6 @@ func parseArgs(argv []string) (*Args, error) {
 	fs.StringVar(&a.FsImage, "fs-image", "", "Test fs image path.")
 	fs.BoolVar(&a.NoBuild, "no-build", false, "Skip the `just _iso-tests` invocation.")
 	fs.BoolVar(&a.DryRun, "dry-run", false, "Print the assembled cmdline + invocation; do not run QEMU.")
-	fs.IntVar(&a.Shards, "shards", 1, "Split the run over N concurrent boots, each with its own ISO "+
-		"(tests.shard=K/N), fs image copy and scratch disks; results combine into one summary.")
-	fs.IntVar(&a.Jobs, "jobs", 0, "With --shards, boot at most J shards at once (default: all N).")
-	fs.IntVar(&a.OnlyShard, "only-shard", 0, "With --shards N, run shard K alone (1 <= K <= N): build only "+
-		"its ISO, write only its log; the exit status is that shard's.")
-	fs.StringVar(&a.CaptureDir, "capture-dir", "", "With --shards, where each boot's raw log goes as "+
-		"shard-K.log (default: builddir/shards).")
 	fs.SetOutput(os.Stderr)
 
 	if err := fs.Parse(argv); err != nil {
@@ -151,16 +135,6 @@ func parseArgs(argv []string) (*Args, error) {
 	}
 	if modes > 1 {
 		return nil, fmt.Errorf("--verbose, --quiet, and --raw are mutually exclusive")
-	}
-	switch {
-	case a.Shards < 1:
-		return nil, fmt.Errorf("--shards takes a count of at least 1, not %d", a.Shards)
-	case a.Jobs < 0:
-		return nil, fmt.Errorf("--jobs takes a count of at least 1, not %d", a.Jobs)
-	case a.OnlyShard < 0 || a.OnlyShard > a.Shards:
-		return nil, fmt.Errorf("--only-shard takes K with 1 <= K <= --shards (%d), not %d", a.Shards, a.OnlyShard)
-	case a.Shards > 1 && a.Iso != "":
-		return nil, fmt.Errorf("--iso names one ISO, and --shards %d boots one per shard", a.Shards)
 	}
 	return a, nil
 }

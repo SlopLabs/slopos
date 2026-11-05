@@ -9,9 +9,9 @@ package gates
 // log, a test that ran but is not listed, and a name reported twice within
 // one phase of one boot.
 //
-// Aggregation: the union of every log's names per phase is compared with the
-// list, so a suite split across shards is held to the same list as one boot.
-// Duplicates are per log and phase, because a shard runs each of its tests once.
+// Several logs are several whole runs: each log's names per phase must equal
+// the list on their own, and duplicates are per log and phase, because a
+// boot runs each of its tests once.
 
 import (
 	"fmt"
@@ -132,11 +132,13 @@ func runTestList(cfg Config) error {
 		return err
 	}
 	var fail findings
-	seen := map[string]bool{}
+	var seen []map[string]bool
 	var phaseOrder []string
 	var duplicates []string
 	for _, c := range caps {
 		phases := ktapPhases(c)
+		ran := map[string]bool{}
+		seen = append(seen, ran)
 		planned := false
 		for _, ph := range phases {
 			planned = planned || ph.plan
@@ -146,7 +148,7 @@ func runTestList(cfg Config) error {
 			count := map[string]int{}
 			for _, t := range ph.tests {
 				count[t]++
-				seen[ph.name+"\t"+t] = true
+				ran[ph.name+"\t"+t] = true
 			}
 			for _, t := range sortedKeys(count) {
 				if count[t] > 1 {
@@ -163,7 +165,12 @@ func runTestList(cfg Config) error {
 	}
 
 	if cfg.Emit {
-		emitTestList(cfg, seen)
+		for i, c := range caps[1:] {
+			if !maps.Equal(seen[0], seen[i+1]) {
+				return fmt.Errorf("%s and %s ran different tests — every log is a whole run, so the list can only be recorded from runs that agree", caps[0].path, c.path)
+			}
+		}
+		emitTestList(cfg, seen[0])
 		return nil
 	}
 
@@ -188,18 +195,27 @@ func runTestList(cfg Config) error {
 		return gateFileErrorf("%s lists no tests, so it grades nothing", rel)
 	}
 
+	where := func(key string, c capture) string {
+		item := strings.Replace(key, "\t", " ", 1)
+		if len(caps) > 1 {
+			item += " in " + c.path
+		}
+		return item
+	}
 	var missing, unlisted []string
-	for _, key := range sortedKeys(listed) {
-		if !seen[key] {
-			missing = append(missing, strings.Replace(key, "\t", " ", 1))
+	for i, c := range caps {
+		for _, key := range sortedKeys(listed) {
+			if !seen[i][key] {
+				missing = append(missing, where(key, c))
+			}
+		}
+		for _, key := range sortedKeys(seen[i]) {
+			if !listed[key] {
+				unlisted = append(unlisted, where(key, c))
+			}
 		}
 	}
-	for _, key := range sortedKeys(seen) {
-		if !listed[key] {
-			unlisted = append(unlisted, strings.Replace(key, "\t", " ", 1))
-		}
-	}
-	listCapped(&fail, "listed test(s) ran in no log — a deleted or renamed test (or an unbooted shard):", missing,
+	listCapped(&fail, "listed test(s) did not run — a deleted or renamed test:", missing,
 		"If the removal is intended, delete the line(s) from "+rel+" in the same commit.")
 	listCapped(&fail, "test(s) ran but are not listed in "+rel+":", unlisted,
 		"Record them: "+emitCommand("tests", cfg.Variant))
@@ -209,7 +225,7 @@ func runTestList(cfg Config) error {
 	}
 
 	perPhase := map[string]int{}
-	for key := range seen {
+	for key := range listed {
 		phase, _, _ := strings.Cut(key, "\t")
 		perPhase[phase]++
 	}
@@ -217,7 +233,7 @@ func runTestList(cfg Config) error {
 	for _, ph := range phaseOrder {
 		parts = append(parts, fmt.Sprintf("%d %s", perPhase[ph], ph))
 	}
-	fmt.Fprintf(cfg.Out, "tests: OK — %s tests ran over %d log(s), each once per boot and each listed in %s\n",
+	fmt.Fprintf(cfg.Out, "tests: OK — %s tests ran in each of %d log(s), each once per boot and each listed in %s\n",
 		strings.Join(parts, " + "), len(caps), rel)
 	return nil
 }

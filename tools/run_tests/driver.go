@@ -23,8 +23,6 @@ type QemuDriver struct {
 	Iso            string
 	FsImage        string
 	WallTimeoutSec float64
-	// Env is appended to the inherited environment: a shard's SCRATCH_DIR.
-	Env []string
 	// SilenceSec aborts the run when the QEMU stdout pipe stays silent for
 	// this many seconds; 0 disables. Catches inter-phase wedges that would
 	// otherwise burn the full WallTimeoutSec.
@@ -105,7 +103,7 @@ func (d *QemuDriver) Run(ctx context.Context, onLine func(string)) (DriverResult
 		d.RepoRoot+"/scripts/qemu_run.sh", "test", d.Iso, d.FsImage,
 	)
 	// qemu_run.sh and its callees honour QEMU_BIN/QEMU_SMP/etc.
-	cmd.Env = append(os.Environ(), d.Env...)
+	cmd.Env = os.Environ()
 	cmd.Stderr = os.Stderr
 
 	// Detach from any inherited TTY stdin so QEMU doesn't try to read

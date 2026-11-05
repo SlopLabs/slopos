@@ -188,7 +188,7 @@ func TestJsonlSinkOneEventPerLine(t *testing.T) {
 	} {
 		for _, ev := range p.Feed(ln) {
 			rec.Record(ev)
-			if err := sink.Write(ev, 0); err != nil {
+			if err := sink.Write(ev, rec.Summary); err != nil {
 				t.Fatal(err)
 			}
 		}

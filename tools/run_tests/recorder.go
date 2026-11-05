@@ -46,9 +46,6 @@ type TestRecord struct {
 	Log             *string   `json:"log"`
 	Subtests        []Subtest `json:"subtests"`
 	PreFailKlogTail []string  `json:"pre_fail_klog_tail"`
-	// Shard is the 1-based shard of a sharded run that ran the test; 0 in an
-	// unsharded run.
-	Shard int `json:"shard,omitempty"`
 }
 
 // PhaseCounters aggregates per-phase outcome counts.

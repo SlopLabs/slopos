@@ -30,7 +30,7 @@ func summaryOf(phases ...*PhaseRecord) *RunSummary {
 	return s
 }
 
-func TestQemuNeverLaunchedIsHardError(t *testing.T) {
+func TestQemuNeverLaunchedIsAHardError(t *testing.T) {
 	s := summaryOf()
 	v := ClassifyRun(s, DriverResult{QemuStatus: intp(0)}, false)
 	if v.Code == 0 {
@@ -44,7 +44,7 @@ func TestQemuNeverLaunchedIsHardError(t *testing.T) {
 	}
 }
 
-func TestQemuNeverLaunchedIsHardErrorEvenWithFilter(t *testing.T) {
+func TestQemuNeverLaunchedIsAHardErrorEvenWithFilter(t *testing.T) {
 	v := ClassifyRun(summaryOf(), DriverResult{QemuStatus: intp(0)}, true)
 	if v.Code != 2 {
 		t.Fatalf("no phases must fail even under a filter, got exit %d", v.Code)

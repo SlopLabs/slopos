@@ -80,20 +80,32 @@ func TestFsperfSelfTestCases(t *testing.T) {
 	expect(t, "no gate data", f.run("fsperf", []string{good}), 2, "no gate data")
 }
 
-func TestFsperfShards(t *testing.T) {
+func TestFsperfLogs(t *testing.T) {
 	f := newFixture(t)
 	f.gateFile("fsperf", "tests", fsperfCapacityGate)
-	measured := f.log("measured.log", fsperfGood)
+	run1 := f.log("run1.log", fsperfGood+fscapLine)
+	run2 := f.log("run2.log", fsperfGood+fscapLine)
 	other := f.log("other.log", "SCHEDCPU[boot]: cpus=4 online=0xf eligible=0xe\n")
 	third := f.log("third.log", "boot\n")
-	capShard := f.log("cap.log", "noise\n"+fscapLine)
+	variant := func(name, from, to string) string { return f.log(name, strings.Replace(fsperfGood, from, to, 1)) }
 
-	expect(t, "FSPERF from one shard of two", f.run("fsperf", []string{other, measured}), 0, "over 2 log(s)")
-	expect(t, "FSPERF from one shard of three, FSCAP from another", f.run("fsperf", []string{other, measured, capShard}, "--require-capacity"), 0, "over 3 log(s)")
-	expect(t, "no shard carries FSPERF", f.run("fsperf", []string{other, third}), 1, "no FSPERF lines in")
-	expect(t, "a floor fails when no shard carries its phase", f.run("fsperf", []string{other, measured, third}, "--require-capacity"), 1, "which reported no FSCAP line")
-	twice := f.log("twice.log", fsperfGood)
-	expect(t, "a measurement in two shards", f.run("fsperf", []string{measured, twice}), 1, "FSPERF[tests] appears in both")
-	capTwice := f.log("cap2.log", fscapLine)
-	expect(t, "a capacity measurement in two shards", f.run("fsperf", []string{measured, capShard, capTwice}), 1, "FSCAP[capacity] appears in both")
+	expect(t, "two complete runs", f.run("fsperf", []string{run1, run2}, "--require-capacity"), 0, "over 2 log(s)")
+	expect(t, "no log carries FSPERF", f.run("fsperf", []string{other, third}), 1, "no FSPERF lines in")
+	measured := f.log("measured.log", fsperfGood)
+	expect(t, "a floor fails when no log carries its phase", f.run("fsperf", []string{measured, third}, "--require-capacity"), 1, "which reported no FSCAP line")
+	f.gateFile("fsperf", "tests", fsperfGate)
+	expect(t, "one run over its cap fails the set", f.run("fsperf", []string{run1, variant("chunky.log", "txns=16", "txns=1024")}), 1, "tests max-txns-per-mib: 256 > 4")
+
+	// Each cap takes the highest observation and each floor the lowest.
+	heavy := variant("heavy.log", "txns=16", "txns=24")
+	out := f.emitInto("fsperf", "merged", []string{run1, heavy})
+	solo := f.emitInto("fsperf", "solo", []string{heavy})
+	capOf := func(text, key string) string {
+		i := strings.Index(text, key)
+		return text[i : i+strings.Index(text[i:], "\n")]
+	}
+	if capOf(out, "max-txns-per-mib\ttests") != capOf(solo, "max-txns-per-mib\ttests") {
+		t.Errorf("merged emit did not take the larger cap:\n%s", out)
+	}
+	expect(t, "emit over several runs round-trips", f.run("fsperf", []string{run1, heavy}, "--variant", "merged"), 0)
 }

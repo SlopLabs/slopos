@@ -1,8 +1,8 @@
 // Package gates grades captured test runs: the invariants and ratchets a
 // boot's serial log is held to. Each gate is a file in this package that
 // registers itself from init(); `run_tests gate NAME --log FILE...` runs it.
-// A run split into shards is graded over every shard's log at once: each
-// gate states how it aggregates, and a single log behaves as one unsharded run.
+// Several captures can be graded at once, one --log each, every one a whole
+// run of the suite: each gate states how it aggregates them.
 package gates
 
 import (
@@ -77,7 +77,7 @@ func run(args []string, repoRoot string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("run_tests gate", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var logs logList
-	fs.Var(&logs, "log", "raw capture to grade (repeatable: one per shard)")
+	fs.Var(&logs, "log", "raw capture of one whole run to grade (repeatable)")
 	variant := fs.String("variant", "tests", "gate data variant")
 	emit := fs.Bool("emit-allowlist", false, "print a gate file measured from the logs")
 	requireCapacity := fs.Bool("require-capacity", false, "fsperf: fail when no log carries the FSCAP rows")

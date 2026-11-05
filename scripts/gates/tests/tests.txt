@@ -1,6 +1,6 @@
 # tests gate data — variant: tests
 #
-#     run_tests gate tests --variant tests --emit-allowlist --log RUN.log [--log SHARD.log...] > scripts/gates/tests/tests.txt
+#     run_tests gate tests --variant tests --emit-allowlist --log RUN.log [--log RUN.log...] > scripts/gates/tests/tests.txt
 #
 # Every top-level test the suite runs: one '<phase> <TAB> <module::name>'
 # line, sorted, phase 'kernel' or 'userland'. The gate fails on a listed test
@@ -3015,9 +3015,6 @@ kernel	slopos_testing::exception_tests::test_vector_boundaries
 kernel	slopos_testing::fpu_tests::fpu_xmm_roundtrip_a
 kernel	slopos_testing::fpu_tests::fpu_xmm_roundtrip_b
 kernel	slopos_testing::fpu_tests::fpu_xrstor_gp_is_recovered
-kernel	slopos_testing::harness::shard_tests::test_kernel_shards_keep_modules_whole
-kernel	slopos_testing::harness::shard_tests::test_shard_slices_are_balanced
-kernel	slopos_testing::harness::shard_tests::test_userland_shards_partition_tests
 kernel	slopos_testing::lockdep_tests::lockdep_ab_ba_is_detected
 kernel	slopos_testing::lockdep_tests::lockdep_graph_overflow_clear_at_boot_end
 kernel	slopos_testing::lockdep_tests::lockdep_no_class_collisions

@@ -1,6 +1,6 @@
 # fsperf gate data — variant: tests
 #
-#     run_tests gate fsperf --variant tests --emit-allowlist --log RUN.log [--log SHARD.log...] > scripts/gates/fsperf/tests.txt
+#     run_tests gate fsperf --variant tests --emit-allowlist --log RUN.log [--log RUN.log...] > scripts/gates/fsperf/tests.txt
 #
 # Counts per MiB are deterministic for one ISO and carry caps. The
 # filesystem-over-raw write-rate ratio is the only quantity here that is

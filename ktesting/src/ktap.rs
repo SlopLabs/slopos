@@ -17,11 +17,6 @@ pub fn emit_header(plan: u32) {
     klog_info!("KTAP\t1..{}", plan);
 }
 
-/// After the plan: the plan counts this shard's tests, not the suite's.
-pub fn emit_shard(index: u32, count: u32) {
-    klog_info!("KTAP\t# shard {}/{}", index, count);
-}
-
 /// A fixture is not a test, so it reports as a comment line, or as the bail
 /// that ends its phase.
 pub fn emit_fixture(module: &str, name: &str, ok: bool) {

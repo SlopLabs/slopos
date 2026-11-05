@@ -380,23 +380,6 @@ _iso-tests: _fs-image _fs-image-tests _initramfs-tests (_kernel kernel_variant_t
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_iso.sh "{{iso_tests}}" "{{build_dir}}" "{{test_cmdline_effective}}"
 
-# `run_tests --shards N`: one ISO per shard at builddir/shards/<K>/slop-tests.iso,
-# each TEST_CMDLINE plus `tests.shard=K/N`, from one kernel and base built
-# once. ONLY=K builds that shard's ISO alone.
-_iso-tests-shards SHARDS ONLY='': _fs-image _fs-image-tests _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for k in $(seq 1 "{{SHARDS}}"); do
-        [ -z "{{ONLY}}" ] || [ "$k" = "{{ONLY}}" ] || continue
-        mkdir -p "{{build_dir}}/shards/$k"
-        KERNEL_ELF={{kernel_elf_tests}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
-        QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
-        QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
-        QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
-            scripts/build_iso.sh "{{build_dir}}/shards/$k/slop-tests.iso" "{{build_dir}}" \
-                "{{test_cmdline_effective}} tests.shard=$k/{{SHARDS}}"
-    done
-
 # `tests.run=__userland_only__` is a glob that deliberately matches no kernel
 # test, leaving the userland phase as the only thing exercised.
 _iso-tests-userland-only: _fs-image-tests _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
@@ -956,15 +939,9 @@ _build-run-tests:
     mkdir -p {{build_dir}}
     cd tools/run_tests && go build -o ../../{{build_dir}}/run_tests .
 
-# One boot per 8 host CPUs, 1 to 4 of them: a boot is QEMU_SMP=4 vCPUs, and
-# leaving each as many host CPUs again keeps the boots from stealing the time
-# the timing-sensitive tests measure. A 4-CPU CI runner gets 1. TEST_SHARDS
-# overrides it.
-test_shards := env("TEST_SHARDS", `n=$(( $(getconf _NPROCESSORS_ONLN) / 8 )); [ "$n" -ge 1 ] || n=1; [ "$n" -le 4 ] || n=4; echo "$n"`)
-
-[doc("Run the SlopOS test harness — live progress bar, per-failure detail; pass a 'glob' filter as the positional argument. Splits the run over TEST_SHARDS concurrent boots, by default one per 8 host CPUs, 1 to 4")]
+[doc("Run the SlopOS test harness — live progress bar, per-failure detail; pass a 'glob' filter as the positional argument")]
 test FILTER='': _build-run-tests
-    {{build_dir}}/run_tests --shards {{test_shards}} --filter "{{FILTER}}"
+    {{build_dir}}/run_tests --filter "{{FILTER}}"
 
 [doc("Re-run only the tests that failed on the previous `just test` invocation.")]
 test-rerun-failed: _build-run-tests
@@ -1470,14 +1447,16 @@ check-tests-host:
 check-fs-image *ARGS:
     scripts/check_fs_image.sh {{ARGS}}
 
-# One raw capture per boot of the suite: CI's sharded capture under
-# builddir/ci/, or any `run_tests --raw` log named on the command line.
-[doc("Grade boot captures (one per shard) with every log gate: the tracked test list, lockdep, SMP placement, quota headroom and filesystem cost. Defaults to builddir/ci/shard-*.log")]
+# Every log gate over one or more raw captures (`run_tests --raw`), by default
+# the suite capture `just ci-suite` writes. CI grades only the test list,
+# lockdep and SMP placement; the quota and filesystem-cost ratchets are caps
+# measured as maxima, so they are graded here, by hand, before a commit.
+[doc("Grade boot captures with every log gate: the tracked test list, lockdep, SMP placement, quota headroom and filesystem cost. Defaults to builddir/ci-test.log")]
 check-capture *LOGS: _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
     logs=({{LOGS}})
-    [ "${#logs[@]}" -gt 0 ] || logs=({{build_dir}}/ci/shard-*.log)
+    [ "${#logs[@]}" -gt 0 ] || logs=({{build_dir}}/ci-test.log)
     args=()
     for log in "${logs[@]}"; do
         [ -f "$log" ] || { echo "check-capture: no capture at $log — run \`just ci-suite\` first" >&2; exit 2; }
@@ -1658,10 +1637,8 @@ check-framekernel: check-framekernel-gates clippy
 # command CI ran, and `just ci` runs them all. CI_RUSTC_WRAPPER (sccache in CI)
 # wraps the build steps only: a gate that asks what a compiler does must get a
 # fresh answer, not a cached one.
-ci_shards := "2"
-
 [doc("Every CI lane on this machine, in CI's order: what a green CI run proves, reproduced locally. The toolchain lane fetches ~2 GB of pinned sources")]
-ci: ci-gates ci-candidates ci-suite check-capture (ci-boot "persist") (ci-boot "usb") (ci-boot "selfhost-root") ci-toolchain check-miri verify
+ci: ci-gates ci-candidates ci-suite ci-toolchain check-miri verify
 
 [doc("CI's gates lane: formatting, the host tests, clippy, the dev kernel and every framekernel gate, the offline build, and the release kernel with its gates")]
 ci-gates:
@@ -1687,33 +1664,29 @@ ci-candidates:
     PATH="$root/bin:$PATH" scripts/check_codegen_backend.sh --backend cranelift
     PATH="$root/bin:$PATH" scripts/check_linker_script.sh --linker wild --require
 
-[doc("CI's suite lane: the tests system booted as ci_shards shards (every shard, or the one SHARD names), each capture at builddir/ci/shard-K.log; then each shard's image held to e2fsck and the ownership map, and the tests kernel to the authority gate")]
-ci-suite SHARD='': _build-run-tests
+# One build of the tests system serves the suite and every boot check. A
+# check runs whatever failed before it, so one red check does not hide the
+# rest. `--raw` because the progress renderer leaves klog out of a green run,
+# and the log gates read the LOCKDEP/SCHEDCPU lines in it.
+[doc("CI's suite lane: the tests system booted once, its capture (builddir/ci-test.log) held to the test list, lockdep and SMP gates, its image to e2fsck and the ownership map, the tests kernel to the authority gate; then test-persist, test-rude-exit, test-usb and test-toolchain. Fails at the end if any check did")]
+ci-suite: _build-run-tests
     #!/usr/bin/env bash
-    set -euo pipefail
-    only=()
-    [ -z "{{SHARD}}" ] || only=(--only-shard "{{SHARD}}")
-    rc=0
-    RUSTC_WRAPPER="${CI_RUSTC_WRAPPER:-}" {{build_dir}}/run_tests --no-color \
-        --shards {{ci_shards}} "${only[@]}" --capture-dir {{build_dir}}/ci || rc=$?
-    for k in $(seq 1 {{ci_shards}}); do
-        [ -z "{{SHARD}}" ] || [ "$k" = "{{SHARD}}" ] || continue
-        scripts/check_fs_image.sh --map "{{build_dir}}/shards/$k/$(basename {{fs_image_tests}})" || rc=1
-    done
-    {{xtask}} elf --variant tests {{kernel_elf_tests}} authority || rc=1
-    exit "$rc"
-
-[doc("CI's boot lanes, a machine each in CI: persist (test-persist, then test-rude-exit), usb (test-usb) and selfhost-root (test-toolchain)")]
-ci-boot LANE:
-    #!/usr/bin/env bash
-    set -euo pipefail
+    set -uo pipefail
     export RUSTC_WRAPPER="${CI_RUSTC_WRAPPER:-}"
-    case "{{LANE}}" in
-        persist) just test-persist && just test-rude-exit ;;
-        usb) just test-usb ;;
-        selfhost-root) just test-toolchain ;;
-        *) echo "ci-boot: no lane '{{LANE}}' (persist, usb, selfhost-root)" >&2; exit 2 ;;
-    esac
+    failed=()
+    ok() { echo "── $* ──"; "$@" || failed+=("$*"); }
+    ok bash -o pipefail -c "{{build_dir}}/run_tests --raw --no-color 2>&1 | tee {{build_dir}}/ci-test.log"
+    ok {{build_dir}}/run_tests gate tests lockdep sched --log {{build_dir}}/ci-test.log
+    ok just check-fs-image
+    ok {{xtask}} elf --variant tests {{kernel_elf_tests}} authority
+    ok just test-persist
+    ok just test-rude-exit
+    ok just test-usb
+    ok just test-toolchain
+    if [ "${#failed[@]}" -gt 0 ]; then
+        printf 'ci-suite: failed: %s\n' "${failed[@]}" >&2
+        exit 1
+    fi
 
 # A check runs whenever the inputs it reads were made, even if an unrelated
 # check before it failed, so one red check does not hide the rest.

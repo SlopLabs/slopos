@@ -14,13 +14,14 @@ package gates
 // min-treebytes) exists because a measurement that stopped happening looks
 // exactly like one that got free.
 //
-// Aggregation: the lines come from the tests that measure them, which run in
-// one shard, so each FSPERF/FSCAP phase must come from exactly one log, and a
-// row still fails when no log carries its phase.
+// Several logs are several whole runs: each row is graded against the worst
+// value any log reported for its phase, and still fails when no log carries
+// its phase.
 
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -82,57 +83,127 @@ func (w fsWrite) fsOverRawPct() int64 {
 func padUp(v int64) int64   { return (v*5+3)/4 + 1 }
 func padDown(v int64) int64 { return v * 3 / 4 }
 
+// fsLog is one run's report lines, keyed by phase.
+type fsLog struct {
+	path     string
+	write    map[string]fsWrite
+	capacity map[string]fsCapacity
+}
+
+// fsRun is every log, each one whole run, with the phases in the order the
+// logs first reported them.
 type fsRun struct {
+	logs                 []fsLog
 	writeOrder, capOrder []string
-	write                map[string]fsWrite
-	capacity             map[string]fsCapacity
+}
+
+var (
+	fsWriteKeys = []string{"max-txns-per-mib", "max-commits-per-mib", "max-devwrites-per-mib", "max-devblocks-per-mib", "max-barriers-per-mib", "min-fs-over-raw-pct", "min-bytes"}
+	fsCapKeys   = []string{"max-mount-reads-per-gib", "max-lookup-reads", "min-volume-gib", "min-dirents", "min-files", "min-treebytes"}
+)
+
+func (w fsWrite) value(key string) int64 {
+	switch key {
+	case "max-txns-per-mib":
+		return perMiB(w.txns, w.bytes)
+	case "max-commits-per-mib":
+		return perMiB(w.commits, w.bytes)
+	case "max-devwrites-per-mib":
+		return perMiB(w.devwrites, w.bytes)
+	case "max-devblocks-per-mib":
+		return perMiB(w.devblocks, w.bytes)
+	case "max-barriers-per-mib":
+		return perMiB(w.barriers, w.bytes)
+	case "min-fs-over-raw-pct":
+		return w.fsOverRawPct()
+	}
+	return w.bytes
+}
+
+func (c fsCapacity) value(key string) int64 {
+	switch key {
+	case "max-mount-reads-per-gib":
+		return c.mreads / c.gib()
+	case "max-lookup-reads":
+		return c.lookupr
+	case "min-volume-gib":
+		return c.gib()
+	case "min-dirents":
+		return c.dirents
+	case "min-files":
+		return c.files
+	}
+	return c.treeb
+}
+
+// worse keeps whichever of two observations a cap or floor must admit.
+func worse(key string, a, b int64) int64 {
+	if strings.HasPrefix(key, "max-") {
+		return max(a, b)
+	}
+	return min(a, b)
 }
 
 func parseFsperf(caps []capture) (*fsRun, error) {
-	r := &fsRun{write: map[string]fsWrite{}, capacity: map[string]fsCapacity{}}
-	var fail findings
+	r := &fsRun{}
+	seenWrite, seenCap := map[string]bool{}, map[string]bool{}
 	for _, c := range caps {
-		write := map[string]fsWrite{}
-		capacity := map[string]fsCapacity{}
-		var writeOrder, capOrder []string
+		l := fsLog{path: c.path, write: map[string]fsWrite{}, capacity: map[string]fsCapacity{}}
 		for _, line := range c.lines {
 			text, ok := reportAt(line, fsperfMarker)
 			if !ok {
 				continue
 			}
 			if m := fsperfRE.FindStringSubmatch(text); m != nil {
-				if _, dup := write[m[1]]; !dup {
-					writeOrder = append(writeOrder, m[1])
+				if !seenWrite[m[1]] {
+					seenWrite[m[1]] = true
+					r.writeOrder = append(r.writeOrder, m[1])
 				}
-				write[m[1]] = fsWrite{c.path, num(m[2]), num(m[3]), num(m[4]), num(m[5]), num(m[6]), num(m[7]), num(m[8]), num(m[9]), num(m[10])}
+				l.write[m[1]] = fsWrite{c.path, num(m[2]), num(m[3]), num(m[4]), num(m[5]), num(m[6]), num(m[7]), num(m[8]), num(m[9]), num(m[10])}
 			} else if m := fscapRE.FindStringSubmatch(text); m != nil {
-				if _, dup := capacity[m[1]]; !dup {
-					capOrder = append(capOrder, m[1])
+				if !seenCap[m[1]] {
+					seenCap[m[1]] = true
+					r.capOrder = append(r.capOrder, m[1])
 				}
-				capacity[m[1]] = fsCapacity{c.path, num(m[2]), num(m[3]), num(m[4]), num(m[5]), num(m[6]), num(m[7]), num(m[8]), num(m[9]), num(m[10]), num(m[11]), num(m[12]), num(m[13])}
+				l.capacity[m[1]] = fsCapacity{c.path, num(m[2]), num(m[3]), num(m[4]), num(m[5]), num(m[6]), num(m[7]), num(m[8]), num(m[9]), num(m[10]), num(m[11]), num(m[12]), num(m[13])}
 			}
 		}
-		for _, phase := range writeOrder {
-			if prev, dup := r.write[phase]; dup {
-				fail.add("FSPERF[%s] appears in both %s and %s — a measurement comes from exactly one boot; one test ran twice.", phase, prev.log, c.path)
-				continue
-			}
-			r.write[phase] = write[phase]
-			r.writeOrder = append(r.writeOrder, phase)
-		}
-		for _, phase := range capOrder {
-			if prev, dup := r.capacity[phase]; dup {
-				fail.add("FSCAP[%s] appears in both %s and %s — a measurement comes from exactly one boot; one test ran twice.", phase, prev.log, c.path)
-				continue
-			}
-			r.capacity[phase] = capacity[phase]
-			r.capOrder = append(r.capOrder, phase)
-		}
+		r.logs = append(r.logs, l)
 	}
-	if len(r.write) == 0 {
+	if len(r.writeOrder) == 0 {
+		var fail findings
 		fail.add("no FSPERF lines in %s — the kernel emits them from the fs cost report; a run with none never reached the measurement, it is not a cost-free one.", strings.Join(logPaths(caps), ", "))
+		return nil, fail.err()
 	}
-	return r, fail.err()
+	return r, nil
+}
+
+// observed is the worst value of key over every log that reported phase.
+func (r *fsRun) observed(key, phase string) (int64, bool) {
+	var got int64
+	found := false
+	for _, l := range r.logs {
+		var v int64
+		if slices.Contains(fsWriteKeys, key) {
+			w, ok := l.write[phase]
+			if !ok {
+				continue
+			}
+			v = w.value(key)
+		} else {
+			c, ok := l.capacity[phase]
+			if !ok {
+				continue
+			}
+			v = c.value(key)
+		}
+		if found {
+			got = worse(key, got, v)
+		} else {
+			got, found = v, true
+		}
+	}
+	return got, found
 }
 
 func logPaths(caps []capture) []string {
@@ -176,59 +247,24 @@ func runFsperf(cfg Config) error {
 			return gateFileErrorf("%s:%d: want '<key> <phase> <value>', got %d fields: %s", rel, l.no, len(f), l.text)
 		}
 		key, phase := f[0], f[1]
-		var got int64
-		switch key {
-		case "max-txns-per-mib", "max-commits-per-mib", "max-devwrites-per-mib", "max-devblocks-per-mib", "max-barriers-per-mib", "min-fs-over-raw-pct", "min-bytes":
-			w, ok := run.write[phase]
-			if !ok {
+		isWrite := slices.Contains(fsWriteKeys, key)
+		if !isWrite && !slices.Contains(fsCapKeys, key) {
+			return gateFileErrorf("%s:%d: unknown gate key '%s'", rel, l.no, key)
+		}
+		got, ok := run.observed(key, phase)
+		if !ok {
+			switch {
+			case isWrite:
 				fail.add("%s names phase '%s', which reported no FSPERF line (dead entry)", key, phase)
-				continue
-			}
-			switch key {
-			case "max-txns-per-mib":
-				got = perMiB(w.txns, w.bytes)
-			case "max-commits-per-mib":
-				got = perMiB(w.commits, w.bytes)
-			case "max-devwrites-per-mib":
-				got = perMiB(w.devwrites, w.bytes)
-			case "max-devblocks-per-mib":
-				got = perMiB(w.devblocks, w.bytes)
-			case "max-barriers-per-mib":
-				got = perMiB(w.barriers, w.bytes)
-			case "min-fs-over-raw-pct":
-				got = w.fsOverRawPct()
-			case "min-bytes":
-				got = w.bytes
-			}
-		case "max-mount-reads-per-gib", "max-lookup-reads", "min-volume-gib", "min-dirents", "min-files", "min-treebytes":
-			c, ok := run.capacity[phase]
-			if !ok {
+			case cfg.RequireCapacity:
+				fail.add("%s names phase '%s', which reported no FSCAP line", key, phase)
+			case !skipped[phase]:
 				// A run without the capacity volume attached legitimately
 				// reports no FSCAP line; --require-capacity is the run that has it.
-				if cfg.RequireCapacity {
-					fail.add("%s names phase '%s', which reported no FSCAP line", key, phase)
-				} else if !skipped[phase] {
-					skipped[phase] = true
-					fmt.Fprintf(cfg.Out, "fsperf: no FSCAP[%s] in this run — capacity volume not attached, skipping its rows\n", phase)
-				}
-				continue
+				skipped[phase] = true
+				fmt.Fprintf(cfg.Out, "fsperf: no FSCAP[%s] in this run — capacity volume not attached, skipping its rows\n", phase)
 			}
-			switch key {
-			case "max-mount-reads-per-gib":
-				got = c.mreads / c.gib()
-			case "max-lookup-reads":
-				got = c.lookupr
-			case "min-volume-gib":
-				got = c.gib()
-			case "min-dirents":
-				got = c.dirents
-			case "min-files":
-				got = c.files
-			case "min-treebytes":
-				got = c.treeb
-			}
-		default:
-			return gateFileErrorf("%s:%d: unknown gate key '%s'", rel, l.no, key)
+			continue
 		}
 		want, err := parseCount(rel, l, f[2])
 		if err != nil {
@@ -257,6 +293,18 @@ func runFsperf(cfg Config) error {
 	return nil
 }
 
+// fsPad is the emitted bound for an observation: padded away from it, except
+// the volume size, which is a property of the attached image.
+func fsPad(key string, v int64) int64 {
+	switch {
+	case key == "min-volume-gib":
+		return v
+	case strings.HasPrefix(key, "max-"):
+		return padUp(v)
+	}
+	return padDown(v)
+}
+
 func emitFsperf(cfg Config, run *fsRun) {
 	out := cfg.Out
 	fmt.Fprintf(out, `# fsperf gate data — variant: %s
@@ -267,35 +315,44 @@ func emitFsperf(cfg Config, run *fsRun) {
 # filesystem-over-raw write-rate ratio is the only quantity here that is
 # invariant under a change of accelerator, so it is the only rate graded.
 # Floors exist so a measurement that stopped happening cannot read as free.
+# Over several runs each cap takes the highest and each floor the lowest
+# value any run reported.
 #
 # A cap matching nothing is a dead entry and fails the gate.
 `, cfg.Variant, emitCommand("fsperf", cfg.Variant))
 	for _, phase := range run.writeOrder {
-		w := run.write[phase]
-		fmt.Fprintf(out, "\n# %s: %d bytes written, %d transactions,\n", phase, w.bytes, w.txns)
-		fmt.Fprintf(out, "# %d device write requests carrying %d blocks,\n", w.devwrites, w.devblocks)
-		fmt.Fprintf(out, "# %d barriers; fs %dKiB in %dns against\n", w.barriers, w.bytes/1024, w.ns)
-		fmt.Fprintf(out, "# raw %dKiB in %dns.\n", w.rawb/1024, w.rawns)
-		fmt.Fprintf(out, "max-txns-per-mib\t%s\t%d\n", phase, padUp(perMiB(w.txns, w.bytes)))
-		fmt.Fprintf(out, "max-commits-per-mib\t%s\t%d\n", phase, padUp(perMiB(w.commits, w.bytes)))
-		fmt.Fprintf(out, "max-devwrites-per-mib\t%s\t%d\n", phase, padUp(perMiB(w.devwrites, w.bytes)))
-		fmt.Fprintf(out, "max-devblocks-per-mib\t%s\t%d\n", phase, padUp(perMiB(w.devblocks, w.bytes)))
-		fmt.Fprintf(out, "max-barriers-per-mib\t%s\t%d\n", phase, padUp(perMiB(w.barriers, w.bytes)))
-		fmt.Fprintf(out, "min-fs-over-raw-pct\t%s\t%d\n", phase, padDown(w.fsOverRawPct()))
-		fmt.Fprintf(out, "min-bytes\t%s\t%d\n", phase, padDown(w.bytes))
+		for _, l := range run.logs {
+			w, ok := l.write[phase]
+			if !ok {
+				continue
+			}
+			fmt.Fprintf(out, "\n# %s (%s): %d bytes written, %d transactions,\n", phase, l.path, w.bytes, w.txns)
+			fmt.Fprintf(out, "# %d device write requests carrying %d blocks,\n", w.devwrites, w.devblocks)
+			fmt.Fprintf(out, "# %d barriers; fs %dKiB in %dns against\n", w.barriers, w.bytes/1024, w.ns)
+			fmt.Fprintf(out, "# raw %dKiB in %dns.\n", w.rawb/1024, w.rawns)
+			break
+		}
+		for _, key := range fsWriteKeys {
+			v, _ := run.observed(key, phase)
+			fmt.Fprintf(out, "%s\t%s\t%d\n", key, phase, fsPad(key, v))
+		}
 	}
 	for _, phase := range run.capOrder {
-		c := run.capacity[phase]
-		fmt.Fprintf(out, "\n# %s: %d blocks of %d (%d GiB) in\n", phase, c.blocks, c.bsize, c.gib())
-		fmt.Fprintf(out, "# %d groups, mounted with %d cache entries in\n", c.groups, c.entries)
-		fmt.Fprintf(out, "# %d device reads / %dns; %d names in one\n", c.mreads, c.mns, c.dirents)
-		fmt.Fprintf(out, "# directory, a lookup of the last costing %d block reads;\n", c.lookupr)
-		fmt.Fprintf(out, "# %d regular files totalling %d bytes walked back off it.\n", c.files, c.treeb)
-		fmt.Fprintf(out, "max-mount-reads-per-gib\t%s\t%d\n", phase, padUp(c.mreads/c.gib()))
-		fmt.Fprintf(out, "max-lookup-reads\t%s\t%d\n", phase, padUp(c.lookupr))
-		fmt.Fprintf(out, "min-volume-gib\t%s\t%d\n", phase, c.gib())
-		fmt.Fprintf(out, "min-dirents\t%s\t%d\n", phase, padDown(c.dirents))
-		fmt.Fprintf(out, "min-files\t%s\t%d\n", phase, padDown(c.files))
-		fmt.Fprintf(out, "min-treebytes\t%s\t%d\n", phase, padDown(c.treeb))
+		for _, l := range run.logs {
+			c, ok := l.capacity[phase]
+			if !ok {
+				continue
+			}
+			fmt.Fprintf(out, "\n# %s (%s): %d blocks of %d (%d GiB) in\n", phase, l.path, c.blocks, c.bsize, c.gib())
+			fmt.Fprintf(out, "# %d groups, mounted with %d cache entries in\n", c.groups, c.entries)
+			fmt.Fprintf(out, "# %d device reads / %dns; %d names in one\n", c.mreads, c.mns, c.dirents)
+			fmt.Fprintf(out, "# directory, a lookup of the last costing %d block reads;\n", c.lookupr)
+			fmt.Fprintf(out, "# %d regular files totalling %d bytes walked back off it.\n", c.files, c.treeb)
+			break
+		}
+		for _, key := range fsCapKeys {
+			v, _ := run.observed(key, phase)
+			fmt.Fprintf(out, "%s\t%s\t%d\n", key, phase, fsPad(key, v))
+		}
 	}
 }

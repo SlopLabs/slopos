@@ -17,7 +17,7 @@
 //! themselves, and give the claim back to the boot step that follows.
 //!
 //! The `vfs_ready` fixture in `slopos_fs::tests` has brought the VFS up before
-//! any kernel test runs, whatever the filter or shard.
+//! any kernel test runs, whatever the filter.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

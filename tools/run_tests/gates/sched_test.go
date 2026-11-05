@@ -101,11 +101,11 @@ func TestSchedSelfTestCases(t *testing.T) {
 	expect(t, "no gate data", f.run("sched", []string{good}), 2, "no gate data")
 }
 
-func TestSchedShards(t *testing.T) {
+func TestSchedLogs(t *testing.T) {
 	f := schedFixture(t)
 	a, b, c := f.log("a.log", schedGood), f.log("b.log", schedGood), f.log("c.log", schedGood)
-	expect(t, "two shards", f.run("sched", []string{a, b}), 0, "a.log", "b.log")
-	expect(t, "three shards", f.run("sched", []string{a, b, c}), 0)
+	expect(t, "two logs", f.run("sched", []string{a, b}), 0, "a.log", "b.log")
+	expect(t, "three logs", f.run("sched", []string{a, b, c}), 0)
 	bad := f.log("bad.log", schedRegressed)
 	expect(t, "one regressed boot fails the run and is named",
 		f.run("sched", []string{a, bad, c}), 1, "bad.log: phase boot — 3 online CPU(s) are not eligible")

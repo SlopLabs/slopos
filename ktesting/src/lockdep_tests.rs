@@ -1,7 +1,7 @@
 //! In-kernel lockdep self-tests.
 //!
 //! `order = last`: they grade the lock graph the rest of the phase built, so
-//! they run after every other test of their shard.
+//! they run after every other test of the phase.
 
 use slopos_ostd::lock_class;
 use slopos_ostd::sync::lock_graph::{self, LockClassKey};

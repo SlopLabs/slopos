@@ -5,15 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 )
 
 // JsonlSink emits one compact JSON object per line. The schema is documented
-// in the public KTAP docs. Safe for concurrent use: a sharded run's boots all
-// write to one sink.
+// in the public KTAP docs.
 type JsonlSink struct {
 	path string
-	mu   sync.Mutex
 	f    *os.File
 }
 
@@ -31,47 +28,24 @@ func NewJsonlSink(path string) (*JsonlSink, error) {
 }
 
 // Write emits one event; events deliberately kept out of the stream
-// (currently EvNonKtap) are skipped. `shard` is the 1-based shard of a
-// sharded run that produced it, carried as a `shard` key; 0 omits the key.
-func (s *JsonlSink) Write(ev Event, shard int) error {
+// (currently EvNonKtap) are skipped.
+func (s *JsonlSink) Write(ev Event, _ *RunSummary) error {
 	obj := encodeEvent(ev)
 	if obj == nil {
 		return nil
 	}
-	if shard > 0 {
-		obj["shard"] = shard
-	}
-	return s.writeObj(obj)
-}
-
-// WriteRunEnd emits the `run_end` summary, the last event in any run; a
-// sharded run's is the combined summary.
-func (s *JsonlSink) WriteRunEnd(summary *RunSummary, exitCode int) error {
-	return s.writeObj(runEndObject("run_end", summary, exitCode))
-}
-
-// WriteShardEnd emits one shard's own summary, ahead of the combined
-// `run_end`.
-func (s *JsonlSink) WriteShardEnd(shard int, summary *RunSummary, exitCode int) error {
-	obj := runEndObject("shard_end", summary, exitCode)
-	obj["shard"] = shard
-	return s.writeObj(obj)
-}
-
-func (s *JsonlSink) writeObj(obj map[string]any) error {
 	b, err := json.Marshal(obj)
 	if err != nil {
-		return fmt.Errorf("jsonl: marshal %v: %w", obj["t"], err)
+		return fmt.Errorf("jsonl: marshal: %w", err)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, err := s.f.Write(append(b, '\n')); err != nil {
-		return fmt.Errorf("jsonl: write %v: %w", obj["t"], err)
+		return fmt.Errorf("jsonl: write: %w", err)
 	}
 	return nil
 }
 
-func runEndObject(kind string, summary *RunSummary, exitCode int) map[string]any {
+// WriteRunEnd emits the `run_end` summary, the last event in any run.
+func (s *JsonlSink) WriteRunEnd(summary *RunSummary, exitCode int) error {
 	phases := make([]map[string]any, 0, len(summary.Phases))
 	for _, p := range summary.Phases {
 		var planN any
@@ -102,8 +76,8 @@ func runEndObject(kind string, summary *RunSummary, exitCode int) map[string]any
 	if summary.QemuStatus != nil {
 		qemuStatus = *summary.QemuStatus
 	}
-	return map[string]any{
-		"t":                   kind,
+	obj := map[string]any{
+		"t":                   "run_end",
 		"wall_ms":             summary.WallMs(),
 		"exit":                exitCode,
 		"qemu_status":         qemuStatus,
@@ -115,6 +89,14 @@ func runEndObject(kind string, summary *RunSummary, exitCode int) map[string]any
 		"kernel_abort_reason": summary.KernelAbortReason,
 		"phases":              phases,
 	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return fmt.Errorf("jsonl: marshal run_end: %w", err)
+	}
+	if _, err := s.f.Write(append(b, '\n')); err != nil {
+		return fmt.Errorf("jsonl: write run_end: %w", err)
+	}
+	return nil
 }
 
 // Close closes the file after a best-effort fsync, so a crashed wrapper
@@ -191,24 +173,17 @@ func encodeEvent(ev Event) map[string]any {
 			"skip":       e.Skip,
 			"over_time":  e.OverTime,
 		}
-	case *EvBail:
-		return map[string]any{
-			"t":         "bail",
-			"phase_idx": e.PhaseIdx,
-			"reason":    e.Reason,
-		}
 	case *EvFixture:
 		return map[string]any{
 			"t":         "fixture",
 			"phase_idx": e.PhaseIdx,
 			"name":      e.Name,
 		}
-	case *EvShard:
+	case *EvBail:
 		return map[string]any{
-			"t":         "shard",
+			"t":         "bail",
 			"phase_idx": e.PhaseIdx,
-			"index":     e.Index,
-			"count":     e.Count,
+			"reason":    e.Reason,
 		}
 	case *EvKernelAbort:
 		return map[string]any{

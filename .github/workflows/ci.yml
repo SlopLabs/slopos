@@ -62,22 +62,19 @@ jobs:
         with:
           job: gates
 
-  # The suite in shards, each boot on a machine of its own: one shard's state
-  # cannot reach another's, and a failing shard names its own tests.
+  # The suite and the boot checks share one build of the tests system, so they
+  # share one machine: each boot check is under a minute, setting up and
+  # building again on another machine is several.
   suite:
-    name: Test suite (shard ${{ matrix.shard }})
+    name: Test suite and boot checks
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
     steps:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup
         with:
-          job: suite-${{ matrix.shard }}
+          job: suite
           go: "true"
           llvm: "true"
           kvm: "true"
@@ -85,76 +82,20 @@ jobs:
           apt: xorriso e2fsprogs cmake ninja-build make pkg-config openssh-client
 
       - name: Suite lane
-        run: just ci-suite ${{ matrix.shard }}
+        run: just ci-suite
 
       - if: always()
         uses: ./.github/actions/sccache-save
         with:
-          job: suite-${{ matrix.shard }}
+          job: suite
 
-      - if: always()
+      - name: Upload the suite's capture on failure
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: suite-shard-${{ matrix.shard }}
-          path: builddir/ci/shard-${{ matrix.shard }}.log
+          name: ci-test-log
+          path: builddir/ci-test.log
           if-no-files-found: ignore
-
-  # Grades the shards' captures together: the tracked test list is a union
-  # over shards, and the ratchets read every boot.
-  grade:
-    name: Grade the suite's captures
-    needs: suite
-    if: ${{ !cancelled() }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: extractions/setup-just@v4
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: tools/run_tests/go.mod
-          cache-dependency-path: tools/run_tests/go.sum
-
-      - uses: actions/download-artifact@v7
-        with:
-          pattern: suite-shard-*
-          path: builddir/ci
-          merge-multiple: true
-
-      - name: Log gates over every shard
-        run: just check-capture
-
-  # Each boot check needs its own image or its own devices, so each is a
-  # machine of its own rather than a step after the suite.
-  boot:
-    name: Boot check (${{ matrix.lane }})
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      matrix:
-        lane: [persist, usb, selfhost-root]
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: ./.github/actions/setup
-        with:
-          job: boot-${{ matrix.lane }}
-          go: "true"
-          llvm: "true"
-          kvm: "true"
-          pinned-sources: "true"
-          apt: xorriso e2fsprogs cmake ninja-build make pkg-config openssh-client
-
-      - name: Boot lane
-        run: just ci-boot ${{ matrix.lane }}
-
-      - if: always()
-        uses: ./.github/actions/sccache-save
-        with:
-          job: boot-${{ matrix.lane }}
 
   toolchain:
     name: Toolchain port

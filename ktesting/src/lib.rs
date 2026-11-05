@@ -71,8 +71,8 @@ macro_rules! fail {
 ///   the userland tests;
 /// - `suite = <ident>` disambiguates the generated statics when two modules
 ///   register functions of one name;
-/// - `order = first` runs the test ahead of every other in every shard, and a
-///   failure bails the phase; `order = last` runs it at the end of its shard;
+/// - `order = first` runs the test ahead of every other test, and a failure
+///   bails the phase; `order = last` runs it at the end of the phase;
 /// - `rank = <u8>` runs it after every lower-ranked test of its module and
 ///   order, for a test that reads what others in its module left behind.
 ///
@@ -145,9 +145,9 @@ macro_rules! stest {
 }
 
 /// Register shared setup for a phase: `setup`, a `fn() -> bool`, runs before
-/// the phase's first test whenever the phase runs any, whatever the filter or
-/// shard, so no test has to be named, filtered in or sorted first to provide
-/// it. A fixture is not a test: it reports `KTAP\t# fixture <path> ok`, and a
+/// the phase's first test whenever the phase runs any, whatever the filter,
+/// so no test has to be named, filtered in or sorted first to provide it. A
+/// fixture is not a test: it reports `KTAP\t# fixture <path> ok`, and a
 /// `false` or a panic bails the phase.
 ///
 /// ```ignore
