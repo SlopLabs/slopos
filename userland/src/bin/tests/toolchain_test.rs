@@ -1288,7 +1288,9 @@ fn git_clones_over_https() -> bool {
 /// cargo resolves both lockfiles from crates.io over HTTPS as the host's cargo
 /// does: the workspace's, and the standard library's that `-Zbuild-std`
 /// reads. A fresh `CARGO_HOME`, so every crate is a download; cargo holds each
-/// to the checksum its lockfile records.
+/// to the checksum its lockfile records. The workspace's fetch names no target,
+/// so it takes every package the lockfile pins, a `cfg(any())` one included,
+/// which no target's fetch would.
 fn cargo_resolves_the_lockfiles_from_crates_io() -> bool {
     let prefix = match toolchain() {
         Ok(p) => p,
@@ -1304,25 +1306,34 @@ fn cargo_resolves_the_lockfiles_from_crates_io() -> bool {
     };
     let cargo_home = format!("{SCRATCH}/ladder/crates-io-home");
     let _ = fs::remove_dir_all(&cargo_home);
-    let Some(fetched) = run(
-        &clone,
-        &format!("{prefix}/bin/cargo"),
-        &[
-            "fetch",
-            "--locked",
-            "-Zbuild-std=core,alloc",
-            "--target",
-            "targets/x86_64-slos.json",
-        ],
-        &[
-            ("CARGO_HOME", cargo_home.as_str()),
-            ("CARGO_NET_OFFLINE", "false"),
-        ],
-    ) else {
-        return false;
-    };
-    if !fetched.ok("cargo fetch -Zbuild-std") {
-        return false;
+    let started = std::time::Instant::now();
+    for (what, args) in [
+        ("cargo fetch", &["fetch", "--locked"][..]),
+        (
+            "cargo fetch -Zbuild-std",
+            &[
+                "fetch",
+                "--locked",
+                "-Zbuild-std=core,alloc",
+                "--target",
+                "targets/x86_64-slos.json",
+            ][..],
+        ),
+    ] {
+        let Some(fetched) = run(
+            &clone,
+            &format!("{prefix}/bin/cargo"),
+            args,
+            &[
+                ("CARGO_HOME", cargo_home.as_str()),
+                ("CARGO_NET_OFFLINE", "false"),
+            ],
+        ) else {
+            return false;
+        };
+        if !fetched.ok(what) {
+            return false;
+        }
     }
     let Some(cache) = fs::read_dir(format!("{cargo_home}/registry/cache"))
         .ok()
@@ -1358,7 +1369,7 @@ fn cargo_resolves_the_lockfiles_from_crates_io() -> bool {
     note(&format!(
         "{crates} crates from crates.io, the workspace's {} among them, in {} ms",
         workspace.len(),
-        fetched.took.as_millis()
+        started.elapsed().as_millis()
     ));
     true
 }
