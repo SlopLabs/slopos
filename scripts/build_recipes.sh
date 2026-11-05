@@ -234,7 +234,9 @@ template_tools() {
 }
 tool_version() {
     case "$1" in
-        cmake | make) "$1" --version | head -n 1 ;;
+        # sed drains the pipe: make writes its version a line at a time, and
+        # head's early exit would kill it with SIGPIPE under pipefail.
+        cmake | make) "$1" --version | sed -n 1p ;;
         perl) perl -e 'print "perl $]\n"' ;;
         git) git --version ;;
         *) printf '%s %s\n' "$1" "$("$1" --version)" ;;
