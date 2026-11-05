@@ -79,12 +79,12 @@
 #
 # One divergence this gate does not probe and should not be forgotten: wild
 # defaults --gc-sections ON where ld and lld default it off, and documents
-# that nowhere. KEEP is honoured, so link.ld's eleven registries survive; a
+# that nowhere. KEEP is honoured, so link.ld's twelve registries survive; a
 # section relying on ld's default would not.
 #
 # PHDRS with declared flags, KEEP against a control link, ASSERT(SIZEOF()),
 # /DISCARD/, ENTRY of a non-default symbol, and symbols bracketing exactly the
-# section they are written in are all `has`. So the eleven registries would be
+# section they are written in are all `has`. So the twelve registries would be
 # measured correctly — around an image that starts in the wrong place. That is
 # why this is a gate rather than a note: a `lacks` that turns into a `has` is
 # the signal to re-try the whole link.
