@@ -196,18 +196,16 @@ crate::utest!(
 
 // Nothing below is ordered by its position in this file. The userland phase
 // walks `ktesting::registry::registry_sorted()`, which orders by
-// `(order, module, rank, name)`, and every utest here shares one module, order
-// and rank — so the sorted `name` is the running order, and this file's order
-// is presentation only. A shard runs a contiguous run of that order.
+// `(order, module, rank, name)`, and every utest here shares one module and
+// order — so within a rank the sorted `name` is the running order, and this
+// file's order is presentation only. A shard runs a contiguous run of that
+// order.
 //
 // `libc_abi` opens AF_UNIX endpoints, and the kernel phase has a known bug
 // where exercising unix sockets leaves UDP dead for the rest of the run (see
-// `dns_resolve_test`'s header), so it has to follow every network case. It
-// does, by name: `utest_curl_e2e`, `utest_curl_recv_repro`,
-// `utest_dns_concurrent`, `utest_dns_resolve`, `utest_https_transfer`,
-// `utest_ip_e2e` and `utest_ip_netctl` all sort before `utest_libc_abi`. A
-// network case named past `l` breaks that and has to be renamed.
-crate::utest!(name = utest_libc_abi, bin = "/bin/libc_abi_test");
+// `dns_resolve_test`'s header), so it has to follow every network case:
+// `rank = 1` runs it after every other utest, whatever they are named.
+crate::utest!(name = utest_libc_abi, bin = "/bin/libc_abi_test", rank = 1);
 
 // Not last, and deliberately not renamed to be: `utest_s…` sorts ahead of
 // `utest_terminal_grid` and `utest_tls_independence`. This one spawns eight
