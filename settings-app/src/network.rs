@@ -13,7 +13,7 @@ use slopos_settings_core::network::{
 };
 use slopos_theme_core::{Icon, TextRole, space};
 
-use crate::field::{Field, Left, caption_text, with_caption};
+use crate::field::{Field, Left, caption_text, locked_text, with_caption};
 use crate::{Ask, Asked, Effect as AppEffect, Input, Msg as AppMsg, Panel, Purpose};
 
 /// On or off, which an administrator runs unasked.
@@ -73,15 +73,12 @@ impl Request {
 #[derive(Clone, Debug, Default)]
 struct Typed {
     field: Field,
-    /// Focus left it holding something, so what is wrong with it shows.
-    left: bool,
 }
 
 impl Typed {
     fn with(text: String) -> Typed {
         Typed {
             field: Field::with(text),
-            left: false,
         }
     }
 
@@ -90,9 +87,6 @@ impl Typed {
     }
 
     fn edit(&mut self, input: LineEditInput) -> Left {
-        if matches!(input, LineEditInput::Blur) && !self.text().is_empty() {
-            self.left = true;
-        }
         self.field.edit(input)
     }
 }
@@ -804,23 +798,7 @@ impl Network {
         let mut parts: Vec<Node<AppMsg>> = vec![group.into()];
         parts.extend(self.trouble_where(|r| matches!(r, Request::Networking(_))));
         if !self.admin && self.kept.is_some() {
-            parts.push(row(
-                space::XS,
-                vec![
-                    Node::Icon {
-                        icon: Icon::Lock,
-                        role: TextRole::Caption,
-                        tone: Tone::Secondary,
-                    },
-                    Node::Expand {
-                        weight: 1,
-                        child: Box::new(caption_text(
-                            "Changes ask for an administrator's password.",
-                            Tone::Secondary,
-                        )),
-                    },
-                ],
-            ));
+            parts.push(locked_text("Changes ask for an administrator's password."));
         }
         column(space::SM, parts)
     }
@@ -933,8 +911,9 @@ impl Network {
 
     pub fn dialog(&self) -> Option<Node<AppMsg>> {
         let editing = self.editing.as_ref()?;
-        let shown =
-            |typed: &Typed, error: Option<Invalid>| error.filter(|_| typed.left || editing.tried);
+        let shown = |typed: &Typed, error: Option<Invalid>| {
+            error.filter(|_| typed.field.left || editing.tried)
+        };
         let line = |typed: &Typed,
                     error: Option<Invalid>,
                     placeholder: &str,

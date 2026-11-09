@@ -21,13 +21,16 @@ pub fn build_widget_tree<M: Clone + 'static>(node: &Node<M>) -> Box<dyn Widget> 
             Box::new(widgets::icon::IconWidget::new(*icon, *role, *tone))
         }
         Node::Avatar { name } => Box::new(widgets::avatar::AvatarWidget::new(name.clone())),
-        Node::IconButton(b) => Box::new(widgets::icon_button::IconButtonWidget::new(
-            b.icon,
-            b.label.clone(),
-            erase(&b.on_press),
-            b.enabled,
-            b.active,
-        )),
+        Node::IconButton(b) => Box::new(
+            widgets::icon_button::IconButtonWidget::new(
+                b.icon,
+                b.label.clone(),
+                erase(&b.on_press),
+                b.enabled,
+                b.active,
+            )
+            .takes_escape(b.takes_escape),
+        ),
         Node::ButtonRow(row) => build_button_row(row, row.ends),
         Node::PropertyList(list) => {
             let mut cells: Vec<Box<dyn Widget>> = Vec::with_capacity(list.rows.len() * 2);

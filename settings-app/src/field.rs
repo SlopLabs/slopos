@@ -1,12 +1,16 @@
 //! A line a person types into, and whether it has the keyboard.
 
-use slopos_appkit::{Key, LineEditInput, LineInput, NamedKey, Node, PasswordField, Text, Tone};
-use slopos_theme_core::{TextRole, space};
+use slopos_appkit::{
+    Key, LineEditInput, LineInput, NamedKey, Node, PasswordField, Text, Tone, row,
+};
+use slopos_theme_core::{Icon, TextRole, space};
 
 #[derive(Clone, Default)]
 pub struct Field {
     pub input: LineInput,
     pub focused: bool,
+    /// Focus left it holding something, so what is wrong with it shows.
+    pub left: bool,
 }
 
 /// Its length alone, since what a person types may be a password.
@@ -27,7 +31,7 @@ impl Field {
     pub fn with(text: impl Into<String>) -> Field {
         Field {
             input: LineInput::with_text(text.into()),
-            focused: false,
+            ..Field::default()
         }
     }
 
@@ -40,7 +44,10 @@ impl Field {
             LineEditInput::Text { character } => self.input.insert(character),
             LineEditInput::Caret { col } => self.input.set_caret(col),
             LineEditInput::Focus => self.focused = true,
-            LineEditInput::Blur => self.focused = false,
+            LineEditInput::Blur => {
+                self.focused = false;
+                self.left |= !self.input.text.trim().is_empty();
+            }
             LineEditInput::Key {
                 key: Key::Named(NamedKey::Enter),
                 ..
@@ -76,10 +83,16 @@ impl Field {
         }
     }
 
-    pub fn secret<M>(&self, placeholder: &str, on_input: fn(LineEditInput) -> M) -> Node<M> {
+    pub fn secret<M>(
+        &self,
+        placeholder: &str,
+        wrong: bool,
+        on_input: fn(LineEditInput) -> M,
+    ) -> Node<M> {
         PasswordField::new(&self.input)
             .focused(self.focused)
             .placeholder(placeholder)
+            .invalid(wrong)
             .on_input(on_input)
             .into()
     }
@@ -92,7 +105,7 @@ impl Field {
                 text: String::with_capacity(256),
                 caret: 0,
             },
-            focused: false,
+            ..Field::default()
         }
     }
 
@@ -104,6 +117,7 @@ impl Field {
         bytes.resize(room, 0);
         std::hint::black_box(&bytes);
         self.input.caret = 0;
+        self.left = false;
     }
 }
 
@@ -128,4 +142,21 @@ pub fn caption_text<M>(said: &str, tone: Tone) -> Node<M> {
         .tone(tone)
         .wrap()
         .into()
+}
+
+pub fn locked_text<M>(said: &str) -> Node<M> {
+    row(
+        space::XS,
+        vec![
+            Node::Icon {
+                icon: Icon::Lock,
+                role: TextRole::Caption,
+                tone: Tone::Secondary,
+            },
+            Node::Expand {
+                weight: 1,
+                child: Box::new(caption_text(said, Tone::Secondary)),
+            },
+        ],
+    )
 }

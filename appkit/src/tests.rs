@@ -2149,6 +2149,10 @@ pub fn cases() -> &'static [(&'static str, fn())] {
             components::test_button_row_answers_enter_and_escape,
         ),
         (
+            "a_page_s_way_back_answers_escape_once",
+            components::test_a_page_s_way_back_answers_escape_once,
+        ),
+        (
             "button_row_stacks_when_narrow",
             components::test_button_row_stacks_when_narrow,
         ),
@@ -2159,6 +2163,10 @@ pub fn cases() -> &'static [(&'static str, fn())] {
         (
             "list_rows_pass_the_audit",
             components::test_list_rows_pass_the_audit,
+        ),
+        (
+            "a_row_that_opens_keeps_room_for_its_arrow",
+            components::test_a_row_that_opens_keeps_room_for_its_arrow,
         ),
         (
             "avatars_show_an_initial_and_pass_the_audit",

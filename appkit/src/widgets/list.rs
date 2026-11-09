@@ -2,7 +2,7 @@ use std::any::Any;
 use std::cell::Cell;
 
 use slopos_abi::draw::Color32;
-use slopos_theme_core::{TextRole, Theme, space};
+use slopos_theme_core::{Icon, TextRole, Theme, space};
 
 use super::RowState;
 use super::text::break_lines;
@@ -103,12 +103,20 @@ impl ListWidget {
         }
     }
 
+    fn arrow_room(row: &ListRow) -> i32 {
+        match row.opens {
+            true => TITLE.style().icon + space::SM,
+            false => 0,
+        }
+    }
+
     fn trailing_room(row: &ListRow) -> i32 {
-        if row.trailing.is_empty() {
+        let text = if row.trailing.is_empty() {
             0
         } else {
             ui::width(&row.trailing, DETAIL) + space::SM
-        }
+        };
+        text + Self::arrow_room(row)
     }
 
     fn second_line(row: &ListRow) -> &str {
@@ -306,16 +314,17 @@ impl Widget for ListWidget {
                     ctx.draw_text_fitted(x, y, line, DETAIL, text_w, quiet);
                 }
             }
+            let end = rect.x + rect.width - PAD;
             if !row.trailing.is_empty() {
                 let w = ui::width(&row.trailing, DETAIL);
                 let y = ui::centred_top(top, title_lh, DETAIL);
-                ctx.draw_text(
-                    rect.x + rect.width - PAD - w,
-                    y,
-                    &row.trailing,
-                    DETAIL,
-                    quiet,
-                );
+                let x = end - Self::arrow_room(row) - w;
+                ctx.draw_text(x, y, &row.trailing, DETAIL, quiet);
+            }
+            if row.opens {
+                let size = TITLE.style().icon;
+                let y = rect.y + (rect.height - size) / 2;
+                ctx.draw_icon(Icon::ChevronRight, end - size, y, size, quiet);
             }
         }
         if self.focused && ringed.is_none() {

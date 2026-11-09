@@ -78,6 +78,7 @@ pub const PAGES: [&str; 14] = [
     "graphs",
 ];
 
+const LISTS: usize = 4;
 const STRUCTURE: usize = 6;
 const FEEDBACK: usize = 9;
 const DIALOG: usize = 12;
@@ -104,7 +105,7 @@ const ABOUT: [&str; 14] = [
     "A row of buttons ends a page: going back on the left, finishing on the right.",
     "Fields share one frame, which thickens and takes the focus colour while typed into.",
     "Choose one of several or a picture, turn one thing on at once or with a button after it, or pick an amount; a keyboard shows what each key of a layout types.",
-    "Rows that may be chosen, one tab stop for the whole list.",
+    "Rows that may be chosen or that open another page, one tab stop for the whole list; the arrow by this page's title is the way back from one.",
     "Rows in columns, and a tree of folders, each one tab stop the arrows move along.",
     "A page is made of sections, groups of rows, property lists and details that open, and ends in a row of buttons.",
     "Tabs that switch what a view shows, a menu bar and its menu, and the documents an app has open.",
@@ -275,6 +276,9 @@ impl Catalogue {
                     .back(Button::new("Back").on_press(Msg::Press))
                     .confirm(Button::new("Continue").on_press(Msg::Press)),
             );
+        }
+        if index == LISTS {
+            page = page.back("Back to choices", Msg::Press);
         }
         page.into()
     }
@@ -709,6 +713,9 @@ impl Catalogue {
         ]
         .map(|(name, folder)| ListRow::new(name).detail_tail(folder))
         .to_vec();
+        let opened = [("ada", "Standard user"), ("grace", "Administrator")]
+            .map(|(name, kind)| ListRow::new(name).avatar().detail(kind).opens())
+            .to_vec();
         Self::sections(vec![
             Section::new(
                 "Rows with details",
@@ -741,6 +748,11 @@ impl Catalogue {
                             .into(),
                     ],
                 ),
+            )
+            .into(),
+            Section::new(
+                "Rows that open a page",
+                List::new(opened).on_activate(|_| Msg::Press),
             )
             .into(),
         ])

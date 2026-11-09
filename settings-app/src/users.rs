@@ -6,12 +6,12 @@
 
 use slopos_accounts_core::listing::Listed;
 use slopos_appkit::{
-    Button, ButtonRow, Dialog, LineEditInput, List, ListRow, Node, Notice, PropertyList, Section,
-    Text, Tone, column, row,
+    ActionRow, Button, ButtonRow, CrossAxisAlignment, Dialog, Group, LineEditInput, List, ListRow,
+    Node, Notice, Page, PropertyList, Section, Switch, Text, Tone, column, row,
 };
-use slopos_theme_core::{TextRole, space};
+use slopos_theme_core::{Surface, TextRole, space};
 
-use crate::field::{Field, Left, caption_text, with_caption, with_error};
+use crate::field::{Field, Left, caption_text, locked_text, with_caption};
 use crate::{Ask, Asked, Effect as AppEffect, Input, Msg as AppMsg, Panel, Person, Purpose};
 
 pub const LIST: &str = "org.slopos.accounts.list";
@@ -21,12 +21,16 @@ pub const OWN_PASSWORD: &str = "org.slopos.accounts.password";
 /// The first person, who keeps the workspace at `/src` and so stays.
 const FIRST_PERSON: u32 = slopos_abi::fs::SESSION_UID;
 
+const ABOUT: &str = "The people who use this computer.";
+
 #[derive(Clone, Debug)]
 pub enum Msg {
     /// The people, and whether the list says what holds for each: from the
     /// accounts record through privd, else from the user database alone.
     Listed(Vec<Listed>, bool),
-    Choose(usize),
+    /// By row among everyone but the person running Settings.
+    Open(usize),
+    Back,
     Admin,
     Autologin,
     Add,
@@ -35,8 +39,10 @@ pub enum Msg {
     Remove,
     Cancel,
     Confirm,
-    RemoveFiles,
-    DialogAdmin,
+    /// Row 0 a standard user, row 1 an administrator.
+    Kind(usize),
+    /// Row 0 keeps the removed person's files, row 1 deletes them.
+    Files(usize),
     Name(LineEditInput),
     Current(LineEditInput),
     New(LineEditInput),
@@ -62,6 +68,19 @@ pub enum Request {
     Autologin,
 }
 
+impl Request {
+    fn failed(self) -> &'static str {
+        match self {
+            Request::Add => "The user couldn't be added",
+            Request::Password => "The password couldn't be changed",
+            Request::Rename => "The name couldn't be changed",
+            Request::Remove => "The user couldn't be removed",
+            Request::Admin => "The account type couldn't be changed",
+            Request::Autologin => "Automatic login couldn't be changed",
+        }
+    }
+}
+
 enum Form {
     Add {
         name: Field,
@@ -74,20 +93,112 @@ enum Form {
         own_again: Field,
     },
     Password {
+        uid: u32,
         name: String,
-        own: bool,
         current: Field,
         password: Field,
         again: Field,
     },
     Rename {
+        uid: u32,
         name: String,
         new: Field,
     },
     Remove {
         name: String,
+        home: String,
         files: bool,
     },
+}
+
+impl Form {
+    fn request(&self) -> Request {
+        match self {
+            Form::Add { .. } => Request::Add,
+            Form::Password { .. } => Request::Password,
+            Form::Rename { .. } => Request::Rename,
+            Form::Remove { .. } => Request::Remove,
+        }
+    }
+
+    fn done(&self, noted: bool) -> &'static str {
+        match self {
+            Form::Add { .. } if noted => "The user is added.",
+            Form::Add { .. } => "The new user can log in now.",
+            Form::Password { .. } => "The password is changed.",
+            Form::Rename { .. } => "The name is changed.",
+            Form::Remove { .. } => "The user is removed.",
+        }
+    }
+
+    fn about(&self) -> About {
+        match self {
+            Form::Add { .. } | Form::Remove { .. } => About::People,
+            Form::Password { uid, .. } | Form::Rename { uid, .. } => About::Person(*uid),
+        }
+    }
+
+    fn wipe(&mut self) {
+        match self {
+            Form::Add {
+                password,
+                again,
+                own,
+                own_again,
+                ..
+            } => {
+                for field in [password, again, own, own_again] {
+                    field.wipe();
+                }
+            }
+            Form::Password {
+                current,
+                password,
+                again,
+                ..
+            } => {
+                for field in [current, password, again] {
+                    field.wipe();
+                }
+            }
+            Form::Rename { .. } | Form::Remove { .. } => {}
+        }
+    }
+}
+
+struct Editing {
+    form: Form,
+    tried: bool,
+    trouble: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Name,
+    Current,
+    New,
+    Again,
+    Own,
+    OwnAgain,
+}
+
+struct Asking {
+    request: Request,
+    /// The uid whose switch it turned, and to what.
+    turned: Option<(u32, bool)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum About {
+    Person(u32),
+    People,
+}
+
+struct Said {
+    tone: Tone,
+    title: String,
+    body: Option<String>,
+    about: About,
 }
 
 pub struct Users {
@@ -96,19 +207,17 @@ pub struct Users {
     /// Whether the list says who has a password and who logs in by
     /// themselves.
     whole: bool,
-    chosen: Option<usize>,
-    dialog: Option<Form>,
-    /// Why the dialog's last request did not do what it asked, shown in it
-    /// so nothing typed has to be typed again.
-    dialog_trouble: Option<String>,
-    asking: Option<Request>,
-    said: Option<(Tone, String, Option<String>)>,
+    /// The uid of the other person whose page shows.
+    open: Option<u32>,
+    editing: Option<Editing>,
+    asking: Option<Asking>,
+    said: Option<Said>,
 }
 
 fn kind(person: &Listed) -> &'static str {
     match person.admin {
-        true => "Administrator",
-        false => "Standard user",
+        true => KINDS[1].0,
+        false => KINDS[0].0,
     }
 }
 
@@ -118,15 +227,18 @@ fn twice(input: &mut Input, password: &Field) {
     input.line(password.text());
 }
 
+fn owned(args: &[&str]) -> Vec<String> {
+    args.iter().map(|arg| arg.to_string()).collect()
+}
+
 impl Users {
     pub fn new(me: Person) -> Users {
         Users {
             me,
             people: None,
             whole: false,
-            chosen: None,
-            dialog: None,
-            dialog_trouble: None,
+            open: None,
+            editing: None,
             asking: None,
             said: None,
         }
@@ -140,41 +252,133 @@ impl Users {
         self.me.admin
     }
 
-    fn person(&self) -> Option<&Listed> {
-        self.people.as_ref()?.get(self.chosen?)
+    pub fn show_everyone(&mut self) {
+        self.open = None;
+        self.said = None;
+    }
+
+    fn listed(&self, uid: u32) -> Option<&Listed> {
+        self.people.as_ref()?.iter().find(|p| p.uid == uid)
     }
 
     fn me_listed(&self) -> Option<&Listed> {
-        self.people.as_ref()?.iter().find(|p| p.uid == self.me.uid)
+        self.listed(self.me.uid)
+    }
+
+    fn shown(&self) -> Option<&Listed> {
+        self.listed(self.open.unwrap_or(self.me.uid))
+    }
+
+    fn others(&self) -> impl Iterator<Item = &Listed> {
+        let me = self.me.uid;
+        self.people.iter().flatten().filter(move |p| p.uid != me)
+    }
+
+    fn told(&self, person: &Listed) -> bool {
+        self.whole && !person.withheld
     }
 
     fn ask(
         &mut self,
-        request: Request,
+        asking: Asking,
         action: &'static str,
         args: Vec<String>,
         input: Input,
     ) -> Vec<AppEffect> {
-        self.asking = Some(request);
+        let purpose = Purpose::Users(asking.request);
+        self.asking = Some(asking);
         self.said = None;
         vec![AppEffect::Ask(Ask {
-            purpose: Purpose::Users(request),
+            purpose,
             action,
             args,
             input,
         })]
     }
 
-    fn manage(&mut self, request: Request, args: &[&str], input: Input) -> Vec<AppEffect> {
-        let args = args.iter().map(|a| a.to_string()).collect();
-        self.ask(request, MANAGE, args, input)
+    fn kept_admin(&self, person: &Listed) -> Option<&'static str> {
+        let admins = self.people.iter().flatten().filter(|p| p.admin).count();
+        match person.admin {
+            true if admins == 1 => Some("The computer's last administrator stays one."),
+            true if person.uid == self.me.uid => {
+                Some("Another administrator can make you a standard user.")
+            }
+            _ => None,
+        }
     }
 
-    /// Why the dialog cannot be answered yet, in a sentence, `None` when it
-    /// can.
-    fn not_yet(&self) -> Option<&'static str> {
+    fn turned(&self, request: Request, person: &Listed, now: bool) -> bool {
+        match &self.asking {
+            Some(Asking {
+                request: asked,
+                turned: Some((uid, on)),
+            }) if *asked == request && *uid == person.uid => *on,
+            _ => now,
+        }
+    }
+
+    fn turn(&mut self, request: Request) -> Vec<AppEffect> {
+        if self.asking.is_some() {
+            return Vec::new();
+        }
+        let Some(person) = self.shown() else {
+            return Vec::new();
+        };
+        let (uid, name) = (person.uid, person.name.clone());
+        let (on, args) = match request {
+            Request::Admin => {
+                if self.kept_admin(person).is_some() {
+                    return Vec::new();
+                }
+                let verb = match person.admin {
+                    true => "demote",
+                    false => "promote",
+                };
+                (!person.admin, vec![String::from(verb), name])
+            }
+            _ => {
+                let whom = match person.autologin {
+                    true => String::from("--off"),
+                    false => name,
+                };
+                (!person.autologin, vec![String::from("autologin"), whom])
+            }
+        };
+        let asking = Asking {
+            request,
+            turned: Some((uid, on)),
+        };
+        self.ask(asking, MANAGE, args, Input::default())
+    }
+
+    /// So a switch never flicks back before the people are read again.
+    fn keep_turned(&mut self, request: Request, uid: u32, on: bool) {
+        for person in self.people.iter_mut().flatten() {
+            match request {
+                Request::Admin if person.uid == uid => person.admin = on,
+                Request::Autologin => person.autologin = on && person.uid == uid,
+                _ => {}
+            }
+        }
+        if request == Request::Admin && uid == self.me.uid {
+            self.me.admin = on;
+        }
+    }
+
+    fn wrong(&self) -> Vec<(Slot, &'static str)> {
+        let Some(editing) = &self.editing else {
+            return Vec::new();
+        };
         let taken = |name: &str| self.people.iter().flatten().any(|p| p.name == name);
-        match self.dialog.as_ref()? {
+        let named = |name: &str| match slopos_accounts_core::valid_name(name) {
+            false => Some(NAME_RULE),
+            true => taken(name).then_some("Someone has that name already."),
+        };
+        let mut wrong = Vec::new();
+        let mut hold = |slot: Slot, why: Option<&'static str>| {
+            wrong.extend(why.map(|why| (slot, why)));
+        };
+        match &editing.form {
             Form::Add {
                 name,
                 password,
@@ -183,60 +387,58 @@ impl Users {
                 own_again,
                 ..
             } => {
-                if !slopos_accounts_core::valid_name(name.text()) {
-                    return Some(NAME_RULE);
-                }
-                if taken(name.text()) {
-                    return Some("Someone has that name already.");
-                }
-                if password.text() != again.text() {
-                    return Some("The two passwords differ.");
-                }
-                if self.needs_own_password() && own.text().is_empty() {
-                    return Some("Choose a password for yourself first.");
-                }
-                if own.text() != own_again.text() {
-                    return Some("Your two passwords differ.");
-                }
-                None
+                hold(Slot::Name, named(name.text()));
+                hold(
+                    Slot::Again,
+                    (password.text() != again.text()).then_some(DIFFER),
+                );
+                let unset = self.needs_own_password() && own.text().is_empty();
+                hold(
+                    Slot::Own,
+                    unset.then_some("Choose a password for yourself first."),
+                );
+                hold(
+                    Slot::OwnAgain,
+                    (own.text() != own_again.text()).then_some(DIFFER),
+                );
             }
             Form::Password {
-                own,
+                uid,
                 current,
                 password,
                 again,
                 ..
             } => {
-                let has = self.whole && self.me_listed().is_some_and(|me| me.password);
-                if *own && has && current.text().is_empty() {
-                    return Some("Type your password as it is now.");
-                }
-                if password.text().is_empty() {
-                    return Some("Type the new password.");
-                }
-                (password.text() != again.text()).then_some("The two passwords differ.")
+                let asked = *uid == self.me.uid
+                    && self.whole
+                    && self.me_listed().is_some_and(|me| me.password);
+                hold(
+                    Slot::Current,
+                    (asked && current.text().is_empty())
+                        .then_some("Type your password as it is now."),
+                );
+                hold(
+                    Slot::New,
+                    password
+                        .text()
+                        .is_empty()
+                        .then_some("Type the new password."),
+                );
+                hold(
+                    Slot::Again,
+                    (password.text() != again.text()).then_some(DIFFER),
+                );
             }
-            Form::Rename { name, new } => {
-                if new.text() == name {
-                    return Some("Type a new name.");
-                }
-                if !slopos_accounts_core::valid_name(new.text()) {
-                    return Some(NAME_RULE);
-                }
-                taken(new.text()).then_some("Someone has that name already.")
-            }
-            Form::Remove { .. } => None,
+            Form::Rename { name, new, .. } => hold(
+                Slot::Name,
+                match new.text() == name {
+                    true => Some("Type a new name."),
+                    false => named(new.text()),
+                },
+            ),
+            Form::Remove { .. } => {}
         }
-    }
-
-    /// Whether `users` asks for the person's password now before a new
-    /// one: when the record says they have one, or, read from the database
-    /// alone, when they typed one.
-    fn asks_current(&self, current: &Field) -> bool {
-        match self.whole {
-            true => self.me_listed().is_some_and(|me| me.password),
-            false => !current.text().is_empty(),
-        }
+        wrong
     }
 
     /// An administrator with no password who adds someone sets one first,
@@ -246,14 +448,27 @@ impl Users {
     }
 
     fn confirm(&mut self) -> Vec<AppEffect> {
-        if self.not_yet().is_some() || self.asking.is_some() {
+        if self.asking.is_some() {
             return Vec::new();
         }
-        let Some(mut dialog) = self.dialog.take() else {
+        let wrong = !self.wrong().is_empty();
+        let needs_own = self.needs_own_password();
+        let me = self.me.uid;
+        // `users` asks for the password as it is when the record says there
+        // is one, or, with the database alone read, when one was typed.
+        let has = self
+            .whole
+            .then(|| self.me_listed().is_some_and(|me| me.password));
+        let Some(editing) = &mut self.editing else {
             return Vec::new();
         };
-        self.dialog_trouble = None;
-        let effects = match &mut dialog {
+        editing.trouble = None;
+        if wrong {
+            editing.tried = true;
+            return Vec::new();
+        }
+        let mut input = Input::new();
+        let (action, args) = match &editing.form {
             Form::Add {
                 name,
                 admin,
@@ -265,8 +480,7 @@ impl Users {
                 if *admin {
                     args.push("--admin");
                 }
-                let mut input = Input::new();
-                if self.needs_own_password() {
+                if needs_own {
                     args.push("--adder-password");
                     twice(&mut input, own);
                 }
@@ -274,62 +488,57 @@ impl Users {
                     args.push("--password");
                     twice(&mut input, password);
                 }
-                let args: Vec<String> = args.into_iter().map(String::from).collect();
-                self.ask(Request::Add, MANAGE, args, input)
+                (MANAGE, owned(&args))
             }
             Form::Password {
-                name,
-                own,
+                uid,
                 current,
                 password,
                 ..
-            } => {
-                let mut input = Input::new();
-                match *own {
-                    true => {
-                        if self.asks_current(current) {
-                            input.line(current.text());
-                        }
-                        twice(&mut input, password);
-                        let args = vec![String::from("passwd")];
-                        self.ask(Request::Password, OWN_PASSWORD, args, input)
-                    }
-                    false => {
-                        twice(&mut input, password);
-                        let name = name.clone();
-                        self.manage(Request::Password, &["passwd", &name], input)
-                    }
+            } if *uid == me => {
+                if has.unwrap_or(!current.text().is_empty()) {
+                    input.line(current.text());
                 }
+                twice(&mut input, password);
+                (OWN_PASSWORD, owned(&["passwd"]))
             }
-            Form::Rename { name, new } => {
-                let (old, new) = (name.clone(), new.text().to_string());
-                self.manage(Request::Rename, &["rename", &old, &new], Input::default())
+            Form::Password { name, password, .. } => {
+                twice(&mut input, password);
+                (MANAGE, owned(&["passwd", name]))
             }
-            Form::Remove { name, files } => {
-                let name = name.clone();
+            Form::Rename { name, new, .. } => (MANAGE, owned(&["rename", name, new.text()])),
+            Form::Remove { name, files, .. } => {
                 let mut args = vec!["remove", name.as_str()];
                 if *files {
                     args.push("--home");
                 }
-                self.manage(Request::Remove, &args, Input::default())
+                (MANAGE, owned(&args))
             }
         };
-        self.dialog = Some(dialog);
-        effects
+        let asking = Asking {
+            request: editing.form.request(),
+            turned: None,
+        };
+        self.ask(asking, action, args, input)
     }
 
-    fn field(&mut self, which: Msg, input: LineEditInput) -> Vec<AppEffect> {
-        self.dialog_trouble = None;
-        let field = match (&mut self.dialog, which) {
-            (Some(Form::Add { name, .. }), Msg::Name(_)) => name,
-            (Some(Form::Add { password, .. } | Form::Password { password, .. }), Msg::New(_)) => {
-                password
+    fn typed(&mut self, which: Msg) -> Vec<AppEffect> {
+        let Some(editing) = &mut self.editing else {
+            return Vec::new();
+        };
+        editing.trouble = None;
+        let (field, input) = match (&mut editing.form, which) {
+            (Form::Add { name, .. }, Msg::Name(input)) => (name, input),
+            (Form::Add { password, .. } | Form::Password { password, .. }, Msg::New(input)) => {
+                (password, input)
             }
-            (Some(Form::Add { again, .. } | Form::Password { again, .. }), Msg::Again(_)) => again,
-            (Some(Form::Add { own, .. }), Msg::Own(_)) => own,
-            (Some(Form::Add { own_again, .. }), Msg::OwnAgain(_)) => own_again,
-            (Some(Form::Password { current, .. }), Msg::Current(_)) => current,
-            (Some(Form::Rename { new, .. }), Msg::Name(_)) => new,
+            (Form::Add { again, .. } | Form::Password { again, .. }, Msg::Again(input)) => {
+                (again, input)
+            }
+            (Form::Add { own, .. }, Msg::Own(input)) => (own, input),
+            (Form::Add { own_again, .. }, Msg::OwnAgain(input)) => (own_again, input),
+            (Form::Password { current, .. }, Msg::Current(input)) => (current, input),
+            (Form::Rename { new, .. }, Msg::Name(input)) => (new, input),
             _ => return Vec::new(),
         };
         match field.edit(input) {
@@ -338,40 +547,48 @@ impl Users {
         }
     }
 
+    /// Reads the people again, so the form is held to who is here now.
+    fn edit(&mut self, form: Form) -> Vec<AppEffect> {
+        self.editing = Some(Editing {
+            form,
+            tried: false,
+            trouble: None,
+        });
+        vec![AppEffect::Users(Effect::Read)]
+    }
+
+    fn removable(&self, person: &Listed) -> bool {
+        person.uid != self.me.uid && person.uid != FIRST_PERSON
+    }
+
     pub fn update(&mut self, msg: Msg) -> Vec<AppEffect> {
+        let idle = self.asking.is_none() && self.editing.is_none();
         match msg {
             Msg::Listed(people, whole) => {
                 if let Some(me) = people.iter().find(|p| p.uid == self.me.uid) {
                     self.me.admin = me.admin;
                 }
-                let chosen = self.person().map(|p| p.uid).unwrap_or(self.me.uid);
-                self.chosen = people.iter().position(|p| p.uid == chosen).or(Some(0));
+                if self
+                    .open
+                    .is_some_and(|uid| !people.iter().any(|p| p.uid == uid))
+                {
+                    self.open = None;
+                }
                 self.people = Some(people);
                 self.whole = whole;
             }
-            Msg::Choose(row) => self.chosen = Some(row),
-            Msg::Admin => {
-                let Some(person) = self.person() else {
-                    return Vec::new();
-                };
-                let (verb, name) = match person.admin {
-                    true => ("demote", person.name.clone()),
-                    false => ("promote", person.name.clone()),
-                };
-                return self.manage(Request::Admin, &[verb, &name], Input::default());
+            Msg::Open(row) => {
+                let opened = self.others().nth(row).map(|p| p.uid);
+                if opened.is_some() {
+                    self.open = opened;
+                    self.said = None;
+                }
             }
-            Msg::Autologin => {
-                let Some(person) = self.person() else {
-                    return Vec::new();
-                };
-                let name = match person.autologin {
-                    true => String::from("--off"),
-                    false => person.name.clone(),
-                };
-                return self.manage(Request::Autologin, &["autologin", &name], Input::default());
-            }
-            Msg::Add => {
-                self.dialog = Some(Form::Add {
+            Msg::Back => self.show_everyone(),
+            Msg::Admin => return self.turn(Request::Admin),
+            Msg::Autologin => return self.turn(Request::Autologin),
+            Msg::Add if idle && self.whole => {
+                return self.edit(Form::Add {
                     name: Field::default(),
                     admin: false,
                     password: Field::for_secret(),
@@ -379,263 +596,355 @@ impl Users {
                     own: Field::for_secret(),
                     own_again: Field::for_secret(),
                 });
-                return vec![AppEffect::Users(Effect::Read)];
             }
-            Msg::Password => {
-                if let Some(person) = self.person() {
-                    self.dialog = Some(Form::Password {
+            Msg::Password if idle => {
+                if let Some(person) = self.shown() {
+                    return self.edit(Form::Password {
+                        uid: person.uid,
                         name: person.name.clone(),
-                        own: person.uid == self.me.uid,
                         current: Field::for_secret(),
                         password: Field::for_secret(),
                         again: Field::for_secret(),
                     });
-                    return vec![AppEffect::Users(Effect::Read)];
                 }
             }
-            Msg::Rename => {
-                if let Some(person) = self.person() {
-                    self.dialog = Some(Form::Rename {
+            Msg::Rename if idle => {
+                if let Some(person) = self.shown() {
+                    return self.edit(Form::Rename {
+                        uid: person.uid,
                         name: person.name.clone(),
                         new: Field::with(person.name.clone()),
                     });
                 }
             }
-            Msg::Remove => {
-                if let Some(person) = self.person() {
-                    self.dialog = Some(Form::Remove {
+            Msg::Remove if idle => {
+                if let Some(person) = self.shown().filter(|p| self.removable(p)) {
+                    return self.edit(Form::Remove {
                         name: person.name.clone(),
+                        home: person.home.clone(),
                         files: false,
                     });
                 }
             }
+            Msg::Add | Msg::Password | Msg::Rename | Msg::Remove => {}
             Msg::Cancel => {
-                if let Some(mut dialog) = self.dialog.take() {
-                    wipe(&mut dialog);
+                if self.asking.is_none()
+                    && let Some(mut editing) = self.editing.take()
+                {
+                    editing.form.wipe();
                 }
-                self.dialog_trouble = None;
             }
             Msg::Confirm => return self.confirm(),
-            Msg::RemoveFiles => {
-                if let Some(Form::Remove { files, .. }) = &mut self.dialog {
-                    *files = !*files;
+            Msg::Kind(row) => {
+                if let Some(Form::Add { admin, .. }) = self.editing.as_mut().map(|e| &mut e.form) {
+                    *admin = row == 1;
                 }
             }
-            Msg::DialogAdmin => {
-                if let Some(Form::Add { admin, .. }) = &mut self.dialog {
-                    *admin = !*admin;
+            Msg::Files(row) => {
+                if let Some(Form::Remove { files, .. }) = self.editing.as_mut().map(|e| &mut e.form)
+                {
+                    *files = row == 1;
                 }
             }
-            which @ (Msg::Name(input)
-            | Msg::Current(input)
-            | Msg::New(input)
-            | Msg::Again(input)
-            | Msg::Own(input)
-            | Msg::OwnAgain(input)) => return self.field(which, input),
+            which @ (Msg::Name(_)
+            | Msg::Current(_)
+            | Msg::New(_)
+            | Msg::Again(_)
+            | Msg::Own(_)
+            | Msg::OwnAgain(_)) => return self.typed(which),
         }
         Vec::new()
     }
 
+    /// A person's own no says nothing; any other is said where it was asked.
     pub fn answered(&mut self, request: Request, asked: Asked) -> Vec<AppEffect> {
-        self.asking = None;
+        let read = vec![AppEffect::Users(Effect::Read)];
+        let turned = self.asking.take().and_then(|asking| asking.turned);
+        let declined = matches!(
+            asked,
+            Asked::Refused {
+                by_person: true,
+                ..
+            }
+        );
         let trouble = asked.trouble();
-        match (&trouble, self.dialog.as_mut()) {
-            (None, Some(dialog)) => {
-                wipe(dialog);
-                self.dialog = None;
-            }
-            (Some(why), Some(dialog)) => {
-                if let Form::Password { current, .. } = dialog {
-                    current.wipe();
+        if let Some((uid, on)) = turned {
+            match trouble {
+                None => self.keep_turned(request, uid, on),
+                Some(_) if declined => {}
+                Some(why) => {
+                    self.said = Some(Said {
+                        tone: Tone::Danger,
+                        title: String::from(request.failed()),
+                        body: Some(why),
+                        about: About::Person(uid),
+                    });
                 }
-                self.dialog_trouble = Some(why.clone());
-                return vec![AppEffect::Users(Effect::Read)];
             }
-            (_, None) => {}
+            return read;
         }
-        self.said = Some(match trouble {
-            None => {
-                let notes = match &asked {
-                    Asked::Ran { notes, .. } => more(notes),
-                    Asked::Refused { .. } => None,
-                };
-                match notes {
-                    Some(notes) => (Tone::Info, String::from(done(request, true)), Some(notes)),
-                    None => (Tone::Success, String::from(done(request, false)), None),
-                }
+        let Some(editing) = &mut self.editing else {
+            return read;
+        };
+        if let Some(why) = trouble {
+            if let Form::Password { current, .. } = &mut editing.form {
+                current.wipe();
             }
-            Some(why) => (Tone::Danger, why, None),
+            editing.trouble = (!declined).then_some(why);
+            return read;
+        }
+        let notes = match &asked {
+            Asked::Ran { notes, .. } => more(notes),
+            Asked::Refused { .. } => None,
+        };
+        let tone = match notes {
+            Some(_) => Tone::Info,
+            None => Tone::Success,
+        };
+        self.said = Some(Said {
+            tone,
+            title: String::from(editing.form.done(notes.is_some())),
+            body: notes,
+            about: editing.form.about(),
         });
-        vec![AppEffect::Users(Effect::Read)]
+        if request == Request::Remove {
+            self.open = None;
+        }
+        editing.form.wipe();
+        self.editing = None;
+        read
     }
 
     pub fn view(&self) -> Node<AppMsg> {
-        let about = "The people who use this computer.";
-        let Some(people) = &self.people else {
+        if self.people.is_none() {
             let reading = Notice::new(Tone::Info, "Reading who uses this computer");
-            return crate::page(Panel::Users, about, vec![reading.into()], None);
-        };
+            return crate::page(Panel::Users, ABOUT, vec![reading.into()], None);
+        }
+        match self.open.and_then(|uid| self.listed(uid)) {
+            Some(person) => self.person_page(person),
+            None => self.everyone(),
+        }
+    }
+
+    fn said_of(&self, here: impl Fn(About) -> bool) -> Option<Node<AppMsg>> {
+        let said = self.said.as_ref().filter(|said| here(said.about))?;
+        let notice = Notice::new(said.tone, said.title.clone());
+        Some(match &said.body {
+            Some(body) => notice.body(body.clone()).into(),
+            None => notice.into(),
+        })
+    }
+
+    fn everyone(&self) -> Node<AppMsg> {
+        let mine = |about: About| about == About::Person(self.me.uid);
         let mut parts: Vec<Node<AppMsg>> = Vec::new();
-        if let Some((tone, said, body)) = &self.said {
-            let notice = Notice::new(*tone, said.clone());
-            parts.push(match body {
-                Some(body) => notice.body(body.clone()).into(),
-                None => notice.into(),
-            });
+        if let Some(me) = self.me_listed() {
+            let mut yours: Vec<Node<AppMsg>> = vec![self.account(me).into()];
+            yours.extend(self.said_of(mine));
+            if !self.me.admin {
+                yours.push(locked_text(
+                    "Anything but your own password asks for an administrator's password.",
+                ));
+            }
+            parts.push(Section::new("Your account", column(space::SM, yours)).into());
         }
-        if !self.me.admin {
-            parts.push(
-                Notice::new(
-                    Tone::Info,
-                    "Changing anything but your own password takes an administrator's password",
-                )
-                .into(),
-            );
-        }
-        let rows = people
-            .iter()
+        let rows: Vec<ListRow> = self
+            .others()
             .map(|p| {
-                let you = match p.uid == self.me.uid {
-                    true => " · You",
-                    false => "",
-                };
                 ListRow::new(p.name.clone())
                     .avatar()
-                    .detail(format!("{}{you}", kind(p)))
+                    .detail(self.summary(p))
+                    .opens()
             })
             .collect();
-        parts.push(
-            Section::new(
-                "People",
-                column(
-                    space::SM,
-                    vec![
-                        List::new(rows)
-                            .selected(self.chosen)
-                            .on_select(|row| AppMsg::Users(Msg::Choose(row)))
-                            .into(),
-                        row(
-                            0,
-                            vec![
-                                Button::new("Add user…")
-                                    .on_press(AppMsg::Users(Msg::Add))
-                                    .enabled(self.asking.is_none() && self.whole)
-                                    .into(),
-                            ],
-                        ),
-                    ],
+        // Said over the list, which is in view wherever *Add user…* was.
+        let mut theirs: Vec<Node<AppMsg>> =
+            self.said_of(|about| !mine(about)).into_iter().collect();
+        theirs.push(match rows.is_empty() {
+            true => Text::new("Nobody else uses this computer.")
+                .tone(Tone::Secondary)
+                .wrap()
+                .into(),
+            false => Node::Card {
+                surface: Surface::Raised,
+                shadow: false,
+                child: Box::new(
+                    List::new(rows)
+                        .on_activate(|row| AppMsg::Users(Msg::Open(row)))
+                        .into(),
                 ),
-            )
-            .into(),
-        );
+            },
+        });
+        theirs.push(row(
+            0,
+            vec![
+                Button::new("Add user…")
+                    .on_press(AppMsg::Users(Msg::Add))
+                    .enabled(self.asking.is_none() && self.whole)
+                    .into(),
+            ],
+        ));
         if !self.whole {
-            parts.push(caption_text(
+            theirs.push(caption_text(
                 "Adding someone waits until who has a password can be read.",
                 Tone::Secondary,
             ));
         }
-        if let Some(person) = self.person() {
-            parts.push(self.person_section(person));
-        }
-        crate::page(Panel::Users, about, parts, None)
+        let heading = match self.me_listed() {
+            Some(_) => "Other users",
+            None => "Users",
+        };
+        parts.push(Section::new(heading, column(space::SM, theirs)).into());
+        crate::page(Panel::Users, ABOUT, parts, None)
     }
 
-    fn person_section(&self, person: &Listed) -> Node<AppMsg> {
-        let idle = self.asking.is_none();
-        let told = self.whole && !person.withheld;
-        let mut facts = PropertyList::new().row("Account type", kind(person));
-        if told {
-            facts = facts.row("Password", if person.password { "Set" } else { "None" });
-        }
-        facts = facts.row("Home folder", person.home.clone());
-        let mut parts: Vec<Node<AppMsg>> = vec![facts.into()];
-        let admins = self.people.iter().flatten().filter(|p| p.admin).count();
-        let kept_admin = match person.admin {
-            true if admins == 1 => Some("The computer's last administrator stays one."),
-            true if person.uid == self.me.uid => {
-                Some("Another administrator can make you a standard user.")
+    fn summary(&self, person: &Listed) -> String {
+        let mut said = String::from(kind(person));
+        if self.told(person) {
+            if !person.password {
+                said.push_str(" · No password");
             }
-            _ => None,
-        };
-        parts.push(Node::Checkbox {
-            checked: person.admin,
-            label: String::from("Administrator"),
-            on_toggle: Some(AppMsg::Users(Msg::Admin)),
-            enabled: idle && kept_admin.is_none(),
-        });
-        if let Some(why) = kept_admin {
-            parts.push(caption_text(why, Tone::Secondary));
-        }
-        if told {
-            parts.push(Node::Checkbox {
-                checked: person.autologin,
-                label: String::from("Log in automatically when the computer starts"),
-                on_toggle: Some(AppMsg::Users(Msg::Autologin)),
-                enabled: idle,
-            });
             if person.autologin {
-                parts.push(
-                    Text::new("Anyone who starts the computer can use this account.")
-                        .role(TextRole::Caption)
-                        .tone(Tone::Secondary)
-                        .wrap()
-                        .into(),
-                );
+                said.push_str(" · Logs in automatically");
             }
         }
-        let password = match person.uid == self.me.uid {
-            true => "Change password…",
-            false => "Set password…",
+        said
+    }
+
+    fn person_page(&self, person: &Listed) -> Node<AppMsg> {
+        let mut theirs: Vec<Node<AppMsg>> = vec![self.account(person).into()];
+        theirs.extend(self.said_of(|_| true));
+        if !self.me.admin {
+            theirs.push(locked_text("Changes ask for an administrator's password."));
+        }
+        let leaving: Node<AppMsg> = match self.removable(person) {
+            false => caption_text(
+                "The computer's first user can't be removed.",
+                Tone::Secondary,
+            ),
+            true => Group::new()
+                .row(
+                    ActionRow::new(format!("Remove {}", person.name))
+                        .detail("They can no longer log in. You choose whether their files go too.")
+                        .trailing(
+                            Button::new("Remove…")
+                                .destructive()
+                                .on_press(AppMsg::Users(Msg::Remove))
+                                .enabled(self.asking.is_none()),
+                        ),
+                )
+                .into(),
         };
-        let removable = person.uid != self.me.uid && person.uid != FIRST_PERSON;
-        parts.push(row(
-            space::SM,
-            vec![
-                Button::new(password)
-                    .on_press(AppMsg::Users(Msg::Password))
-                    .enabled(idle)
-                    .into(),
-                Button::new("Rename…")
-                    .on_press(AppMsg::Users(Msg::Rename))
-                    .enabled(idle)
-                    .into(),
-                Button::new("Remove…")
-                    .destructive()
-                    .on_press(AppMsg::Users(Msg::Remove))
-                    .enabled(idle && removable)
-                    .into(),
+        Page::new(person.name.clone())
+            .back("Back to Users", AppMsg::Users(Msg::Back))
+            .content(column(space::XL, vec![column(space::SM, theirs), leaving]))
+            .into()
+    }
+
+    fn account(&self, person: &Listed) -> Group<AppMsg> {
+        let idle = self.asking.is_none();
+        let mine = person.uid == self.me.uid;
+        let button = |label: &str, msg: Msg| {
+            Button::new(label)
+                .on_press(AppMsg::Users(msg))
+                .enabled(idle)
+        };
+        let face = Node::VStack {
+            children: vec![
+                Node::Avatar {
+                    name: person.name.clone(),
+                },
+                Text::new(person.name.clone()).role(TextRole::Title).into(),
+                Text::new(kind(person)).tone(Tone::Secondary).into(),
             ],
-        ));
-        if !removable {
-            let why = match person.uid == self.me.uid {
-                true => "You can't remove yourself.",
-                false => "The computer's first user stays.",
-            };
-            parts.push(
-                Text::new(why)
-                    .role(TextRole::Caption)
-                    .tone(Tone::Secondary)
-                    .wrap()
-                    .into(),
+            spacing: space::XS,
+            align: CrossAxisAlignment::Center,
+        };
+        let name = ActionRow::new("Name")
+            .detail(format!("Renaming keeps the home folder, {}.", person.home))
+            .trailing(button("Rename…", Msg::Rename));
+        let password = ActionRow::new("Password");
+        let password = match (self.told(person), person.password, mine) {
+            (false, ..) => password.trailing(button("Change…", Msg::Password)),
+            (true, true, true) => password
+                .detail("You log in with a password.")
+                .trailing(button("Change…", Msg::Password)),
+            (true, true, false) => password
+                .detail("They log in with a password.")
+                .trailing(button("Change…", Msg::Password)),
+            (true, false, true) => password
+                .detail("You have none, so anyone at this computer can log in as you.")
+                .trailing(button("Set…", Msg::Password)),
+            (true, false, false) => password
+                .detail("They have none, so anyone at this computer can log in as them.")
+                .trailing(button("Set…", Msg::Password)),
+        };
+        let mut group = Group::new().row(face).row(name).row(password);
+        if self.told(person) {
+            group = group.row(
+                Switch::new(
+                    "Log in automatically",
+                    self.turned(Request::Autologin, person, person.autologin),
+                )
+                .detail(
+                    "When the computer starts, it opens this account without asking for a password.",
+                )
+                .on_toggle(AppMsg::Users(Msg::Autologin))
+                .enabled(idle),
             );
         }
-        Section::new(person.name.clone(), column(space::MD, parts)).into()
+        let kept = self.kept_admin(person);
+        group.row(
+            Switch::new(
+                "Administrator",
+                self.turned(Request::Admin, person, person.admin),
+            )
+            .detail(kept.unwrap_or(KINDS[1].1))
+            .on_toggle(AppMsg::Users(Msg::Admin))
+            .enabled(idle && kept.is_none()),
+        )
     }
 
     pub fn dialog(&self) -> Option<Node<AppMsg>> {
-        let dialog = self.dialog.as_ref()?;
-        let error = self.not_yet();
+        let editing = self.editing.as_ref()?;
+        let idle = self.asking.is_none();
+        let wrong = self.wrong();
+        let why = |slot: Slot, left: bool| {
+            let found = wrong.iter().find(|(held, _)| *held == slot);
+            found.map(|(_, why)| *why).filter(|_| editing.tried || left)
+        };
+        let captioned = |field: Node<AppMsg>, error: Option<&str>, hint: Option<&str>| {
+            let danger = error.map(|said| (said, Tone::Danger));
+            with_caption(field, danger.or(hint.map(|said| (said, Tone::Secondary))))
+        };
+        let line = |field: &Field,
+                    error: Option<&str>,
+                    placeholder: &str,
+                    on_input: fn(LineEditInput) -> AppMsg| {
+            let node = field.checked(placeholder, error.is_some(), on_input);
+            captioned(node, error, Some(NAME_RULE))
+        };
+        let secret = |field: &Field,
+                      error: Option<&str>,
+                      placeholder: &str,
+                      hint: Option<&str>,
+                      on_input: fn(LineEditInput) -> AppMsg| {
+            let node = field.secret(placeholder, error.is_some(), on_input);
+            captioned(node, error, hint)
+        };
         let footer = |verb: &str, destructive: bool| {
-            let cancel = Button::new("Cancel").on_press(AppMsg::Users(Msg::Cancel));
+            let cancel = Button::new("Cancel")
+                .on_press(AppMsg::Users(Msg::Cancel))
+                .enabled(idle);
             let go = Button::new(verb)
                 .on_press(AppMsg::Users(Msg::Confirm))
-                .enabled(error.is_none() && self.asking.is_none());
+                .enabled(idle);
             match destructive {
                 true => ButtonRow::new().cancel(cancel).destructive(go),
                 false => ButtonRow::new().cancel(cancel).confirm(go),
             }
         };
-        let (title, content, footer) = match dialog {
+        let (title, mut parts, footer) = match &editing.form {
             Form::Add {
                 name,
                 admin,
@@ -644,154 +953,203 @@ impl Users {
                 own,
                 own_again,
             } => {
-                let unsafe_without = password.text().is_empty().then_some((
-                    "With no password, anyone at the computer can log in as them.",
-                    Tone::Secondary,
-                ));
-                let mut form = PropertyList::new()
+                let unset = match password.text().is_empty() {
+                    true => "Without one, anyone at this computer can log in as them.",
+                    false => "They can change it once they log in.",
+                };
+                let form = PropertyList::new()
                     .row_with(
                         "Name",
-                        with_caption(
-                            name.line("Such as grace", |i| AppMsg::Users(Msg::Name(i))),
-                            Some((NAME_RULE, Tone::Secondary)),
-                        ),
+                        line(name, why(Slot::Name, name.left), "Such as grace", |i| {
+                            AppMsg::Users(Msg::Name(i))
+                        }),
                     )
                     .row_with(
                         "Password",
-                        password.secret("Password", |i| AppMsg::Users(Msg::New(i))),
+                        secret(password, None, "Leave empty for none", None, |i| {
+                            AppMsg::Users(Msg::New(i))
+                        }),
                     )
                     .row_with(
-                        "Again",
-                        with_caption(
-                            again.secret("The password again", |i| AppMsg::Users(Msg::Again(i))),
-                            unsafe_without,
+                        "Confirm",
+                        secret(
+                            again,
+                            why(Slot::Again, again.left),
+                            "The same password again",
+                            Some(unset),
+                            |i| AppMsg::Users(Msg::Again(i)),
                         ),
                     );
-                if self.needs_own_password() {
-                    form = form
-                        .row_with(
-                            "Your password",
-                            with_caption(
-                                own.secret("Your new password", |i| AppMsg::Users(Msg::Own(i))),
-                                Some((
-                                    "You have none, which an administrator of a computer others use needs.",
-                                    Tone::Secondary,
-                                )),
-                            ),
-                        )
-                        .row_with(
-                            "Yours again",
-                            own_again.secret("Your new password again", |i| {
-                                AppMsg::Users(Msg::OwnAgain(i))
-                            }),
-                        );
-                }
+                let kinds = KINDS
+                    .iter()
+                    .map(|(title, detail)| ListRow::new(*title).detail(*detail))
+                    .collect();
                 let mut parts: Vec<Node<AppMsg>> = vec![
                     form.into(),
-                    Node::Checkbox {
-                        checked: *admin,
-                        label: String::from("Administrator"),
-                        on_toggle: Some(AppMsg::Users(Msg::DialogAdmin)),
-                        enabled: true,
-                    },
+                    List::new(kinds)
+                        .selected(Some(usize::from(*admin)))
+                        .on_select(|row| AppMsg::Users(Msg::Kind(row)))
+                        .into(),
                 ];
+                if self.needs_own_password() {
+                    parts.push(
+                        Notice::new(Tone::Info, "Choose a password for yourself too")
+                            .body(
+                                "You administer this computer with none, which a computer others use needs.",
+                            )
+                            .into(),
+                    );
+                    parts.push(
+                        PropertyList::new()
+                            .row_with(
+                                "Password",
+                                secret(
+                                    own,
+                                    why(Slot::Own, own.left),
+                                    "Your new password",
+                                    None,
+                                    |i| AppMsg::Users(Msg::Own(i)),
+                                ),
+                            )
+                            .row_with(
+                                "Confirm",
+                                secret(
+                                    own_again,
+                                    why(Slot::OwnAgain, own_again.left),
+                                    "The same password again",
+                                    None,
+                                    |i| AppMsg::Users(Msg::OwnAgain(i)),
+                                ),
+                            )
+                            .into(),
+                    );
+                }
                 if self.people.iter().flatten().any(|p| p.autologin) {
                     parts.push(caption_text(
                         "Nobody logs in automatically once they are added.",
                         Tone::Secondary,
                     ));
                 }
-                ("Add a user", parts, footer("Add", false))
+                (String::from("Add a user"), parts, footer("Add", false))
             }
             Form::Password {
+                uid,
                 name,
-                own,
                 current,
                 password,
                 again,
             } => {
-                let mut form = PropertyList::new();
+                let mine = *uid == self.me.uid;
                 let has = !self.whole || self.me_listed().is_some_and(|me| me.password);
-                if *own && has {
+                let mut form = PropertyList::new();
+                if mine && has {
                     form = form.row_with(
                         "Current",
-                        current.secret("Your password now", |i| AppMsg::Users(Msg::Current(i))),
+                        secret(
+                            current,
+                            why(Slot::Current, current.left),
+                            "Your password now",
+                            None,
+                            |i| AppMsg::Users(Msg::Current(i)),
+                        ),
                     );
                 }
                 form = form
                     .row_with(
                         "New",
-                        password.secret("The new password", |i| AppMsg::Users(Msg::New(i))),
+                        secret(
+                            password,
+                            why(Slot::New, password.left),
+                            "The new password",
+                            None,
+                            |i| AppMsg::Users(Msg::New(i)),
+                        ),
                     )
                     .row_with(
-                        "Again",
-                        again.secret("The new password again", |i| AppMsg::Users(Msg::Again(i))),
+                        "Confirm",
+                        secret(
+                            again,
+                            why(Slot::Again, again.left),
+                            "The same password again",
+                            None,
+                            |i| AppMsg::Users(Msg::Again(i)),
+                        ),
                     );
-                let (title, verb) = match own {
-                    true => (String::from("Change your password"), "Change"),
-                    false => (format!("Set {name}'s password"), "Set"),
+                let lacks = self
+                    .listed(*uid)
+                    .is_some_and(|p| self.told(p) && !p.password);
+                let verb = match lacks {
+                    true => "Set",
+                    false => "Change",
                 };
-                let parts = vec![form.into()];
-                return Some(self.dialog_node(title, parts, error, footer(verb, false)));
+                let title = match mine {
+                    true => format!("{verb} your password"),
+                    false => format!("{verb} {name}'s password"),
+                };
+                (title, vec![form.into()], footer(verb, false))
             }
-            Form::Rename { new, .. } => {
-                let field = new.line("A new name", |i| AppMsg::Users(Msg::Name(i)));
-                let parts = vec![
-                    PropertyList::new()
-                        .row_with(
-                            "Name",
-                            with_caption(field, Some((NAME_RULE, Tone::Secondary))),
-                        )
-                        .into(),
+            Form::Rename { name, new, .. } => {
+                let changed = new.left && new.text() != name;
+                let form = PropertyList::new().row_with(
+                    "Name",
+                    line(new, why(Slot::Name, changed), "A new name", |i| {
+                        AppMsg::Users(Msg::Name(i))
+                    }),
+                );
+                (
+                    format!("Rename {name}"),
+                    vec![form.into()],
+                    footer("Rename", false),
+                )
+            }
+            Form::Remove { name, home, files } => {
+                let choices = vec![
+                    ListRow::new("Keep their files").detail(format!(
+                        "Their home folder, {home}, stays on this computer."
+                    )),
+                    ListRow::new("Delete their files")
+                        .detail(format!("Everything in {home} is deleted for good.")),
                 ];
-                ("Rename", parts, footer("Rename", false))
-            }
-            Form::Remove { name, files } => {
                 let parts = vec![
                     Text::new(format!("They can no longer log in as {name}."))
                         .wrap()
                         .into(),
-                    Node::Checkbox {
-                        checked: *files,
-                        label: String::from("Delete their files too"),
-                        on_toggle: Some(AppMsg::Users(Msg::RemoveFiles)),
-                        enabled: true,
-                    },
+                    List::new(choices)
+                        .selected(Some(usize::from(*files)))
+                        .on_select(|row| AppMsg::Users(Msg::Files(row)))
+                        .into(),
                 ];
-                let title = format!("Remove {name}?");
-                return Some(self.dialog_node(title, parts, error, footer("Remove", true)));
+                (format!("Remove {name}?"), parts, footer("Remove", true))
             }
         };
-        Some(self.dialog_node(title.to_string(), content, error, footer))
-    }
-
-    fn dialog_node(
-        &self,
-        title: String,
-        mut parts: Vec<Node<AppMsg>>,
-        error: Option<&str>,
-        footer: ButtonRow<AppMsg>,
-    ) -> Node<AppMsg> {
-        let typed = match &self.dialog {
-            Some(Form::Add { name, .. }) => !name.text().is_empty(),
-            Some(Form::Password { password, .. }) => !password.text().is_empty(),
-            Some(Form::Rename { name, new }) => new.text() != name,
-            _ => false,
-        };
-        match &self.dialog_trouble {
-            Some(trouble) => parts.push(with_error(Node::Empty, Some(trouble))),
-            None if typed => parts.push(with_error(Node::Empty, error)),
-            None => {}
+        if let Some(trouble) = &editing.trouble {
+            parts.push(
+                Notice::new(Tone::Danger, editing.form.request().failed())
+                    .body(trouble.clone())
+                    .into(),
+            );
         }
-        Dialog::new(title)
-            .content(column(space::MD, parts))
-            .footer(footer)
-            .into()
+        Some(
+            Dialog::new(title)
+                .content(column(space::MD, parts))
+                .footer(footer)
+                .into(),
+        )
     }
 }
 
 const NAME_RULE: &str =
     "A name is a lowercase letter, then lowercase letters, digits, hyphens and underscores.";
+
+const DIFFER: &str = "The two passwords differ.";
+
+const KINDS: [(&str, &str); 2] = [
+    ("Standard user", "Uses apps and changes their own settings."),
+    (
+        "Administrator",
+        "Adds and removes users, installs software and changes settings for the whole computer.",
+    ),
+];
 
 /// What `users` noted beside the change it made, as sentences: the clauses
 /// after the first of its last line.
@@ -810,45 +1168,6 @@ fn more(notes: &str) -> Option<String> {
         })
         .collect();
     (!clauses.is_empty()).then(|| clauses.join(" "))
-}
-
-fn done(request: Request, noted: bool) -> &'static str {
-    match request {
-        Request::Add if noted => "The user is added.",
-        Request::Add => "The new user can log in now.",
-        Request::Password => "The password is changed.",
-        Request::Rename => "The name is changed.",
-        Request::Remove => "The user is removed.",
-        Request::Admin => "The account type is changed.",
-        Request::Autologin => "Who logs in automatically is changed.",
-    }
-}
-
-fn wipe(dialog: &mut Form) {
-    match dialog {
-        Form::Add {
-            password,
-            again,
-            own,
-            own_again,
-            ..
-        } => {
-            for field in [password, again, own, own_again] {
-                field.wipe();
-            }
-        }
-        Form::Password {
-            current,
-            password,
-            again,
-            ..
-        } => {
-            for field in [current, password, again] {
-                field.wipe();
-            }
-        }
-        Form::Rename { .. } | Form::Remove { .. } => {}
-    }
 }
 
 #[cfg(test)]

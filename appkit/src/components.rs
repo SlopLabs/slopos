@@ -234,6 +234,7 @@ pub struct Page<M> {
     pub subtitle: String,
     pub content: Node<M>,
     pub footer: Option<ButtonRow<M>>,
+    pub back: Option<IconButton<M>>,
 }
 
 impl<M> Page<M> {
@@ -243,6 +244,7 @@ impl<M> Page<M> {
             subtitle: String::new(),
             content: Node::Empty,
             footer: None,
+            back: None,
         }
     }
 
@@ -265,10 +267,23 @@ impl<M> Page<M> {
         self.footer = Some(footer);
         self
     }
+
+    /// An arrow before the title that goes back, which Escape presses too;
+    /// `label` says where to, as *Back to Users*.
+    pub fn back(mut self, label: impl Into<String>, msg: M) -> Self {
+        let mut back = IconButton::new(Icon::ArrowLeft, label).on_press(msg);
+        back.takes_escape = true;
+        self.back = Some(back);
+        self
+    }
 }
 
-fn header<M>(title: String, subtitle: String) -> Node<M> {
-    let mut lines = vec![Text::new(title).role(TextRole::Title).wrap().into()];
+fn header<M>(title: String, subtitle: String, back: Option<IconButton<M>>) -> Node<M> {
+    let title: Node<M> = Text::new(title).role(TextRole::Title).wrap().into();
+    let mut lines = vec![match back {
+        Some(back) => row(space::SM, vec![back.into(), expand(title)]),
+        None => title,
+    }];
     if !subtitle.is_empty() {
         lines.push(Text::new(subtitle).tone(Tone::Secondary).wrap().into());
     }
@@ -329,7 +344,7 @@ impl<M> From<Page<M>> for Node<M> {
         };
         let mut parts = Vec::new();
         if !page.title.is_empty() {
-            parts.push(padded(top, header(page.title, page.subtitle)));
+            parts.push(padded(top, header(page.title, page.subtitle, page.back)));
         }
         parts.push(expand(body));
         if let Some(mut footer) = page.footer {
@@ -711,6 +726,7 @@ pub struct ListRow {
     /// The detail is one line cut short from its start.
     pub detail_tail: bool,
     pub trailing: String,
+    pub opens: bool,
     pub disabled_reason: Option<String>,
     pub graph: Option<Graph>,
 }
@@ -754,6 +770,13 @@ impl ListRow {
 
     pub fn trailing(mut self, trailing: impl Into<String>) -> Self {
         self.trailing = trailing.into();
+        self
+    }
+
+    /// Ends in an arrow: choosing it opens another view. Give its [`List`]
+    /// `on_activate` and no `on_select`, so a click opens it.
+    pub fn opens(mut self) -> Self {
+        self.opens = true;
         self
     }
 
@@ -1140,6 +1163,7 @@ pub struct IconButton<M> {
     pub enabled: bool,
     /// Shown pressed in, as a toggled tool is.
     pub active: bool,
+    pub(crate) takes_escape: bool,
 }
 
 impl<M> IconButton<M> {
@@ -1150,6 +1174,7 @@ impl<M> IconButton<M> {
             on_press: None,
             enabled: true,
             active: false,
+            takes_escape: false,
         }
     }
 

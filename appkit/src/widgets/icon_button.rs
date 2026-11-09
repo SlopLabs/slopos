@@ -4,7 +4,7 @@ use slopos_theme_core::{Icon, State, TextRole, radius, space};
 
 use super::button::Press;
 use crate::constraints::{BoxConstraints, Size};
-use crate::event::{EventResponse, MessageSink, WidgetEvent};
+use crate::event::{EventResponse, Key, MessageSink, Modifiers, NamedKey, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetCore};
 
@@ -19,6 +19,7 @@ pub struct IconButtonWidget {
     on_press: Option<Box<dyn Fn() -> Box<dyn Any>>>,
     enabled: bool,
     active: bool,
+    takes_escape: bool,
     press: Press,
 }
 
@@ -37,8 +38,14 @@ impl IconButtonWidget {
             on_press,
             enabled,
             active,
+            takes_escape: false,
             press: Press::default(),
         }
+    }
+
+    pub fn takes_escape(mut self, takes: bool) -> Self {
+        self.takes_escape = takes;
+        self
     }
 }
 
@@ -89,6 +96,22 @@ impl Widget for IconButtonWidget {
             sink.emit_raw(f());
         }
         response
+    }
+
+    fn take_unhandled_key(
+        &mut self,
+        key: Key,
+        modifiers: Modifiers,
+        sink: &mut MessageSink,
+    ) -> bool {
+        let plain = !(modifiers.ctrl || modifiers.alt || modifiers.shift);
+        if !(self.takes_escape && plain && key == Key::Named(NamedKey::Escape)) {
+            return false;
+        }
+        if let (true, Some(f)) = (self.enabled, &self.on_press) {
+            sink.emit_raw(f());
+        }
+        true
     }
 
     fn role(&self) -> Role {

@@ -394,6 +394,9 @@ impl Settings {
     /// not the whole list.
     fn show(&mut self, panel: Panel) -> Vec<Effect> {
         let again = panel == Panel::Users && self.panel != panel && !self.users.whole();
+        if panel == Panel::Users {
+            self.users.show_everyone();
+        }
         self.panel = panel;
         match again {
             true => vec![Effect::Users(users::Effect::Read)],

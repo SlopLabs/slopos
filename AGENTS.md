@@ -995,7 +995,10 @@ row of a list, table, tree or menu, is at least 28 px across
 and Escape no control took go to the `ButtonRow` that ends the modal layer's
 `Page` or dialog (its confirming button, never a destructive one, and its
 back or cancel one; Escape dismisses a dialog without one) before the app's
-`on_key`, Left and Right move along a `ButtonRow`, a list or a table
+`on_key`, a `Page` opened from another shows an arrow before its title that
+goes back, which Escape presses ahead of its footer (`Page::back`), and a
+row that opens one ends in an arrow (`ListRow::opens`), Left and Right move
+along a `ButtonRow`, a list or a table
 leaves an Alt chord to the app, a table's chosen row opens on Enter or a
 second click (`on_activate`), a scroll view is a tab stop only while it
 scrolls, and a scroll view and a table keep their offset, and a menu its
@@ -1063,7 +1066,22 @@ asked (`settings-core`'s sentences), a standard user is told up front that a
 change takes an administrator's password, and the page refuses what the
 mechanism would or a person would regret: the last administrator's
 demotion, the first person's removal, and the person's own removal or
-demotion. The Network page leads with how the computer stands — connected,
+demotion. The Users page leads with the person's own account, as GNOME's
+Users panel and Windows 11's *Your info* do: who they are, drawn as the login
+screen draws them, over a `Group` whose rows each end in the control that
+changes them — *Rename…*, the password's *Set…* or *Change…*, and a `Switch`
+each for logging in automatically and for administering the computer, which
+says why in its own line when it cannot be turned. Everyone else is a row
+under *Other users* that opens that person's page, the same rows for them,
+from which the arrow by its title, Escape and the sidebar go back; removal
+sits apart there, as the GNOME HIG asks of a destructive action, and is
+offered only for someone who can be removed. A switch asks at once; a
+refusal that is not the person's own is said under what was asked, a
+dialog's inside it, and nothing said moves the control it is about. A
+dialog's field says what is wrong once focus leaves it or its button is
+pressed, and an account type, or what a removal does with the person's
+files, is one of two rows that each say what follows. The Network page
+leads with how the computer stands — connected,
 through which adapter and at what address, or else what to do about it — as
 Windows 11's Network & internet does, and then a `Group` per adapter and one
 for the DNS servers, which every adapter shares. A `Switch` turns networking

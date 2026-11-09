@@ -781,6 +781,41 @@ pub(super) fn test_button_row_answers_enter_and_escape() {
     assert!(sink.drain_typed::<&str>().is_empty());
 }
 
+pub(super) fn test_a_page_s_way_back_answers_escape_once() {
+    let page = || -> Node<&str> {
+        crate::components::Page::new("ada")
+            .back("Back to Users", "back")
+            .content(Text::new("Their account."))
+            .footer(ButtonRow::new().cancel(Button::new("Cancel").on_press("cancel")))
+            .into()
+    };
+    let mut root = built(page(), Size::new(400, 300));
+    let mut sink = MessageSink::new();
+    let escape = Key::Named(NamedKey::Escape);
+    let shifted = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    assert!(!crate::tree::offer_unhandled(
+        root.as_mut(),
+        escape,
+        shifted,
+        &mut sink
+    ));
+    assert!(crate::tree::offer_unhandled(
+        root.as_mut(),
+        escape,
+        Modifiers::default(),
+        &mut sink
+    ));
+    assert_eq!(
+        sink.drain_typed::<&str>(),
+        vec!["back"],
+        "the way back, ahead of the footer"
+    );
+    assert_clean("a page with a way back", audit_node(&page(), &WIDTHS, 300));
+}
+
 pub(super) fn test_button_row_stacks_when_narrow() {
     let row: Node<()> = ButtonRow::new()
         .back(Button::new("Back to the start"))
@@ -847,6 +882,34 @@ pub(super) fn test_list_rows_pass_the_audit() {
     .on_select(|i| i)
     .into();
     assert_clean("a list", audit_node(&list, &[200, 360, 640], 400));
+}
+
+pub(super) fn test_a_row_that_opens_keeps_room_for_its_arrow() {
+    let rows = |opens: bool| {
+        let row = ListRow::new("A person with a name too long for the row it is in")
+            .avatar()
+            .detail("Standard user")
+            .trailing("Away");
+        vec![if opens { row.opens() } else { row }]
+    };
+    let trailing_at = |opens: bool| {
+        let size = Size::new(240, 100);
+        let list: Node<usize> = List::new(rows(opens)).on_activate(|i| i + 10).into();
+        let root = built(list, size);
+        let runs = crate::audit::paint_recording(root.as_ref(), size, &style());
+        let away = runs.iter().find(|r| r.text == "Away").expect("its end");
+        away.x
+    };
+    let arrow = TextRole::Body.style().icon + space::SM;
+    assert_eq!(trailing_at(false) - trailing_at(true), arrow);
+
+    let list: Node<usize> = List::new(rows(true)).on_activate(|i| i + 10).into();
+    assert_clean("a row that opens", audit_node(&list, &[200, 360, 640], 100));
+    let mut widget = built(list, Size::new(240, 100));
+    let mut sink = MessageSink::new();
+    let rect = widget.layout_rect();
+    widget.event(&click(rect.x + 10, rect.y + 10), &mut sink);
+    assert_eq!(sink.drain_typed::<usize>(), vec![10], "a click opens it");
 }
 
 pub(super) fn test_avatars_show_an_initial_and_pass_the_audit() {

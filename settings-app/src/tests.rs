@@ -10,6 +10,8 @@ use slopos_settings_core::network::Settings as NetSettings;
 use slopos_settings_core::prefs::{Key as PrefKey, Prefs};
 use slopos_theme_core::words;
 
+use slopos_accounts_core::listing::Listed;
+
 use super::*;
 
 fn fonts() {
@@ -119,19 +121,7 @@ fn states() -> Vec<(String, Settings)> {
     }
     out.extend(network_states());
 
-    for (name, open) in [
-        ("users add", users::Msg::Add),
-        ("users password", users::Msg::Password),
-        ("users rename", users::Msg::Rename),
-    ] {
-        let mut app = read(Panel::Users, admin());
-        app.update(Msg::Users(open));
-        out.push((name.into(), app));
-    }
-    let mut remove = read(Panel::Users, admin());
-    remove.update(Msg::Users(users::Msg::Choose(1)));
-    remove.update(Msg::Users(users::Msg::Remove));
-    out.push(("users remove".into(), remove));
+    out.extend(users_states());
 
     let mut computer = read(Panel::Keyboard, admin());
     computer.update(Msg::Keyboard(keyboard::Msg::Change));
@@ -310,6 +300,7 @@ fn texts(node: &Node<Msg>, out: &mut Vec<(Kind, String)>) {
             push(Kind::Any, &switch.detail);
         }
         Node::Button(button) => push(Kind::Label, &button.label),
+        Node::IconButton(button) => push(Kind::Label, &button.label),
         Node::ButtonRow(row) => {
             for button in row.leading.iter().chain(&row.trailing) {
                 push(Kind::Label, &button.label);
@@ -719,7 +710,6 @@ fn a_taken_or_bad_name_is_refused_before_privd_is_asked() {
 #[test]
 fn your_own_password_is_changed_through_its_own_action() {
     let mut app = read(Panel::Users, standard());
-    app.update(Msg::Users(users::Msg::Choose(1)));
     app.update(Msg::Users(users::Msg::Password));
     type_into(&mut app, |i| Msg::Users(users::Msg::Current(i)), "old");
     type_into(&mut app, |i| Msg::Users(users::Msg::New(i)), "new");
@@ -733,6 +723,245 @@ fn your_own_password_is_changed_through_its_own_action() {
         (users::OWN_PASSWORD, &["passwd".to_string()][..])
     );
     assert_eq!(&ask.input[..], b"old\nnew\nnew\n");
+}
+
+fn people(msg: users::Msg) -> Msg {
+    Msg::Users(msg)
+}
+
+fn answer(request: users::Request, status: i32, said: &str) -> Msg {
+    Msg::Answered(
+        Purpose::Users(request),
+        Asked::Ran {
+            status,
+            said: said.into(),
+            notes: String::new(),
+        },
+    )
+}
+
+fn users_states() -> Vec<(String, Settings)> {
+    let mut out = Vec::new();
+    for (name, open) in [
+        ("users add", users::Msg::Add),
+        ("users password", users::Msg::Password),
+        ("users rename", users::Msg::Rename),
+    ] {
+        let mut app = read(Panel::Users, admin());
+        app.update(people(open));
+        out.push((name.into(), app));
+    }
+    let listed = |change: fn(&mut Vec<Listed>), whole: bool| {
+        let mut app = read(Panel::Users, admin());
+        let mut sample = users::sample();
+        change(&mut sample);
+        app.update(people(users::Msg::Listed(sample, whole)));
+        app
+    };
+    out.push(("users alone".into(), listed(|all| all.truncate(1), true)));
+    out.push(("users partly read".into(), listed(|_| {}, false)));
+    out.push((
+        "users several".into(),
+        listed(
+            |all| {
+                for (uid, name) in [(1002, "grace"), (1003, "a-name-as-long-as-a-name-may-be")] {
+                    let mut more = all[1].clone();
+                    (more.uid, more.name, more.admin) = (uid, name.into(), uid == 1002);
+                    more.password = uid == 1002;
+                    all.push(more);
+                }
+            },
+            true,
+        ),
+    ));
+
+    let ada = || {
+        let mut app = read(Panel::Users, admin());
+        app.update(people(users::Msg::Open(0)));
+        app
+    };
+    out.push(("users person".into(), ada()));
+    let mut first = read(Panel::Users, standard());
+    first.update(people(users::Msg::Open(0)));
+    out.push(("users person, the first".into(), first));
+    let mut remove = ada();
+    remove.update(people(users::Msg::Remove));
+    remove.update(people(users::Msg::Files(1)));
+    out.push(("users remove".into(), remove));
+    let mut set = ada();
+    set.update(people(users::Msg::Password));
+    out.push(("users password, theirs".into(), set));
+    let mut turned = ada();
+    turned.update(people(users::Msg::Admin));
+    out.push(("users turning".into(), turned));
+    let mut kept = ada();
+    kept.update(people(users::Msg::Admin));
+    kept.update(answer(
+        users::Request::Admin,
+        1,
+        "users: the record is locked",
+    ));
+    out.push(("users not turned".into(), kept));
+
+    let mut wrong = read(Panel::Users, admin());
+    wrong.update(people(users::Msg::Add));
+    type_into(&mut wrong, |i| people(users::Msg::Name(i)), "Grace");
+    type_into(&mut wrong, |i| people(users::Msg::New(i)), "one");
+    type_into(&mut wrong, |i| people(users::Msg::Again(i)), "other");
+    wrong.update(people(users::Msg::Kind(1)));
+    wrong.update(people(users::Msg::Confirm));
+    out.push(("users add, wrong".into(), wrong));
+    let mut refused = read(Panel::Users, standard());
+    refused.update(people(users::Msg::Password));
+    type_into(&mut refused, |i| people(users::Msg::Current(i)), "old");
+    type_into(&mut refused, |i| people(users::Msg::New(i)), "new");
+    type_into(&mut refused, |i| people(users::Msg::Again(i)), "new");
+    refused.update(people(users::Msg::Confirm));
+    refused.update(answer(
+        users::Request::Password,
+        1,
+        "users: that is not ada's password",
+    ));
+    out.push(("users password, refused".into(), refused));
+    let mut added = read(Panel::Users, admin());
+    added.update(people(users::Msg::Add));
+    added.update(Msg::Answered(
+        Purpose::Users(users::Request::Add),
+        Asked::Ran {
+            status: 0,
+            said: String::new(),
+            notes: "grace is uid 1002; restart before they log in\n".into(),
+        },
+    ));
+    out.push(("users added".into(), added));
+    out
+}
+
+fn asked(effects: &[Effect]) -> Vec<String> {
+    let [Effect::Ask(ask)] = effects else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(ask.action, users::MANAGE);
+    ask.args.clone()
+}
+
+#[test]
+fn another_person_s_row_opens_their_page_and_the_panel_opens_on_everyone() {
+    let mut app = read(Panel::Users, admin());
+    assert!(shows(&app, "Your account") && !shows(&app, "Remove ada"));
+    app.update(people(users::Msg::Open(0)));
+    assert!(shows(&app, "Remove ada") && !shows(&app, "Your account"));
+    let (_, effects) = app.update(people(users::Msg::Autologin));
+    assert_eq!(
+        asked(&effects),
+        ["autologin", "ada"],
+        "the page's switches are the person's it shows"
+    );
+    app.update(answer(users::Request::Autologin, 0, ""));
+    app.update(people(users::Msg::Back));
+    assert!(shows(&app, "Standard user · Logs in automatically"));
+    let (_, effects) = app.update(people(users::Msg::Autologin));
+    assert_eq!(
+        asked(&effects),
+        ["autologin", "user"],
+        "one person at most logs in automatically, so yours was turned off"
+    );
+    app.update(answer(users::Request::Autologin, 0, ""));
+
+    app.update(people(users::Msg::Open(0)));
+    app.update(Msg::Panel(1));
+    assert!(
+        shows(&app, "Your account"),
+        "the sidebar opens the panel on everyone"
+    );
+}
+
+#[test]
+fn a_switch_stays_turned_and_only_a_refusal_not_your_own_is_said() {
+    fonts();
+    let place = |app: &Settings| placed(app, Role::Switch, "Administrator", 920, 660);
+    let mut app = read(Panel::Users, admin());
+    app.update(people(users::Msg::Open(0)));
+    let before = place(&app);
+    let (_, effects) = app.update(people(users::Msg::Admin));
+    assert_eq!(asked(&effects), ["promote", "ada"]);
+    let (_, busy) = app.update(people(users::Msg::Admin));
+    assert!(busy.is_empty(), "one request at a time");
+    app.update(answer(users::Request::Admin, 0, ""));
+    let (_, effects) = app.update(people(users::Msg::Admin));
+    assert_eq!(
+        asked(&effects),
+        ["demote", "ada"],
+        "turned again from where it was turned, before the read"
+    );
+    app.update(Msg::Answered(
+        Purpose::Users(users::Request::Admin),
+        Asked::Refused {
+            why: "You didn't allow it.".into(),
+            by_person: true,
+        },
+    ));
+    assert!(!shows(&app, "The account type couldn't be changed"));
+    let (_, effects) = app.update(people(users::Msg::Admin));
+    assert_eq!(asked(&effects), ["demote", "ada"], "back where it was");
+    app.update(answer(
+        users::Request::Admin,
+        1,
+        "users: the record is locked",
+    ));
+    assert!(shows(&app, "The account type couldn't be changed"));
+    assert!(shows(&app, "The record is locked."));
+    assert_eq!(place(&app), before, "what is said moved the switch");
+}
+
+#[test]
+fn only_another_person_who_is_not_the_first_is_removed() {
+    let mut app = read(Panel::Users, admin());
+    app.update(people(users::Msg::Remove));
+    assert!(app.users.dialog().is_none(), "never yourself");
+    let mut app = read(Panel::Users, standard());
+    app.update(people(users::Msg::Open(0)));
+    app.update(people(users::Msg::Remove));
+    assert!(app.users.dialog().is_none(), "nor the first user");
+
+    let mut app = read(Panel::Users, admin());
+    app.update(people(users::Msg::Open(0)));
+    app.update(people(users::Msg::Remove));
+    let (_, effects) = app.update(people(users::Msg::Confirm));
+    assert_eq!(asked(&effects), ["remove", "ada"], "their files stay");
+    app.update(answer(
+        users::Request::Remove,
+        1,
+        "users: ada: is logged in",
+    ));
+    assert!(shows(&app, "Ada: is logged in."), "said in the dialog");
+    app.update(people(users::Msg::Files(1)));
+    let (_, effects) = app.update(people(users::Msg::Confirm));
+    assert_eq!(asked(&effects), ["remove", "ada", "--home"]);
+    app.update(answer(users::Request::Remove, 0, ""));
+    assert!(
+        app.users.dialog().is_none() && shows(&app, "The user is removed."),
+        "back on everyone's page, where it is said"
+    );
+}
+
+#[test]
+fn what_is_wrong_with_a_field_waits_until_it_is_left_or_add_is_pressed() {
+    let differ = "The two passwords differ.";
+    let mut app = read(Panel::Users, admin());
+    app.update(people(users::Msg::Add));
+    type_into(&mut app, |i| people(users::Msg::Name(i)), "grace");
+    type_into(&mut app, |i| people(users::Msg::New(i)), "one");
+    type_into(&mut app, |i| people(users::Msg::Again(i)), "o");
+    assert!(!shows(&app, differ), "not while it is typed");
+    app.update(people(users::Msg::Again(LineEditInput::Blur)));
+    assert!(shows(&app, differ), "once focus leaves it");
+    type_into(&mut app, |i| people(users::Msg::Again(i)), "ne");
+    assert!(!shows(&app, differ));
+    let own = "Choose a password for yourself first.";
+    assert!(!shows(&app, own), "nothing asked for before Add is pressed");
+    let (_, effects) = app.update(people(users::Msg::Confirm));
+    assert!(effects.is_empty() && shows(&app, own));
 }
 
 #[test]
@@ -1043,7 +1272,6 @@ fn you_stay_an_administrator_by_another_s_word_alone() {
     people[1].admin = true;
     let mut app = read(Panel::Users, admin());
     app.update(Msg::Users(users::Msg::Listed(people, true)));
-    app.update(Msg::Users(users::Msg::Choose(0)));
     let mut said = Vec::new();
     texts(&app.view(), &mut said);
     assert!(
