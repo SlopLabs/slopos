@@ -106,6 +106,7 @@ struct WindowManager {
     protocol_pointer_grab_gen: u32,
 
     first_frame: bool,
+    last_present: Option<Instant>,
     /// Disjoint.
     output_damage: Region,
     force_full_redraw: bool,
@@ -171,6 +172,7 @@ impl WindowManager {
             protocol_pointer_grab: 0,
             protocol_pointer_grab_gen: 0,
             first_frame: true,
+            last_present: None,
             output_damage: Region::new(),
             force_full_redraw: false,
             pending_damage: Region::new(),
@@ -270,8 +272,8 @@ impl WindowManager {
                     self.add_bounds_damage(&old);
                     self.add_bounds_damage(&curr_bounds);
                 }
-            } else if curr_bounds.rect().is_valid() {
-                self.force_full_redraw = true;
+            } else {
+                self.add_bounds_damage(&curr_bounds);
             }
 
             self.prev_window_bounds[i] = curr_bounds;
@@ -298,10 +300,12 @@ impl WindowManager {
     /// input has laid the path.
     fn add_pointer_damage(&mut self) {
         let cursor_moved = self.input.cursor_trail_count > 0;
-        if self.dock.take_content_dirty() || cursor_moved {
+        let (x, y) = (self.input.mouse_x, self.input.mouse_y);
+        // The lock and login screens cover the dock.
+        let dock_changed = self.dock.take_content_dirty() || self.dock.moved_by(x, y);
+        if dock_changed && !self.gate.shown() {
             self.output_damage.add(self.dock.bounds());
-            self.output_damage
-                .add(self.dock.reach(self.input.mouse_x, self.input.mouse_y));
+            self.output_damage.add(self.dock.reach(x, y));
         }
         if cursor_moved {
             for i in 0..self.input.cursor_trail_count {
@@ -780,10 +784,18 @@ impl WindowManager {
     }
 
     fn needs_redraw(&self) -> bool {
-        self.first_frame
-            || self.input.needs_full_redraw
-            || self.force_full_redraw
-            || !self.output_damage.is_empty()
+        self.first_frame || self.force_full_redraw || !self.output_damage.is_empty()
+    }
+
+    /// When a frame may show what a client just committed without waiting
+    /// for the next tick: once the last one has had a frame's time on screen.
+    fn early_present_at(&self) -> Instant {
+        let gap = std::time::Duration::from_millis(TARGET_FRAME_MS);
+        self.last_present.map_or_else(Instant::now, |at| at + gap)
+    }
+
+    fn commits(&self) -> u64 {
+        self.protocol.as_ref().map_or(0, |proto| proto.commits())
     }
 
     /// What the lock or login screen and the questions repaint, each laid out
@@ -826,10 +838,14 @@ impl WindowManager {
         time_origin: Instant,
         frame_start: Instant,
         target_frame_ms: u64,
+        takes_input: bool,
     ) {
         let wm = self;
         let screen = screen_rect(fb_info);
-        wm.input.drain_events();
+        match takes_input {
+            true => wm.input.drain_events(),
+            false => wm.input.no_events(),
+        }
         wm.refresh_windows();
         wm.gate.poll();
         wm.add_overlay_damage(screen);
@@ -842,6 +858,11 @@ impl WindowManager {
             wm.prev_window_count,
         );
         wm.process_input_events(work_area(fb_info.width, fb_info.height));
+        // Now rather than at the frame's end, so a client draws its answer
+        // while this frame is composed.
+        if let Some(ref mut proto) = wm.protocol {
+            proto.flush_events();
+        }
         match wm.popover.take_choice() {
             Some(Choice::Lock) => wm.gate.lock(),
             Some(Choice::SwitchUser) => ask_init(Command::Greeter),
@@ -963,7 +984,7 @@ impl WindowManager {
         }
 
         if wm.needs_redraw() {
-            let force_full = wm.first_frame || wm.input.needs_full_redraw || wm.force_full_redraw;
+            let force_full = wm.first_frame || wm.force_full_redraw;
 
             let frame_damage = if force_full {
                 Region::full(output.width, output.height)
@@ -1027,6 +1048,7 @@ impl WindowManager {
             }
             *frame_count = frame_count.saturating_add(1);
             if flip_result {
+                wm.last_present = Some(Instant::now());
                 let present_time = time_origin.elapsed().as_millis() as u64;
 
                 let presented = core::mem::take(&mut wm.frame_dirty_surfaces);
@@ -1053,7 +1075,6 @@ impl WindowManager {
             );
             metrics.record(mode, copied, frame_time, target_frame_ms, flip_result);
 
-            wm.input.needs_full_redraw = false;
             wm.force_full_redraw = false;
             wm.first_frame = false;
         }
@@ -1420,11 +1441,26 @@ async fn compositor_async(
         });
     }
 
+    let committed = wm.borrow().protocol.as_ref().map(|p| p.committed());
     let mut frame_count: u32 = 0;
     let mut metrics = FrameMetrics::new(metrics_reporting_enabled());
     let time_origin = Instant::now();
+    // A tick takes input; a frame between two shows what a client committed.
+    let mut next_tick = Instant::now();
     loop {
         let frame_start = Instant::now();
+        wm.borrow_mut().hear_init();
+        let behind = wm.borrow().behind;
+        // To the millisecond, as the wait below counts.
+        let tick = next_tick.saturating_duration_since(frame_start).as_millis() == 0;
+        if tick {
+            let frame_ms = if behind {
+                BEHIND_FRAME_MS
+            } else {
+                TARGET_FRAME_MS
+            };
+            next_tick = frame_start + std::time::Duration::from_millis(frame_ms);
+        }
 
         // Covers the accept stream while it is armed again.
         {
@@ -1441,8 +1477,8 @@ async fn compositor_async(
             }
         }
 
-        wm.borrow_mut().hear_init();
-        let behind = wm.borrow().behind;
+        // A commit taken once the frame has read the windows is not in it.
+        let shown_commits = wm.borrow().commits();
         if behind {
             wm.borrow_mut().look_after_clients();
         } else {
@@ -1455,19 +1491,35 @@ async fn compositor_async(
                 time_origin,
                 frame_start,
                 TARGET_FRAME_MS,
+                tick,
             );
         }
 
-        let frame_ms = if behind {
-            BEHIND_FRAME_MS
-        } else {
-            TARGET_FRAME_MS
-        };
-        let elapsed = frame_start.elapsed().as_millis() as u64;
-        let remaining = frame_ms.saturating_sub(elapsed);
-        if remaining > 0 {
-            slopfut::time::sleep_ms(remaining).await;
-        } else {
+        let committed = committed.as_ref().filter(|_| !behind);
+        // A commit seen sooner than a frame may show it waits for this.
+        let mut early: Option<Instant> = None;
+        let mut waited = false;
+        loop {
+            let now = Instant::now();
+            let until = early.map_or(next_tick, |at| at.min(next_tick));
+            let wait_ms = until.saturating_duration_since(now).as_millis() as u64;
+            if wait_ms == 0 {
+                break;
+            }
+            waited = true;
+            let sleep = Box::pin(slopfut::time::sleep_ms(wait_ms));
+            let Some(committed) = committed.filter(|_| early.is_none()) else {
+                sleep.await;
+                break;
+            };
+            match slopfut::select2(sleep, committed.notified()).await {
+                slopfut::Either2::A(()) => break,
+                // A wake left over from a commit the frame showed is none.
+                slopfut::Either2::B(()) if wm.borrow().commits() == shown_commits => {}
+                slopfut::Either2::B(()) => early = Some(wm.borrow().early_present_at()),
+            }
+        }
+        if !waited {
             slopfut::yield_now().await;
         }
     }
@@ -1624,7 +1676,11 @@ fn spawn_client_task(
                     let still_connected = {
                         let mut w = wm.borrow_mut();
                         match w.protocol {
-                            Some(ref mut proto) if owns(proto) => proto.process_client(idx),
+                            Some(ref mut proto) if owns(proto) => {
+                                let connected = proto.process_client(idx);
+                                proto.flush_client(idx);
+                                connected
+                            }
                             _ => false,
                         }
                     };

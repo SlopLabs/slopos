@@ -1,7 +1,8 @@
 //! A window's frame: its title bar above the content, all four corners
 //! rounded at the window radius unless it is maximized, and its shadow.
 
-use slopos_abi::draw::{Canvas, Color32, EncodedPixel};
+use slopos_abi::draw::{Canvas, Color32};
+use slopos_gfx::blend::BlendInk;
 use slopos_gfx::rounded::Rounded;
 use slopos_theme_core::{Shadow, radius, with_alpha};
 
@@ -134,15 +135,6 @@ pub fn paint_in_outline(
     }
 }
 
-/// `pixel` and `over`, both encoded, mixed at `alpha` out of 255 of `over`,
-/// two channels to a word.
-fn blended(pixel: u32, over: u32, alpha: u32) -> u32 {
-    let inv = 255 - alpha;
-    let rb = (pixel & 0x00FF00FF) * inv + (over & 0x00FF00FF) * alpha + 0x00800080;
-    let ag = ((pixel >> 8) & 0x00FF00FF) * inv + ((over >> 8) & 0x00FF00FF) * alpha + 0x00800080;
-    (rb >> 8 & 0x00FF00FF) | (ag >> 8 & 0x00FF00FF) << 8
-}
-
 /// The shadow `caster` throws over what is already in `clip`, `color` at
 /// its darkest.
 pub fn draw_window_shadow(
@@ -156,21 +148,26 @@ pub fn draw_window_shadow(
         return;
     }
     let spread = shadow_token().spread;
-    let over = buf.pixel_format().encode(with_alpha(color, 0xff)).0;
+    let over = buf.pixel_format().encode(with_alpha(color, 0xff));
     let darkest = u32::from(color.alpha());
-    let bpp = buf.bytes_per_pixel() as usize;
-    let pitch = buf.pitch_bytes();
+    let shaded = |dark: u8, pixel: u32| match (u32::from(dark) * darkest / 255) as u8 {
+        0 => None,
+        alpha => Some(BlendInk::new(over, alpha).over(pixel)),
+    };
     for y in clip.y0..=clip.y1 {
-        let base = y as usize * pitch;
-        for x in clip.x0..=clip.x1 {
-            let alpha = u32::from(caster.shadow(spread, x, y)) * darkest / 255;
-            if alpha == 0 {
-                continue;
-            }
-            let off = base + x as usize * bpp;
-            let pixel = blended(buf.read_encoded_at(off), over, alpha);
-            buf.write_encoded_at(off, EncodedPixel(pixel));
-        }
+        caster.shadow_runs(
+            spread,
+            y,
+            clip.x0,
+            clip.x1,
+            |first, last, dark| match dark {
+                Some(0) => {}
+                Some(dark) => buf.mix_row_span(y, first, last, |_, pixel| shaded(dark, pixel)),
+                None => buf.mix_row_span(y, first, last, |x, pixel| {
+                    shaded(caster.shadow(spread, x as i32, y), pixel)
+                }),
+            },
+        );
     }
 }
 

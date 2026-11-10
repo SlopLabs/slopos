@@ -100,6 +100,26 @@ struct ProtocolSurface {
 }
 
 impl ProtocolSurface {
+    /// Commits the pending damage beside what was committed and has not
+    /// reached the screen: the buffer changed there too, and the screen
+    /// still shows the frame before it. A count of none is the whole surface.
+    fn take_pending_damage(&mut self) {
+        let pending = self.pending_damage_count as usize;
+        let committed = self.committed_damage_count as usize;
+        let whole = pending == 0 || (self.dirty && committed == 0);
+        if whole || (self.dirty && committed + pending > MAX_PENDING_DAMAGE) {
+            self.committed_damage_count = 0;
+        } else {
+            let at = if self.dirty { committed } else { 0 };
+            self.committed_damage[at..at + pending]
+                .copy_from_slice(&self.pending_damage[..pending]);
+            self.committed_damage_count = (at + pending) as u8;
+        }
+        self.pending_damage = [DamageRect::invalid(); MAX_PENDING_DAMAGE];
+        self.pending_damage_count = 0;
+        self.dirty = true;
+    }
+
     const fn empty() -> Self {
         Self {
             active: false,
@@ -168,6 +188,12 @@ pub struct ProtocolBridge {
     /// Fired when a connection is torn down, so its own task drops the armed
     /// poll that otherwise holds the socket open past the close.
     hangups: [Notify; MAX_CLIENTS],
+    /// Fired when a surface commits, so a frame shows it without waiting
+    /// for the next tick.
+    committed: Notify,
+    /// How many commits were taken, which tells one a frame has shown from
+    /// one it has not.
+    commits: u64,
 }
 
 impl ProtocolBridge {
@@ -198,6 +224,8 @@ impl ProtocolBridge {
             next_gen: 1,
             client_pid: [0; MAX_CLIENTS],
             hangups: core::array::from_fn(|_| Notify::new()),
+            committed: Notify::new(),
+            commits: 0,
         })
     }
 
@@ -322,6 +350,14 @@ impl ProtocolBridge {
 
     pub fn hangup(&self, idx: usize) -> Option<Notify> {
         self.hangups.get(idx).cloned()
+    }
+
+    pub fn committed(&self) -> Notify {
+        self.committed.clone()
+    }
+
+    pub fn commits(&self) -> u64 {
+        self.commits
     }
 
     /// Greet every waiting connection and name each in `out` as
@@ -608,11 +644,7 @@ impl ProtocolBridge {
                 }
             }
 
-            surface.committed_damage = surface.pending_damage;
-            surface.committed_damage_count = surface.pending_damage_count;
-            surface.pending_damage = [DamageRect::invalid(); MAX_PENDING_DAMAGE];
-            surface.pending_damage_count = 0;
-            surface.dirty = true;
+            surface.take_pending_damage();
 
             if prev != NO_BUFFER && prev != pend {
                 Some(prev)
@@ -636,6 +668,8 @@ impl ProtocolBridge {
                 },
             );
         }
+        self.commits = self.commits.wrapping_add(1);
+        self.committed.notify_one();
     }
 
     fn handle_surface_frame(&mut self, client_idx: usize, surface_id: SurfaceId) {
@@ -1195,6 +1229,18 @@ impl ProtocolBridge {
             self.server.probe_disconnected(idx);
         }
         self.reap_disconnected_clients();
+    }
+
+    /// Send `client_idx` what is queued for it now: a buffer it may draw the
+    /// next frame into, which would otherwise wait for the frame's end.
+    pub fn flush_client(&mut self, client_idx: usize) {
+        self.server.flush_client(client_idx);
+    }
+
+    /// Send every client what is queued for it; one a write finds gone is
+    /// reaped at the frame's end.
+    pub fn flush_events(&mut self) {
+        self.server.flush_clients();
     }
 
     /// A client a write finds gone is reaped here, so its windows go within

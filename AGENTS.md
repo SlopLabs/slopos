@@ -1041,6 +1041,38 @@ one, a read-only or write-protected disk, or permissions — from what `statfs`
 and `FS_IOC_GETFLAGS` report (`appkit::Refusal`), never from its path.
 `appkit/GUIDE.md` is what to read before writing an app.
 
+**A frame costs what changed, and none is seen half drawn.** A window draws
+into two shared buffers and only into one the compositor has let go of
+(`slopos_gfx::swap::Swap`, host-tested, behind `SoftSurface::ready`): the
+compositor reads the buffer last committed, and the one before it until its
+`BufferRelease`, so a frame owed while neither is free waits for that event
+rather than being drawn over what is on screen; a release five seconds
+overdue is taken for lost. A commit also asks for `FrameDone`, and the next frame
+waits for it, 100 ms at most, so an app or the terminal draws once for each
+frame shown however fast its input or its output comes. `run_app` paints a
+whole frame and commits the rects where it differs from the one shown
+(`slopos_gfx::damage::changed`, at most eight bands of rows, through
+`SoftSurface::present_changed`), and nothing where it does not differ. A
+pointer move no widget took changes only what the pointer lights, so those
+widgets alone are repainted over the frame shown, unless a key or a wheel
+turn no widget took came since, whose frame is painted whole (`lit_damage`,
+`frame_over_shown`, which first copies in what the buffer is behind by) and
+compared within their bounds; `settings-app`'s test holds such a frame to
+the one painted whole, pixel for pixel, for every Settings state and
+catalogue page, and the compositor's own surfaces repaint by the same rects
+(`Embedded::hover`). The compositor adds a commit's damage to what of the
+surface has not reached the screen, sends a client its events as it serves
+its requests and the frame's input as soon as it is dispatched, takes input
+at each 16 ms tick, and between two draws a frame early for a commit, once
+the last one has had a frame's time on screen, so the answer to a key does
+not wait for the next tick while a client that never stops committing is
+still shown once a tick. A window that comes, zooms or is raised repaints its
+bounds, and the dock when the pointer changes its layout; only the first
+frame, a session brought in front and a new background repaint the screen.
+Glyphs, rounded outlines and shadows are written a row at a time
+(`Canvas::mix_row_span`), a shadow or an outline as one run between its
+corners.
+
 **Settings changes the system through the tools a terminal has.**
 `/bin/settings` (`apps::settings`, app id `org.slopos.settings`, `--page
 network|users|keyboard|desktop|about`) is a base program whose panels are

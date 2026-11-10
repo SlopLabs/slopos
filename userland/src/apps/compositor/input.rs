@@ -187,7 +187,6 @@ pub struct InputHandler {
     zoomed: Vec<Zoomed>,
 
     focused_window: u32,
-    pub needs_full_redraw: bool,
 
     pub cursor_trail: [(i32, i32); MAX_CURSOR_TRAIL],
     pub cursor_trail_count: usize,
@@ -221,7 +220,6 @@ impl InputHandler {
             resize_last_configure_ms: 0,
             zoomed: Vec::new(),
             focused_window: 0,
-            needs_full_redraw: false,
             cursor_trail: [(0, 0); MAX_CURSOR_TRAIL],
             cursor_trail_count: 0,
             clock_origin: Instant::now(),
@@ -245,6 +243,12 @@ impl InputHandler {
     pub fn drain_events(&mut self) {
         self.cursor_trail_count = 0;
         self.raw_event_count = input::poll_batch(&mut self.raw_event_buf);
+    }
+
+    /// A frame between two that take input: it dispatches none.
+    pub fn no_events(&mut self) {
+        self.cursor_trail_count = 0;
+        self.raw_event_count = 0;
     }
 
     pub fn apply_motion(&mut self, event: &InputEvent) {
@@ -454,7 +458,6 @@ impl InputHandler {
             |z: &Zoomed, w: &WindowInfo| z.window == w.id && z.generation == w.generation;
         self.zoomed
             .retain(|z| windows.iter().any(|w| incarnation(z, w)));
-        self.needs_full_redraw = true;
         let now = Geometry::of(window);
         if let Some(at) = self.zoomed.iter().position(|z| incarnation(z, window)) {
             let zoomed = self.zoomed.swap_remove(at);
@@ -761,7 +764,6 @@ impl InputHandler {
                         p.raise_window(entry.window);
                     }
                     self.set_focused(entry.window);
-                    self.needs_full_redraw = true;
                     return;
                 }
             }

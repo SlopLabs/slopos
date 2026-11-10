@@ -193,15 +193,21 @@ impl Server {
     /// A client that cannot be written is flagged for [`take_disconnected`].
     pub fn flush_clients(&mut self) {
         for i in 0..MAX_CLIENTS {
-            let died = match self.clients.get_mut(i) {
-                Some(Some(c)) if c.active && !c.write_buf.is_empty() => {
-                    c.write_buf.flush(c.conn.fd()).is_err()
-                }
-                _ => false,
-            };
-            if died {
-                self.mark_disconnected(i);
+            self.flush_client(i);
+        }
+    }
+
+    /// [`flush_clients`](Self::flush_clients) for one client, whose events
+    /// then do not wait for the rest.
+    pub fn flush_client(&mut self, client: usize) {
+        let died = match self.clients.get_mut(client) {
+            Some(Some(c)) if c.active && !c.write_buf.is_empty() => {
+                c.write_buf.flush(c.conn.fd()).is_err()
             }
+            _ => false,
+        };
+        if died {
+            self.mark_disconnected(client);
         }
     }
 

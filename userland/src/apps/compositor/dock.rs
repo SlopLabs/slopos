@@ -96,7 +96,7 @@ impl DockEntry {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct IconLayout {
     center_x: i32,
     /// Icons grow upward from a common bottom line.
@@ -107,6 +107,7 @@ struct IconLayout {
 /// Where everything is for one pointer position, which drawing and a press
 /// both take from [`Dock::layout`], so a press is tested against where the
 /// pointer is rather than where it was at the last frame.
+#[derive(PartialEq, Eq)]
 struct Layout {
     icons: [IconLayout; MAX_ENTRIES],
     pill: Rounded,
@@ -141,6 +142,8 @@ impl Layout {
 pub struct Dock {
     entries: Vec<DockEntry>,
     last_bounds: DamageRect,
+    /// As it was last drawn, which a pointer far from it does not change.
+    last_layout: Option<Layout>,
     screen_w: u32,
     screen_h: u32,
     content_dirty: bool,
@@ -151,6 +154,7 @@ impl Dock {
         Self {
             entries: Vec::new(),
             last_bounds: DamageRect::invalid(),
+            last_layout: None,
             screen_w: 0,
             screen_h: 0,
             content_dirty: false,
@@ -311,6 +315,7 @@ impl Dock {
     ) {
         if self.entries.is_empty() {
             self.last_bounds = DamageRect::invalid();
+            self.last_layout = None;
             return;
         }
         self.screen_w = screen_width;
@@ -369,6 +374,16 @@ impl Dock {
             draw_label(buf, name, &shape, clip);
         }
         self.last_bounds = layout.bounds(&self.entries);
+        self.last_layout = Some(layout);
+    }
+
+    /// Whether the pointer at `(x, y)` shows it other than it was last
+    /// drawn: an icon grown, shrunk or named.
+    pub fn moved_by(&self, x: i32, y: i32) -> bool {
+        if self.entries.is_empty() || self.screen_w == 0 || self.screen_h == 0 {
+            return false;
+        }
+        self.last_layout.as_ref() != Some(&self.layout(self.screen_w, self.screen_h, x, y))
     }
 
     /// The entry at `(px, py)`, laid out for that position.
