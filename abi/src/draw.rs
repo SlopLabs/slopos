@@ -123,6 +123,27 @@ pub trait Canvas {
         }
     }
 
+    /// Rewrites columns `x0..=x1` of `row`, clipped, to what `mix` makes of
+    /// each column and its encoded value; `None` leaves the pixel as it is.
+    #[inline]
+    fn mix_row_span<F>(&mut self, row: i32, x0: i32, x1: i32, mut mix: F)
+    where
+        Self: Sized,
+        F: FnMut(usize, u32) -> Option<u32>,
+    {
+        let Some((row, x0, x1)) = self.clip_row_span(row, x0, x1) else {
+            return;
+        };
+        let bpp = self.bytes_per_pixel() as usize;
+        let row_start = row * self.pitch_bytes();
+        for x in x0..=x1 {
+            let off = row_start + x * bpp;
+            if let Some(mixed) = mix(x, self.read_encoded_at(off)) {
+                self.write_encoded_at(off, EncodedPixel(mixed));
+            }
+        }
+    }
+
     #[inline]
     fn clear_canvas(&mut self, pixel: EncodedPixel) {
         let h = self.height() as i32;
@@ -177,11 +198,6 @@ pub trait Canvas {
             (y as usize) * self.pitch_bytes() + (x as usize) * self.bytes_per_pixel() as usize;
         self.read_encoded_at(off)
     }
-
-    /// Report that a rectangular region was modified. A no-op by default, which
-    /// suits direct framebuffers; buffer-backed surfaces feed a damage tracker.
-    #[inline]
-    fn report_damage(&mut self, _rect: crate::damage::DamageRect) {}
 
     #[inline]
     fn fill_rect_encoded(&mut self, x: i32, y: i32, w: i32, h: i32, pixel: EncodedPixel) {

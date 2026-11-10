@@ -3,14 +3,6 @@ use slopos_abi::draw::{Canvas, Color32};
 
 use crate::blend::put_pixel_coverage;
 
-#[inline]
-fn emit<T: Canvas>(target: &mut T, damage: Option<DamageRect>) -> Option<DamageRect> {
-    if let Some(d) = damage {
-        target.report_damage(d);
-    }
-    damage
-}
-
 pub fn line<T: Canvas>(
     target: &mut T,
     x0: i32,
@@ -72,7 +64,7 @@ pub fn line<T: Canvas>(
     } else {
         None
     };
-    emit(target, damage)
+    damage
 }
 
 pub fn rect<T: Canvas>(
@@ -104,7 +96,7 @@ pub fn rect<T: Canvas>(
     } else {
         None
     };
-    emit(target, damage)
+    damage
 }
 
 pub fn fill_rect<T: Canvas>(
@@ -133,7 +125,7 @@ pub fn fill_rect<T: Canvas>(
     } else {
         None
     };
-    emit(target, damage)
+    damage
 }
 
 pub fn fill_rect_clipped<T: Canvas>(
@@ -201,7 +193,7 @@ pub fn circle<T: Canvas>(
     } else {
         None
     };
-    emit(target, damage)
+    damage
 }
 
 pub fn circle_filled<T: Canvas>(
@@ -249,7 +241,7 @@ pub fn circle_filled<T: Canvas>(
     } else {
         None
     };
-    emit(target, damage)
+    damage
 }
 
 pub fn triangle_filled<T: Canvas>(
@@ -321,7 +313,7 @@ pub fn triangle_filled<T: Canvas>(
     } else {
         None
     };
-    emit(target, damage)
+    damage
 }
 
 /// Xiaolin Wu's anti-aliased line algorithm, in integer fixed point.
@@ -351,7 +343,7 @@ pub fn line_aa<T: Canvas>(
             x1: x0,
             y1: y0,
         };
-        return emit(target, Some(damage));
+        return Some(damage);
     }
 
     let steep = dy > dx;
@@ -416,7 +408,7 @@ pub fn line_aa<T: Canvas>(
     } else {
         None
     };
-    emit(target, damage)
+    damage
 }
 
 #[cfg(test)]

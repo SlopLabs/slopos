@@ -325,9 +325,7 @@ impl GlyphAtlas {
         let x1 = (x + cw - 1).min(buf_w - 1);
         let y1 = (y + ch - 1).min(buf_h - 1);
         if x0 <= x1 && y0 <= y1 {
-            let d = DamageRect { x0, y0, x1, y1 };
-            target.report_damage(d);
-            Some(d)
+            Some(DamageRect { x0, y0, x1, y1 })
         } else {
             None
         }
@@ -377,9 +375,6 @@ impl GlyphAtlas {
             if cy >= h {
                 break;
             }
-        }
-        if let Some(d) = damage {
-            target.report_damage(d);
         }
         damage
     }
@@ -488,6 +483,29 @@ impl GlyphAtlas {
 fn blend_div255(num: u32) -> u32 {
     let x = num + 128;
     (x + 1 + (x >> 8)) >> 8
+}
+
+/// [`blend_color32`] of two encoded pixels, whatever the channel order;
+/// `opaque` holds the bits the format has no channel for, which read as full.
+#[inline]
+pub fn blend_encoded(cov: u8, fg: u32, bg: u32, opaque: u32) -> u32 {
+    let a = cov as u32;
+    let inv = 255 - a;
+    let pair = |fg: u32, bg: u32| {
+        let x = (fg & 0x00FF_00FF) * a + (bg & 0x00FF_00FF) * inv + 0x0080_0080;
+        ((x + 0x0001_0001 + ((x >> 8) & 0x00FF_00FF)) >> 8) & 0x00FF_00FF
+    };
+    pair(fg, bg | opaque) | (pair(fg >> 8, (bg | opaque) >> 8) << 8) | opaque
+}
+
+/// The bits [`blend_encoded`] takes as `opaque` for `format`.
+#[inline]
+pub fn opaque_bits(format: slopos_abi::pixel::PixelFormat) -> u32 {
+    use slopos_abi::pixel::PixelFormat;
+    match format {
+        PixelFormat::Xrgb8888 | PixelFormat::Rgb888 | PixelFormat::Bgr888 => 0xFF00_0000,
+        PixelFormat::Argb8888 | PixelFormat::Rgba8888 | PixelFormat::Bgra8888 => 0,
+    }
 }
 
 /// Blend fg and bg Color32 values by coverage (0-255).
@@ -608,6 +626,50 @@ mod tests {
                 (num + 128) / 255,
                 "div255_round diverged at {num}"
             );
+        }
+    }
+
+    #[test]
+    fn an_encoded_blend_is_the_colour_blend_in_every_format() {
+        use slopos_abi::draw::Color32;
+        use slopos_abi::pixel::PixelFormat;
+        let formats = [
+            PixelFormat::Argb8888,
+            PixelFormat::Xrgb8888,
+            PixelFormat::Rgb888,
+            PixelFormat::Bgr888,
+            PixelFormat::Rgba8888,
+            PixelFormat::Bgra8888,
+        ];
+        let mut seed = 0x9e37_79b9u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for format in formats {
+            let kept = match format.bytes_per_pixel() {
+                3 => 0x00ff_ffff,
+                _ => u32::MAX,
+            };
+            for _ in 0..20_000 {
+                let (color, dst, cov) = (Color32(next()), next(), next() as u8);
+                // A buffer of three-byte pixels reads the fourth as full.
+                let dst = dst | !kept;
+                let want = format.encode(super::blend_color32(cov, color, format.decode(dst)));
+                let got = super::blend_encoded(
+                    cov,
+                    format.encode(color).0,
+                    dst,
+                    super::opaque_bits(format),
+                );
+                assert_eq!(
+                    got & kept,
+                    want.0 & kept,
+                    "{format:?} {cov} {color:?} {dst:#x}"
+                );
+            }
         }
     }
 

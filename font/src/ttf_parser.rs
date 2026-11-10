@@ -18,6 +18,8 @@ pub struct TtfFont<'a> {
     /// Recent pairs' kerning, direct-mapped: text repeats its pairs, and the
     /// class tables cost several binary searches. Made by the first pair asked.
     kern_memo: OnceCell<KVec<Cell<u64>>>,
+    /// What `cmap` answers for each codepoint below [`GLYPH_MEMO_LEN`].
+    glyph_memo: OnceCell<KVec<Cell<u32>>>,
 }
 
 /// log2 of the memo's slot count.
@@ -25,6 +27,12 @@ const KERN_MEMO_BITS: u32 = 10;
 
 /// No pair packs to an all-ones key: glyph ids stop short of 0xFFFF.
 const KERN_MEMO_EMPTY: u64 = u64::MAX;
+
+/// Through Latin Extended-A.
+const GLYPH_MEMO_LEN: usize = 0x180;
+const GLYPH_MEMO_EMPTY: u32 = u32::MAX;
+/// No unicode `cmap` subtable holds the codepoint.
+const GLYPH_MEMO_NONE: u32 = u32::MAX - 1;
 
 /// A pair-adjustment subtable of the `kern` feature, in lookup order. Within
 /// one lookup the first subtable that applies to a pair decides it; separate
@@ -178,6 +186,7 @@ impl<'a> TtfFont<'a> {
             // A malformed GPOS kerns nothing rather than refusing the font.
             pairs: kern_pair_subtables(data).unwrap_or_else(KVec::new),
             kern_memo: OnceCell::new(),
+            glyph_memo: OnceCell::new(),
         })
     }
 
@@ -191,6 +200,25 @@ impl<'a> TtfFont<'a> {
 
     /// Only Format 4 (BMP) cmap subtables are supported.
     pub fn glyph_index(&self, codepoint: u32) -> Option<u16> {
+        let memo = self.glyph_memo.get_or_init(|| {
+            KVec::from_iter_fallible((0..GLYPH_MEMO_LEN).map(|_| Cell::new(GLYPH_MEMO_EMPTY)))
+                .unwrap_or_else(|_| KVec::new())
+        });
+        let Some(slot) = memo.get(codepoint as usize) else {
+            return self.cmap_lookup(codepoint);
+        };
+        match slot.get() {
+            GLYPH_MEMO_EMPTY => {
+                let found = self.cmap_lookup(codepoint);
+                slot.set(found.map_or(GLYPH_MEMO_NONE, u32::from));
+                found
+            }
+            GLYPH_MEMO_NONE => None,
+            glyph => Some(glyph as u16),
+        }
+    }
+
+    fn cmap_lookup(&self, codepoint: u32) -> Option<u16> {
         if codepoint > 0xFFFF {
             return None;
         }

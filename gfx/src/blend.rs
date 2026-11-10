@@ -8,6 +8,36 @@
 
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32, EncodedPixel};
+use slopos_abi::pixel::PixelFormat;
+
+/// An encoded pixel at an alpha out of 255, two channels to a word whatever
+/// their order; mixing divides by 256, so a result is at most one level dark.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct BlendInk {
+    rb: u32,
+    ag: u32,
+    inv: u32,
+}
+
+impl BlendInk {
+    #[inline]
+    pub const fn new(pixel: EncodedPixel, alpha: u8) -> Self {
+        let alpha = alpha as u32;
+        Self {
+            rb: (pixel.0 & 0x00FF_00FF) * alpha,
+            ag: ((pixel.0 >> 8) & 0x00FF_00FF) * alpha,
+            inv: 255 - alpha,
+        }
+    }
+
+    #[inline]
+    pub const fn over(self, dst: u32) -> u32 {
+        let rb = ((self.rb + (dst & 0x00FF_00FF) * self.inv + 0x0080_0080) >> 8) & 0x00FF_00FF;
+        let ag =
+            ((self.ag + ((dst >> 8) & 0x00FF_00FF) * self.inv + 0x0080_0080) >> 8) & 0x00FF_00FF;
+        rb | (ag << 8)
+    }
+}
 
 /// Porter-Duff "source over" compositing operator.
 ///
@@ -131,6 +161,17 @@ pub fn put_pixel_coverage<T: Canvas>(target: &mut T, x: i32, y: i32, color: Colo
     target.write_encoded_at(off, fmt.encode(Color32(blended)));
 }
 
+/// `dst` once `color` is blended over it scaled by `coverage`, as
+/// [`put_pixel_coverage`] leaves it; `None` where it covers nothing.
+#[inline]
+pub fn cover_encoded(format: PixelFormat, dst: u32, color: Color32, coverage: u8) -> Option<u32> {
+    if coverage == 0 {
+        return None;
+    }
+    let blended = blend_coverage(coverage, color, format.decode(dst).to_u32());
+    Some(format.encode(Color32(blended)).0)
+}
+
 /// Alpha-blend a filled rectangle onto a canvas.
 pub fn fill_rect_blended<T: Canvas>(
     target: &mut T,
@@ -171,35 +212,13 @@ pub fn fill_rect_blended<T: Canvas>(
         let px = target.pixel_format().encode(color);
         target.fill_rect_encoded(x0, y0, x1 - x0 + 1, y1 - y0 + 1, px);
     } else {
-        // RB/AG channel separation, applied in the native pixel format: it only
-        // separates alternating byte pairs, so the layout does not matter.
-        let sa = alpha as u32;
-        let inv_sa = 255 - sa;
-        let src_native = target.pixel_format().encode(color).to_u32();
-        let src_rb = (src_native & 0x00FF00FF) * sa;
-        let src_ag = ((src_native >> 8) & 0x00FF00FF) * sa;
-
-        let bpp = target.bytes_per_pixel() as usize;
-        let pitch = target.pitch_bytes();
-        let col_count = (x1 - x0 + 1) as usize;
-
+        let ink = BlendInk::new(target.pixel_format().encode(color), alpha);
         for row in y0..=y1 {
-            let base = (row as usize) * pitch + (x0 as usize) * bpp;
-            for i in 0..col_count {
-                let off = base + i * bpp;
-                let dst = target.read_encoded_at(off);
-                let dst_rb = dst & 0x00FF00FF;
-                let dst_ag = (dst >> 8) & 0x00FF00FF;
-                let rb = (src_rb + dst_rb * inv_sa + 0x00800080) >> 8 & 0x00FF00FF;
-                let ag = (src_ag + dst_ag * inv_sa + 0x00800080) >> 8 & 0x00FF00FF;
-                target.write_encoded_at(off, EncodedPixel(rb | (ag << 8)));
-            }
+            target.mix_row_span(row, x0, x1, |_, dst| Some(ink.over(dst)));
         }
     }
 
-    let damage = DamageRect { x0, y0, x1, y1 };
-    target.report_damage(damage);
-    Some(damage)
+    Some(DamageRect { x0, y0, x1, y1 })
 }
 
 /// [`fill_rect_blended`] intersected with `clip`.

@@ -155,7 +155,6 @@ impl WallpaperCache {
             let src = &self.cache[src_off..src_off + row_bytes];
             dst_data[dst_off..dst_off + row_bytes].copy_from_slice(src);
         }
-        buf.add_damage(clipped.x0, clipped.y0, clipped.x1, clipped.y1);
         true
     }
 

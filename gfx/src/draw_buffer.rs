@@ -2,10 +2,8 @@ use slopos_abi::damage;
 use slopos_abi::draw::{Canvas, Color32, EncodedPixel};
 use slopos_abi::pixel::PixelFormat;
 
-use crate::DamageTracker;
-
 /// A heap-free [`Canvas`] over a caller-supplied `&mut [u8]`, with
-/// bounds-checked writes and damage tracking.
+/// bounds-checked writes.
 pub struct DrawBuffer<'a> {
     data: &'a mut [u8],
     width: u32,
@@ -13,7 +11,6 @@ pub struct DrawBuffer<'a> {
     pitch: usize,
     bytes_pp: u8,
     pixel_format: PixelFormat,
-    damage: DamageTracker,
     /// Set during a partial-region repaint so no primitive can paint outside
     /// the region being composited.
     scissor: Option<damage::DamageRect>,
@@ -46,7 +43,6 @@ impl<'a> DrawBuffer<'a> {
             } else {
                 PixelFormat::Rgb888
             },
-            damage: DamageTracker::new(),
             scissor: None,
         })
     }
@@ -83,10 +79,6 @@ impl<'a> DrawBuffer<'a> {
         self.data
     }
 
-    pub fn damage(&self) -> &DamageTracker {
-        &self.damage
-    }
-
     /// Confine every subsequent primitive to `scissor`; `None` lifts the clip.
     #[inline]
     pub fn set_scissor(&mut self, scissor: Option<damage::DamageRect>) {
@@ -109,17 +101,6 @@ impl<'a> DrawBuffer<'a> {
         self.scissor = Some(next);
         f(self);
         self.scissor = prev;
-    }
-
-    pub fn add_damage(&mut self, x0: i32, y0: i32, x1: i32, y1: i32) {
-        let x0 = x0.max(0);
-        let y0 = y0.max(0);
-        let x1 = x1.min(self.width as i32 - 1);
-        let y1 = y1.min(self.height as i32 - 1);
-
-        if x0 <= x1 && y0 <= y1 {
-            self.damage.add_rect(x0, y0, x1, y1);
-        }
     }
 
     /// Copy a rectangular region within the same buffer (handles overlap).
@@ -179,8 +160,6 @@ impl<'a> DrawBuffer<'a> {
                 self.data.copy_within(src_off..src_off + row_bytes, dst_off);
             }
         }
-
-        self.add_damage(dst_x0, dst_y0, dst_x1, dst_y1);
     }
 
     /// Scroll up by `pixels` rows, filling the vacated bottom with `fill_color`.
@@ -195,7 +174,6 @@ impl<'a> DrawBuffer<'a> {
         if pixels >= height {
             let px = self.pixel_format.encode(fill_color);
             self.clear_canvas(px);
-            self.add_damage(0, 0, width - 1, height - 1);
             return;
         }
 
@@ -215,7 +193,6 @@ impl<'a> DrawBuffer<'a> {
         if pixels >= height {
             let px = self.pixel_format.encode(fill_color);
             self.clear_canvas(px);
-            self.add_damage(0, 0, width - 1, height - 1);
             return;
         }
 
@@ -387,6 +364,39 @@ impl Canvas for DrawBuffer<'_> {
     }
 
     #[inline]
+    fn mix_row_span<F>(&mut self, row: i32, x0: i32, x1: i32, mut mix: F)
+    where
+        F: FnMut(usize, u32) -> Option<u32>,
+    {
+        let Some((row, x0, x1)) = self.clip_row_span(row, x0, x1) else {
+            return;
+        };
+        let bytes_pp = self.bytes_pp as usize;
+        let start = row * self.pitch + x0 * bytes_pp;
+        let Some(span) = self.data.get_mut(start..start + (x1 - x0 + 1) * bytes_pp) else {
+            return;
+        };
+        match bytes_pp {
+            4 => {
+                for (px, x) in span.chunks_exact_mut(4).zip(x0..) {
+                    let dst = u32::from_le_bytes([px[0], px[1], px[2], px[3]]);
+                    if let Some(mixed) = mix(x, dst) {
+                        px.copy_from_slice(&mixed.to_le_bytes());
+                    }
+                }
+            }
+            _ => {
+                for (px, x) in span.chunks_exact_mut(3).zip(x0..) {
+                    let dst = u32::from_le_bytes([px[0], px[1], px[2], 0xFF]);
+                    if let Some(mixed) = mix(x, dst) {
+                        px.copy_from_slice(&mixed.to_le_bytes()[..3]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[inline]
     fn clear_canvas(&mut self, pixel: EncodedPixel) {
         let color = pixel.to_u32();
         let bytes_pp = self.bytes_pp as usize;
@@ -411,11 +421,6 @@ impl Canvas for DrawBuffer<'_> {
                 _ => {}
             }
         }
-    }
-
-    #[inline]
-    fn report_damage(&mut self, rect: damage::DamageRect) {
-        self.damage.add(rect);
     }
 }
 
@@ -510,6 +515,35 @@ mod scissor_tests {
         assert_ne!(raw_at(&buf, 5, 5), 0, "inside scissor blended");
         assert_eq!(raw_at(&buf, 0, 0), 0, "outside scissor untouched");
         assert_eq!(raw_at(&buf, 20, 20), 0, "outside scissor untouched");
+    }
+
+    #[test]
+    fn a_blended_fill_mixes_every_pixel_of_its_rect_and_no_other() {
+        use crate::blend::BlendInk;
+        for bpp in [4u8, 3] {
+            let pitch = W as usize * bpp as usize;
+            let mut data: alloc::vec::Vec<u8> =
+                (0..pitch * H as usize).map(|i| (i * 7 + 3) as u8).collect();
+            let before = data.clone();
+            let mut buf = DrawBuffer::new(&mut data, W, H, pitch, bpp).unwrap();
+            let color = Color32::new(200, 40, 90, 0x66);
+            let ink = BlendInk::new(buf.pixel_format().encode(color), color.alpha());
+            blend::fill_rect_blended(&mut buf, 3, 4, 20, 9, color);
+            let kept = if bpp == 4 { u32::MAX } else { 0x00ff_ffff };
+            for y in 0..H as i32 {
+                for x in 0..W as i32 {
+                    let off = y as usize * pitch + x as usize * bpp as usize;
+                    let mut was = [0xff; 4];
+                    was[..bpp as usize].copy_from_slice(&before[off..off + bpp as usize]);
+                    let was = u32::from_le_bytes(was);
+                    let want = match (3..23).contains(&x) && (4..13).contains(&y) {
+                        true => ink.over(was),
+                        false => was,
+                    };
+                    assert_eq!(raw_at(&buf, x, y) & kept, want & kept, "{bpp} ({x}, {y})");
+                }
+            }
+        }
     }
 
     #[test]

@@ -178,9 +178,6 @@ impl<'a> FontRenderer<'a> {
             };
         }
 
-        if let Some(d) = damage {
-            target.report_damage(d);
-        }
         damage
     }
 
@@ -247,30 +244,31 @@ impl<'a> FontRenderer<'a> {
 
         let has_bg = bg.0 != 0;
         let fmt = target.pixel_format();
+        let ink = fmt.encode(color);
+        let opaque = atlas::opaque_bits(fmt);
 
         for row in y0..=y1 {
-            for col in x0..=x1 {
-                let cov_x = (col - x) as usize;
-                let cov_y = (row - y) as usize;
-                let idx = cov_y * (w as usize) + cov_x;
-
-                if idx < coverage.len() {
-                    let cov = coverage[idx];
-                    if cov == 0 {
-                        continue;
-                    }
-                    if cov == 255 {
-                        target.put_pixel(col, row, fmt.encode(color));
-                    } else {
-                        let under = if has_bg {
-                            bg
-                        } else {
-                            fmt.decode(target.read_pixel(col, row))
-                        };
-                        let blended = atlas::blend_color32(cov, color, under);
-                        target.put_pixel(col, row, fmt.encode(blended));
+            let line = coverage
+                .get((row - y) as usize * w as usize..)
+                .unwrap_or_default();
+            let covered = |col: i32| line.get((col - x) as usize).copied().unwrap_or(0);
+            if has_bg {
+                for col in x0..=x1 {
+                    match covered(col) {
+                        0 => {}
+                        255 => target.put_pixel(col, row, ink),
+                        cov => {
+                            let blended = atlas::blend_color32(cov, color, bg);
+                            target.put_pixel(col, row, fmt.encode(blended));
+                        }
                     }
                 }
+            } else {
+                target.mix_row_span(row, x0, x1, |col, dst| match covered(col as i32) {
+                    0 => None,
+                    255 => Some(ink.0),
+                    cov => Some(atlas::blend_encoded(cov, ink.0, dst, opaque)),
+                });
             }
         }
 

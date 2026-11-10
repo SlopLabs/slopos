@@ -4,7 +4,7 @@
 use slopos_abi::damage::DamageRect;
 use slopos_abi::draw::{Canvas, Color32};
 
-use crate::blend::{fill_rect_blended_clipped, put_pixel_coverage};
+use crate::blend::{cover_encoded, fill_rect_blended_clipped};
 
 /// The `w` by `h` rectangle at `(x, y)` whose corners are quarter circles
 /// of `radius`, as round as its shorter side allows.
@@ -72,6 +72,41 @@ impl Rounded {
         let reach = i64::from(spread) * PX as i64;
         let left = (reach - i64::from(self.distance(x, y).max(0))).max(0);
         (left * left * 255 / (reach * reach)) as u8
+    }
+
+    /// The columns between the corners, where a row's pixels lie equally far
+    /// from the outline; the first past the last on a shape too narrow for any.
+    fn flat_columns(&self) -> (i32, i32) {
+        let r = self.half_radius();
+        let first = (2 * self.x + r).div_euclid(2);
+        let last = (2 * (self.x + self.w) - r - 1).div_euclid(2);
+        (first, last)
+    }
+
+    /// Row `y`'s columns `x0..=x1` as runs, left to right: `run(first, last,
+    /// Some(dark))` where [`shadow`](Rounded::shadow) is `dark` at every
+    /// pixel of the run, `None` where each pixel has its own.
+    pub fn shadow_runs(
+        &self,
+        spread: i32,
+        y: i32,
+        x0: i32,
+        x1: i32,
+        mut run: impl FnMut(i32, i32, Option<u8>),
+    ) {
+        let (first, last) = self.flat_columns();
+        let (flat0, flat1) = (first.max(x0), last.min(x1));
+        if flat0 > flat1 {
+            run(x0, x1, None);
+            return;
+        }
+        if x0 < flat0 {
+            run(x0, flat0 - 1, None);
+        }
+        run(flat0, flat1, Some(self.shadow(spread, flat0, y)));
+        if flat1 < x1 {
+            run(flat1 + 1, x1, None);
+        }
     }
 
     /// The rectangle holding every pixel a shadow reaching `spread` px past
@@ -155,10 +190,13 @@ impl Rounded {
         clip: &DamageRect,
         ink: impl Fn(i32, i32) -> Color32,
     ) {
+        let format = canvas.pixel_format();
+        let (x0, x1) = (area.x0.max(clip.x0), area.x1.min(clip.x1));
         for y in area.y0.max(clip.y0)..=area.y1.min(clip.y1) {
-            for x in area.x0.max(clip.x0)..=area.x1.min(clip.x1) {
-                put_pixel_coverage(canvas, x, y, ink(x, y), self.coverage(x, y));
-            }
+            canvas.mix_row_span(y, x0, x1, |x, dst| {
+                let x = x as i32;
+                cover_encoded(format, dst, ink(x, y), self.coverage(x, y))
+            });
         }
     }
 
@@ -219,11 +257,35 @@ impl Rounded {
                 ..b
             },
         ];
+        let format = canvas.pixel_format();
+        let covered = |x: i32, y: i32| self.coverage(x, y).saturating_sub(inner.coverage(x, y));
+        let (outer_flat, inner_flat) = (self.flat_columns(), inner.flat_columns());
+        let flat = (
+            outer_flat.0.max(inner_flat.0),
+            outer_flat.1.min(inner_flat.1),
+        );
         for part in rim {
+            let (x0, x1) = (part.x0.max(clip.x0), part.x1.min(clip.x1));
+            let (flat0, flat1) = (flat.0.max(x0), flat.1.min(x1));
             for y in part.y0.max(clip.y0)..=part.y1.min(clip.y1) {
-                for x in part.x0.max(clip.x0)..=part.x1.min(clip.x1) {
-                    let covered = self.coverage(x, y).saturating_sub(inner.coverage(x, y));
-                    put_pixel_coverage(canvas, x, y, ink(x, y), covered);
+                let each = |canvas: &mut C, x0: i32, x1: i32| {
+                    canvas.mix_row_span(y, x0, x1, |x, dst| {
+                        let x = x as i32;
+                        cover_encoded(format, dst, ink(x, y), covered(x, y))
+                    });
+                };
+                if flat0 > flat1 {
+                    each(canvas, x0, x1);
+                    continue;
+                }
+                each(canvas, x0, flat0 - 1);
+                each(canvas, flat1 + 1, x1);
+                // Between the corners of both outlines a row is covered alike.
+                let along = covered(flat0, y);
+                if along > 0 {
+                    canvas.mix_row_span(y, flat0, flat1, |x, dst| {
+                        cover_encoded(format, dst, ink(x as i32, y), along)
+                    });
                 }
             }
         }
@@ -258,12 +320,28 @@ impl Rounded {
         color: Color32,
     ) {
         let area = self.grown(spread).bounds();
+        let format = canvas.pixel_format();
+        let (x0, x1) = (area.x0.max(clip.x0), area.x1.min(clip.x1));
         for y in area.y0.max(clip.y0)..=area.y1.min(clip.y1) {
-            for x in area.x0.max(clip.x0)..=area.x1.min(clip.x1) {
-                if !under.contains(x, y) {
-                    put_pixel_coverage(canvas, x, y, color, self.shadow(spread, x, y));
+            let hidden = under.y0 <= y && y <= under.y1;
+            self.shadow_runs(spread, y, x0, x1, |first, last, dark| {
+                let mut paint = |first: i32, last: i32| match dark {
+                    Some(0) => {}
+                    Some(dark) => canvas.mix_row_span(y, first, last, |_, dst| {
+                        cover_encoded(format, dst, color, dark)
+                    }),
+                    None => canvas.mix_row_span(y, first, last, |x, dst| {
+                        cover_encoded(format, dst, color, self.shadow(spread, x as i32, y))
+                    }),
+                };
+                match hidden {
+                    true => {
+                        paint(first, last.min(under.x0 - 1));
+                        paint(first.max(under.x1 + 1), last);
+                    }
+                    false => paint(first, last),
                 }
-            }
+            });
         }
     }
 
@@ -278,15 +356,18 @@ impl Rounded {
     ) {
         let area = self.grown(spread).bounds();
         let whole = pane.bands()[1];
+        let format = canvas.pixel_format();
+        let (x0, x1) = (area.x0.max(clip.x0), area.x1.min(clip.x1));
         for y in area.y0.max(clip.y0)..=area.y1.min(clip.y1) {
-            for x in area.x0.max(clip.x0)..=area.x1.min(clip.x1) {
+            canvas.mix_row_span(y, x0, x1, |x, dst| {
+                let x = x as i32;
                 if whole.contains(x, y) {
-                    continue;
+                    return None;
                 }
                 let open = 255 - u32::from(pane.coverage(x, y));
                 let dark = u32::from(self.shadow(spread, x, y)) * open / 255;
-                put_pixel_coverage(canvas, x, y, color, dark as u8);
-            }
+                cover_encoded(format, dst, color, dark as u8)
+            });
         }
     }
 }
@@ -478,7 +559,7 @@ mod tests {
 
     #[test]
     fn a_stroke_is_the_shape_less_the_one_inside_it() {
-        for (r, width) in [(9, 1), (6, 2), (0, 1), (2, 3)] {
+        for (r, width) in [(9, 1), (6, 2), (0, 1), (2, 3), (15, 1), (15, 4), (3, 20)] {
             let mut bytes = [0u8; 64 * 64 * 4];
             let shape = Rounded::new(5, 7, 41, 30, r);
             let inner = Rounded::new(
@@ -516,6 +597,106 @@ mod tests {
         assert_eq!(pixel(&bytes, 64, 30, 30).red(), 0);
         assert_eq!(pixel(&bytes, 64, 30, 15).red(), shape.shadow(8, 30, 15));
         assert_eq!(pixel(&bytes, 64, 30, 63).red(), 0);
+    }
+
+    #[test]
+    fn a_drawn_shadow_is_its_darkness_at_every_pixel_outside_what_covers_it() {
+        for (shape, spread) in [
+            (Rounded::new(16, 14, 30, 24, 6), 8),
+            (Rounded::new(20, 20, 9, 21, 9), 12),
+            (Rounded::new(12, 18, 40, 10, 0), 5),
+            (Rounded::new(24, 24, 3, 3, 8), 10),
+        ] {
+            let mut bytes = [0u8; 64 * 64 * 4];
+            let under = shape.bands()[1];
+            canvas(&mut bytes, 64, |b| {
+                shape.draw_shadow(b, spread, &WHOLE, &under, Color32::WHITE)
+            });
+            for y in 0..64 {
+                for x in 0..64 {
+                    let want = match under.contains(x, y) {
+                        true => 0,
+                        false => shape.shadow(spread, x, y),
+                    };
+                    let red = pixel(&bytes, 64, x as usize, y as usize).red();
+                    assert_eq!(red, want, "{shape:?} ({x}, {y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_of_shadow_runs_covers_its_columns_once_and_tells_no_lie() {
+        let shape = Rounded::new(10, 10, 31, 20, 7);
+        for y in 0..40 {
+            for (x0, x1) in [(0, 60), (12, 14), (20, 30), (38, 59), (5, 5)] {
+                let mut next = x0;
+                shape.shadow_runs(9, y, x0, x1, |first, last, dark| {
+                    assert_eq!(first, next, "row {y}");
+                    assert!(first <= last);
+                    if let Some(dark) = dark {
+                        for x in first..=last {
+                            assert_eq!(shape.shadow(9, x, y), dark, "({x}, {y})");
+                        }
+                    }
+                    next = last + 1;
+                });
+                assert_eq!(next, x1 + 1, "row {y}");
+            }
+        }
+    }
+
+    /// A write-only surface: every pixel reads as 0, and writes are counted.
+    struct WriteOnly {
+        written: [bool; 64 * 64],
+    }
+
+    impl Canvas for WriteOnly {
+        fn width(&self) -> u32 {
+            64
+        }
+        fn height(&self) -> u32 {
+            64
+        }
+        fn pitch_bytes(&self) -> usize {
+            64 * 4
+        }
+        fn bytes_per_pixel(&self) -> u8 {
+            4
+        }
+        fn pixel_format(&self) -> slopos_abi::pixel::PixelFormat {
+            slopos_abi::pixel::PixelFormat::Argb8888
+        }
+        fn write_encoded_at(&mut self, byte_offset: usize, _: slopos_abi::draw::EncodedPixel) {
+            self.written[byte_offset / 4] = true;
+        }
+    }
+
+    #[test]
+    fn a_shape_writes_only_the_pixels_it_covers_where_none_can_be_read() {
+        let shape = Rounded::new(10, 12, 30, 20, 8);
+        let mut canvas = WriteOnly {
+            written: [false; 64 * 64],
+        };
+        shape.draw(&mut canvas, &WHOLE, Color32::WHITE);
+        shape.stroke(&mut canvas, 2, &WHOLE, Color32::WHITE);
+        for y in 0..64 {
+            for x in 0..64 {
+                let written = canvas.written[(y * 64 + x) as usize];
+                assert_eq!(written, shape.coverage(x, y) > 0, "({x}, {y})");
+            }
+        }
+        let mut canvas = WriteOnly {
+            written: [false; 64 * 64],
+        };
+        shape.draw_shadow(&mut canvas, 6, &WHOLE, &shape.bands()[1], Color32::WHITE);
+        for y in 0..64 {
+            for x in 0..64 {
+                let shaded = shape.shadow(6, x, y) > 0 && !shape.bands()[1].contains(x, y);
+                let written = canvas.written[(y * 64 + x) as usize];
+                assert_eq!(written, shaded, "({x}, {y})");
+            }
+        }
     }
 
     #[test]

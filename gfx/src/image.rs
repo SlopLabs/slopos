@@ -136,7 +136,6 @@ pub fn draw_image_clipped<T: Canvas>(
         scale_blit(target, bitmap, &dst, &clipped, sampling);
     }
 
-    target.report_damage(clipped);
     Some(clipped)
 }
 
