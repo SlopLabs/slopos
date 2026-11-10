@@ -1,7 +1,7 @@
 //! What each of the compositor's own surfaces draws: an appkit tree, which
 //! takes the pointer while the surface's model takes the keys.
 
-use slopos_appkit::embed::Embedded;
+use slopos_appkit::embed::{Embedded, Moved};
 use slopos_appkit::traits::Role;
 use slopos_appkit::{Node, Rect, Size};
 use slopos_chrome_core::key::Taken;
@@ -11,7 +11,8 @@ use crate::gfx::{DamageRect, DrawBuffer};
 pub struct Overlay {
     tree: Option<Embedded>,
     stale: bool,
-    dirty: bool,
+    /// What the next frame repaints of it.
+    dirty: Moved,
     painted: Option<Rect>,
     /// Where the primary button is held down on the tree, which a rebuild
     /// presses again so a relayout mid-click keeps the click.
@@ -25,7 +26,7 @@ impl Overlay {
         Overlay {
             tree: None,
             stale: false,
-            dirty: false,
+            dirty: Moved::Nothing,
             painted: None,
             held: None,
             taken: Taken::default(),
@@ -43,7 +44,7 @@ impl Overlay {
 
     pub fn changed(&mut self) {
         self.stale = true;
-        self.dirty = true;
+        self.dirty = Moved::Anything;
     }
 
     /// `node` laid out in `rect`, each scroll view kept where it was, lit
@@ -87,14 +88,14 @@ impl Overlay {
             }
         }
         self.stale = false;
-        self.dirty = true;
+        self.dirty = Moved::Anything;
     }
 
     pub fn hide(&mut self) {
         self.stale = false;
         self.held = None;
         if self.tree.take().is_some() {
-            self.dirty = true;
+            self.dirty = Moved::Anything;
         }
     }
 
@@ -102,14 +103,15 @@ impl Overlay {
         let Some(tree) = self.tree.as_mut() else {
             return Vec::new();
         };
-        self.dirty = true;
+        self.dirty = Moved::Anything;
         self.held = pressed.then_some((x, y));
         tree.click(x, y, pressed)
     }
 
     pub fn hover(&mut self, x: i32, y: i32) {
         if let Some(tree) = self.tree.as_mut() {
-            self.dirty |= tree.hover(x, y);
+            let dirty = std::mem::replace(&mut self.dirty, Moved::Nothing);
+            self.dirty = dirty.and(tree.hover(x, y));
         }
     }
 
@@ -117,7 +119,7 @@ impl Overlay {
         let Some(tree) = self.tree.as_mut() else {
             return Vec::new();
         };
-        self.dirty = true;
+        self.dirty = Moved::Anything;
         tree.wheel(x, y, value_v120)
     }
 
@@ -129,18 +131,17 @@ impl Overlay {
         }
     }
 
-    /// Where it was painted and where it is now, once either changed.
+    /// Where it was painted and where it is now, once either changed, or
+    /// what the pointer's light moving changed of it where it stayed.
     pub fn take_damage(&mut self) -> impl Iterator<Item = DamageRect> + use<> {
         let now = self.rect();
-        let damage = match std::mem::take(&mut self.dirty) {
-            true => [self.painted, now],
-            false => [None, None],
+        let damage: Vec<Rect> = match std::mem::replace(&mut self.dirty, Moved::Nothing) {
+            Moved::Lit(lit) if self.painted == now => lit,
+            Moved::Nothing if self.painted == now => Vec::new(),
+            _ => [self.painted, now].into_iter().flatten().collect(),
         };
         self.painted = now;
-        damage
-            .into_iter()
-            .flatten()
-            .map(|rect| rect.to_damage_rect())
+        damage.into_iter().map(|rect| rect.to_damage_rect())
     }
 
     pub fn draw(&self, buf: &mut DrawBuffer, clip: &DamageRect) {

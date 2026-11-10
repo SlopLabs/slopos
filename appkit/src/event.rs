@@ -1,3 +1,4 @@
+use super::constraints::Rect;
 use super::traits::{Widget, WidgetId};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -130,6 +131,33 @@ pub(crate) fn lit_at(widget: &dyn Widget, x: i32, y: i32) -> Option<(WidgetId, u
         .rev()
         .find(|child| child.layout_rect().contains(x, y))?;
     lit_at(child.as_ref(), x, y)
+}
+
+fn rect_of(widget: &dyn Widget, id: WidgetId) -> Option<Rect> {
+    if widget.id() == id {
+        return Some(widget.layout_rect());
+    }
+    widget
+        .children()
+        .iter()
+        .find_map(|child| rect_of(child.as_ref(), id))
+}
+
+/// The widgets that light or go dark as the pointer's light moves from `was`
+/// to `now`, each whole.
+pub(crate) fn lit_damage(
+    root: &dyn Widget,
+    was: Option<(WidgetId, usize)>,
+    now: Option<(WidgetId, usize)>,
+) -> Vec<Rect> {
+    if was == now {
+        return Vec::new();
+    }
+    let rect = |lit: Option<(WidgetId, usize)>| lit.and_then(|(id, _)| rect_of(root, id));
+    match (rect(was), rect(now)) {
+        (Some(a), Some(b)) if a == b => vec![a],
+        (a, b) => a.into_iter().chain(b).collect(),
+    }
 }
 
 /// Type-erased, so the object-safe `Widget` need not know the app's message

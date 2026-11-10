@@ -213,7 +213,7 @@ fn test_fill_spacers_share_the_room_left() {
 
 fn test_hover_moves_between_a_list_s_rows() {
     use super::components::{List, ListRow};
-    use super::embed::Embedded;
+    use super::embed::{Embedded, Moved};
     let list = |rows: usize| -> crate::Node<usize> {
         List::new(
             (0..rows)
@@ -230,9 +230,9 @@ fn test_hover_moves_between_a_list_s_rows() {
     };
     let (one, two) = (tall(1), tall(2));
     let mut tree = Embedded::new(&list(3), Rect::new(0, 0, 200, 400));
-    assert!(tree.hover(20, one / 2));
-    assert!(!tree.hover(30, one / 2 + 1));
-    assert!(tree.hover(20, two - one / 2));
+    assert_ne!(tree.hover(20, one / 2), Moved::Nothing);
+    assert_eq!(tree.hover(30, one / 2 + 1), Moved::Nothing);
+    assert_ne!(tree.hover(20, two - one / 2), Moved::Nothing);
 }
 
 fn test_focus_next() {

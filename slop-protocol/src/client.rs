@@ -133,6 +133,12 @@ impl Client {
         })
     }
 
+    /// Asks for one [`Event::FrameDone`] once a frame after the next commit
+    /// has reached the screen.
+    pub fn surface_frame(&mut self, surface: SurfaceId) -> Result<(), ProtocolError> {
+        self.conn.send(&Request::SurfaceFrame { surface })
+    }
+
     pub fn surface_commit(&mut self, surface: SurfaceId) -> Result<(), ProtocolError> {
         self.conn.send(&Request::SurfaceCommit { surface })
     }

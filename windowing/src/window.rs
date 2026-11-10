@@ -86,13 +86,21 @@ impl Window {
     }
 
     /// The next event waiting, or `None` once none is; a `BufferRelease`
-    /// frees its buffer here instead, and `pointer()` follows the motion.
+    /// frees its buffer and a `FrameDone` lets the next frame be drawn here
+    /// instead, and `pointer()` follows the motion.
     pub fn next_event(&mut self) -> Option<Event> {
         loop {
             let event = self.handle.borrow_client().poll_event().ok().flatten()?;
-            if let ProtocolEvent::BufferRelease { buffer_id, .. } = event {
-                self.renderer.release_buffer(buffer_id);
-                continue;
+            match event {
+                ProtocolEvent::BufferRelease { buffer_id, .. } => {
+                    self.renderer.release_buffer(buffer_id);
+                    continue;
+                }
+                ProtocolEvent::FrameDone { .. } => {
+                    self.renderer.frame_done();
+                    continue;
+                }
+                _ => {}
             }
             let Some(event) = Event::from_protocol(&event) else {
                 continue;

@@ -1,14 +1,13 @@
-use slopos_abi::Canvas;
 use slopos_gfx::RenderSurface;
 
 use slopos_windowing::Event;
 use slopos_windowing::Window;
 use slopos_windowing::connection;
 
-use super::constraints::Size;
+use super::constraints::{Rect, Size};
 use super::event::{
     EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerButton, WidgetEvent, control_at,
-    lit_at,
+    lit_at, lit_damage,
 };
 use super::focus::FocusManager;
 use super::input::translate_event;
@@ -43,6 +42,10 @@ pub fn run_app<A: App>(mut app: A) -> ! {
 
     let mut needs_rebuild = false;
     let mut needs_repaint = true;
+    let mut relit: Vec<Rect> = Vec::new();
+    // An event no widget took may still have changed what one shows.
+    let mut unsettled = false;
+    let mut shown_focus_visible = false;
     let mut gesture = Gesture::default();
     let action = app.on_start(AppSender::new(handle.ui_sender()));
     process_action(action, &mut needs_rebuild, &mut needs_repaint);
@@ -79,7 +82,8 @@ pub fn run_app<A: App>(mut app: A) -> ! {
             match &ev {
                 Event::PointerLeave => {
                     inside = false;
-                    needs_repaint |= tip.clear() | hovered.take().is_some();
+                    needs_repaint |= tip.clear();
+                    relight(&mut relit, root.as_ref(), hovered.take(), None);
                     continue;
                 }
                 Event::PointerEnter { .. } | Event::PointerMotion { .. } => inside = true,
@@ -161,13 +165,21 @@ pub fn run_app<A: App>(mut app: A) -> ! {
             let resp = root.event(&widget_event, &mut sink);
             if let WidgetEvent::PointerMove { .. } = widget_event {
                 let lit = lit_at(root.as_ref(), px, py);
-                needs_repaint |= lit != hovered;
+                relight(&mut relit, root.as_ref(), hovered, lit);
                 hovered = lit;
             }
 
             let blocked = resp == EventResponse::Blocked;
-            if resp.is_consumed() {
+            // A release ends a press wherever it lands, taken or not.
+            let pressed = matches!(
+                widget_event,
+                WidgetEvent::PointerDown { .. } | WidgetEvent::PointerUp { .. }
+            );
+            let moved = matches!(widget_event, WidgetEvent::PointerMove { .. });
+            if resp == EventResponse::Consumed || pressed {
                 needs_repaint = true;
+            } else if !moved {
+                unsettled = true;
             }
             key_taken |= resp.is_consumed()
                 && !blocked
@@ -277,6 +289,9 @@ pub fn run_app<A: App>(mut app: A) -> ! {
             }
             needs_rebuild = false;
             needs_repaint = true;
+            relit.clear();
+            unsettled = false;
+            hovered = None;
         }
 
         if let Some(id) = focus.focused().filter(|_| key_taken) {
@@ -289,26 +304,32 @@ pub fn run_app<A: App>(mut app: A) -> ! {
             needs_repaint = true;
         }
 
-        if needs_repaint {
+        needs_repaint |= focus.is_focus_visible() != shown_focus_visible;
+        if (needs_repaint || !relit.is_empty()) && win.renderer().ready() {
             // Again, since a rebuild or a scroll may have moved what is there.
             let (px, py) = win.pointer();
-            hovered = lit_at(root.as_ref(), px, py).filter(|_| inside);
-            if let Some(mut fb) = win.renderer_mut().frame() {
-                let fmt = fb.pixel_format();
-                fb.clear_canvas(fmt.encode(style.theme.surface));
-                let mut ctx = PaintContext::new(&mut fb, &style);
-                ctx.focus_visible = focus.is_focus_visible();
-                ctx.hovered = hovered;
-                root.paint(&mut ctx);
-                if let Some(text) = &tip.shown {
-                    super::tooltip::paint(&mut ctx, text, tip.at, window_size);
-                }
+            let lit = lit_at(root.as_ref(), px, py).filter(|_| inside);
+            relight(&mut relit, root.as_ref(), hovered, lit);
+            hovered = lit;
+            shown_focus_visible = focus.is_focus_visible();
+            let scene = Scene {
+                root: root.as_ref(),
+                style: &style,
+                focus_visible: shown_focus_visible,
+                hovered,
+                tip: tip.shown.as_deref().map(|text| (text, tip.at)),
+                window: window_size,
+            };
+            let parts = core::mem::take(&mut relit);
+            let whole = needs_repaint || core::mem::take(&mut unsettled);
+            if whole || !scene.present_parts(win.renderer_mut(), &parts) {
+                scene.present_whole(win.renderer_mut());
             }
-            win.renderer_mut().present();
             needs_repaint = false;
         }
 
-        let timeout_ms: i64 = if needs_repaint || needs_rebuild {
+        let owed = needs_repaint || !relit.is_empty();
+        let timeout_ms: i64 = if needs_rebuild {
             0
         } else if taken == EVENTS_PER_PASS {
             // The connection may hold decoded events already, which a wait
@@ -325,8 +346,9 @@ pub fn run_app<A: App>(mut app: A) -> ! {
         } else {
             -1
         };
+        let frame_wait = owed.then(|| win.renderer().wait_ms());
         let now = slopos_windowing::get_time_ms();
-        let timeout_ms = [gesture.wait_ms(now), tip.wait_ms(now)]
+        let timeout_ms = [gesture.wait_ms(now), tip.wait_ms(now), frame_wait]
             .into_iter()
             .flatten()
             .fold(timeout_ms, |t, wait| {
@@ -337,6 +359,78 @@ pub fn run_app<A: App>(mut app: A) -> ! {
                 }
             });
         handle.wait_events(timeout_ms);
+    }
+}
+
+struct Scene<'a> {
+    root: &'a dyn Widget,
+    style: &'a StyleSheet,
+    focus_visible: bool,
+    hovered: Option<(WidgetId, usize)>,
+    tip: Option<(&'a str, (i32, i32))>,
+    window: Size,
+}
+
+impl Scene<'_> {
+    fn paint(&self, fb: &mut slopos_gfx::DrawBuffer<'_>, clip: Rect) {
+        slopos_gfx::canvas_ops::fill_rect(
+            fb,
+            clip.x,
+            clip.y,
+            clip.width,
+            clip.height,
+            self.style.theme.surface,
+        );
+        let mut ctx = PaintContext::new(fb, self.style);
+        ctx.focus_visible = self.focus_visible;
+        ctx.hovered = self.hovered;
+        ctx.with_clip(clip, |ctx| {
+            self.root.paint(ctx);
+            if let Some((text, at)) = self.tip {
+                super::tooltip::paint(ctx, text, at, self.window);
+            }
+        });
+    }
+
+    fn present_whole(&self, surface: &mut slopos_windowing::SoftSurface) {
+        let whole = Rect::new(0, 0, self.window.width, self.window.height);
+        if let Some(mut fb) = surface.frame() {
+            self.paint(&mut fb, whole);
+        }
+        surface.present_changed();
+    }
+
+    /// `false` when the surface holds no frame to draw over, and nothing was
+    /// drawn.
+    fn present_parts(&self, surface: &mut slopos_windowing::SoftSurface, parts: &[Rect]) -> bool {
+        let whole = Rect::new(0, 0, self.window.width, self.window.height);
+        let parts: Vec<Rect> = parts.iter().filter_map(|p| p.intersect(&whole)).collect();
+        let bounds = parts
+            .iter()
+            .map(Rect::to_damage_rect)
+            .reduce(|a, b| a.union(&b));
+        let Some(bounds) = bounds else {
+            return true;
+        };
+        match surface.frame_over_shown() {
+            Some(mut fb) => parts.iter().for_each(|part| self.paint(&mut fb, *part)),
+            None => return false,
+        }
+        surface.present_changed_within(bounds);
+        true
+    }
+}
+
+fn relight(
+    relit: &mut Vec<Rect>,
+    root: &dyn Widget,
+    was: Option<(WidgetId, usize)>,
+    now: Option<(WidgetId, usize)>,
+) {
+    for rect in lit_damage(root, was, now) {
+        if !relit.contains(&rect) {
+            relit.push(rect);
+        }
     }
 }
 

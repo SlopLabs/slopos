@@ -4,12 +4,35 @@
 use slopos_gfx::DrawBuffer;
 
 use crate::constraints::{BoxConstraints, Rect, Size};
-use crate::event::{EventResponse, MessageSink, PointerButton, WidgetEvent, lit_at};
+use crate::event::{EventResponse, MessageSink, PointerButton, WidgetEvent, lit_at, lit_damage};
 use crate::node::Node;
 use crate::paint::PaintContext;
 use crate::style::StyleSheet;
 use crate::traits::{MeasureCtx, Role, Widget, WidgetId, measure_widget, place_widget};
 use crate::tree;
+
+/// What a move of the pointer changed of what a tree draws.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Moved {
+    Nothing,
+    /// The pointer's light alone, within these rects.
+    Lit(Vec<Rect>),
+    /// A widget took the move, as one dragged does.
+    Anything,
+}
+
+impl Moved {
+    pub fn and(self, more: Moved) -> Moved {
+        match (self, more) {
+            (Moved::Anything, _) | (_, Moved::Anything) => Moved::Anything,
+            (Moved::Nothing, other) | (other, Moved::Nothing) => other,
+            (Moved::Lit(mut rects), Moved::Lit(more)) => {
+                rects.extend(more);
+                Moved::Lit(rects)
+            }
+        }
+    }
+}
 
 pub struct Embedded {
     root: Box<dyn Widget>,
@@ -150,10 +173,9 @@ impl Embedded {
         sink.drain_typed::<M>()
     }
 
-    /// The pointer moved to `(x, y)`, which drags what a press holds:
-    /// whether that, or the part lit, changed what is drawn. What a move
-    /// sends is dropped, so a slider here does not drag.
-    pub fn hover(&mut self, x: i32, y: i32) -> bool {
+    /// The pointer moved to `(x, y)`: what that changed of what is drawn.
+    /// What a move sends is dropped, so a slider here does not drag.
+    pub fn hover(&mut self, x: i32, y: i32) -> Moved {
         self.pointer = (x, y);
         let before = self.hovered;
         let mut sink = MessageSink::new();
@@ -161,7 +183,13 @@ impl Embedded {
             .root
             .event(&WidgetEvent::PointerMove { x, y }, &mut sink);
         self.hovered = self.lit();
-        moved == EventResponse::Consumed || self.hovered != before
+        if moved == EventResponse::Consumed {
+            return Moved::Anything;
+        }
+        match lit_damage(self.root.as_ref(), before, self.hovered) {
+            lit if lit.is_empty() => Moved::Nothing,
+            lit => Moved::Lit(lit),
+        }
     }
 
     /// Paints what lies in `clip` into `buffer`, which holds the whole of the

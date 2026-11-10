@@ -413,6 +413,9 @@ async fn event_loop(
             continue;
         }
         let blink_ms = (BLINK_INTERVAL - elapsed).as_millis().max(1) as u64;
+        // What is owed is drawn once the surface can take a frame.
+        let owed_ms = (!pending.is_empty()).then(|| win.renderer().wait_ms());
+        let blink_ms = owed_ms.map_or(blink_ms, |ms| blink_ms.min(ms.max(1)));
         let comp = slopfut::poll_add(compositor_fd, POLLIN);
         let master_mask = if pending_writes.is_empty() {
             POLLIN
@@ -434,10 +437,15 @@ fn render_full(
     history: &mut DamageHistory,
     pending: &mut CellDamage,
 ) {
-    render::render_full(win, grid, selection, cursor_on);
-    pending.clear();
     // No recorded frame describes what the other slots hold.
     history.clear();
+    if !win.renderer().ready() {
+        // Owed whole until the compositor frees a buffer to draw it into.
+        pending.add_all(grid.cols);
+        return;
+    }
+    render::render_full(win, grid, selection, cursor_on);
+    pending.clear();
     let mut all = CellDamage::new();
     all.set_rows(grid.rows as usize);
     all.add_all(grid.cols);
@@ -452,7 +460,7 @@ fn present_pending(
     history: &mut DamageHistory,
     pending: &mut CellDamage,
 ) {
-    if pending.is_empty() {
+    if pending.is_empty() || !win.renderer().ready() {
         return;
     }
     match history.resolve(win.renderer().buffer_age(), pending) {

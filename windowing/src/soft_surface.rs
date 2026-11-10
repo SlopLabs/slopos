@@ -1,7 +1,17 @@
 //! A window drawn on the CPU into two shared-memory buffers; a consumer that
-//! polls the socket itself hands `BufferRelease` to [`SoftSurface::release_buffer`].
+//! polls the socket itself hands `BufferRelease` to
+//! [`SoftSurface::release_buffer`] and `FrameDone` to
+//! [`SoftSurface::frame_done`].
+//!
+//! The compositor reads the buffer it was last committed, and the one before
+//! it until it says otherwise, so a frame is drawn only into a buffer it has
+//! released: [`SoftSurface::ready`] says whether one is free, and
+//! [`RenderSurface::frame`] hands none out while none is.
 
+use slopos_abi::damage::DamageRect;
 use slopos_abi::pixel::PixelFormat;
+use slopos_gfx::damage::{Geometry, Rects};
+use slopos_gfx::swap::{BUFFERS, Swap};
 use slopos_gfx::{DrawBuffer, RenderError, RenderSurface};
 use slopos_protocol::types::SurfaceId;
 
@@ -9,21 +19,24 @@ use crate::connection::ProtocolHandle;
 use crate::surface::SurfaceError;
 use slopos_cabi::SharedMemory;
 
-const NUM_BUFFERS: usize = 2;
+/// How long a frame waits for the compositor to say the last one reached
+/// the screen: one that shows nothing of this surface says nothing, and the
+/// surface must not stop drawing for good.
+const FRAME_DONE_WAIT_MS: u64 = 100;
 
-const AGE_UNDEFINED: u32 = u32::MAX;
+/// How long the compositor may keep the buffer it showed before a commit
+/// without releasing it: past that the release is taken for lost, since a
+/// surface waiting for it would never draw again. Long, because a
+/// compositor that only stalled this long still reads that buffer.
+const RELEASE_WAIT_MS: u64 = 5000;
 
 pub struct SoftSurface {
     handle: ProtocolHandle,
-    bufs: [SharedMemory; NUM_BUFFERS],
-    /// Whether the compositor has been sent this slot's fd yet.
-    registered: [bool; NUM_BUFFERS],
-    /// Whether this slot is committed and awaiting a `BufferRelease`.
-    busy: [bool; NUM_BUFFERS],
-    /// Frames since each slot last held a presented frame; saturates at `AGE_UNDEFINED`.
-    age: [u32; NUM_BUFFERS],
-    /// The slot `frame()` last handed out and `present()` commits.
-    current: usize,
+    bufs: [SharedMemory; BUFFERS],
+    swap: Swap,
+    /// When the frame last committed stops holding the next one back.
+    paced_until_ms: Option<u64>,
+    committed_at_ms: u64,
     surface_id: SurfaceId,
     width: u32,
     height: u32,
@@ -41,30 +54,17 @@ impl SoftSurface {
         width: u32,
         height: u32,
     ) -> Result<Self, SurfaceError> {
-        if width == 0 || height == 0 {
-            return Err(SurfaceError::BadSize);
-        }
-
         let bytes_pp = pixel_format.bytes_per_pixel();
-        let pitch = (width as usize)
-            .checked_mul(bytes_pp as usize)
-            .ok_or(SurfaceError::BadSize)?;
-        let buffer_size = pitch
-            .checked_mul(height as usize)
-            .ok_or(SurfaceError::BadSize)?;
-
-        let bufs = [
-            SharedMemory::create(buffer_size).map_err(|_| SurfaceError::ShmFailed)?,
-            SharedMemory::create(buffer_size).map_err(|_| SurfaceError::ShmFailed)?,
-        ];
-
+        let (bufs, pitch) = buffers(width, height, bytes_pp).map_err(|why| match why {
+            RenderError::BadSize => SurfaceError::BadSize,
+            RenderError::BufferUnavailable => SurfaceError::ShmFailed,
+        })?;
         Ok(Self {
             handle,
             bufs,
-            registered: [false; NUM_BUFFERS],
-            busy: [false; NUM_BUFFERS],
-            age: [AGE_UNDEFINED; NUM_BUFFERS],
-            current: 0,
+            swap: Swap::new(),
+            paced_until_ms: None,
+            committed_at_ms: 0,
             surface_id,
             width,
             height,
@@ -77,75 +77,59 @@ impl SoftSurface {
     /// Age of the buffer the next [`frame()`](RenderSurface::frame) will hand out,
     /// per the `EGL_EXT_buffer_age` convention: `n > 0` means it still holds the
     /// frame presented `n` frames ago; `0` means undefined contents, repaint in full.
-    ///
-    /// `frame()` picks the same slot this reads, by the same rule.
     pub fn buffer_age(&self) -> u32 {
-        let age = self.age[self.pick_slot()];
-        if age == AGE_UNDEFINED { 0 } else { age }
+        self.swap.age()
     }
 
     pub fn release_buffer(&mut self, buffer_id: u32) {
-        if let Some(b) = self.busy.get_mut(buffer_id as usize) {
-            *b = false;
+        self.swap.release(buffer_id as usize);
+    }
+
+    /// The frame last committed reached the screen.
+    pub fn frame_done(&mut self) {
+        self.paced_until_ms = None;
+    }
+
+    /// Whether a frame can be drawn now: a buffer is free, and the frame
+    /// last committed has reached the screen or has had its time to.
+    pub fn ready(&self) -> bool {
+        self.wait_ms() == 0
+    }
+
+    /// How long until a frame can be drawn, should no event come first: a
+    /// `FrameDone` or a `BufferRelease` ends the wait early.
+    pub fn wait_ms(&self) -> u64 {
+        let now = crate::get_time_ms();
+        let paced = self
+            .paced_until_ms
+            .map_or(0, |until| until.saturating_sub(now));
+        match self.swap.free() {
+            Some(_) => paced,
+            None => (self.committed_at_ms + RELEASE_WAIT_MS)
+                .saturating_sub(now)
+                .max(paced),
         }
     }
 
-    /// A free buffer, else the current one.
-    fn pick_slot(&self) -> usize {
-        let other = 1 - self.current;
-        if !self.busy[other] {
-            other
-        } else if !self.busy[self.current] {
-            self.current
-        } else {
-            self.current
+    /// Takes a buffer whose release is overdue for free.
+    fn reclaim_overdue(&mut self) {
+        if self.swap.free().is_none() && self.wait_ms() == 0 {
+            self.swap.reclaim();
         }
     }
 
-    /// A buffer's fd is sent only on first use; later frames re-select the slot by
-    /// id, so the compositor keeps a stable mapping per slot.
-    fn attach_and_commit(&mut self, x: i32, y: i32, w: i32, h: i32) {
-        let slot = self.current;
-        let first_use = !self.registered[slot];
-        {
-            let mut client = self.handle.borrow_client();
-            if first_use {
-                let _ = client.surface_attach_buffer(
-                    self.surface_id,
-                    slot as u32,
-                    self.bufs[slot].fd(),
-                    self.width,
-                    self.height,
-                );
-            } else {
-                let _ = client.surface_select_buffer(
-                    self.surface_id,
-                    slot as u32,
-                    self.width,
-                    self.height,
-                );
-            }
-            let _ = client.surface_damage(self.surface_id, x, y, w, h);
-            let _ = client.surface_commit(self.surface_id);
-        }
-        self.registered[slot] = true;
-        self.busy[slot] = true;
-
-        for (i, age) in self.age.iter_mut().enumerate() {
-            if i == slot {
-                *age = 1;
-            } else {
-                *age = age.saturating_add(1);
-            }
+    fn geometry(&self) -> Geometry {
+        Geometry {
+            width: self.width,
+            height: self.height,
+            pitch: self.pitch,
+            bytes_pp: self.bytes_pp,
         }
     }
-}
 
-impl RenderSurface for SoftSurface {
-    fn frame(&mut self) -> Option<DrawBuffer<'_>> {
-        self.current = self.pick_slot();
+    fn draw_buffer(&mut self, slot: usize) -> Option<DrawBuffer<'_>> {
         let mut buf = DrawBuffer::new(
-            self.bufs[self.current].as_mut_slice(),
+            self.bufs[slot].as_mut_slice(),
             self.width,
             self.height,
             self.pitch,
@@ -155,44 +139,161 @@ impl RenderSurface for SoftSurface {
         Some(buf)
     }
 
+    /// The next frame's buffer holding the frame the compositor shows, so a
+    /// caller repaints only what changed and presents those rects; `None`
+    /// when no frame can be drawn or what the buffer holds is unknown, which
+    /// a whole frame through [`frame`](RenderSurface::frame) mends.
+    pub fn frame_over_shown(&mut self) -> Option<DrawBuffer<'_>> {
+        self.reclaim_overdue();
+        let over = self.swap.begin_over_shown()?;
+        let [first, second] = &mut self.bufs;
+        let (to, from) = match over.slot {
+            0 => (first.as_mut_slice(), second.as_slice()),
+            _ => (second.as_mut_slice(), first.as_slice()),
+        };
+        let bytes_pp = self.bytes_pp as usize;
+        for rect in over.stale.as_slice() {
+            let rect = rect.clip(self.width as i32, self.height as i32);
+            if !rect.is_valid() {
+                continue;
+            }
+            let (x0, len) = (
+                rect.x0 as usize * bytes_pp,
+                (rect.x1 - rect.x0 + 1) as usize * bytes_pp,
+            );
+            for y in rect.y0 as usize..=rect.y1 as usize {
+                let at = y * self.pitch + x0;
+                if let (Some(to), Some(from)) = (to.get_mut(at..at + len), from.get(at..at + len)) {
+                    to.copy_from_slice(from);
+                }
+            }
+        }
+        self.draw_buffer(over.slot)
+    }
+
+    /// Commits the frame drawn where it differs from the one the compositor
+    /// shows, and answers whether it differed at all: one that does not is
+    /// dropped, and nothing is sent.
+    pub fn present_changed(&mut self) -> bool {
+        self.present_changed_within(self.geometry().whole())
+    }
+
+    /// [`present_changed`](Self::present_changed) of a frame that can differ
+    /// from the one shown only within `bounds`.
+    pub fn present_changed_within(&mut self, bounds: DamageRect) -> bool {
+        let Some(slot) = self.swap.drawing() else {
+            return false;
+        };
+        let Some(shown) = self.swap.shown() else {
+            self.present();
+            return true;
+        };
+        let changed = slopos_gfx::damage::changed_within(
+            self.bufs[slot].as_slice(),
+            self.bufs[shown].as_slice(),
+            self.geometry(),
+            bounds,
+        );
+        if changed.is_empty() {
+            self.swap.drop_unchanged();
+            return false;
+        }
+        self.commit(changed.as_slice());
+        true
+    }
+
+    /// Commits the frame drawn, damaged in `rects`; one of none damages it
+    /// whole.
+    pub fn present_rects(&mut self, rects: &[DamageRect]) {
+        match rects.iter().any(DamageRect::is_valid) {
+            true => self.commit(Rects::of(rects).as_slice()),
+            false => self.commit(&[self.geometry().whole()]),
+        }
+    }
+
+    /// A buffer's fd is sent only on first use; later frames re-select the slot by
+    /// id, so the compositor keeps a stable mapping per slot.
+    fn commit(&mut self, damage: &[DamageRect]) {
+        let Some(committed) = self.swap.commit(damage) else {
+            return;
+        };
+        let slot = committed.slot as u32;
+        let mut client = self.handle.borrow_client();
+        let _ = match committed.first_use {
+            true => client.surface_attach_buffer(
+                self.surface_id,
+                slot,
+                self.bufs[committed.slot].fd(),
+                self.width,
+                self.height,
+            ),
+            false => client.surface_select_buffer(self.surface_id, slot, self.width, self.height),
+        };
+        for rect in damage.iter().filter(|rect| rect.is_valid()) {
+            let (w, h) = (rect.x1 - rect.x0 + 1, rect.y1 - rect.y0 + 1);
+            let _ = client.surface_damage(self.surface_id, rect.x0, rect.y0, w, h);
+        }
+        let _ = client.surface_frame(self.surface_id);
+        let _ = client.surface_commit(self.surface_id);
+        self.committed_at_ms = crate::get_time_ms();
+        self.paced_until_ms = Some(self.committed_at_ms + FRAME_DONE_WAIT_MS);
+    }
+}
+
+fn buffers(
+    width: u32,
+    height: u32,
+    bytes_pp: u8,
+) -> Result<([SharedMemory; BUFFERS], usize), RenderError> {
+    if width == 0 || height == 0 {
+        return Err(RenderError::BadSize);
+    }
+    let pitch = (width as usize)
+        .checked_mul(bytes_pp as usize)
+        .ok_or(RenderError::BadSize)?;
+    let size = pitch
+        .checked_mul(height as usize)
+        .ok_or(RenderError::BadSize)?;
+    let buffer = || SharedMemory::create(size).map_err(|_| RenderError::BufferUnavailable);
+    Ok(([buffer()?, buffer()?], pitch))
+}
+
+impl RenderSurface for SoftSurface {
+    /// `None` while no buffer is free; what one holds is as old as
+    /// [`buffer_age`](SoftSurface::buffer_age) says.
+    fn frame(&mut self) -> Option<DrawBuffer<'_>> {
+        self.reclaim_overdue();
+        let slot = self.swap.begin()?;
+        self.draw_buffer(slot)
+    }
+
     fn present(&mut self) {
-        self.attach_and_commit(0, 0, self.width as i32, self.height as i32);
+        self.present_rects(&[]);
     }
 
     fn present_region(&mut self, x: i32, y: i32, w: i32, h: i32) {
-        self.attach_and_commit(x, y, w, h);
+        self.present_rects(&[DamageRect {
+            x0: x,
+            y0: y,
+            x1: x + w - 1,
+            y1: y + h - 1,
+        }]);
     }
 
     fn resize(&mut self, new_width: u32, new_height: u32) -> Result<(), RenderError> {
-        if new_width == 0 || new_height == 0 {
-            return Err(RenderError::BadSize);
-        }
-        if new_width == self.width && new_height == self.height {
+        if (new_width, new_height) == (self.width, self.height) {
             return Ok(());
         }
-
-        let new_pitch = (new_width as usize)
-            .checked_mul(self.bytes_pp as usize)
-            .ok_or(RenderError::BadSize)?;
-        let buffer_size = new_pitch
-            .checked_mul(new_height as usize)
-            .ok_or(RenderError::BadSize)?;
-
-        let bufs = [
-            SharedMemory::create(buffer_size).map_err(|_| RenderError::BufferUnavailable)?,
-            SharedMemory::create(buffer_size).map_err(|_| RenderError::BufferUnavailable)?,
-        ];
+        let (bufs, pitch) = buffers(new_width, new_height, self.bytes_pp)?;
 
         // New fds must be re-registered; the compositor evicts the old slot
         // mappings when the new fds become current.
         self.bufs = bufs;
-        self.registered = [false; NUM_BUFFERS];
-        self.busy = [false; NUM_BUFFERS];
-        self.age = [AGE_UNDEFINED; NUM_BUFFERS];
-        self.current = 0;
+        self.swap.replace_buffers();
+        self.paced_until_ms = None;
         self.width = new_width;
         self.height = new_height;
-        self.pitch = new_pitch;
+        self.pitch = pitch;
         Ok(())
     }
 

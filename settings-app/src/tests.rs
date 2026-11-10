@@ -1,6 +1,6 @@
 use std::sync::Once;
 
-use slopos_appkit::embed::Embedded;
+use slopos_appkit::embed::{Embedded, Moved};
 use slopos_appkit::{
     Key, KeyboardMap, LineEditInput, Modifiers, NamedKey, Node, Rect, Role, Size, Widget,
 };
@@ -1286,6 +1286,76 @@ fn a_password_typed_is_never_shown_by_debug() {
     let mut input = Input::new();
     input.line("hunter2");
     assert_eq!(format!("{input:?}"), "<8 bytes>");
+}
+
+/// `tree` whole, or what of it lies in `part`, over the window's surface, as
+/// a window paints a frame.
+fn paint_over_surface(tree: &Embedded, pixels: &mut [u8], window: Rect, part: Rect) {
+    let (w, h) = (window.width as u32, window.height as u32);
+    let mut buffer = slopos_gfx::DrawBuffer::new(pixels, w, h, (w * 4) as usize, 4).unwrap();
+    let surface = slopos_theme_core::current().surface;
+    slopos_gfx::canvas_ops::fill_rect(
+        &mut buffer,
+        part.x,
+        part.y,
+        part.width,
+        part.height,
+        surface,
+    );
+    tree.paint(&mut buffer, part);
+}
+
+/// Moves the pointer about `node` `moves` times and holds each frame
+/// repainted only where the move said it changed to the frame painted whole.
+fn light_repaints_what_it_says<M: Clone + 'static>(name: &str, node: &Node<M>, moves: usize) {
+    const WINDOW: Rect = Rect::new(0, 0, 700, 500);
+    let mut tree = Embedded::new(node, WINDOW);
+    let mut shown = vec![0u8; (WINDOW.width * WINDOW.height * 4) as usize];
+    let mut whole = shown.clone();
+    paint_over_surface(&tree, &mut shown, WINDOW, WINDOW);
+    let mut seed = 0x1234_5678u32 ^ name.len() as u32;
+    let mut below = |limit: i32| {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        (seed % limit as u32) as i32
+    };
+    for step in 0..=moves {
+        // Off the tree last, which puts every light out.
+        let (x, y) = match step == moves {
+            true => (-1, -1),
+            false => (below(WINDOW.width), below(WINDOW.height)),
+        };
+        match tree.hover(x, y) {
+            Moved::Nothing if step < moves => continue,
+            Moved::Nothing => {}
+            Moved::Anything => paint_over_surface(&tree, &mut shown, WINDOW, WINDOW),
+            Moved::Lit(parts) => {
+                for part in parts.iter().filter_map(|part| part.intersect(&WINDOW)) {
+                    paint_over_surface(&tree, &mut shown, WINDOW, part);
+                }
+            }
+        }
+        paint_over_surface(&tree, &mut whole, WINDOW, WINDOW);
+        assert!(
+            shown == whole,
+            "{name}: the pointer at ({x}, {y}) changed pixels it did not say it repaints"
+        );
+    }
+}
+
+#[test]
+fn the_pointers_light_repaints_only_what_it_says_it_changed() {
+    use slopos_appkit::catalogue::{Catalogue, PAGES};
+    fonts();
+    // The catalogue holds every component in each of its states; a Settings
+    // state adds how its page composes them.
+    for (name, app) in states() {
+        light_repaints_what_it_says(&name, &app.view(), 12);
+    }
+    for (index, name) in PAGES.iter().enumerate() {
+        light_repaints_what_it_says(name, &Catalogue::new(index).page(index), 64);
+    }
 }
 
 /// `SETTINGS_SHOTS=<dir> cargo test -p slopos-settings-app shots` writes a

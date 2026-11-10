@@ -4,7 +4,7 @@ use slopos_theme_core::{Icon, TextRole, Tone};
 use crate::audit::audit_node;
 use crate::components::{Button, ButtonRow, Dialog, Disclosure, List, ListRow, Text};
 use crate::constraints::{CrossAxisAlignment, Rect};
-use crate::embed::Embedded;
+use crate::embed::{Embedded, Moved};
 use crate::node::Node;
 use crate::traits::{Kept, KeptAt, Role, Widget};
 
@@ -99,13 +99,13 @@ pub(super) fn test_hover_counts_only_between_controls() {
     let mut tree = Embedded::new(&dialog(None), SCREEN);
     let allow = named(tree.root(), "Change").expect("the allowing button");
     let cancel = named(tree.root(), "Cancel").expect("the cancelling button");
-    assert!(!tree.hover(1, 1), "the scrim is no control");
+    assert_eq!(tree.hover(1, 1), Moved::Nothing, "the scrim is no control");
     let (x, y) = centre(allow);
-    assert!(tree.hover(x, y));
-    assert!(!tree.hover(x + 1, y));
+    assert_eq!(tree.hover(x, y), Moved::Lit(vec![allow]));
+    assert_eq!(tree.hover(x + 1, y), Moved::Nothing);
     let (cx, cy) = centre(cancel);
-    assert!(tree.hover(cx, cy));
-    assert!(tree.hover(1, 1));
+    assert_eq!(tree.hover(cx, cy), Moved::Lit(vec![allow, cancel]));
+    assert_eq!(tree.hover(1, 1), Moved::Lit(vec![cancel]));
 }
 
 pub(super) fn test_hover_lights_what_a_press_reaches() {
@@ -113,9 +113,13 @@ pub(super) fn test_hover_lights_what_a_press_reaches() {
         .expanded(true)
         .into();
     let mut tree = Embedded::new(&disclosure, Rect::new(0, 0, 400, 200));
-    assert!(tree.hover(10, 10), "onto the header");
-    assert!(tree.hover(390, 10), "beside it");
-    assert!(!tree.hover(40, 40), "the content is no control");
+    assert_ne!(tree.hover(10, 10), Moved::Nothing, "onto the header");
+    assert_ne!(tree.hover(390, 10), Moved::Nothing, "beside it");
+    assert_eq!(
+        tree.hover(40, 40),
+        Moved::Nothing,
+        "the content is no control"
+    );
 
     let rows: Vec<Node<Said>> = (0..20)
         .map(|i| Text::new(format!("Line {i}")).into())
@@ -132,9 +136,13 @@ pub(super) fn test_hover_lights_what_a_press_reaches() {
         shows: None,
     };
     let mut tree = Embedded::new(&scrolled, Rect::new(0, 0, 200, 100));
-    assert!(!tree.hover(20, 5));
-    assert!(tree.hover(197, 5), "onto the thumb");
-    assert!(tree.hover(197, 95), "down the track past it");
+    assert_eq!(tree.hover(20, 5), Moved::Nothing);
+    assert_ne!(tree.hover(197, 5), Moved::Nothing, "onto the thumb");
+    assert_ne!(
+        tree.hover(197, 95),
+        Moved::Nothing,
+        "down the track past it"
+    );
 
     let list = || -> Node<Said> {
         List::new(vec![ListRow::new("One"), ListRow::new("Two")])
@@ -142,7 +150,7 @@ pub(super) fn test_hover_lights_what_a_press_reaches() {
             .into()
     };
     let mut tree = Embedded::new(&list(), Rect::new(0, 0, 200, 200));
-    assert!(tree.hover(20, 10));
+    assert_ne!(tree.hover(20, 10), Moved::Nothing);
     let covered = Node::ZStack {
         children: vec![
             list(),
@@ -155,7 +163,11 @@ pub(super) fn test_hover_lights_what_a_press_reaches() {
         ],
     };
     let mut tree = Embedded::new(&covered, Rect::new(0, 0, 200, 200));
-    assert!(!tree.hover(20, 10), "a row beneath the popup");
+    assert_eq!(
+        tree.hover(20, 10),
+        Moved::Nothing,
+        "a row beneath the popup"
+    );
 }
 
 pub(super) fn test_a_dialog_centres_over_its_anchor_where_it_fits() {
@@ -214,7 +226,11 @@ pub(super) fn test_an_embedded_thumb_drags() {
     };
     assert!(tree.click::<Said>(197, 1, true).is_empty());
     assert_eq!(down(&tree), 0);
-    assert!(tree.hover(197, 99), "the thumb follows the pointer");
+    assert_ne!(
+        tree.hover(197, 99),
+        Moved::Nothing,
+        "the thumb follows the pointer"
+    );
     let bottom = down(&tree);
     assert!(bottom > 0);
     assert!(tree.click::<Said>(197, 99, false).is_empty());
@@ -238,7 +254,7 @@ pub(super) fn test_a_slider_and_a_field_light_under_the_pointer() {
         let still = painted(&tree);
         let knob = tree.root().layout_rect();
         let at = (knob.x + knob.width * 2 / 5, knob.y + knob.height / 2);
-        assert!(tree.hover(at.0, at.1));
+        assert_ne!(tree.hover(at.0, at.1), Moved::Nothing);
         assert_ne!(painted(&tree), still);
     }
 }
