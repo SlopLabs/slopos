@@ -9,7 +9,7 @@
 
 use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::sync::Mutex;
-use slopos_ostd::{KBox, KVec, klog_warn, lock_class};
+use slopos_ostd::{KBox, KVec, klog_warn_ratelimited, lock_class};
 use slopos_verity_core::{self as verity, BLOCK, Digest, Fault, Geometry};
 
 use crate::blockdev::{BlockDevice, BlockDeviceError};
@@ -145,7 +145,8 @@ impl VerityFile {
             match fault {
                 Fault::Read(e) => e,
                 Fault::Mismatch(block) => {
-                    klog_warn!("EXT: image block {} fails its tree", block);
+                    // Any reader of the activation's files reaches this.
+                    klog_warn_ratelimited!("EXT: image block {} fails its tree", block);
                     BlockDeviceError::IntegrityFailure
                 }
                 Fault::OutOfRange => BlockDeviceError::OutOfBounds,
