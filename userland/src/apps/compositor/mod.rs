@@ -37,7 +37,7 @@ use slopos_abi::net::{
     NET_EVENT_LEN, NET_IFINDEX_NONE, NET_MON_DEFAULT, NET_Q_ADDRS, NET_Q_GLOBAL, NET_Q_IFACES,
     UserAddr, UserIface, UserNetGlobal,
 };
-use slopos_abi::syscall::POLLIN;
+use slopos_abi::syscall::{POLLERR, POLLHUP, POLLIN};
 use slopos_chrome_core::clock::WallTime;
 use slopos_chrome_core::menu::{Choice, Ending};
 use slopos_chrome_core::netstate::{
@@ -1086,7 +1086,7 @@ impl WindowManager {
         }
 
         // Every frame: the probe in `cleanup_disconnected` reads bytes the
-        // client's readiness stream will not fire for again.
+        // client's poll will not fire for.
         if let Some(ref mut proto) = wm.protocol {
             proto.process_requests();
             proto.cleanup_disconnected();
@@ -1542,15 +1542,17 @@ fn spawn_net_monitor_task(wm: std::rc::Rc<std::cell::RefCell<WindowManager>>) ->
 
     slopfut::spawn(async move {
         let mut buf = [0u8; NET_EVENT_LEN * 16];
+        // A oneshot poll each time: a multishot fires only when readiness
+        // changes, so an event landing after the last read would wake nothing.
         loop {
-            let mut stream = slopfut::poll_add_multishot(raw, POLLIN);
-            while stream.next().await.is_some() {
-                // To empty, or the stream spins; an empty read is `EAGAIN`.
-                while crate::syscall::fs::read_slice(raw, &mut buf).unwrap_or(0) > 0 {}
-                wm.borrow_mut().refresh_from_kernel();
+            let revents = slopfut::poll_add(raw, POLLIN).await;
+            if revents < 0 || revents & i32::from(POLLERR | POLLHUP) != 0 {
+                slopfut::time::sleep_ms(500).await;
+                continue;
             }
-            log!("net_monitor stream ended; re-arming");
-            slopfut::time::sleep_ms(500).await;
+            // To empty, or the poll spins; an empty read is `EAGAIN`.
+            while crate::syscall::fs::read_slice(raw, &mut buf).unwrap_or(0) > 0 {}
+            wm.borrow_mut().refresh_from_kernel();
         }
     });
     true
@@ -1665,43 +1667,28 @@ fn spawn_client_task(
         return;
     };
     slopfut::spawn(async move {
-        let mut stream = slopfut::poll_add_multishot(fd, POLLIN);
+        // A oneshot poll each time: a multishot fires only when readiness
+        // changes, and a request it missed waited for the frame's own pass.
         loop {
-            let readiness = match slopfut::select2(stream.next(), hangup.notified()).await {
-                slopfut::Either2::A(readiness) => readiness,
+            let poll = slopfut::poll_add(fd, POLLIN);
+            let revents = match slopfut::select2(poll, hangup.notified()).await {
+                slopfut::Either2::A(revents) => revents,
                 slopfut::Either2::B(()) => break,
             };
-            match readiness {
-                Some(_revents) => {
-                    let still_connected = {
-                        let mut w = wm.borrow_mut();
-                        match w.protocol {
-                            Some(ref mut proto) if owns(proto) => {
-                                let connected = proto.process_client(idx);
-                                proto.flush_client(idx);
-                                connected
-                            }
-                            _ => false,
-                        }
-                    };
-                    if !still_connected {
-                        break;
-                    }
-                }
-                None => {
-                    // The last requests may come with the hangup, which ends
-                    // the stream without a readiness of their own.
-                    let mut w = wm.borrow_mut();
-                    if let Some(ref mut proto) = w.protocol {
-                        if owns(proto) {
-                            if proto.process_client(idx) {
-                                proto.disconnect_client(idx);
-                            }
-                        }
-                    }
-                    break;
-                }
+            let gone = revents < 0 || revents & i32::from(POLLERR | POLLHUP) != 0;
+            let mut w = wm.borrow_mut();
+            let Some(proto) = w.protocol.as_mut().filter(|proto| owns(proto)) else {
+                break;
+            };
+            // The last requests may come with the hangup.
+            let connected = proto.process_client(idx);
+            if connected && gone {
+                proto.disconnect_client(idx);
             }
+            if !connected || gone {
+                break;
+            }
+            proto.flush_client(idx);
         }
     });
 }

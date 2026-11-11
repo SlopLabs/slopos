@@ -1046,8 +1046,13 @@ into two shared buffers and only into one the compositor has let go of
 (`slopos_gfx::swap::Swap`, host-tested, behind `SoftSurface::ready`): the
 compositor reads the buffer last committed, and the one before it until its
 `BufferRelease`, so a frame owed while neither is free waits for that event
-rather than being drawn over what is on screen; a release five seconds
-overdue is taken for lost. A commit also asks for `FrameDone`, and the next frame
+rather than being drawn over what is on screen. An attach names its buffer
+by slot and by a serial the client gives each pair of buffers, and the
+release echoes both, so one for a buffer a resize replaced frees nothing of
+its successor; the compositor serves each client on a oneshot poll taken
+anew after every read, since a multishot one fires only when readiness
+changes and a commit it missed waited for the frame's own pass over the
+clients. A commit also asks for `FrameDone`, and the next frame
 waits for it, 100 ms at most, so an app or the terminal draws once for each
 frame shown however fast its input or its output comes. `run_app` paints a
 whole frame and commits the rects where it differs from the one shown

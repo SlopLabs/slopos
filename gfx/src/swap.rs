@@ -3,6 +3,8 @@
 //!
 //! The reader shows the buffer last committed and may read the one before it
 //! until it releases it, so a frame is begun only in a buffer that is neither.
+//! A buffer is named by its slot and the serial of the pair it came with, so
+//! a release of one since replaced frees nothing of its successor.
 
 use slopos_abi::damage::DamageRect;
 
@@ -28,11 +30,12 @@ pub struct OverShown {
     pub stale: Rects,
 }
 
-/// A frame committed: `slot` is shown now, and `first_use` says the reader
-/// has not been handed it before.
+/// A frame committed: the buffer `slot` holds under `serial` is shown now,
+/// and `first_use` says the reader has not been handed it before.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Committed {
     pub slot: usize,
+    pub serial: u32,
     pub first_use: bool,
 }
 
@@ -42,9 +45,8 @@ pub struct Swap {
     registered: [bool; BUFFERS],
     /// Whether the reader may still read this slot.
     busy: [bool; BUFFERS],
-    /// Releases still to come for the buffers [`Swap::replace_buffers`]
-    /// replaced, which free nothing of the ones that took their slots.
-    stale_releases: [u32; BUFFERS],
+    /// Which pair of buffers the slots hold, of those they have held.
+    serial: u32,
     /// Frames since each slot last held a committed frame.
     age: [u32; BUFFERS],
     behind: [Behind; BUFFERS],
@@ -63,7 +65,7 @@ impl Swap {
         Self {
             registered: [false; BUFFERS],
             busy: [false; BUFFERS],
-            stale_releases: [0; BUFFERS],
+            serial: 0,
             age: [AGE_UNDEFINED; BUFFERS],
             behind: [Behind::Unknown; BUFFERS],
             shown: None,
@@ -74,14 +76,8 @@ impl Swap {
     /// Both slots hold new buffers the reader has not seen, as after a
     /// resize; it may still release the ones they replace.
     pub fn replace_buffers(&mut self) {
-        let mut stale_releases = self.stale_releases;
-        for (slot, stale) in stale_releases.iter_mut().enumerate() {
-            if self.busy[slot] && self.shown != Some(slot) {
-                *stale += 1;
-            }
-        }
         *self = Self {
-            stale_releases,
+            serial: self.serial.wrapping_add(1),
             ..Self::new()
         };
     }
@@ -109,22 +105,12 @@ impl Swap {
         }
     }
 
-    /// Takes back the buffer the reader was shown before this one though it
-    /// never said it let it go, as a release lost would leave it for good.
-    pub fn reclaim(&mut self) {
-        for slot in 0..BUFFERS {
-            if self.shown != Some(slot) {
-                self.busy[slot] = false;
-            }
-        }
-    }
-
-    /// The reader let `slot` go.
-    pub fn release(&mut self, slot: usize) {
-        match self.stale_releases.get_mut(slot) {
-            Some(0) => self.busy[slot] = false,
-            Some(stale) => *stale -= 1,
-            None => {}
+    /// The reader let go of the buffer `slot` held under `serial`.
+    pub fn release(&mut self, slot: usize, serial: u32) {
+        if serial == self.serial
+            && let Some(busy) = self.busy.get_mut(slot)
+        {
+            *busy = false;
         }
     }
 
@@ -176,7 +162,11 @@ impl Swap {
                 false => age.saturating_add(1),
             };
         }
-        Some(Committed { slot, first_use })
+        Some(Committed {
+            slot,
+            serial: self.serial,
+            first_use,
+        })
     }
 }
 
@@ -201,6 +191,10 @@ mod tests {
         swap.commit(damage).expect("a frame begun")
     }
 
+    fn release(swap: &mut Swap, buffer: Committed) {
+        swap.release(buffer.slot, buffer.serial);
+    }
+
     #[test]
     fn the_first_frames_take_each_buffer_once_and_hand_it_over() {
         let mut swap = Swap::new();
@@ -210,7 +204,7 @@ mod tests {
         let second = frame(&mut swap, &[WHOLE]);
         assert!(second.first_use);
         assert_ne!(first.slot, second.slot);
-        swap.release(first.slot);
+        release(&mut swap, first);
         assert!(!frame(&mut swap, &[WHOLE]).first_use);
     }
 
@@ -224,7 +218,7 @@ mod tests {
         assert_eq!(swap.begin(), None);
         assert_eq!(swap.begin_over_shown(), None);
         assert_eq!(swap.age(), 0);
-        swap.release(first.slot);
+        release(&mut swap, first);
         assert_eq!(swap.free(), Some(first.slot));
         assert_eq!(swap.shown(), Some(second.slot));
     }
@@ -233,10 +227,10 @@ mod tests {
     fn the_buffer_shown_is_never_drawn_into_even_released() {
         let mut swap = Swap::new();
         let first = frame(&mut swap, &[WHOLE]);
-        swap.release(first.slot);
+        release(&mut swap, first);
         assert_eq!(swap.free(), Some(1 - first.slot));
         let second = frame(&mut swap, &[WHOLE]);
-        swap.release(second.slot);
+        release(&mut swap, second);
         assert_eq!(swap.free(), None, "the one before it is not released");
     }
 
@@ -254,10 +248,10 @@ mod tests {
         let first = frame(&mut swap, &[WHOLE]);
         assert_eq!(swap.age(), 0, "the other has held no frame");
         let second = frame(&mut swap, &[WHOLE]);
-        swap.release(first.slot);
+        release(&mut swap, first);
         assert_eq!(swap.age(), 2);
         frame(&mut swap, &[WHOLE]);
-        swap.release(second.slot);
+        release(&mut swap, second);
         assert_eq!(swap.age(), 2);
     }
 
@@ -268,12 +262,12 @@ mod tests {
         assert_eq!(swap.begin_over_shown(), None, "the other holds nothing");
         let damage = [rect(1, 2, 3, 4), rect(10, 10, 20, 20)];
         let second = frame(&mut swap, &damage);
-        swap.release(first.slot);
+        release(&mut swap, first);
         let over = swap.begin_over_shown().expect("a frame to draw over");
         assert_eq!((over.slot, swap.shown()), (first.slot, Some(second.slot)));
         assert_eq!(over.stale.as_slice(), damage);
         let third = swap.commit(&[rect(5, 5, 6, 6)]).unwrap();
-        swap.release(second.slot);
+        release(&mut swap, second);
         let over = swap.begin_over_shown().unwrap();
         assert_eq!((over.slot, swap.shown()), (second.slot, Some(third.slot)));
         assert_eq!(over.stale.as_slice(), [rect(5, 5, 6, 6)]);
@@ -284,7 +278,7 @@ mod tests {
         let mut swap = Swap::new();
         let first = frame(&mut swap, &[WHOLE]);
         frame(&mut swap, &[rect(0, 0, 9, 9)]);
-        swap.release(first.slot);
+        release(&mut swap, first);
         swap.begin_over_shown().expect("a frame to draw over");
         // Dropped half drawn.
         assert_eq!(swap.begin_over_shown(), None);
@@ -296,7 +290,7 @@ mod tests {
         let mut swap = Swap::new();
         let first = frame(&mut swap, &[WHOLE]);
         let second = frame(&mut swap, &[WHOLE]);
-        swap.release(first.slot);
+        release(&mut swap, first);
         swap.begin().unwrap();
         swap.drop_unchanged();
         assert_eq!(swap.shown(), Some(second.slot));
@@ -312,25 +306,10 @@ mod tests {
         let many: [DamageRect; MAX_DAMAGE_REGIONS + 1] =
             core::array::from_fn(|i| rect(i as i32 * 10, 0, i as i32 * 10 + 4, 4));
         frame(&mut swap, &many);
-        swap.release(first.slot);
+        release(&mut swap, first);
         let over = swap.begin_over_shown().unwrap();
         let reach = MAX_DAMAGE_REGIONS as i32 * 10 + 4;
         assert_eq!(over.stale.as_slice(), [rect(0, 0, reach, 4)]);
-    }
-
-    #[test]
-    fn a_buffer_never_released_can_be_taken_back_but_not_the_one_shown() {
-        let mut swap = Swap::new();
-        frame(&mut swap, &[WHOLE]);
-        let second = frame(&mut swap, &[rect(1, 1, 2, 2)]);
-        assert_eq!(swap.free(), None);
-        swap.reclaim();
-        assert_eq!(swap.free(), Some(1 - second.slot));
-        assert_eq!(swap.shown(), Some(second.slot));
-        let over = swap
-            .begin_over_shown()
-            .expect("what it is behind by is known");
-        assert_eq!(over.stale.as_slice(), [rect(1, 1, 2, 2)]);
     }
 
     #[test]
@@ -338,35 +317,45 @@ mod tests {
         let mut swap = Swap::new();
         let first = frame(&mut swap, &[WHOLE]);
         let second = frame(&mut swap, &[WHOLE]);
-        // The first's release is on its way as the buffers are replaced.
+        // Both releases are still to come as the buffers are replaced.
         swap.replace_buffers();
         assert_eq!(swap.shown(), None);
         let third = frame(&mut swap, &[WHOLE]);
         assert!(third.first_use);
         assert_eq!(third.slot, first.slot, "the slot is used again");
+        assert_ne!(third.serial, first.serial, "by another buffer");
         let fourth = frame(&mut swap, &[WHOLE]);
         assert_eq!(fourth.slot, second.slot);
-        // The release of the buffer the first slot held before.
-        swap.release(first.slot);
-        assert_eq!(swap.free(), None, "its successor is still the reader's");
-        swap.release(first.slot);
-        assert_eq!(swap.free(), Some(first.slot));
+        release(&mut swap, first);
+        release(&mut swap, second);
+        assert_eq!(swap.free(), None, "their successors are the reader's");
+        release(&mut swap, third);
+        assert_eq!(swap.free(), Some(third.slot));
+    }
+
+    #[test]
+    fn a_release_naming_no_slot_frees_nothing() {
+        let mut swap = Swap::new();
+        let first = frame(&mut swap, &[WHOLE]);
+        frame(&mut swap, &[WHOLE]);
+        swap.release(BUFFERS, first.serial);
+        assert_eq!(swap.free(), None);
     }
 
     #[test]
     fn a_late_release_of_the_buffer_shown_does_not_free_it_once_replaced() {
         let mut swap = Swap::new();
         let first = frame(&mut swap, &[WHOLE]);
-        swap.release(first.slot);
+        release(&mut swap, first);
         let second = frame(&mut swap, &[WHOLE]);
         // Shown, so it was not free; replaced, it waits for a release of its
         // own, whatever was released before.
         assert_eq!(swap.free(), None);
-        swap.release(first.slot);
+        release(&mut swap, first);
         assert_eq!(swap.free(), Some(first.slot));
         frame(&mut swap, &[WHOLE]);
         assert_eq!(swap.free(), None);
-        swap.release(second.slot);
+        release(&mut swap, second);
         assert_eq!(swap.free(), Some(second.slot));
     }
 }

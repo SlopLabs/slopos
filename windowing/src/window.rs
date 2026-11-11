@@ -92,8 +92,10 @@ impl Window {
         loop {
             let event = self.handle.borrow_client().poll_event().ok().flatten()?;
             match event {
-                ProtocolEvent::BufferRelease { buffer_id, .. } => {
-                    self.renderer.release_buffer(buffer_id);
+                ProtocolEvent::BufferRelease {
+                    buffer_id, serial, ..
+                } => {
+                    self.renderer.release_buffer(buffer_id, serial);
                     continue;
                 }
                 ProtocolEvent::FrameDone { .. } => {

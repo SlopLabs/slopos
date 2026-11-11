@@ -346,7 +346,10 @@ pub fn run_app<A: App>(mut app: A) -> ! {
         } else {
             -1
         };
-        let frame_wait = owed.then(|| win.renderer().wait_ms());
+        let frame_wait = match owed {
+            true => win.renderer().wait_ms(),
+            false => None,
+        };
         let now = slopos_windowing::get_time_ms();
         let timeout_ms = [gesture.wait_ms(now), tip.wait_ms(now), frame_wait]
             .into_iter()

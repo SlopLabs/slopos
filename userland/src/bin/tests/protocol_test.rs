@@ -177,6 +177,7 @@ fn a_client_of_the_version_draws() -> bool {
                 &Request::SurfaceAttach {
                     surface,
                     buffer_id: 0,
+                    serial: 0,
                     width: SIDE,
                     height: SIDE,
                     has_fd: true,
@@ -210,6 +211,71 @@ fn a_client_of_the_version_draws() -> bool {
     false
 }
 
+/// A buffer a commit replaces is released by the slot and serial it was
+/// attached under, one whose slot was given another buffer included.
+fn a_replaced_buffer_is_released_by_name() -> bool {
+    const SIDE: u32 = 16;
+    let Some(mut conn) = served() else {
+        return false;
+    };
+    let buffer = || ShmBuffer::create((SIDE * SIDE * 4) as usize).ok();
+    let (Some(first), Some(second), Some(third)) = (buffer(), buffer(), buffer()) else {
+        eprintln!("protocol_test: no memfd for the buffers");
+        return false;
+    };
+    let surface = SurfaceId::from_raw(1);
+    let show = |conn: &Connection, buffer_id: u32, serial: u32, buffer: &ShmBuffer| {
+        let attach = Request::SurfaceAttach {
+            surface,
+            buffer_id,
+            serial,
+            width: SIDE,
+            height: SIDE,
+            has_fd: true,
+            buffer_fd: None,
+        };
+        conn.send_with_fd(&attach, buffer.fd()).is_ok()
+            && conn.send(&Request::SurfaceCommit { surface }).is_ok()
+    };
+    let released = |conn: &mut Connection| {
+        let start = Instant::now();
+        while start.elapsed() < DEADLINE {
+            match conn.wait_recv::<Event>(TIMEOUT_MS) {
+                Ok(Event::BufferRelease {
+                    surface: of,
+                    buffer_id,
+                    serial,
+                }) if of == surface => return Some((buffer_id, serial)),
+                Ok(_) => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    };
+    let toplevel = Request::GetToplevel {
+        surface,
+        new_id: ToplevelId::from_raw(1),
+    };
+    if conn
+        .send(&Request::CreateSurface { new_id: surface })
+        .is_err()
+        || conn.send(&toplevel).is_err()
+        || !show(&conn, 0, 7, &first)
+        || !show(&conn, 1, 7, &second)
+    {
+        eprintln!("protocol_test: could not send the frames");
+        return false;
+    }
+    let one = released(&mut conn);
+    // The shown slot again, under another serial with another buffer.
+    let two = show(&conn, 1, 8, &third).then(|| released(&mut conn));
+    if (one, two) != (Some((0, 7)), Some(Some((1, 7)))) {
+        eprintln!("protocol_test: released {one:?} then {two:?}");
+        return false;
+    }
+    true
+}
+
 fn the_client_connects() -> bool {
     let path = slopos_protocol::socket_path();
     match Client::connect(&path).and_then(|mut client| client.ensure_output_info()) {
@@ -238,7 +304,8 @@ fn a_newer_version_is_refused() -> bool {
     refuses_version(PROTOCOL_VERSION + 1)
 }
 
-/// Version 1's tags and Hellos; a change to any of them is a new version.
+/// Version 1's tags, its Hellos and the lengths of the two messages that
+/// name a buffer; a change to any of them is a new version.
 fn the_wire_is_this_versions() -> bool {
     use slopos_protocol::codec::tag::*;
     let requests = [
@@ -281,7 +348,25 @@ fn the_wire_is_this_versions() -> bool {
     ];
     let mut request = [0u8; 8];
     let mut event = [0u8; 8];
+    let mut wide = [0u8; 32];
+    let surface = SurfaceId::from_raw(1);
+    let attach = Request::SurfaceAttach {
+        surface,
+        buffer_id: 1,
+        serial: 2,
+        width: 3,
+        height: 4,
+        has_fd: false,
+        buffer_fd: None,
+    };
+    let release = Event::BufferRelease {
+        surface,
+        buffer_id: 1,
+        serial: 2,
+    };
     PROTOCOL_VERSION == 1
+        && attach.encode(&mut wide) == Ok(22)
+        && release.encode(&mut wide) == Ok(13)
         && requests.iter().copied().eq(0..=16)
         && events.iter().copied().eq(0..=16)
         && Request::Hello { version: 1 }.encode(&mut request) == Ok(5)
@@ -410,6 +495,10 @@ fn main() {
         ),
         ("the_client_connects", the_client_connects),
         ("an_older_version_is_refused", an_older_version_is_refused),
+        (
+            "a_replaced_buffer_is_released_by_name",
+            a_replaced_buffer_is_released_by_name,
+        ),
         ("the_wire_is_this_versions", the_wire_is_this_versions),
         ("a_newer_version_is_refused", a_newer_version_is_refused),
         (

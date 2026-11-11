@@ -238,13 +238,17 @@ impl Connection {
             events: POLLOUT,
             revents: 0,
         };
-        if slopos_cabi::poll(core::slice::from_mut(&mut pfd), timeout_ms).is_err() {
-            return Err(ProtocolError::Io);
+        loop {
+            match slopos_cabi::poll(core::slice::from_mut(&mut pfd), timeout_ms) {
+                Err(Errno::EINTR) => continue,
+                Err(_) => return Err(ProtocolError::Io),
+                Ok(_) => {}
+            }
+            if pfd.revents & (POLLERR | POLLHUP) != 0 {
+                return Err(ProtocolError::Io);
+            }
+            return Ok(());
         }
-        if pfd.revents & (POLLERR | POLLHUP) != 0 {
-            return Err(ProtocolError::Io);
-        }
-        Ok(())
     }
 
     /// Decode one length-prefixed frame from the read buffer.

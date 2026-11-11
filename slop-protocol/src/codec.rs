@@ -169,6 +169,7 @@ impl Encode for Request {
             Request::SurfaceAttach {
                 surface,
                 buffer_id,
+                serial,
                 width,
                 height,
                 has_fd,
@@ -177,6 +178,7 @@ impl Encode for Request {
                 let p = put_u8(buf, 0, REQ_SURFACE_ATTACH)?;
                 let p = put_u32(buf, p, surface.raw())?;
                 let p = put_u32(buf, p, *buffer_id)?;
+                let p = put_u32(buf, p, *serial)?;
                 let p = put_u32(buf, p, *width)?;
                 let p = put_u32(buf, p, *height)?;
                 put_bool(buf, p, *has_fd)
@@ -300,6 +302,7 @@ impl Decode for Request {
             REQ_SURFACE_ATTACH => {
                 let (surface, p) = get_u32(buf, p)?;
                 let (buffer_id, p) = get_u32(buf, p)?;
+                let (serial, p) = get_u32(buf, p)?;
                 let (width, p) = get_u32(buf, p)?;
                 let (height, p) = get_u32(buf, p)?;
                 let (has_fd, p) = get_bool(buf, p)?;
@@ -308,6 +311,7 @@ impl Decode for Request {
                     Request::SurfaceAttach {
                         surface: SurfaceId::from_raw(surface),
                         buffer_id,
+                        serial,
                         width,
                         height,
                         has_fd,
@@ -599,10 +603,15 @@ impl Encode for Event {
                 let p = put_u32(buf, p, *object_id)?;
                 put_u32(buf, p, *code)
             }
-            Event::BufferRelease { surface, buffer_id } => {
+            Event::BufferRelease {
+                surface,
+                buffer_id,
+                serial,
+            } => {
                 let p = put_u8(buf, 0, EVT_BUFFER_RELEASE)?;
                 let p = put_u32(buf, p, surface.raw())?;
-                put_u32(buf, p, *buffer_id)
+                let p = put_u32(buf, p, *buffer_id)?;
+                put_u32(buf, p, *serial)
             }
         }
     }
@@ -758,10 +767,12 @@ impl Decode for Event {
             EVT_BUFFER_RELEASE => {
                 let (surface, p) = get_u32(buf, p)?;
                 let (buffer_id, p) = get_u32(buf, p)?;
+                let (serial, p) = get_u32(buf, p)?;
                 Ok((
                     Event::BufferRelease {
                         surface: SurfaceId::from_raw(surface),
                         buffer_id,
+                        serial,
                     },
                     p,
                 ))

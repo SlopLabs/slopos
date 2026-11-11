@@ -35,6 +35,8 @@ const NO_BUFFER: u8 = u8::MAX;
 #[derive(Copy, Clone)]
 struct SurfaceBuffer {
     fd: i32,
+    /// What the client last attached the slot's buffer as.
+    serial: u32,
     width: u32,
     height: u32,
     registered: bool,
@@ -43,6 +45,7 @@ struct SurfaceBuffer {
 impl SurfaceBuffer {
     const EMPTY: Self = Self {
         fd: -1,
+        serial: 0,
         width: 0,
         height: 0,
         registered: false,
@@ -69,6 +72,8 @@ struct ProtocolSurface {
     buffers: [SurfaceBuffer; MAX_SURFACE_BUFFERS],
     pending_buffer: u8,
     current_buffer: u8,
+    /// The serial `current_buffer` was committed under.
+    current_serial: u32,
     pending_damage: [DamageRect; MAX_PENDING_DAMAGE],
     pending_damage_count: u8,
     committed_damage: [DamageRect; MAX_PENDING_DAMAGE],
@@ -134,6 +139,7 @@ impl ProtocolSurface {
             buffers: [SurfaceBuffer::EMPTY; MAX_SURFACE_BUFFERS],
             pending_buffer: 0,
             current_buffer: NO_BUFFER,
+            current_serial: 0,
             pending_damage: [DamageRect::invalid(); MAX_PENDING_DAMAGE],
             pending_damage_count: 0,
             committed_damage: [DamageRect::invalid(); MAX_PENDING_DAMAGE],
@@ -441,13 +447,15 @@ impl ProtocolBridge {
             Request::SurfaceAttach {
                 surface,
                 buffer_id,
+                serial,
                 width,
                 height,
                 has_fd: _,
                 buffer_fd,
             } => {
                 let fd = buffer_fd.map(|f| f.into_raw());
-                self.handle_surface_attach(client_idx, surface, buffer_id, fd, width, height);
+                let buffer = (buffer_id, serial);
+                self.handle_surface_attach(client_idx, surface, buffer, fd, width, height);
             }
             Request::SurfaceDamage {
                 surface,
@@ -555,13 +563,13 @@ impl ProtocolBridge {
         Ok(())
     }
 
-    /// `fd` comes with a slot's first attach alone; one that has no slot to go
-    /// to is closed.
+    /// `fd` comes with a buffer's first attach alone; one that has no slot to
+    /// go to is closed.
     fn handle_surface_attach(
         &mut self,
         client_idx: usize,
         surface_id: SurfaceId,
-        buffer_id: u32,
+        (buffer_id, serial): (u32, u32),
         fd: Option<i32>,
         width: u32,
         height: u32,
@@ -587,6 +595,7 @@ impl ProtocolBridge {
             slot.fd = new_fd;
             slot.registered = true;
         }
+        slot.serial = serial;
         slot.width = width;
         slot.height = height;
     }
@@ -630,11 +639,12 @@ impl ProtocolBridge {
 
         let release_prev = {
             let surface = &mut self.surfaces[idx];
-            let prev = surface.current_buffer;
+            let prev = (surface.current_buffer, surface.current_serial);
             let pend = surface.pending_buffer;
-            surface.current_buffer = pend;
-
             let slot = surface.buffers[pend as usize];
+            surface.current_buffer = pend;
+            surface.current_serial = slot.serial;
+
             if slot.registered {
                 surface.buffer_fd = slot.fd as u32;
                 surface.width = slot.width;
@@ -646,11 +656,7 @@ impl ProtocolBridge {
 
             surface.take_pending_damage();
 
-            if prev != NO_BUFFER && prev != pend {
-                Some(prev)
-            } else {
-                None
-            }
+            (prev.0 != NO_BUFFER && prev != (pend, slot.serial)).then_some(prev)
         };
 
         let surface = &self.surfaces[idx];
@@ -659,12 +665,13 @@ impl ProtocolBridge {
             log!("shown {}", printable(&self.surfaces[idx].app_id));
         }
 
-        if let Some(prev) = release_prev {
+        if let Some((slot, serial)) = release_prev {
             let _ = self.server.queue_event(
                 client_idx,
                 &Event::BufferRelease {
                     surface: surface_id,
-                    buffer_id: prev as u32,
+                    buffer_id: slot as u32,
+                    serial,
                 },
             );
         }

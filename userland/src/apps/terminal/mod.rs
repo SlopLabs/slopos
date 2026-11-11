@@ -413,8 +413,10 @@ async fn event_loop(
             continue;
         }
         let blink_ms = (BLINK_INTERVAL - elapsed).as_millis().max(1) as u64;
-        // What is owed is drawn once the surface can take a frame.
-        let owed_ms = (!pending.is_empty()).then(|| win.renderer().wait_ms());
+        let owed_ms = match pending.is_empty() {
+            true => None,
+            false => win.renderer().wait_ms(),
+        };
         let blink_ms = owed_ms.map_or(blink_ms, |ms| blink_ms.min(ms.max(1)));
         let comp = slopfut::poll_add(compositor_fd, POLLIN);
         let master_mask = if pending_writes.is_empty() {

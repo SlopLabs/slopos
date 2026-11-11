@@ -73,13 +73,13 @@ impl Client {
         Ok(SurfaceId::from_raw(id))
     }
 
-    /// Register a memfd-backed buffer in slot `buffer_id`, passing the fd via
-    /// SCM_RIGHTS. Re-selecting an already-registered slot uses
-    /// [`surface_select_buffer`](Self::surface_select_buffer) (no fd).
+    /// Register a memfd-backed buffer in slot `buffer_id` under `serial`,
+    /// passing the fd via SCM_RIGHTS.
     pub fn surface_attach_buffer(
         &mut self,
         surface: SurfaceId,
         buffer_id: u32,
+        serial: u32,
         memfd_fd: i32,
         width: u32,
         height: u32,
@@ -88,6 +88,7 @@ impl Client {
             &Request::SurfaceAttach {
                 surface,
                 buffer_id,
+                serial,
                 width,
                 height,
                 has_fd: true,
@@ -97,18 +98,20 @@ impl Client {
         )
     }
 
-    /// Re-select an already-registered buffer slot for the next commit, without
-    /// re-sending the fd.
+    /// Re-select the buffer registered in a slot under `serial` for the next
+    /// commit, without re-sending the fd.
     pub fn surface_select_buffer(
         &mut self,
         surface: SurfaceId,
         buffer_id: u32,
+        serial: u32,
         width: u32,
         height: u32,
     ) -> Result<(), ProtocolError> {
         self.conn.send(&Request::SurfaceAttach {
             surface,
             buffer_id,
+            serial,
             width,
             height,
             has_fd: false,

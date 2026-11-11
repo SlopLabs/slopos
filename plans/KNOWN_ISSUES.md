@@ -210,19 +210,6 @@ every CPU.
 
 ---
 
-## The compositor's client tasks stream multishot polls
-
-**Status**: Open
-**Severity**: Low (one client's connection stalls)
-**Component**: `userland/src/apps/compositor/mod.rs:1612-1640`
-
-A multishot poll fires only when readiness changes, so a client message that
-lands between a read and the ring's next pass wakes nothing until the client
-sends again. The consent channel takes a oneshot poll each time for this
-reason (`mod.rs:1513-1530`); the protocol clients stream.
-
----
-
 ## `recvmsg` on `AF_UNIX` takes every queued descriptor
 
 **Status**: Open

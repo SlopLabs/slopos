@@ -121,8 +121,12 @@ pub enum Request {
     SurfaceAttach {
         surface: SurfaceId,
         /// Client-assigned buffer slot. The fd is sent via SCM_RIGHTS only the
-        /// first time a slot is used; later attaches re-select by id, no fd.
+        /// first time a buffer is put there; later attaches re-select by id,
+        /// no fd.
         buffer_id: u32,
+        /// Names the buffer among those the slot has held, which the
+        /// [`Event::BufferRelease`] of it echoes.
+        serial: u32,
         width: u32,
         height: u32,
         /// Whether this attach carries an SCM_RIGHTS fd; a no-fd re-select must
@@ -241,11 +245,13 @@ pub enum Event {
         timestamp_ms: u32,
     },
 
-    /// A buffer slot the compositor has finished compositing from and the client
-    /// may draw into again. Sent when a newer buffer for the surface is committed.
+    /// A buffer the compositor has finished compositing from and the client
+    /// may draw into again, named by its slot and the serial it was attached
+    /// with. Sent when a commit shows another in its place.
     BufferRelease {
         surface: SurfaceId,
         buffer_id: u32,
+        serial: u32,
     },
 
     /// The size the window is to lay itself out at, and its

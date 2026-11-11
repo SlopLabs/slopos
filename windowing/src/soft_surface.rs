@@ -24,19 +24,12 @@ use slopos_cabi::SharedMemory;
 /// surface must not stop drawing for good.
 const FRAME_DONE_WAIT_MS: u64 = 100;
 
-/// How long the compositor may keep the buffer it showed before a commit
-/// without releasing it: past that the release is taken for lost, since a
-/// surface waiting for it would never draw again. Long, because a
-/// compositor that only stalled this long still reads that buffer.
-const RELEASE_WAIT_MS: u64 = 5000;
-
 pub struct SoftSurface {
     handle: ProtocolHandle,
     bufs: [SharedMemory; BUFFERS],
     swap: Swap,
     /// When the frame last committed stops holding the next one back.
     paced_until_ms: Option<u64>,
-    committed_at_ms: u64,
     surface_id: SurfaceId,
     width: u32,
     height: u32,
@@ -64,7 +57,6 @@ impl SoftSurface {
             bufs,
             swap: Swap::new(),
             paced_until_ms: None,
-            committed_at_ms: 0,
             surface_id,
             width,
             height,
@@ -81,8 +73,9 @@ impl SoftSurface {
         self.swap.age()
     }
 
-    pub fn release_buffer(&mut self, buffer_id: u32) {
-        self.swap.release(buffer_id as usize);
+    /// The compositor let go of the buffer slot `buffer_id` held under `serial`.
+    pub fn release_buffer(&mut self, buffer_id: u32, serial: u32) {
+        self.swap.release(buffer_id as usize, serial);
     }
 
     /// The frame last committed reached the screen.
@@ -93,29 +86,19 @@ impl SoftSurface {
     /// Whether a frame can be drawn now: a buffer is free, and the frame
     /// last committed has reached the screen or has had its time to.
     pub fn ready(&self) -> bool {
-        self.wait_ms() == 0
+        self.wait_ms() == Some(0)
     }
 
     /// How long until a frame can be drawn, should no event come first: a
-    /// `FrameDone` or a `BufferRelease` ends the wait early.
-    pub fn wait_ms(&self) -> u64 {
+    /// `FrameDone` ends the wait early. `None` while no buffer is free,
+    /// which only a `BufferRelease` ends.
+    pub fn wait_ms(&self) -> Option<u64> {
+        self.swap.free()?;
         let now = crate::get_time_ms();
-        let paced = self
-            .paced_until_ms
-            .map_or(0, |until| until.saturating_sub(now));
-        match self.swap.free() {
-            Some(_) => paced,
-            None => (self.committed_at_ms + RELEASE_WAIT_MS)
-                .saturating_sub(now)
-                .max(paced),
-        }
-    }
-
-    /// Takes a buffer whose release is overdue for free.
-    fn reclaim_overdue(&mut self) {
-        if self.swap.free().is_none() && self.wait_ms() == 0 {
-            self.swap.reclaim();
-        }
+        Some(
+            self.paced_until_ms
+                .map_or(0, |until| until.saturating_sub(now)),
+        )
     }
 
     fn geometry(&self) -> Geometry {
@@ -139,12 +122,10 @@ impl SoftSurface {
         Some(buf)
     }
 
-    /// The next frame's buffer holding the frame the compositor shows, so a
-    /// caller repaints only what changed and presents those rects; `None`
-    /// when no frame can be drawn or what the buffer holds is unknown, which
-    /// a whole frame through [`frame`](RenderSurface::frame) mends.
+    /// The next frame's buffer, holding the frame the compositor shows;
+    /// `None` when no frame can be drawn or what the buffer holds is unknown,
+    /// which a whole [`frame`](RenderSurface::frame) mends.
     pub fn frame_over_shown(&mut self) -> Option<DrawBuffer<'_>> {
-        self.reclaim_overdue();
         let over = self.swap.begin_over_shown()?;
         let [first, second] = &mut self.bufs;
         let (to, from) = match over.slot {
@@ -171,9 +152,8 @@ impl SoftSurface {
         self.draw_buffer(over.slot)
     }
 
-    /// Commits the frame drawn where it differs from the one the compositor
-    /// shows, and answers whether it differed at all: one that does not is
-    /// dropped, and nothing is sent.
+    /// Commits the frame drawn where it differs from the one shown; `false`,
+    /// with nothing sent, when it does not differ.
     pub fn present_changed(&mut self) -> bool {
         self.present_changed_within(self.geometry().whole())
     }
@@ -211,23 +191,21 @@ impl SoftSurface {
         }
     }
 
-    /// A buffer's fd is sent only on first use; later frames re-select the slot by
-    /// id, so the compositor keeps a stable mapping per slot.
+    /// A buffer's fd is sent only on first use; later frames re-select it by
+    /// slot and serial, so the compositor keeps a stable mapping per slot.
     fn commit(&mut self, damage: &[DamageRect]) {
         let Some(committed) = self.swap.commit(damage) else {
             return;
         };
-        let slot = committed.slot as u32;
+        let (slot, serial) = (committed.slot as u32, committed.serial);
+        let (surface, width, height) = (self.surface_id, self.width, self.height);
         let mut client = self.handle.borrow_client();
         let _ = match committed.first_use {
-            true => client.surface_attach_buffer(
-                self.surface_id,
-                slot,
-                self.bufs[committed.slot].fd(),
-                self.width,
-                self.height,
-            ),
-            false => client.surface_select_buffer(self.surface_id, slot, self.width, self.height),
+            true => {
+                let fd = self.bufs[committed.slot].fd();
+                client.surface_attach_buffer(surface, slot, serial, fd, width, height)
+            }
+            false => client.surface_select_buffer(surface, slot, serial, width, height),
         };
         for rect in damage.iter().filter(|rect| rect.is_valid()) {
             let (w, h) = (rect.x1 - rect.x0 + 1, rect.y1 - rect.y0 + 1);
@@ -235,8 +213,7 @@ impl SoftSurface {
         }
         let _ = client.surface_frame(self.surface_id);
         let _ = client.surface_commit(self.surface_id);
-        self.committed_at_ms = crate::get_time_ms();
-        self.paced_until_ms = Some(self.committed_at_ms + FRAME_DONE_WAIT_MS);
+        self.paced_until_ms = Some(crate::get_time_ms() + FRAME_DONE_WAIT_MS);
     }
 }
 
@@ -262,7 +239,6 @@ impl RenderSurface for SoftSurface {
     /// `None` while no buffer is free; what one holds is as old as
     /// [`buffer_age`](SoftSurface::buffer_age) says.
     fn frame(&mut self) -> Option<DrawBuffer<'_>> {
-        self.reclaim_overdue();
         let slot = self.swap.begin()?;
         self.draw_buffer(slot)
     }
