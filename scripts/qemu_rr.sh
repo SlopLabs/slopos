@@ -14,7 +14,7 @@ set -euo pipefail
 # Record captures every nondeterministic input (device DMA, timers, serial)
 # tagged by instruction count into RRFILE, plus a VM snapshot (rrsnapshot)
 # so replay can rewind. Replay re-injects them at the identical instruction
-# counts, halts at reset (-S), and exposes the GDB stub on GDB_PORT.
+# counts, halts at reset (-S), and exposes the GDB stub on a Unix socket.
 #
 # HARD constraints (enforced below; deviating causes "replay diverged"):
 #   * TCG only — KVM cannot count instructions.   (-machine accel=tcg)
@@ -29,7 +29,7 @@ set -euo pipefail
 # Environment (optional):
 #   RRFILE          record log path           (default builddir/replay.bin)
 #   RRDISK          qcow2 wrapper for fs image (default builddir/rrdisk.qcow2)
-#   GDB_PORT        replay gdbstub TCP port    (default 1234)
+#   QEMU_GDB_SOCK   replay gdbstub Unix socket (default builddir/qemu-gdb.sock)
 #   ICOUNT_SHIFT    icount scaling             (default auto)
 #   QEMU_MEM        guest RAM                  (default 512M)
 #   QEMU_BIN        qemu binary                (default qemu-system-x86_64)
@@ -48,7 +48,7 @@ QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
 QEMU_MEM="${QEMU_MEM:-512M}"
 RRFILE="${RRFILE:-${REPO_ROOT}/builddir/replay.bin}"
 RRDISK="${RRDISK:-${REPO_ROOT}/builddir/rrdisk.qcow2}"
-GDB_PORT="${GDB_PORT:-1234}"
+GDB_SOCK="${QEMU_GDB_SOCK:-${REPO_ROOT}/builddir/qemu-gdb.sock}"
 ICOUNT_SHIFT="${ICOUNT_SHIFT:-auto}"
 OVMF_DIR="${OVMF_DIR:-${REPO_ROOT}/third_party/ovmf}"
 RECORD_TIMEOUT="${RECORD_TIMEOUT:-900}"
@@ -127,11 +127,12 @@ case "$MODE" in
             echo "RRFILE missing ($RRFILE) — run 'record' first." >&2
             exit 1
         fi
-        echo "Replaying $RRFILE; gdbstub on tcp::$GDB_PORT (halted at reset). Connect GDB now."
+        echo "Replaying $RRFILE; gdbstub on $GDB_SOCK (halted at reset). Connect GDB now."
+        rm -f "$GDB_SOCK"
         ICOUNT="shift=${ICOUNT_SHIFT},rr=replay,rrfile=${RRFILE},rrsnapshot=rrinit"
         exec "$QEMU_BIN" "${COMMON[@]}" \
             -icount "$ICOUNT" -serial "file:$SERIAL_LOG" \
-            -S -gdb "tcp::$GDB_PORT"
+            -S -gdb "unix:${GDB_SOCK//,/,,},server=on,wait=off"
         ;;
     *)
         echo "Unknown mode: $MODE (record|replay)" >&2

@@ -84,6 +84,11 @@ kernel_elf       := build_dir / ("kernel-" + kernel_variant + ".elf")
 kernel_elf_tests := build_dir / ("kernel-" + kernel_variant_tests + ".elf")
 kernel_features_tests := "slopos-testing/qemu-exit kernel/tests"
 
+# The QEMU monitor and GDB stub of a `boot-debug` run. Unix sockets in the
+# build directory: whoever connects reads and writes the guest's memory.
+monitor_sock := build_dir / "qemu-monitor.sock"
+gdb_sock     := build_dir / "qemu-gdb.sock"
+
 iso          := build_dir / "slop.iso"
 install_medium := build_dir / "install.cpio"
 # `test-installer`'s medium: the optimized tests system, always with the payload
@@ -444,9 +449,9 @@ boot:
 boot-fast:
     ROULETTE=0 just boot
 
-[doc("just boot-fast on the dev kernel with QEMU's GDB stub on :1234 and a monitor socket; attach with debug-gdb, debug-bt or debug-monitor")]
+[doc("just boot-fast on the dev kernel with QEMU's GDB stub and monitor on Unix sockets in the build directory; attach with debug-gdb, debug-bt or debug-monitor")]
 boot-debug:
-    QEMU_DEBUG=1 KERNEL_RELEASE=0 ROULETTE=0 just boot
+    QEMU_DEBUG=1 QEMU_MONITOR_SOCK="$PWD/{{monitor_sock}}" QEMU_GDB_SOCK="$PWD/{{gdb_sock}}" KERNEL_RELEASE=0 ROULETTE=0 just boot
 
 [doc("Boot the live ISO from RAM with no disk attached, as bare metal runs it; spins the Wheel of Fate unless ROULETTE=0")]
 boot-live: iso
@@ -882,10 +887,11 @@ boot-log: iso
 [doc("Capture all-CPU backtraces from the running kernel (writes builddir/freeze-gdb.log)")]
 debug-bt:
     @test -f {{kernel_elf}} || { echo "missing {{kernel_elf}} — run 'just boot-debug' first" >&2; exit 1; }
-    @echo "Attaching to QEMU GDB stub on :1234 — kernel must be running with 'just boot-debug'…"
+    @test -S "{{gdb_sock}}" || { echo "no GDB socket at {{gdb_sock}} — boot with 'just boot-debug' first" >&2; exit 1; }
+    @echo "Attaching to QEMU GDB stub at {{gdb_sock}}…"
     gdb -q {{kernel_elf}} \
         -ex 'set pagination off' \
-        -ex 'target remote :1234' \
+        -ex 'target remote {{gdb_sock}}' \
         -ex 'info threads' \
         -ex 'thread apply all bt 30' \
         -ex 'detach' \
@@ -895,15 +901,16 @@ debug-bt:
 [doc("Interactive GDB attached to the running kernel (Ctrl-D to exit)")]
 debug-gdb:
     @test -f {{kernel_elf}} || { echo "missing {{kernel_elf}} — run 'just boot-debug' first" >&2; exit 1; }
+    @test -S "{{gdb_sock}}" || { echo "no GDB socket at {{gdb_sock}} — boot with 'just boot-debug' first" >&2; exit 1; }
     gdb -q {{kernel_elf}} \
         -ex 'set pagination off' \
-        -ex 'target remote :1234'
+        -ex 'target remote {{gdb_sock}}'
 
 [doc("Connect to the QEMU monitor socket — info cpus, cpu N, info registers, …")]
 debug-monitor:
-    @test -S /tmp/slopos-monitor.sock || { echo "no monitor socket at /tmp/slopos-monitor.sock — boot with 'just boot-debug' first" >&2; exit 1; }
+    @test -S "{{monitor_sock}}" || { echo "no monitor socket at {{monitor_sock}} — boot with 'just boot-debug' first" >&2; exit 1; }
     @echo "Connecting to QEMU monitor — type 'quit' or Ctrl-D to detach…"
-    socat - UNIX-CONNECT:/tmp/slopos-monitor.sock
+    socat - "UNIX-CONNECT:{{monitor_sock}}"
 
 # Record/replay needs TCG + smp=1 for icount, so it cannot capture SMP-only races.
 
@@ -917,20 +924,20 @@ rr-record:
     TEST_CMDLINE="{{test_cmdline}} tests.skip={{rr_skip}}" just _iso-tests
     scripts/qemu_rr.sh record "{{iso_tests}}" "{{fs_image_tests}}"
 
-[doc("Replay builddir/replay.bin under interactive GDB (gdbstub halted on :1234)")]
+[doc("Replay builddir/replay.bin under interactive GDB (gdbstub halted on a Unix socket in the build directory)")]
 rr-replay:
     @test -f {{build_dir}}/replay.bin || { echo "no recording — run 'just rr-record' first" >&2; exit 1; }
-    scripts/qemu_rr.sh replay "{{iso_tests}}" "{{fs_image_tests}}" &
+    QEMU_GDB_SOCK="$PWD/{{gdb_sock}}" scripts/qemu_rr.sh replay "{{iso_tests}}" "{{fs_image_tests}}" &
     sleep 2
-    -gdb -q -x scripts/gdb/slopos.gdb
+    -QEMU_GDB_SOCK="{{gdb_sock}}" gdb -q -x scripts/gdb/slopos.gdb
     -pkill -f 'rr=replay'
 
 [doc("Batch reverse-debug: run to fault; pass WATCH=<VA> to reverse-find its writer")]
 rr-gdb WATCH='0':
     @test -f {{build_dir}}/replay.bin || { echo "no recording — run 'just rr-record' first" >&2; exit 1; }
-    scripts/qemu_rr.sh replay "{{iso_tests}}" "{{fs_image_tests}}" &
+    QEMU_GDB_SOCK="$PWD/{{gdb_sock}}" scripts/qemu_rr.sh replay "{{iso_tests}}" "{{fs_image_tests}}" &
     sleep 2
-    -gdb -q -batch -ex 'set $watch_va = {{WATCH}}' -x scripts/gdb/find_corruptor.gdb 2>&1 | tee {{build_dir}}/rr-session.log
+    -QEMU_GDB_SOCK="{{gdb_sock}}" gdb -q -batch -ex 'set $watch_va = {{WATCH}}' -x scripts/gdb/find_corruptor.gdb 2>&1 | tee {{build_dir}}/rr-session.log
     -pkill -f 'rr=replay'
 
 # Idempotent — Go's build cache makes warm rebuilds ~50ms — so every `test*`

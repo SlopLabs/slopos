@@ -22,6 +22,7 @@ set -euo pipefail
 #   NET, NET_PORTS,
 #   ECHO_PEER_ADDR, ECHO_PEER_PORT, ECHO_PEER_CMD,
 #   GIT_PUSH_REPO, GIT_SSH_PEER, QEMU_QMP,
+#   QEMU_DEBUG, QEMU_MONITOR_SOCK, QEMU_GDB_SOCK,
 #   BOOT_LOG_TIMEOUT, LOG_FILE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -560,17 +561,23 @@ if [ -n "$GIT_PUSH_REPO" ]; then
 fi
 
 # ── Debug-mode plumbing ─────────────────────────────────────────────────────
-# Set QEMU_DEBUG=1 to enable the QEMU monitor on a Unix socket plus the GDB
-# stub on TCP :1234. The monitor lets you run `info cpus`, `info registers`,
-# `cpu N`, etc. when the system freezes; GDB gives backtraces per CPU.
+# Set QEMU_DEBUG=1 for the QEMU monitor and the GDB stub, each on a Unix
+# socket in the build directory. The monitor runs `info cpus`,
+# `info registers`, `cpu N`, etc. when the system freezes; GDB gives
+# backtraces per CPU. Either reads and writes the guest's memory, so neither
+# is a TCP port: SLIRP hands the guest the host's loopback as 10.0.2.2, and
+# any local user reaches a loopback port or takes it first.
 #
-#   Monitor:  socat - UNIX-CONNECT:/tmp/slopos-monitor.sock
-#   GDB:      gdb builddir/kernel.elf -ex "target remote :1234"
+#   Monitor:  socat - UNIX-CONNECT:builddir/qemu-monitor.sock
+#   GDB:      gdb builddir/kernel-dev.elf -ex "target remote builddir/qemu-gdb.sock"
 if [ "${QEMU_DEBUG:-0}" != "0" ]; then
-    rm -f /tmp/slopos-monitor.sock
+    MONITOR_SOCK="${QEMU_MONITOR_SOCK:-${REPO_ROOT}/builddir/qemu-monitor.sock}"
+    GDB_SOCK="${QEMU_GDB_SOCK:-${REPO_ROOT}/builddir/qemu-gdb.sock}"
+    mkdir -p "$(dirname "$MONITOR_SOCK")" "$(dirname "$GDB_SOCK")"
+    rm -f "$MONITOR_SOCK" "$GDB_SOCK"
     DEBUG_ARGS=(
-        -monitor "unix:/tmp/slopos-monitor.sock,server,nowait"
-        -s
+        -monitor "unix:${MONITOR_SOCK//,/,,},server=on,wait=off"
+        -gdb "unix:${GDB_SOCK//,/,,},server=on,wait=off"
     )
 else
     DEBUG_ARGS=(-monitor none)

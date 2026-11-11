@@ -28,7 +28,10 @@ source scripts/gdb/slopos_mmu.py
 
 break terminate_user_task
 break panic_with_frame
-target remote :1234
+python
+import os, gdb
+gdb.execute("target remote " + os.environ.get("QEMU_GDB_SOCK", "builddir/qemu-gdb.sock"))
+end
 
 printf "[find_corruptor] running to the fault...\n"
 continue

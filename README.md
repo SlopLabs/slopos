@@ -104,7 +104,7 @@ VIDEO=0 just boot                                  # serial only, no window
 ROULETTE=0 just boot-live                          # the live ISO without the Wheel of Fate
 just ports=7777,8080 boot                          # expose guest ports on the host
 just test 'mm::*'                                  # run a subset of the tests
-just boot-debug                                    # QEMU GDB stub on :1234
+just boot-debug                                    # QEMU GDB stub on a Unix socket; attach with just debug-gdb
 ```
 
 </details>

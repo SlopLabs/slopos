@@ -47,7 +47,10 @@ document udinfo
 Print faulting context (RIP/CS/CR3/privilege) and a backtrace.
 end
 
-target remote :1234
+python
+import os, gdb
+gdb.execute("target remote " + os.environ.get("QEMU_GDB_SOCK", "builddir/qemu-gdb.sock"))
+end
 
 echo \n[slopos] connected. 'continue' to run to the fault, then 'udinfo'.\n
 echo [slopos] then: v2p $cr3 <corrupted-VA> ; wpva $cr3 <corrupted-VA> ; reverse-continue\n
