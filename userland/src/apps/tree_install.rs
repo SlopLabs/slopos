@@ -8,9 +8,10 @@
 //! person holds it, and their home, where a tree's manifest is kept in
 //! `~/.local/share/slopos/trees`. Asked for `/usr/local` by anyone who does
 //! not hold it, it asks privd's `org.slopos.software.install`, which runs it
-//! as uid 0 and lets it install there and nowhere else, from a copy of TREE
-//! holding what everyone may read and links staying within it
-//! (`tree::stage`).
+//! as uid 0 and lets it install there and nowhere else. As uid 0, whoever
+//! started it, it installs from a copy of TREE holding what everyone may
+//! read and links staying within it (`tree::stage`): uid 0 reads what the
+//! tree's owner may not, and the owner can change the tree as it is read.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -58,7 +59,7 @@ fn run(name: &str, source: &str, dest: &str) -> Result<String, String> {
             return Err(format!("privd installs at {LOCAL} alone"));
         }
     }
-    let staged = by_privd
+    let staged = (by_privd || geteuid() == 0)
         .then(|| tree::stage(Path::new(source)))
         .transpose()?;
     let source = staged

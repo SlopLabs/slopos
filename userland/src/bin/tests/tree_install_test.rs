@@ -4,7 +4,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{MetadataExt, lchown, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, lchown, symlink};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -205,10 +205,74 @@ fn the_session_installs_a_tree_of_its_own() -> bool {
     held
 }
 
-const CASES: &[(&str, fn() -> bool)] = &[(
-    "the_session_installs_a_tree_of_its_own",
-    the_session_installs_a_tree_of_its_own,
-)];
+/// The tree uid 0 installs itself, under a name of its own so the session's
+/// manifest is no part of it, where uid 0 may make a directory: uid 0 alone
+/// writes nothing of the session's.
+const ROOTS: &str = "tree_install_test_root";
+const ROOTS_DEST: &str = "/var/tmp/tree_install_test_root";
+
+fn as_root(dest: &str) -> Output {
+    Command::new("/bin/tree-install")
+        .args([ROOTS, &src(), dest])
+        .env_remove(slopos_priv_core::ENV_ACTION)
+        .output()
+        .expect("spawning /bin/tree-install")
+}
+
+/// uid 0 running `tree-install` itself installs from the copy privd's runs
+/// make, so the tree's owner hands it nothing uid 0 alone reads: a file not
+/// everyone may read refuses the tree, as a link out of it does, and
+/// nothing of either lands.
+fn uid_0_installs_only_what_everyone_may_read() -> bool {
+    if !stage() {
+        eprintln!("tree_install_test: staging {WORK} failed");
+        return false;
+    }
+    let dest = ROOTS_DEST;
+    let recorded = slopos_tree_core::manifest_path(ROOTS);
+    let _ = fs::remove_dir_all(dest);
+    let _ = fs::remove_file(&recorded);
+    let secret = format!("{}/secret", src());
+    let outward = format!("{}/bin/outward", src());
+    let nothing_landed = || {
+        fs::symlink_metadata(dest).is_err() && fs::symlink_metadata(&recorded).is_err() || {
+            eprintln!("tree_install_test: a refused tree left {dest} or {recorded}");
+            false
+        }
+    };
+    let held = fs::write(&secret, "uid 0's alone\n").is_ok()
+        && fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).is_ok()
+        && said(&as_root(dest), 1, "not everyone may read")
+        && nothing_landed()
+        && fs::remove_file(&secret).is_ok()
+        && symlink("../../../etc/shadow", &outward).is_ok()
+        && said(&as_root(dest), 1, "outside the tree")
+        && nothing_landed()
+        && fs::remove_file(&outward).is_ok()
+        && said(&as_root(dest), 0, "installed")
+        && fs::read_to_string(format!("{dest}/bin/tool"))
+            .ok()
+            .as_deref()
+            == Some("tool\n")
+        && owner(&recorded) == Some(0)
+        && fs::symlink_metadata("/var/lib/slopos/tree-install").is_err();
+    let _ = fs::remove_dir_all(WORK);
+    let _ = fs::remove_dir_all(dest);
+    let _ = fs::remove_file(manifest());
+    let _ = fs::remove_file(recorded);
+    held
+}
+
+const CASES: &[(&str, fn() -> bool)] = &[
+    (
+        "the_session_installs_a_tree_of_its_own",
+        the_session_installs_a_tree_of_its_own,
+    ),
+    (
+        "uid_0_installs_only_what_everyone_may_read",
+        uid_0_installs_only_what_everyone_may_read,
+    ),
+];
 
 fn main() {
     slopos_slibc::test_harness::run(CASES);

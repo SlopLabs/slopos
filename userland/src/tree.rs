@@ -193,21 +193,27 @@ pub fn scan(dir: &Path) -> Result<Manifest, String> {
     })
 }
 
-/// Where uid 0 copies a tree it installs for someone else: a directory only
-/// it may enter, which one install through privd at a time uses.
+/// Where uid 0 copies a tree it installs: a directory only it may enter,
+/// which one install at a time uses, under [`STAGING_LOCK`].
 const STAGING: &str = "/var/lib/slopos/tree-install";
+const STAGING_LOCK: &str = "/var/lib/slopos/tree-install.lock";
 
-pub struct Staged(PathBuf);
+/// The copy, and the lock that keeps another install's copy out of its
+/// directory until this one is done with it.
+pub struct Staged {
+    path: PathBuf,
+    _lock: File,
+}
 
 impl Staged {
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.path
     }
 }
 
 impl Drop for Staged {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.path);
     }
 }
 
@@ -256,7 +262,7 @@ fn stays_within(target: &Path, depth: usize) -> bool {
     climbed <= depth
 }
 
-/// A copy of the tree at `source` that uid 0 installs for someone else:
+/// A copy of the tree at `source` for uid 0 to install from:
 /// reached from `/` through directories alone, each entry opened without
 /// following a link and copied as its descriptor reads it, so neither a link
 /// nor an entry changed during the copy reaches what not everyone may read,
@@ -275,7 +281,7 @@ pub fn stage(source: &Path) -> Result<Staged, String> {
                 dir = open_at(&dir, name, O_RDONLY | O_DIRECTORY).map_err(shown)?;
                 if !dir.metadata().is_ok_and(|meta| everyone_may(&meta, true)) {
                     return Err(format!(
-                        "{}: not everyone may reach it, and only what everyone may read goes in for everyone",
+                        "{}: not everyone may reach it, and uid 0 installs only what everyone may read",
                         source.display()
                     ));
                 }
@@ -289,6 +295,7 @@ pub fn stage(source: &Path) -> Result<Staged, String> {
             source.display()
         ));
     }
+    let lock = crate::sealed::lock(Path::new(STAGING_LOCK))?;
     let staging = |e: std::io::Error| format!("{STAGING}: {e}");
     match fs::remove_dir_all(STAGING) {
         Err(e) if e.kind() != ErrorKind::NotFound => return Err(staging(e)),
@@ -298,7 +305,10 @@ pub fn stage(source: &Path) -> Result<Staged, String> {
         .mode(0o700)
         .create(STAGING)
         .map_err(staging)?;
-    let staged = Staged(PathBuf::from(STAGING));
+    let staged = Staged {
+        path: PathBuf::from(STAGING),
+        _lock: lock,
+    };
     copy_at(&dir, source, staged.path(), 0)?;
     Ok(staged)
 }
