@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "slopos-docs": {
+      "type": "http",
+      "url": "https://slopos.sloplabs.net/api/mcp"
+    }
+  }
+}

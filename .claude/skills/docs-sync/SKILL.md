@@ -1,0 +1,1 @@
+../../../.agents/skills/docs-sync/SKILL.md

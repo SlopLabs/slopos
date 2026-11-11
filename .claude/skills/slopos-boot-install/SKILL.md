@@ -1,0 +1,1 @@
+../../../.agents/skills/slopos-boot-install/SKILL.md

@@ -1,0 +1,1 @@
+../../../.agents/skills/slopos-usb-input/SKILL.md

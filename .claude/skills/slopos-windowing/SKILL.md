@@ -1,0 +1,1 @@
+../../../.agents/skills/slopos-windowing/SKILL.md

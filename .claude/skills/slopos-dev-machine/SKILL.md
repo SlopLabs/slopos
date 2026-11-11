@@ -1,0 +1,1 @@
+../../../.agents/skills/slopos-dev-machine/SKILL.md

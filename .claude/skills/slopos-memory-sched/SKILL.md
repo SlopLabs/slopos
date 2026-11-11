@@ -1,0 +1,1 @@
+../../../.agents/skills/slopos-memory-sched/SKILL.md

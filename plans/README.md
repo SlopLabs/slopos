@@ -17,7 +17,8 @@ editing.
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
 
-What has landed is described in `AGENTS.md` and the code, not here.
+What has landed is described in the docs repo, the skills under
+`.agents/skills/` and the code, not here.
 
 ## When To Promote A Plan
 
