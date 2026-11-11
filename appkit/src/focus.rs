@@ -20,6 +20,7 @@ struct Beneath {
     index: Option<usize>,
     chain_len: Option<usize>,
     stop: Option<(Stop, usize)>,
+    parked: bool,
 }
 
 /// Where the keyboard is, kept across rebuilds by place rather than by id:
@@ -35,6 +36,9 @@ pub struct FocusManager {
     tab_stops: Vec<Stop>,
     /// `focused`'s stop, and how many like it precede it.
     focused_stop: Option<(Stop, usize)>,
+    /// The focused stop left the chain; a rebuild that shows it again
+    /// focuses it.
+    parked: bool,
     /// The modal layer the chain was built from, when one covers the page.
     layer: Option<Stop>,
     /// Where focus sat on the page when a layer covered it, to go back to.
@@ -52,6 +56,7 @@ impl FocusManager {
             tab_chain: Vec::new(),
             tab_stops: Vec::new(),
             focused_stop: None,
+            parked: false,
             layer: None,
             beneath: None,
             keyboard_active: false,
@@ -79,6 +84,7 @@ impl FocusManager {
     }
 
     fn set_index(&mut self, index: Option<usize>) {
+        self.parked = false;
         self.focused_index = index;
         self.chain_len_at_focus = index.map(|_| self.tab_chain.len());
         self.focused_stop = index.and_then(|i| {
@@ -92,13 +98,19 @@ impl FocusManager {
         self.keyboard_active = true;
     }
 
+    /// A press gives up a parked stop.
     pub fn note_pointer_input(&mut self) {
         self.keyboard_active = false;
+        if self.parked {
+            self.set_index(None);
+        }
     }
 
     /// Rebuilds the chain and finds focus in it again: the stop of the same
     /// role and name, as many such stops along, or failing that the stop of
     /// the same role at the same position in a chain of the same length.
+    /// A stop in neither place is parked until a rebuild shows it again,
+    /// or a press, Tab or another page comes first.
     ///
     /// Answers the widget now focused, which a rebuild always makes new. A
     /// dialog that opens starts on its first field, or with nothing focused
@@ -118,6 +130,7 @@ impl FocusManager {
                     index: self.focused_index,
                     chain_len: self.chain_len_at_focus,
                     stop: self.focused_stop.clone(),
+                    parked: self.parked,
                 });
             }
             let closed = layer.is_none();
@@ -138,6 +151,7 @@ impl FocusManager {
             self.focused_index = back.index;
             self.chain_len_at_focus = back.chain_len;
             self.focused_stop = back.stop;
+            self.parked = back.parked;
         }
         let Some(index) = self.focused_index else {
             self.focused = None;
@@ -157,11 +171,19 @@ impl FocusManager {
                 .get(index)
                 .is_some_and(|s| s.role == stop.role)
         });
-        let index = found.or((same_shape && same_kind).then_some(index));
-        let restored = index.and_then(|i| self.tab_chain.get(i).copied());
-        self.focused = restored;
-        self.set_index(restored.and(index));
-        restored
+        let in_place = !self.parked && same_shape && same_kind;
+        let index = found.or(in_place.then_some(index));
+        let Some(restored) = index.and_then(|i| self.tab_chain.get(i).copied()) else {
+            self.focused = None;
+            match self.focused_stop.is_some() {
+                true => self.parked = true,
+                false => self.set_index(None),
+            }
+            return None;
+        };
+        self.focused = Some(restored);
+        self.set_index(index);
+        Some(restored)
     }
 
     /// The tab stops of `root`'s modal layer, in order.
@@ -201,11 +223,15 @@ impl FocusManager {
         let at = self
             .focused
             .and_then(|current| self.tab_chain.iter().position(|&id| id == current));
-        let index = match (at, forward) {
-            (Some(at), true) => (at + 1) % len,
-            (None, true) => 0,
-            (Some(at), false) => (at + len - 1) % len,
-            (None, false) => len - 1,
+        // A parked stop left its place to the one that followed it.
+        let parked = self.focused_index.filter(|_| self.parked);
+        let index = match (at, parked, forward) {
+            (Some(at), _, true) => (at + 1) % len,
+            (Some(at), _, false) => (at + len - 1) % len,
+            (None, Some(left), true) => left.min(len) % len,
+            (None, Some(left), false) => (left.min(len) + len - 1) % len,
+            (None, None, true) => 0,
+            (None, None, false) => len - 1,
         };
         self.focused = Some(self.tab_chain[index]);
         self.set_index(Some(index));

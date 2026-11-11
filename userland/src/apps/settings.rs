@@ -10,13 +10,16 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use slopos_abi::PAGE_SIZE;
+use slopos_abi::net::{NET_EVENT_LEN, NET_MON_DEFAULT};
 use slopos_abi::syscall::types::{UserCpuInfo, UserSysInfo, UserUtsname};
+use slopos_abi::syscall::{POLLIN, UserPollFd};
 use slopos_accounts_core::listing::{self, Listed};
 use slopos_appkit::{Action, App, AppSender, ImageData, Node, SIDEBAR_WIDTH, WindowSpec};
 use slopos_keymap_core::board::Board;
 use slopos_settings_app::{
     Ask, Asked, Effect, Msg, Panel, Person, Settings, about, desktop, keyboard, network, users,
 };
+use slopos_settings_core::network::{Live, Settings as NetSettings};
 use slopos_settings_core::prefs::Prefs;
 
 use crate::syscall::core as sys_core;
@@ -126,10 +129,8 @@ fn person() -> Person {
 fn carry_out(effect: Effect, sender: &AppSender<Msg>) {
     let msg = match effect {
         Effect::Ask(ask) => ask_privd(ask),
-        Effect::Network(network::Effect::Read) => Msg::Network(network::Msg::Read(
-            crate::network_settings::read()
-                .and_then(|kept| crate::network_settings::live().map(|live| (kept, live))),
-        )),
+        Effect::Network(network::Effect::Read) => Msg::Network(network::Msg::Read(network())),
+        Effect::Network(network::Effect::Settle) => Msg::Network(network::Msg::Settled(network())),
         Effect::Users(users::Effect::Read) => people(),
         Effect::Keyboard(keyboard::Effect::Read) => Msg::Keyboard(keyboard::Msg::Read(layouts())),
         Effect::Keyboard(keyboard::Effect::Keep(name)) => {
@@ -160,6 +161,39 @@ fn carry_out(effect: Effect, sender: &AppSender<Msg>) {
         Effect::About(about::Effect::Read) => Msg::About(about::Msg::Read(facts())),
     };
     sender.send(msg);
+}
+
+fn network() -> Result<(NetSettings, Live), String> {
+    let kept = crate::network_settings::read()?;
+    Ok((kept, crate::network_settings::live()?))
+}
+
+/// Whether a thread now tells the app of every change to the network.
+fn watch_network(sender: AppSender<Msg>) -> bool {
+    let Ok(monitor) = crate::syscall::net::net_monitor(NET_MON_DEFAULT, 0) else {
+        return false;
+    };
+    let watch = move || {
+        let mut events = [0u8; NET_EVENT_LEN * 16];
+        loop {
+            let mut fds = [UserPollFd {
+                fd: monitor.raw(),
+                events: POLLIN,
+                revents: 0,
+            }];
+            if crate::syscall::fs::poll(&mut fds, -1).is_err() {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                continue;
+            }
+            // To empty, or the poll spins; an empty read is `EAGAIN`.
+            while crate::syscall::fs::read_slice(monitor.raw(), &mut events).unwrap_or(0) > 0 {}
+            sender.send(Msg::Network(network::Msg::Changed));
+        }
+    };
+    std::thread::Builder::new()
+        .name("settings-net".into())
+        .spawn(watch)
+        .is_ok()
 }
 
 fn ask_privd(ask: Ask) -> Msg {
@@ -401,7 +435,11 @@ impl App for SettingsWindow {
         action
     }
 
+    /// The monitor opens before the first read, so nothing falls between.
     fn on_start(&mut self, sender: AppSender<Msg>) -> Action {
+        if watch_network(sender.clone()) {
+            self.app.watch_network();
+        }
         self.sender = Some(sender);
         self.perform(self.app.start());
         Action::None

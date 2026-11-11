@@ -31,6 +31,8 @@ pub struct LiveAdapter {
     pub carrier: bool,
     /// A DHCP client runs on it.
     pub dhcp: bool,
+    /// That client has yet to be given a lease.
+    pub leasing: bool,
     pub addresses: Vec<LiveAddress>,
     /// Through its default route, which an adapter has one of at most.
     pub gateway: Option<Ipv4>,

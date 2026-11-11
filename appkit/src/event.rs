@@ -74,6 +74,8 @@ pub enum WidgetEvent {
     KeyDown {
         key: Key,
         modifiers: Modifiers,
+        /// A held key sending its press again; it presses no control.
+        repeat: bool,
     },
     KeyUp {
         key: Key,

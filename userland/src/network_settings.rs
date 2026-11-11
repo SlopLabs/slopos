@@ -6,12 +6,12 @@
 use std::ffi::CString;
 
 use slopos_abi::net::{
-    NET_ADDR_ORIGIN_DHCP, NET_ADDR_ORIGIN_LINKLOCAL, NET_ADDR_SCOPE_GLOBAL, NET_IFINDEX_GLOBAL,
-    NET_IFINDEX_NONE, NET_IFKIND_LOOPBACK, NET_IFOP_DHCP_RENEW, NET_IFOP_DHCP_START,
-    NET_IFOP_DHCP_STOP, NET_IFOP_SET_ADMIN_UP, NET_IFOP_SET_ENABLED, NET_Q_ADDRS, NET_Q_DHCP,
-    NET_Q_GLOBAL, NET_Q_RESOLVER, NET_Q_ROUTES, NET_RESOLVER_SRC_STATIC, UserAddr, UserAddrReq,
-    UserDhcpStatus, UserIface, UserNetGlobal, UserResolver, UserResolverReq, UserRoute,
-    UserRouteReq,
+    NET_ADDR_ORIGIN_DHCP, NET_ADDR_ORIGIN_LINKLOCAL, NET_ADDR_SCOPE_GLOBAL, NET_DHCP_INIT,
+    NET_DHCP_REQUESTING, NET_DHCP_SELECTING, NET_IFINDEX_GLOBAL, NET_IFINDEX_NONE,
+    NET_IFKIND_LOOPBACK, NET_IFOP_DHCP_RENEW, NET_IFOP_DHCP_START, NET_IFOP_DHCP_STOP,
+    NET_IFOP_SET_ADMIN_UP, NET_IFOP_SET_ENABLED, NET_Q_ADDRS, NET_Q_DHCP, NET_Q_GLOBAL,
+    NET_Q_RESOLVER, NET_Q_ROUTES, NET_RESOLVER_SRC_STATIC, UserAddr, UserAddrReq, UserDhcpStatus,
+    UserIface, UserNetGlobal, UserResolver, UserResolverReq, UserRoute, UserRouteReq,
 };
 use slopos_settings_core::network::{
     self, Cidr, Ipv4, Live, LiveAdapter, LiveAddress, LiveDns, Mac, Scope, Settings, Step,
@@ -108,6 +108,7 @@ fn adapter(
         .iter()
         .find(|r| r.ifindex == ifindex && r.prefix_len == 0)
         .map(|r| Ipv4(r.gateway));
+    let client = dhcp.iter().find(|d| d.ifindex == ifindex);
     LiveAdapter {
         ifindex,
         name: net_query::name_of(iface).to_string(),
@@ -115,7 +116,13 @@ fn adapter(
         loopback: iface.kind == NET_IFKIND_LOOPBACK,
         up: iface.admin_up != 0,
         carrier: iface.carrier != 0,
-        dhcp: dhcp.iter().any(|d| d.ifindex == ifindex),
+        dhcp: client.is_some(),
+        leasing: client.is_some_and(|d| {
+            matches!(
+                d.state,
+                NET_DHCP_INIT | NET_DHCP_SELECTING | NET_DHCP_REQUESTING
+            )
+        }),
         addresses,
         gateway,
     }

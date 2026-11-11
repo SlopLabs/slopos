@@ -82,6 +82,29 @@ be laid out at. `.fixed()` makes a window that cannot be resized. The
 compositor enforces both limits, the same way xdg-shell's `set_min_size` and
 `set_max_size` work.
 
+## A change the system makes
+
+A control that asks the system for something shows it at once and is never
+disabled for being busy. `enabled(false)` says a thing is not available to
+this person, greys it and takes it out of the Tab order; a change still being
+made is none of that. Keep what was asked in a `Pending`:
+
+- `ask(what, value)` when the control is used, and send the request.
+- Build the control from `shown(&what, actual)`, and a `Switch` with
+  `.pending(shown != actual)`.
+- `answer(made)` when an answer comes; answers come in the order asked. A
+  change the system did not make is shown no longer: say why beside the
+  control. One it made stays shown until you have read the system again and
+  call `settle()`, so the page never shows an answer without what followed
+  from it.
+
+A press while a change is pending is one more change to ask for. A request
+that replaces everything, such as a whole file saved from a dialog, waits
+until `is_empty()`; the buttons that end its dialog may be disabled meanwhile.
+
+Keep a row where it is while its value comes and goes: show *None* in its
+place, not one row fewer, so nothing under it moves.
+
 ## Components
 
 Choose the component that says what a thing is. A stack with padding is a
@@ -93,7 +116,7 @@ last resort.
 | `Section` | A heading and the content it heads. Put sections in a column with `space::XL` between them. |
 | `PropertyList` | Names and their values, such as a disk's model or a review of choices. The name column is as wide as the widest name, and each row sits on one baseline. |
 | `Group`, `ActionRow` | The settings of one thing, as a box of rows with a hairline between each: its `Switch`, a `PropertyList` of what it is now, and `ActionRow`s whose title and line say how it is set and whose control at the end, such as *Edit…*, opens a dialog that changes it. Head each group with a `Section` when a page has several. |
-| `Switch` | A setting that takes effect the moment it is turned, with no button after it, such as networking on or off: what it does, a line about it, and a track at the row's end whose knob says which. The whole row is the control. A choice that a later button applies is a checkbox. |
+| `Switch` | A setting that takes effect the moment it is turned, with no button after it, such as networking on or off: what it does, a line about it, and a track at the row's end whose knob says which. The whole row is the control. One whose change the system has yet to make is `.pending(true)`: its knob is where it was turned to, its track still shows what the system does, and it stays a control. `.enabled(false)` is for a setting the person may not change, with the reason as its line. A choice that a later button applies is a checkbox. |
 | `Notice` | Something the person must know before going on. Its tone picks its icon: info, success, warning, danger. It can carry one action. |
 | `ButtonRow` | The buttons that end a page or a dialog. `.back()` and `.aside()` go on the left, and `.cancel()`, `.confirm()` and `.destructive()` on the right, in the order you add them; the one that finishes goes last. In a `Page`'s or a dialog's footer, Enter presses the confirming button and Escape presses back or cancel. Enter never reaches a destructive button through the footer: only one that has focus takes it. Left and Right move focus along the row. |
 | `Button` | A single button outside a row. A button is secondary unless you call `.primary()` or `.destructive()`. |
@@ -186,10 +209,13 @@ shows every component in each of its states. Its pages are
   field. While a dialog is open, Tab moves only among the dialog's controls.
   A dialog opens with the keyboard in its first field, so what is typed goes
   there at once; one without a field opens with nothing focused, and Enter
-  and Escape reach its footer.
+  and Escape reach its footer. A focused control that is disabled for a
+  moment keeps its place: nothing has focus meanwhile, the keyboard is back
+  on it once it can be used again, and Tab goes on from where it was.
 - **Keys.** Enter and Escape reach the page's `ButtonRow` when no control took
   them. A focused button takes Enter for itself; a checkbox and a switch take
-  only Space.
+  only Space. A key held down types and moves again as it repeats, and
+  presses the focused control once.
 - **Hit targets.** Every control, and every row of a list, a table, a tree or
   a menu, is at least `style::MIN_TARGET` across. A `DragHandle` is a divider
   rather than a control: it is as long as the panes it parts and as wide as
@@ -252,6 +278,15 @@ label and a sentence to their shapes. Hold your app's words to them in a test.
   `appkit::audit::audit_node(&node, &widths, height)` returns every finding.
   `appkit_test` runs the audit on every component and on every gallery page
   at 360, 640 and 960 px. Add your app's pages to a test the same way.
+- **The transition audit.** The layout audit judges one view. A change your
+  app asks the system for is several, from the press to the answer, and
+  `audit::audit_transition(&before, &after, (role, name), &widths, height)`
+  reports what going from one to the next costs someone who has just used
+  that control: the control gone or somewhere else, or the keyboard no longer
+  on it. `audit::audit_moved(&before, &after, &widths, height)` reports every
+  control both views show that moved, for a page that holds still while
+  something on it changes. Hold each step of each such change to them in a
+  test.
 - **Look at it.** `just ui-shots` boots the live ISO and saves a PNG of every
   surface in `builddir/ui-shots/`: each installer page, the consent dialog,
   the lock and login screens, the system menu, each app, and each gallery

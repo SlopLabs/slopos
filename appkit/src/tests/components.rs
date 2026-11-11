@@ -275,6 +275,55 @@ pub(super) fn test_audit_finds_text_that_does_not_read() {
     assert_clean("disabled text", audit_node(&disabled, &WIDTHS, 100));
 }
 
+pub(super) fn test_a_transition_audit_finds_a_control_gone_moved_or_without_the_keyboard() {
+    use crate::audit::{audit_moved, audit_transition};
+    use crate::components::{Notice, Switch, column};
+    use crate::traits::Role;
+    let page = |notice: bool, enabled: bool, pending: bool| -> Node<()> {
+        let mut parts: Vec<Node<()>> = Vec::new();
+        if notice {
+            parts.push(Notice::new(Tone::Info, "Read again").into());
+        }
+        parts.push(
+            Switch::new("Networking", true)
+                .on_toggle(())
+                .enabled(enabled)
+                .pending(pending)
+                .into(),
+        );
+        parts.push(Button::new("Edit…").on_press(()).into());
+        column(space::SM, parts)
+    };
+    let used = (Role::Switch, "Networking");
+    let widths = [360, 640];
+    let idle = page(false, true, false);
+    let after = |after: &Node<()>| audit_transition(&idle, after, used, &widths, 300);
+    let found = |found: &[String], what: &str| found.iter().filter(|f| f.contains(what)).count();
+
+    assert_clean("a pending switch", after(&page(false, true, true)));
+    assert_clean(
+        "a pending switch moved",
+        audit_moved(&idle, &page(false, true, true), &widths, 300),
+    );
+
+    let disabled = after(&page(false, false, false));
+    assert_eq!(found(&disabled, "the keyboard left"), 2, "{disabled:?}");
+    assert_eq!(disabled.len(), 2, "{disabled:?}");
+
+    let pushed = after(&page(true, true, false));
+    assert_eq!(found(&pushed, "moved from"), 2, "{pushed:?}");
+    assert_eq!(pushed.len(), 2, "{pushed:?}");
+
+    let gone = after(&Button::new("Edit…").on_press(()).into());
+    assert_eq!(found(&gone, "is gone"), 2, "{gone:?}");
+    assert_eq!(gone.len(), 2, "{gone:?}");
+
+    let all = audit_moved(&idle, &page(true, true, false), &widths, 300);
+    assert_eq!(found(&all, "Switch"), 2, "{all:?}");
+    assert_eq!(found(&all, "Button"), 2, "{all:?}");
+    assert_eq!(all.len(), 4, "{all:?}");
+}
+
 pub(super) fn test_every_catalogue_page_passes_the_audit() {
     let catalogue = Catalogue::new(0);
     for (i, name) in PAGES.iter().enumerate() {
@@ -817,6 +866,7 @@ fn key_down(named: NamedKey) -> WidgetEvent {
     WidgetEvent::KeyDown {
         key: Key::Named(named),
         modifiers: Modifiers::default(),
+        repeat: false,
     }
 }
 

@@ -578,6 +578,16 @@ impl Catalogue {
                             .on_toggle(Msg::Toggle(3)),
                     )
                     .row(
+                        Switch::new("Bluetooth", true)
+                            .detail("Turning on.")
+                            .pending(true),
+                    )
+                    .row(
+                        Switch::new("Share this screen", false)
+                            .detail("Turning off.")
+                            .pending(true),
+                    )
+                    .row(
                         Switch::new("Check for updates", true)
                             .detail("Set by your administrator.")
                             .enabled(false),

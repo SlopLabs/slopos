@@ -4,6 +4,7 @@
 use std::time::{Duration, Instant};
 
 use slopos_abi::InputEvent;
+use slopos_appkit::Pending;
 use slopos_appkit::traits::Role;
 use slopos_chrome_core::clock::WallTime;
 use slopos_chrome_core::key::Key;
@@ -65,7 +66,7 @@ pub struct Popover {
     /// The person may move the networking switch unasked, so it is shown.
     switch_offered: bool,
     /// What the switch was last asked for, while the kernel has yet to agree.
-    pending: Option<bool>,
+    pending: Pending<(), bool>,
     pending_since: Option<Instant>,
     issued_at: Option<Instant>,
     choice: Option<Choice>,
@@ -85,7 +86,7 @@ impl Popover {
             unasked: false,
             pressed_armed: false,
             switch_offered,
-            pending: None,
+            pending: Pending::new(),
             pending_since: None,
             issued_at: None,
             choice: None,
@@ -278,15 +279,16 @@ impl Popover {
     /// What was asked for while a request is outstanding, otherwise what the
     /// kernel says.
     fn switch_on(&self, model: &NetPanelModel) -> bool {
-        self.pending.unwrap_or(model.enabled)
+        self.pending.shown(&(), model.enabled)
     }
 
     /// Settle or abandon an outstanding request: the kernel agreeing is the
     /// normal exit, the deadline the one that matters.
     pub fn settle(&mut self, model: &NetPanelModel) {
-        let Some(wanted) = self.pending else {
+        if self.pending.is_empty() {
             return;
-        };
+        }
+        let wanted = self.switch_on(model);
         if model.enabled == wanted {
             self.clear_pending();
             return;
@@ -315,12 +317,10 @@ impl Popover {
             return;
         };
         let wanted = !self.switch_on(&model);
-        if self.pending == Some(wanted) {
-            return;
-        }
         // A press during an outstanding request retargets it rather than being
         // dropped, which would silently lose the intent.
-        self.pending = Some(wanted);
+        self.pending.clear();
+        self.pending.ask((), wanted);
         self.pending_since = Some(Instant::now());
         self.issue(wanted);
     }
@@ -332,7 +332,7 @@ impl Popover {
     }
 
     fn clear_pending(&mut self) {
-        self.pending = None;
+        self.pending.clear();
         self.pending_since = None;
         self.issued_at = None;
     }

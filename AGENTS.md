@@ -981,7 +981,10 @@ page of every fixture.
 **Apps are built from components.** appkit's components
 (`appkit/src/components.rs`) — `Text` in a role and a tone, `Page`, `Section`,
 `PropertyList`, `Notice`, `Button`, `ButtonRow`, a `List` of `ListRow`s, a
-`Group` of rows — a `Switch`, which acts the moment it is turned, a
+`Group` of rows — a `Switch`, which acts the moment it is turned and is
+pending, never disabled, while the system makes the change, its knob where it
+was turned to and its track what the system still does, as GtkSwitch's
+`active` and `state` are, a
 `PropertyList`, an `ActionRow` ending in the control that changes it —
 `Sidebar`, a `Toolbar` of `IconButton`s, `SearchField`, `StatusBar`, `Tag`,
 `EmptyState`, `Disclosure`, and `Dialog`, which a `ButtonRow` ends, laid out
@@ -1015,7 +1018,16 @@ move, and a dialog is modal for Tab, the pointer and tooltips
 (`Widget::is_modal`, `Widget::covers`, `EventResponse::Blocked`), opening
 with the keyboard in its first field when it has one, giving
 focus back when it closes and scrolling its content when the window is too
-short for it. Icons are glyphs of Lucide
+short for it. A focused control disabled while it works keeps its place:
+nothing has focus meanwhile, the rebuild that enables it focuses it again and
+Tab goes on from where it was, unless a press, Tab or another page came first
+(`FocusManager`). What a control asked of the system and the system has yet
+to show is an `appkit::Pending`, whose `shown` value the control is built
+from, so none is disabled for being busy and a press meanwhile is one more
+change asked, answered in the order asked. A key held down types and moves
+again as it repeats and presses the focused control once: the wire says
+nothing of repeats, so `run_app` knows them by the keys it has seen go down
+and not up (`run::Held`). Icons are glyphs of Lucide
 (`/usr/share/fonts/Lucide.ttf`), named by `theme-core::Icon`, whose host test
 holds every variant to a glyph of the shipped font, and drawn by the UI text
 renderer at a role's size. `App::window` is a `WindowSpec` — the size a
@@ -1034,7 +1046,10 @@ text under its contrast floor against the colour behind it;
 `appkit_test` holds every component and each page of `appkit::catalogue`
 (every component in each of its states, which `widget_gallery --page <name>`
 shows) to it at 360, 640 and 960 px, having planted each violation to see it
-found. `just ui-shots` boots the live ISO with a USB tablet, a blank disk and
+found. `audit::audit_transition` holds two views of a page to what going from
+one to the next costs whoever just used a control — the control gone or
+moved, the keyboard no longer on it — and `audit::audit_moved` to no control
+both show having moved. `just ui-shots` boots the live ISO with a USB tablet, a blank disk and
 a QMP socket (`scripts/ui_shots.py`, `scripts/lib/qmp.py`), plays scenes of
 keys, clicks and commands typed at the serial console's shell, waiting on
 `COMPOSITOR: shown <app id>` and on the screen holding still, and saves a
@@ -1097,7 +1112,8 @@ cargo test -p slopos-settings-app shots` writes a PNG of each. Nothing it
 changes is changed any other way than a terminal changes it: a network switch
 is `netctl networking on|off` or `netctl set ADAPTER on|off`, and an edit
 `netctl load`, the whole edited `/etc/network` on standard input, so each
-change is one request; the people are `/bin/users`, whose passwords travel on
+change is one request, and what is kept for an adapter that is not here goes
+by `netctl forget`; the people are `/bin/users`, whose passwords travel on
 the mechanism's standard input alone (`users add --password`, `users
 passwd`), listed for it by `users list --porcelain`
 (`slopos_accounts_core::listing`, privd's `org.slopos.accounts.list`, `allow
@@ -1132,14 +1148,24 @@ for the DNS servers, which every adapter shares. A `Switch` turns networking
 or an adapter on or off the moment it is pressed, with no Apply after it, as
 NN/g's and Fluent's switch guidance asks, unasked for an administrator as the
 menu bar's does; the networking switch shows what the computer does now, as
-the status above it says. An address or the DNS servers, whose parts change
+the status above it says. A switch turned is pending until the network is
+read again: no control is disabled meanwhile, a second press or another
+switch is asked in turn, and the answer shows nothing before the read that
+follows it (`network::Msg::Settled`), so the page goes from what was to what
+is in one step, which `settings-app`'s tests hold frame by frame. An address or the DNS servers, whose parts change
 together, change in a dialog behind *Edit…* whose Save is the one request,
 which an administrator confirms, as Windows' *IP assignment* and GNOME's IPv4
 tab do. A
 manual address starts from the one the adapter holds, and a field says what
-is wrong once focus leaves it or Save is pressed, as the GNOME HIG asks. A
-request done keeps what it asked for, so a switch never flicks back before
-the next read; one the person declined says nothing. The sidebar's `SearchField` narrows
+is wrong once focus leaves it or Save is pressed, as the GNOME HIG asks; Save
+waits for every change already asked, and its dialog closes with the read
+that shows what it saved. A
+request made stays as it was asked until that read, so a switch never flicks
+back; one the person declined says nothing. An adapter's address and gateway
+rows stay when it has neither, saying *None*, so nothing under them moves,
+and one whose DHCP client has yet to be given a lease is *Connecting*, never
+*Local network only*. The window reads the network when a `net_monitor` says
+it changed, and every two seconds only without one. The sidebar's `SearchField` narrows
 the panels by name and keywords, and Enter opens the first. The Keyboard
 page leads with the layout in use drawn as a keyboard — appkit's
 `KeyboardMap` over `keymap-core::board`, each key printing what it types

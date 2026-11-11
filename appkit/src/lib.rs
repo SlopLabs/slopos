@@ -14,6 +14,7 @@ mod input;
 pub mod layout;
 pub mod node;
 pub mod paint;
+pub mod pending;
 pub mod refusal;
 pub mod run;
 pub mod sender;
@@ -60,6 +61,7 @@ pub use event::{EventResponse, Key, MessageSink, Modifiers, NamedKey, PointerBut
 
 pub use focus::FocusManager;
 pub use paint::PaintContext;
+pub use pending::Pending;
 pub use style::StyleSheet;
 pub use traits::{FocusPolicy, MeasureCtx, Role, Widget, WidgetId};
 

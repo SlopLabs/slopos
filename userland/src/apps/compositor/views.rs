@@ -5,7 +5,7 @@ use slopos_appkit::constraints::TextAlignment;
 use slopos_appkit::traits::Role;
 use slopos_appkit::{
     Button, ButtonRow, CrossAxisAlignment, Dialog, Length, List, ListRow, Node, Notice,
-    PropertyList, Text, column,
+    PropertyList, Switch, Text, column,
 };
 use slopos_chrome_core::clock::{self, WallTime};
 use slopos_chrome_core::gate::{Gate, LOG_IN, PEOPLE_SHOWN, SWITCH_USER, Target, UNLOCK};
@@ -228,12 +228,12 @@ pub fn network_panel(model: &NetPanelModel, switch: Option<bool>) -> Node<Toggle
             .into(),
     ];
     if let Some(on) = switch {
-        parts.push(Node::Checkbox {
-            checked: on,
-            label: String::from(NETWORKING),
-            on_toggle: Some(Toggle),
-            enabled: true,
-        });
+        parts.push(
+            Switch::new(NETWORKING, on)
+                .pending(on != model.enabled)
+                .on_toggle(Toggle)
+                .into(),
+        );
     }
     let ifaces: Vec<Node<Toggle>> = model
         .listed_ifaces()

@@ -1,12 +1,13 @@
 use std::sync::Once;
 
+use slopos_appkit::audit::{audit_moved, audit_transition};
 use slopos_appkit::embed::{Embedded, Moved};
 use slopos_appkit::{
     Key, KeyboardMap, LineEditInput, Modifiers, NamedKey, Node, Rect, Role, Size, Widget,
 };
 use slopos_keymap_core::LayoutTable;
 use slopos_keymap_core::board::Board;
-use slopos_settings_core::network::Settings as NetSettings;
+use slopos_settings_core::network::{Live, Settings as NetSettings};
 use slopos_settings_core::prefs::{Key as PrefKey, Prefs};
 use slopos_theme_core::words;
 
@@ -236,6 +237,20 @@ fn network_states() -> Vec<(String, Settings)> {
     let mut asking = read(Panel::Network, admin());
     asking.update(net(network::Msg::Networking));
     out.push(("network turning off".into(), asking));
+    let mut turning_on = reread(|kept, live| {
+        kept.networking = false;
+        live.networking = false;
+        live.adapters[1].gateway = None;
+    });
+    turning_on.update(net(network::Msg::Networking));
+    out.push(("network turning on".into(), turning_on));
+    out.push((
+        "network connecting".into(),
+        reread(|_, live| {
+            live.adapters[1].gateway = None;
+            live.adapters[1].leasing = true;
+        }),
+    ));
     let mut failed = read(Panel::Network, admin());
     failed.update(net(network::Msg::Networking));
     failed.update(ran(1, "netctl: eth0 would not go down"));
@@ -529,9 +544,9 @@ fn escape_typed_into_a_dialog_s_field_closes_the_dialog() {
     let mut app = unaddressed();
     edit_eth0(&mut app);
     app.update(net(network::Msg::Method(1)));
-    assert!(shows(&app, "Gateway"));
+    assert!(app.network.dialog().is_some());
     app.update(net(network::Msg::Address(escape())));
-    assert!(!shows(&app, "Gateway"), "the address dialog is gone");
+    assert!(app.network.dialog().is_none(), "the address dialog is gone");
 
     let mut app = read(Panel::Users, admin());
     app.update(people(users::Msg::Rename));
@@ -574,11 +589,9 @@ fn a_switch_asks_for_what_it_turns_alone_and_stays_turned() {
     let mut app = read(Panel::Network, admin());
     let (_, effects) = app.update(net(network::Msg::Networking));
     assert_eq!(switched(&effects), ["networking", "off"]);
-    let (name, mac) = eth0();
-    let (_, busy) = app.update(net(network::Msg::Adapter(name.clone(), mac)));
-    assert!(busy.is_empty(), "one request at a time");
-    let (_, effects) = app.update(ran(0, ""));
-    assert_eq!(effects, [Effect::Network(network::Effect::Read)]);
+    let (action, effects) = app.update(ran(0, ""));
+    assert_eq!(effects, [Effect::Network(network::Effect::Settle)]);
+    assert_eq!(action, Action::None, "nothing to show before the read");
     let (_, effects) = app.update(net(network::Msg::Networking));
     assert_eq!(
         switched(&effects),
@@ -587,12 +600,66 @@ fn a_switch_asks_for_what_it_turns_alone_and_stays_turned() {
     );
     app.update(ran(0, ""));
 
+    let (name, mac) = eth0();
     let (_, effects) = app.update(net(network::Msg::Adapter(name, mac)));
     assert_eq!(
         switched(&effects),
         ["set", "52:54:00:12:34:56", "off"],
         "an adapter by its hardware address, which outlasts its name"
     );
+}
+
+#[test]
+fn changes_are_asked_in_turn_and_a_save_waits_for_them() {
+    let mut app = read(Panel::Network, admin());
+    let (name, mac) = eth0();
+    let (_, effects) = app.update(net(network::Msg::Networking));
+    assert_eq!(switched(&effects), ["networking", "off"]);
+    let (_, effects) = app.update(net(network::Msg::Adapter(name.clone(), mac)));
+    assert_eq!(
+        switched(&effects),
+        ["set", "52:54:00:12:34:56", "off"],
+        "asked while the first is still being made"
+    );
+    let (_, effects) = app.update(net(network::Msg::Adapter(name, mac)));
+    assert_eq!(
+        switched(&effects),
+        ["set", "52:54:00:12:34:56", "on"],
+        "a second press turns it from where the first left it"
+    );
+
+    edit_eth0(&mut app);
+    app.update(net(network::Msg::Method(1)));
+    let settled = || net(network::Msg::Settled(Ok(network::sample())));
+    for answer in 0..3 {
+        let (_, held) = app.update(net(network::Msg::Save));
+        assert!(held.is_empty(), "the whole file waits, at answer {answer}");
+        app.update(ran(0, ""));
+        let (_, held) = app.update(net(network::Msg::Save));
+        assert!(held.is_empty(), "and for the read after answer {answer}");
+        app.update(settled());
+    }
+    let (_, effects) = app.update(net(network::Msg::Save));
+    loaded(&effects);
+    app.update(ran(0, ""));
+    assert!(
+        app.network.dialog().is_some(),
+        "open until the page shows what was saved"
+    );
+    app.update(settled());
+    assert!(app.network.dialog().is_none());
+}
+
+#[test]
+fn an_adapter_still_being_given_a_lease_is_connecting() {
+    let mut app = read(Panel::Network, admin());
+    let (kept, mut live) = network::sample();
+    live.adapters[1].gateway = None;
+    app.update(net(network::Msg::Read(Ok((kept.clone(), live.clone())))));
+    assert!(shows(&app, "Local network only"));
+    live.adapters[1].leasing = true;
+    app.update(net(network::Msg::Read(Ok((kept, live)))));
+    assert!(shows(&app, "Connecting") && !shows(&app, "Local network only"));
 }
 
 #[test]
@@ -671,13 +738,19 @@ fn forget_takes_only_the_settings_it_names() {
     .unwrap();
     let id = kept.adapters[2].id.clone();
     app.update(net(network::Msg::Read(Ok((kept, live)))));
-    let (_, effects) = app.update(net(network::Msg::Forget(id)));
-    let left: Vec<String> = loaded(&effects)
-        .adapters
-        .iter()
-        .map(|a| a.id.to_string())
-        .collect();
-    assert_eq!(left, ["52:54:00:00:00:0b", "eth7"]);
+    let (_, effects) = app.update(net(network::Msg::Forget(id.clone())));
+    let [Effect::Ask(ask)] = effects.as_slice() else {
+        panic!("{effects:?}");
+    };
+    assert_eq!(
+        (ask.action, ask.args.as_slice()),
+        (
+            network::SETTINGS,
+            &["forget".to_string(), "52:54:00:00:00:0c".to_string()][..]
+        )
+    );
+    let (_, again) = app.update(net(network::Msg::Forget(id)));
+    assert!(again.is_empty(), "already being forgotten");
 }
 
 #[test]
@@ -911,8 +984,20 @@ fn a_switch_stays_turned_and_only_a_refusal_not_your_own_is_said() {
     let before = place(&app);
     let (_, effects) = app.update(people(users::Msg::Admin));
     assert_eq!(asked(&effects), ["promote", "ada"]);
-    let (_, busy) = app.update(people(users::Msg::Admin));
-    assert!(busy.is_empty(), "one request at a time");
+    let (_, effects) = app.update(people(users::Msg::Admin));
+    assert_eq!(
+        asked(&effects),
+        ["demote", "ada"],
+        "a second press turns it from where the first left it"
+    );
+    app.update(answer(users::Request::Admin, 0, ""));
+    app.update(answer(users::Request::Admin, 0, ""));
+    let (_, effects) = app.update(people(users::Msg::Admin));
+    assert_eq!(
+        asked(&effects),
+        ["promote", "ada"],
+        "both were made, in turn"
+    );
     app.update(answer(users::Request::Admin, 0, ""));
     let (_, effects) = app.update(people(users::Msg::Admin));
     assert_eq!(
@@ -1381,6 +1466,154 @@ fn the_pointers_light_repaints_only_what_it_says_it_changed() {
     }
     for (index, name) in PAGES.iter().enumerate() {
         light_repaints_what_it_says(name, &Catalogue::new(index).page(index), 64);
+    }
+}
+
+const WINDOW: Rect = Rect::new(0, 0, 920, 660);
+
+fn frame(app: &Settings, pointer: (i32, i32)) -> Vec<u8> {
+    let mut tree = Embedded::new(&app.view(), WINDOW);
+    tree.hover(pointer.0, pointer.1);
+    let mut pixels = vec![0u8; (WINDOW.width * WINDOW.height * 4) as usize];
+    paint_over_surface(&tree, &mut pixels, WINDOW, WINDOW);
+    pixels
+}
+
+fn repainted(now: &[u8], was: &[u8]) -> Vec<Rect> {
+    let geometry = slopos_gfx::damage::Geometry {
+        width: WINDOW.width as u32,
+        height: WINDOW.height as u32,
+        pitch: WINDOW.width as usize * 4,
+        bytes_pp: 4,
+    };
+    slopos_gfx::damage::changed(now, was, geometry)
+        .as_slice()
+        .iter()
+        .map(|r| Rect::new(r.x0, r.y0, r.x1 - r.x0 + 1, r.y1 - r.y0 + 1))
+        .collect()
+}
+
+#[test]
+fn a_switch_turned_repaints_its_own_row_and_its_answer_nothing() {
+    fonts();
+    let (name, mac) = eth0();
+    let turns = [
+        ("Networking", net(network::Msg::Networking)),
+        ("Use this adapter", net(network::Msg::Adapter(name, mac))),
+    ];
+    for (switch, turn) in turns {
+        let mut app = read(Panel::Network, admin());
+        let row = placed(&app, Role::Switch, switch, WINDOW.width, WINDOW.height);
+        let on_it = (row.x + row.width / 2, row.y + row.height / 2);
+        let idle = frame(&app, on_it);
+        app.update(turn);
+        let asked = frame(&app, on_it);
+        let changed = repainted(&asked, &idle);
+        assert!(!changed.is_empty(), "{switch}: turning it showed nothing");
+        assert!(
+            changed
+                .iter()
+                .all(|part| part.intersect(&row) == Some(*part)),
+            "{switch}: turning it repainted {changed:?}, outside its row {row:?}"
+        );
+        app.update(ran(0, ""));
+        assert!(
+            frame(&app, on_it) == asked,
+            "{switch}: its answer repainted before the network was read again"
+        );
+    }
+}
+
+fn settled(change: impl Fn(&mut NetSettings, &mut Live)) -> Msg {
+    let (mut kept, mut live) = network::sample();
+    change(&mut kept, &mut live);
+    net(network::Msg::Settled(Ok((kept, live))))
+}
+
+#[test]
+fn turning_a_network_switch_moves_nothing_and_keeps_the_keyboard() {
+    fonts();
+    let (name, mac) = eth0();
+    let again = || net(network::Msg::Read(Ok(network::sample())));
+    let networking = vec![
+        net(network::Msg::Networking),
+        ran(0, ""),
+        settled(|kept, live| {
+            kept.networking = false;
+            live.networking = false;
+            live.adapters[1].gateway = None;
+        }),
+        net(network::Msg::Networking),
+        ran(0, ""),
+        settled(|_, live| {
+            live.adapters[1].gateway = None;
+            live.adapters[1].leasing = true;
+        }),
+        again(),
+    ];
+    let auto = slopos_settings_core::network::Ipv4Method::Auto;
+    let adapter = vec![
+        net(network::Msg::Adapter(name.clone(), mac)),
+        ran(0, ""),
+        settled(|kept, live| {
+            kept.set_for("eth0", mac, false, auto);
+            live.adapters[1].up = false;
+            live.adapters[1].addresses.clear();
+            live.adapters[1].gateway = None;
+            live.dns.servers.clear();
+        }),
+        net(network::Msg::Adapter(name, mac)),
+        ran(0, ""),
+        settled(|_, live| {
+            live.adapters[1].addresses.clear();
+            live.adapters[1].gateway = None;
+            live.adapters[1].leasing = true;
+            live.dns.servers.clear();
+        }),
+        again(),
+    ];
+    for (switch, steps) in [("Networking", networking), ("Use this adapter", adapter)] {
+        let mut app = read(Panel::Network, admin());
+        let mut before = app.view();
+        for (step, msg) in steps.into_iter().enumerate() {
+            app.update(msg);
+            let after = app.view();
+            let used = (Role::Switch, switch);
+            let mut found = audit_transition(&before, &after, used, &[700, 920], 660);
+            found.extend(audit_moved(&before, &after, &[920], 660));
+            assert!(
+                found.is_empty(),
+                "{switch}, step {step}:\n{}",
+                found.join("\n")
+            );
+            before = after;
+        }
+    }
+}
+
+#[test]
+fn turning_a_person_s_switch_keeps_its_place_and_the_keyboard() {
+    fonts();
+    let switches = [
+        ("Administrator", users::Msg::Admin, users::Request::Admin),
+        (
+            "Log in automatically",
+            users::Msg::Autologin,
+            users::Request::Autologin,
+        ),
+    ];
+    for (switch, turn, request) in switches {
+        let mut app = read(Panel::Users, admin());
+        app.update(people(users::Msg::Open(0)));
+        let mut before = app.view();
+        for msg in [people(turn), answer(request, 0, "")] {
+            app.update(msg);
+            let after = app.view();
+            let used = (Role::Switch, switch);
+            let found = audit_transition(&before, &after, used, &[700, 920], 660);
+            assert!(found.is_empty(), "{switch}:\n{}", found.join("\n"));
+            before = after;
+        }
     }
 }
 

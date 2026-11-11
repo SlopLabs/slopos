@@ -80,9 +80,10 @@ impl Press {
             }
             WidgetEvent::KeyDown {
                 key: Key::Named(key @ (NamedKey::Enter | NamedKey::Space)),
+                repeat,
                 ..
             } if self.focused && !(self.toggles && *key == NamedKey::Enter) => {
-                (EventResponse::Consumed, true)
+                (EventResponse::Consumed, !repeat)
             }
             _ => (EventResponse::Ignored, false),
         }

@@ -15,6 +15,7 @@ use crate::traits::{
 pub struct SwitchWidget {
     core: WidgetCore,
     on: bool,
+    pending: bool,
     label: String,
     words: Vec<Box<dyn Widget>>,
     on_toggle: Option<Box<dyn Fn() -> Box<dyn Any>>>,
@@ -28,6 +29,7 @@ pub struct SwitchWidget {
 impl SwitchWidget {
     pub fn new(
         on: bool,
+        pending: bool,
         label: String,
         words: Box<dyn Widget>,
         on_toggle: Option<Box<dyn Fn() -> Box<dyn Any>>>,
@@ -36,6 +38,7 @@ impl SwitchWidget {
         Self {
             core: WidgetCore::new(),
             on,
+            pending,
             label,
             words: vec![words],
             on_toggle,
@@ -114,7 +117,8 @@ impl Widget for SwitchWidget {
             false => track.x + self.knob_inset,
         };
         let knob = Rect::new(knob_x, track.y + self.knob_inset, side, side);
-        if self.on {
+        // A pending change's track still shows what the system does.
+        if self.on != self.pending {
             let fill = match self.enabled {
                 true => theme.state(ColorRole::AccentFill, state),
                 false => theme.text_disabled,

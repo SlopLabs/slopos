@@ -1225,6 +1225,174 @@ pub(super) fn test_a_switch_turns_from_anywhere_on_its_row() {
     assert_eq!(off.focus_policy(), FocusPolicy::None);
 }
 
+pub(super) fn test_a_pending_switch_shows_its_knob_turned_and_what_the_system_still_does() {
+    use crate::components::Switch;
+    use crate::tree::build_widget_tree;
+    let style = StyleSheet::current();
+    let size = Size::new(400, 60);
+    let built = |on: bool, pending: bool| {
+        let node = Switch::new("Networking", on)
+            .on_toggle(())
+            .pending(pending)
+            .into();
+        let mut root = build_widget_tree::<()>(&node);
+        crate::tree::layout_tree(root.as_mut(), size, &style);
+        root
+    };
+    let shot = |on: bool, pending: bool| {
+        let window = Rect::new(0, 0, size.width, size.height);
+        crate::audit::paint_plain(built(on, pending).as_ref(), size, &style, window)
+    };
+    let at = |data: &[u8], x: i32, y: i32| -> [u8; 4] {
+        let i = ((y * size.width + x) * 4) as usize;
+        [data[i], data[i + 1], data[i + 2], data[i + 3]]
+    };
+    let row = built(true, false).layout_rect();
+    let (left, y) = (
+        row.x + row.width - style.switch_width,
+        row.y + row.height / 2,
+    );
+    let quarter = style.switch_width / 4;
+    // Between the knob's two places, where only the track shows.
+    let (track, off_side, on_side) = (left + 2 * quarter, left + quarter, left + 3 * quarter);
+    let (on, off) = (shot(true, false), shot(false, false));
+    let (turning_off, turning_on) = (shot(false, true), shot(true, true));
+
+    assert_eq!(at(&turning_off, track, y), at(&on, track, y), "still on");
+    assert_eq!(at(&turning_on, track, y), at(&off, track, y), "still off");
+    assert_eq!(
+        at(&turning_off, on_side, y),
+        at(&turning_off, track, y),
+        "the knob left the side it was on"
+    );
+    assert_ne!(at(&turning_off, off_side, y), at(&turning_off, track, y));
+    assert_eq!(at(&turning_on, off_side, y), at(&turning_on, track, y));
+    assert_ne!(at(&turning_on, on_side, y), at(&turning_on, track, y));
+
+    let mut waiting = built(true, true);
+    assert_eq!(waiting.focus_policy(), FocusPolicy::TabFocus);
+    let (x, y) = (row.x + 4, row.y + row.height / 2);
+    deliver(waiting.as_mut(), press(x, y));
+    let release = WidgetEvent::PointerUp {
+        x,
+        y,
+        button: PointerButton::Left,
+    };
+    let turned = deliver(waiting.as_mut(), release).1.drain_typed::<()>();
+    assert_eq!(turned.len(), 1, "a press while it waits asks again");
+}
+
+pub(super) fn test_focus_waits_for_a_control_disabled_while_it_works() {
+    use Control::{Off, On};
+    let mut focus = FocusManager::new();
+    let rebuild = |focus: &mut FocusManager, controls: &[Control]| {
+        let (tree, ids) = page(controls);
+        (focus.rebuild_tab_chain(&tree), ids)
+    };
+    let idle = [On("Back"), On("Save"), On("Next")];
+    let working = [On("Back"), Off("Save"), On("Next")];
+
+    let (_, ids) = rebuild(&mut focus, &idle);
+    focus.set_focused(Some(ids[1]));
+    assert_eq!(rebuild(&mut focus, &working).0, None);
+    assert_eq!(focus.focused(), None, "nothing else takes the keyboard");
+    let (restored, ids) = rebuild(&mut focus, &idle);
+    assert_eq!(restored, Some(ids[1]), "back on it once it can be pressed");
+
+    let (_, ids) = rebuild(&mut focus, &working);
+    focus.move_focus_next();
+    assert_eq!(focus.focused(), Some(ids[2]), "Tab goes on from its place");
+    let (restored, ids) = rebuild(&mut focus, &idle);
+    assert_eq!(restored, Some(ids[2]), "and stays where Tab put it");
+
+    let (_, ids) = rebuild(&mut focus, &idle);
+    focus.set_focused(Some(ids[1]));
+    rebuild(&mut focus, &working);
+    focus.move_focus_prev();
+    let (_, ids) = rebuild(&mut focus, &working);
+    assert_eq!(focus.focused(), Some(ids[0]), "Shift+Tab goes back from it");
+
+    let (_, ids) = rebuild(&mut focus, &idle);
+    focus.set_focused(Some(ids[1]));
+    rebuild(&mut focus, &working);
+    focus.note_pointer_input();
+    assert_eq!(rebuild(&mut focus, &idle).0, None, "a press went elsewhere");
+
+    let (_, ids) = rebuild(&mut focus, &[On("Back"), On("Save")]);
+    focus.set_focused(Some(ids[1]));
+    rebuild(&mut focus, &[On("Back"), Off("Save")]);
+    assert_eq!(
+        rebuild(&mut focus, &[On("Back"), On("Cancel")]).0,
+        None,
+        "it waits for that control, not for whatever takes its place"
+    );
+}
+
+pub(super) fn test_a_held_key_presses_a_control_once() {
+    use crate::event::Key;
+    let mut held = crate::run::Held::default();
+    assert!(!held.press(57, 1_000));
+    assert!(held.press(57, 1_400), "its repeat");
+    assert!(held.press(57, 1_430));
+    assert!(!held.press(28, 1_440), "another key");
+    held.release(57);
+    assert!(!held.press(57, 1_500), "let go and pressed again");
+    assert!(
+        !held.press(57, 9_000),
+        "a release that never came costs no later press"
+    );
+
+    let pressed: Box<dyn Fn() -> Box<dyn Any>> = Box::new(|| Box::new(()) as Box<dyn Any>);
+    let mut button = ButtonWidget::new(
+        String::from("Save"),
+        Some(pressed),
+        ButtonStyle::Primary,
+        true,
+    );
+    focused(&mut button);
+    let space = |repeat| WidgetEvent::KeyDown {
+        key: Key::Named(NamedKey::Space),
+        modifiers: Default::default(),
+        repeat,
+    };
+    let (taken, mut sink) = deliver(&mut button, space(false));
+    assert!(taken && sink.drain_typed::<()>().len() == 1);
+    let (taken, mut sink) = deliver(&mut button, space(true));
+    assert!(taken, "not left to the page's own keys");
+    assert!(sink.drain_typed::<()>().is_empty(), "pressed by its repeat");
+}
+
+pub(super) fn test_what_was_asked_shows_until_it_is_answered_and_read_again() {
+    let mut pending = crate::Pending::<&str, bool>::new();
+    assert!(pending.shown(&"networking", true) && !pending.waiting());
+    pending.ask("networking", false);
+    pending.ask("eth0", false);
+    pending.ask("networking", true);
+    assert!(pending.shown(&"networking", false), "what was asked last");
+    assert!(!pending.shown(&"eth0", true));
+    assert!(pending.shown(&"eth1", true), "nothing asked of it");
+
+    assert_eq!(pending.answer(true), Some(("networking", false)));
+    assert!(
+        pending.waiting_for(&"networking"),
+        "its second is still owed"
+    );
+    assert_eq!(pending.answer(false), Some(("eth0", false)));
+    assert!(pending.shown(&"eth0", true), "not made, so not shown");
+    assert_eq!(pending.answer(true), Some(("networking", true)));
+    assert_eq!(pending.answer(true), None);
+    assert!(!pending.waiting() && !pending.is_empty());
+    assert!(
+        pending.shown(&"networking", false),
+        "made, and shown until the system is read again"
+    );
+
+    assert_eq!(pending.settle(), Some(("networking", false)));
+    assert_eq!(pending.settle(), Some(("networking", true)));
+    assert_eq!(pending.settle(), None);
+    assert!(pending.is_empty() && !pending.shown(&"networking", false));
+}
+
 pub(super) fn test_menu_arrows_skip_what_cannot_be_chosen() {
     use crate::node::{MenuItem, MenuItemKind};
     use crate::widgets::menu::MenuWidget;

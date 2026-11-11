@@ -63,6 +63,7 @@ pub fn run_app<A: App>(mut app: A) -> ! {
     let mut tip = Tip::default();
     let mut inside = false;
     let mut hovered: Option<(WidgetId, usize)> = None;
+    let mut held = Held::default();
 
     loop {
         let mut key_taken = false;
@@ -125,10 +126,22 @@ pub fn run_app<A: App>(mut app: A) -> ! {
                 _ => {}
             }
 
-            let widget_event = match translate_event(&ev) {
+            let now_ms = slopos_windowing::get_time_ms();
+            let repeats = match &ev {
+                Event::KeyPress { keycode, .. } => held.press(*keycode, now_ms),
+                Event::KeyRelease { keycode, .. } => {
+                    held.release(*keycode);
+                    false
+                }
+                _ => false,
+            };
+            let mut widget_event = match translate_event(&ev) {
                 Some(e) => e,
                 None => continue,
             };
+            if let WidgetEvent::KeyDown { repeat, .. } = &mut widget_event {
+                *repeat = repeats;
+            }
 
             match &widget_event {
                 WidgetEvent::KeyDown { modifiers: m, .. }
@@ -413,6 +426,37 @@ fn relight(
         if !relit.contains(&rect) {
             relit.push(rect);
         }
+    }
+}
+
+/// Longer than a key waits before it repeats, so a release another surface
+/// took costs no later press of that key.
+const REPEAT_WITHIN_MS: u64 = 1000;
+
+/// Keys held and when each last sent a press: the wire flags no repeat.
+#[derive(Default)]
+pub(crate) struct Held {
+    keys: Vec<(u16, u64)>,
+}
+
+impl Held {
+    /// Whether this press of `keycode` repeats one still held.
+    pub(crate) fn press(&mut self, keycode: u16, now_ms: u64) -> bool {
+        match self.keys.iter_mut().find(|(key, _)| *key == keycode) {
+            Some((_, at)) => {
+                let repeats = now_ms.saturating_sub(*at) < REPEAT_WITHIN_MS;
+                *at = now_ms;
+                repeats
+            }
+            None => {
+                self.keys.push((keycode, now_ms));
+                false
+            }
+        }
+    }
+
+    pub(crate) fn release(&mut self, keycode: u16) {
+        self.keys.retain(|(key, _)| *key != keycode);
     }
 }
 

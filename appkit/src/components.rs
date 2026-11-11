@@ -608,11 +608,15 @@ pub(crate) fn title_and_detail<M>(title: String, detail: String, ink: Tone) -> N
 
 /// An on/off setting that takes effect at once; the whole row is the
 /// control. A choice a later button applies is a checkbox.
+///
+/// While its change is being made it is [`pending`](Self::pending), never
+/// disabled.
 #[derive(Clone, Debug)]
 pub struct Switch<M> {
     pub label: String,
     pub detail: String,
     pub on: bool,
+    pub pending: bool,
     pub on_toggle: Option<M>,
     pub enabled: bool,
 }
@@ -623,6 +627,7 @@ impl<M> Switch<M> {
             label: label.into(),
             detail: String::new(),
             on,
+            pending: false,
             on_toggle: None,
             enabled: true,
         }
@@ -638,6 +643,14 @@ impl<M> Switch<M> {
         self
     }
 
+    /// The system has yet to do what `on` asks: the knob shows `on`, the
+    /// track what the system still does.
+    pub fn pending(mut self, pending: bool) -> Self {
+        self.pending = pending;
+        self
+    }
+
+    /// `false` for a setting the person may not change.
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self

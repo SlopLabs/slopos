@@ -726,7 +726,11 @@ mod dispatch {
     pub fn press(app: &mut EditorApp, key: Key, modifiers: Modifiers) -> bool {
         let mut root = layout(app);
         let mut sink = MessageSink::new();
-        let event = WidgetEvent::KeyDown { key, modifiers };
+        let event = WidgetEvent::KeyDown {
+            key,
+            modifiers,
+            repeat: false,
+        };
         let response = root.event(&event, &mut sink);
         let blocked = response == EventResponse::Blocked;
         let taken = (response.is_consumed() && !blocked)

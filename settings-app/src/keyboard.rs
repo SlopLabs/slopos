@@ -78,6 +78,7 @@ pub struct Keyboard {
     read: Option<Read>,
     try_it: Field,
     computer_dialog: Option<ComputerDialog>,
+    /// One request at a time, since each asks the person.
     asking: bool,
     /// What came of keeping yours, until the next choice.
     yours_said: Option<(Tone, String)>,
@@ -275,11 +276,10 @@ impl Keyboard {
         let buttons = vec![
             Button::new("Use your layout")
                 .on_press(AppMsg::Keyboard(Msg::UseYours))
-                .enabled(!self.asking && self.yours_apart().is_some())
+                .enabled(self.yours_apart().is_some())
                 .into(),
             Button::new("Change…")
                 .on_press(AppMsg::Keyboard(Msg::Change))
-                .enabled(!self.asking)
                 .into(),
         ];
         let mut parts = vec![
@@ -319,7 +319,7 @@ impl Keyboard {
                         .confirm(
                             Button::new("Change")
                                 .on_press(AppMsg::Keyboard(Msg::Confirm))
-                                .enabled(changes),
+                                .enabled(changes && !self.asking),
                         ),
                 )
                 .into(),

@@ -279,6 +279,7 @@ fn said_plainly(said: &str) -> String {
 pub struct Settings {
     pub panel: Panel,
     search: Field,
+    network_watched: bool,
     pub network: network::Network,
     pub users: users::Users,
     pub keyboard: keyboard::Keyboard,
@@ -291,6 +292,7 @@ impl Settings {
         Settings {
             panel,
             search: Field::default(),
+            network_watched: false,
             network: network::Network::new(person.admin),
             users: users::Users::new(person),
             keyboard: keyboard::Keyboard::default(),
@@ -374,6 +376,9 @@ impl Settings {
             Msg::Network(network::Msg::Read(Ok(read))) if self.network.holds(&read) => {
                 return (Action::None, Vec::new());
             }
+            Msg::Network(network::Msg::Changed) => {
+                return (Action::None, self.network.update(network::Msg::Changed));
+            }
             Msg::Network(msg) => self.network.update(msg),
             Msg::Users(msg) => {
                 let effects = self.users.update(msg);
@@ -383,7 +388,15 @@ impl Settings {
             Msg::Keyboard(msg) => self.keyboard.update(msg),
             Msg::Desktop(msg) => self.desktop.update(msg),
             Msg::About(msg) => self.about.update(msg),
-            Msg::Answered(Purpose::Network, asked) => self.network.answered(asked),
+            // A request made shows nothing new until the read that follows it.
+            Msg::Answered(Purpose::Network, asked) => {
+                let made = asked.trouble().is_none();
+                let effects = self.network.answered(asked);
+                if made {
+                    return (Action::None, effects);
+                }
+                effects
+            }
             Msg::Answered(Purpose::Users(request), asked) => self.users.answered(request, asked),
             Msg::Answered(Purpose::Keyboard, asked) => self.keyboard.answered(asked),
         };
@@ -404,9 +417,14 @@ impl Settings {
         }
     }
 
-    /// How often the window reads the network again, while it shows it.
+    /// The window tells of every change to the network from now on.
+    pub fn watch_network(&mut self) {
+        self.network_watched = true;
+    }
+
+    /// How often to read the network again when nothing says it changed.
     pub fn tick_interval_ms(&self) -> Option<u64> {
-        (self.panel == Panel::Network).then_some(network::REFRESH_MS)
+        (self.panel == Panel::Network && !self.network_watched).then_some(network::REFRESH_MS)
     }
 
     pub fn tick(&mut self) -> Vec<Effect> {

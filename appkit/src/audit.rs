@@ -11,7 +11,7 @@ use crate::constraints::{Rect, Size};
 use crate::event::{MessageSink, WidgetEvent};
 use crate::paint::PaintContext;
 use crate::style::{MIN_TARGET, StyleSheet};
-use crate::traits::{Widget, WidgetId};
+use crate::traits::{Role, Widget, WidgetId};
 
 /// One line of text as drawn: its line box, ink, and the colour most of the
 /// box held before it.
@@ -492,6 +492,130 @@ pub fn audit_node<M: Clone + 'static>(
         let mut root = crate::layout::PaddingWidget::new(room, child);
         for finding in audit(&mut root, Size::new(width, height), &style) {
             found.push(format!("at {width} px: {finding}"));
+        }
+    }
+    found
+}
+
+fn laid_out<M: Clone + 'static>(
+    node: &crate::Node<M>,
+    size: Size,
+    style: &StyleSheet,
+) -> Box<dyn Widget> {
+    let mut root = crate::tree::build_widget_tree(node);
+    crate::tree::layout_tree(root.as_mut(), size, style);
+    root
+}
+
+fn controls(widget: &dyn Widget, out: &mut Vec<(Role, String, WidgetId, Rect)>) {
+    let control = matches!(
+        widget.role(),
+        Role::Button
+            | Role::TextField
+            | Role::Checkbox
+            | Role::Switch
+            | Role::Slider
+            | Role::List
+            | Role::Tab
+    );
+    if let (true, Some(name)) = (control, widget.accessible_name()) {
+        out.push((
+            widget.role(),
+            String::from(name),
+            widget.id(),
+            widget.layout_rect(),
+        ));
+    }
+    for child in widget.children() {
+        controls(child.as_ref(), out);
+    }
+}
+
+fn spot(r: Rect) -> String {
+    format!("{}x{}+{}+{}", r.width, r.height, r.x, r.y)
+}
+
+/// What going from `before` to `after` costs whoever just used the first
+/// `role` named `name`: it gone or moved, or the keyboard no longer on it.
+pub fn audit_transition<M: Clone + 'static>(
+    before: &crate::Node<M>,
+    after: &crate::Node<M>,
+    (role, name): (Role, &str),
+    widths: &[i32],
+    height: i32,
+) -> Vec<String> {
+    let style = StyleSheet::current();
+    let mut found = Vec::new();
+    for &width in widths {
+        let size = Size::new(width, height);
+        let (was, now) = (
+            laid_out(before, size, &style),
+            laid_out(after, size, &style),
+        );
+        let used = |root: &dyn Widget| {
+            let mut all = Vec::new();
+            controls(root, &mut all);
+            all.into_iter()
+                .find(|(r, n, ..)| *r == role && n == name)
+                .map(|(.., id, rect)| (id, rect))
+        };
+        let Some((id, at)) = used(was.as_ref()) else {
+            found.push(format!("at {width} px: no {role:?} named {name:?} to use"));
+            continue;
+        };
+        let Some((_, at_now)) = used(now.as_ref()) else {
+            found.push(format!("at {width} px: the {role:?} {name:?} is gone"));
+            continue;
+        };
+        if at_now != at {
+            found.push(format!(
+                "at {width} px: the {role:?} {name:?} moved from {} to {}",
+                spot(at),
+                spot(at_now)
+            ));
+        }
+        let mut focus = crate::focus::FocusManager::new();
+        focus.rebuild_tab_chain(was.as_ref());
+        if !crate::focus::FocusManager::tab_chain_of(was.as_ref()).contains(&id) {
+            continue;
+        }
+        focus.set_focused(Some(id));
+        if focus.rebuild_tab_chain(now.as_ref()).is_none() {
+            found.push(format!(
+                "at {width} px: the keyboard left the {role:?} {name:?}"
+            ));
+        }
+    }
+    found
+}
+
+/// Every control both views show that `after` shows somewhere else.
+pub fn audit_moved<M: Clone + 'static>(
+    before: &crate::Node<M>,
+    after: &crate::Node<M>,
+    widths: &[i32],
+    height: i32,
+) -> Vec<String> {
+    let style = StyleSheet::current();
+    let mut found = Vec::new();
+    for &width in widths {
+        let size = Size::new(width, height);
+        let (mut was, mut now) = (Vec::new(), Vec::new());
+        controls(laid_out(before, size, &style).as_ref(), &mut was);
+        controls(laid_out(after, size, &style).as_ref(), &mut now);
+        for (i, (role, name, _, at)) in was.iter().enumerate() {
+            let alike = |(r, n, ..): &&(Role, String, WidgetId, Rect)| r == role && n == name;
+            let nth = was[..i].iter().filter(alike).count();
+            let Some((.., at_now)) = now.iter().filter(alike).nth(nth) else {
+                continue;
+            };
+            if at_now != at {
+                found.push(format!(
+                    "at {width} px: the {role:?} {name:?} moved from {} to {}",
+                    spot(*at),
+                    spot(*at_now)
+                ));
+            }
         }
     }
     found

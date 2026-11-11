@@ -455,6 +455,7 @@ fn test_table_menu_key_emits_context_menu() {
         &WidgetEvent::KeyDown {
             key: super::event::Key::Named(super::event::NamedKey::Menu),
             modifiers: super::event::Modifiers::default(),
+            repeat: false,
         },
         &mut sink,
     );
@@ -476,6 +477,7 @@ fn test_table_menu_key_without_selection_is_inert() {
         &WidgetEvent::KeyDown {
             key: super::event::Key::Named(super::event::NamedKey::Menu),
             modifiers: super::event::Modifiers::default(),
+            repeat: false,
         },
         &mut sink,
     );
@@ -490,6 +492,7 @@ fn alt_key(named: super::event::NamedKey) -> WidgetEvent {
             alt: true,
             ..Modifiers::default()
         },
+        repeat: false,
     }
 }
 
@@ -796,6 +799,7 @@ fn test_popup_escape_dismisses() {
         &WidgetEvent::KeyDown {
             key: super::event::Key::Named(super::event::NamedKey::Escape),
             modifiers: super::event::Modifiers::default(),
+            repeat: false,
         },
         &mut sink,
     );
@@ -940,6 +944,7 @@ fn key(named: super::event::NamedKey, shift: bool) -> WidgetEvent {
             shift,
             ..Default::default()
         },
+        repeat: false,
     }
 }
 
@@ -1349,6 +1354,7 @@ fn test_tree_keys_only_reach_a_focused_tree() {
     let key = WidgetEvent::KeyDown {
         key: super::event::Key::Named(super::event::NamedKey::Down),
         modifiers: Modifiers::default(),
+        repeat: false,
     };
     assert!(!blurred.event(&key, &mut sink).is_consumed());
     assert!(sink.drain_typed::<TreeInput>().is_empty());
@@ -2037,6 +2043,10 @@ pub fn cases() -> &'static [(&'static str, fn())] {
             components::test_audit_finds_text_that_does_not_read,
         ),
         (
+            "a_transition_audit_finds_a_control_gone_moved_or_without_the_keyboard",
+            components::test_a_transition_audit_finds_a_control_gone_moved_or_without_the_keyboard,
+        ),
+        (
             "every_catalogue_page_passes_the_audit",
             components::test_every_catalogue_page_passes_the_audit,
         ),
@@ -2217,6 +2227,18 @@ pub fn cases() -> &'static [(&'static str, fn())] {
             controls::test_focus_follows_a_control_whose_chain_changed_shape,
         ),
         (
+            "focus_waits_for_a_control_disabled_while_it_works",
+            controls::test_focus_waits_for_a_control_disabled_while_it_works,
+        ),
+        (
+            "what_was_asked_shows_until_it_is_answered_and_read_again",
+            controls::test_what_was_asked_shows_until_it_is_answered_and_read_again,
+        ),
+        (
+            "a_held_key_presses_a_control_once",
+            controls::test_a_held_key_presses_a_control_once,
+        ),
+        (
             "a_scroll_view_hands_pointer_input_to_its_content",
             controls::test_a_scroll_view_hands_pointer_input_to_its_content,
         ),
@@ -2259,6 +2281,10 @@ pub fn cases() -> &'static [(&'static str, fn())] {
         (
             "a_switch_turns_from_anywhere_on_its_row",
             controls::test_a_switch_turns_from_anywhere_on_its_row,
+        ),
+        (
+            "a_pending_switch_shows_its_knob_turned_and_what_the_system_still_does",
+            controls::test_a_pending_switch_shows_its_knob_turned_and_what_the_system_still_does,
         ),
         (
             "menu_arrows_skip_what_cannot_be_chosen",

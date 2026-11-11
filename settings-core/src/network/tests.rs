@@ -233,6 +233,7 @@ fn adapter(ifindex: u32, name: &str, mac: Mac) -> LiveAdapter {
         up: true,
         carrier: true,
         dhcp: true,
+        leasing: false,
         addresses: vec![LiveAddress {
             address: cidr("10.0.2.15/24"),
             from_dhcp: true,

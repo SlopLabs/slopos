@@ -7,7 +7,7 @@
 use slopos_accounts_core::listing::Listed;
 use slopos_appkit::{
     ActionRow, Button, ButtonRow, CrossAxisAlignment, Dialog, Group, LineEditInput, List, ListRow,
-    Node, Notice, Page, PropertyList, Section, Switch, Text, Tone, column, row,
+    Node, Notice, Page, Pending, PropertyList, Section, Switch, Text, Tone, column, row,
 };
 use slopos_theme_core::{Surface, TextRole, space};
 
@@ -182,11 +182,8 @@ enum Slot {
     OwnAgain,
 }
 
-struct Asking {
-    request: Request,
-    /// The uid whose switch it turned, and to what.
-    turned: Option<(u32, bool)>,
-}
+/// A switch's request names the uid it was turned for; a dialog's nobody.
+type Asking = (Request, Option<u32>);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum About {
@@ -210,7 +207,7 @@ pub struct Users {
     /// The uid of the other person whose page shows.
     open: Option<u32>,
     editing: Option<Editing>,
-    asking: Option<Asking>,
+    asked: Pending<Asking, bool>,
     said: Option<Said>,
 }
 
@@ -239,7 +236,7 @@ impl Users {
             whole: false,
             open: None,
             editing: None,
-            asking: None,
+            asked: Pending::new(),
             said: None,
         }
     }
@@ -281,12 +278,13 @@ impl Users {
     fn ask(
         &mut self,
         asking: Asking,
+        on: bool,
         action: &'static str,
         args: Vec<String>,
         input: Input,
     ) -> Vec<AppEffect> {
-        let purpose = Purpose::Users(asking.request);
-        self.asking = Some(asking);
+        let purpose = Purpose::Users(asking.0);
+        self.asked.ask(asking, on);
         self.said = None;
         vec![AppEffect::Ask(Ask {
             purpose,
@@ -308,19 +306,10 @@ impl Users {
     }
 
     fn turned(&self, request: Request, person: &Listed, now: bool) -> bool {
-        match &self.asking {
-            Some(Asking {
-                request: asked,
-                turned: Some((uid, on)),
-            }) if *asked == request && *uid == person.uid => *on,
-            _ => now,
-        }
+        self.asked.shown(&(request, Some(person.uid)), now)
     }
 
     fn turn(&mut self, request: Request) -> Vec<AppEffect> {
-        if self.asking.is_some() {
-            return Vec::new();
-        }
         let Some(person) = self.shown() else {
             return Vec::new();
         };
@@ -330,25 +319,23 @@ impl Users {
                 if self.kept_admin(person).is_some() {
                     return Vec::new();
                 }
-                let verb = match person.admin {
-                    true => "demote",
-                    false => "promote",
+                let on = !self.turned(request, person, person.admin);
+                let verb = match on {
+                    true => "promote",
+                    false => "demote",
                 };
-                (!person.admin, vec![String::from(verb), name])
+                (on, vec![String::from(verb), name])
             }
             _ => {
-                let whom = match person.autologin {
-                    true => String::from("--off"),
-                    false => name,
+                let on = !self.turned(request, person, person.autologin);
+                let whom = match on {
+                    true => name,
+                    false => String::from("--off"),
                 };
-                (!person.autologin, vec![String::from("autologin"), whom])
+                (on, vec![String::from("autologin"), whom])
             }
         };
-        let asking = Asking {
-            request,
-            turned: Some((uid, on)),
-        };
-        self.ask(asking, MANAGE, args, Input::default())
+        self.ask((request, Some(uid)), on, MANAGE, args, Input::default())
     }
 
     /// So a switch never flicks back before the people are read again.
@@ -448,7 +435,7 @@ impl Users {
     }
 
     fn confirm(&mut self) -> Vec<AppEffect> {
-        if self.asking.is_some() {
+        if !self.asked.is_empty() {
             return Vec::new();
         }
         let wrong = !self.wrong().is_empty();
@@ -515,11 +502,8 @@ impl Users {
                 (MANAGE, owned(&args))
             }
         };
-        let asking = Asking {
-            request: editing.form.request(),
-            turned: None,
-        };
-        self.ask(asking, action, args, input)
+        let asking = (editing.form.request(), None);
+        self.ask(asking, true, action, args, input)
     }
 
     fn typed(&mut self, which: Msg) -> Vec<AppEffect> {
@@ -563,7 +547,7 @@ impl Users {
     }
 
     pub fn update(&mut self, msg: Msg) -> Vec<AppEffect> {
-        let idle = self.asking.is_none() && self.editing.is_none();
+        let idle = self.editing.is_none();
         match msg {
             Msg::Listed(people, whole) => {
                 if let Some(me) = people.iter().find(|p| p.uid == self.me.uid) {
@@ -629,7 +613,9 @@ impl Users {
             }
             Msg::Add | Msg::Password | Msg::Rename | Msg::Remove => {}
             Msg::Cancel => {
-                if self.asking.is_none()
+                let own = |editing: &Editing| (editing.form.request(), None);
+                let asking = self.editing.as_ref().map(own);
+                if !asking.is_some_and(|own| self.asked.waiting_for(&own))
                     && let Some(mut editing) = self.editing.take()
                 {
                     editing.form.wipe();
@@ -660,7 +646,8 @@ impl Users {
     /// A person's own no says nothing; any other is said where it was asked.
     pub fn answered(&mut self, request: Request, asked: Asked) -> Vec<AppEffect> {
         let read = vec![AppEffect::Users(Effect::Read)];
-        let turned = self.asking.take().and_then(|asking| asking.turned);
+        let answered = self.asked.answer(false);
+        let turned = answered.and_then(|((_, uid), on)| Some((uid?, on)));
         let declined = matches!(
             asked,
             Asked::Refused {
@@ -781,7 +768,7 @@ impl Users {
             vec![
                 Button::new("Add user…")
                     .on_press(AppMsg::Users(Msg::Add))
-                    .enabled(self.asking.is_none() && self.whole)
+                    .enabled(self.whole)
                     .into(),
             ],
         ));
@@ -830,8 +817,7 @@ impl Users {
                         .trailing(
                             Button::new("Remove…")
                                 .destructive()
-                                .on_press(AppMsg::Users(Msg::Remove))
-                                .enabled(self.asking.is_none()),
+                                .on_press(AppMsg::Users(Msg::Remove)),
                         ),
                 )
                 .into(),
@@ -843,13 +829,8 @@ impl Users {
     }
 
     fn account(&self, person: &Listed) -> Group<AppMsg> {
-        let idle = self.asking.is_none();
         let mine = person.uid == self.me.uid;
-        let button = |label: &str, msg: Msg| {
-            Button::new(label)
-                .on_press(AppMsg::Users(msg))
-                .enabled(idle)
-        };
+        let button = |label: &str, msg: Msg| Button::new(label).on_press(AppMsg::Users(msg));
         let face = Node::VStack {
             children: vec![
                 Node::Avatar {
@@ -882,33 +863,30 @@ impl Users {
         };
         let mut group = Group::new().row(face).row(name).row(password);
         if self.told(person) {
+            let on = self.turned(Request::Autologin, person, person.autologin);
             group = group.row(
-                Switch::new(
-                    "Log in automatically",
-                    self.turned(Request::Autologin, person, person.autologin),
-                )
+                Switch::new("Log in automatically", on)
                 .detail(
                     "When the computer starts, it opens this account without asking for a password.",
                 )
-                .on_toggle(AppMsg::Users(Msg::Autologin))
-                .enabled(idle),
+                .pending(on != person.autologin)
+                .on_toggle(AppMsg::Users(Msg::Autologin)),
             );
         }
         let kept = self.kept_admin(person);
+        let on = self.turned(Request::Admin, person, person.admin);
         group.row(
-            Switch::new(
-                "Administrator",
-                self.turned(Request::Admin, person, person.admin),
-            )
-            .detail(kept.unwrap_or(KINDS[1].1))
-            .on_toggle(AppMsg::Users(Msg::Admin))
-            .enabled(idle && kept.is_none()),
+            Switch::new("Administrator", on)
+                .detail(kept.unwrap_or(KINDS[1].1))
+                .pending(on != person.admin)
+                .on_toggle(AppMsg::Users(Msg::Admin))
+                .enabled(kept.is_none()),
         )
     }
 
     pub fn dialog(&self) -> Option<Node<AppMsg>> {
         let editing = self.editing.as_ref()?;
-        let idle = self.asking.is_none();
+        let idle = self.asked.is_empty();
         let wrong = self.wrong();
         let why = |slot: Slot, left: bool| {
             let found = wrong.iter().find(|(held, _)| *held == slot);

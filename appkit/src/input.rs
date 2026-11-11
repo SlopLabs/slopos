@@ -79,9 +79,11 @@ pub fn translate_event(event: &Event) -> Option<WidgetEvent> {
                 Key::Char(c) if !mods.ctrl && !mods.plain_alt() => {
                     Some(WidgetEvent::TextInput { character: c })
                 }
+                // The run loop, which knows what is held, sets `repeat`.
                 _ => Some(WidgetEvent::KeyDown {
                     key,
                     modifiers: mods,
+                    repeat: false,
                 }),
             }
         }

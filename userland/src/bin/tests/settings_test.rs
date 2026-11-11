@@ -241,10 +241,13 @@ fn until(what: &str, holds: impl Fn(&network::Live) -> bool) -> bool {
 }
 
 fn leased(live: &network::Live) -> bool {
+    let on_a_lease = |a: &network::LiveAdapter| {
+        a.dhcp && !a.leasing && a.addresses.iter().any(|x| x.from_dhcp) && a.gateway.is_some()
+    };
     live.adapters
         .iter()
         .find(|a| a.name == "eth0")
-        .is_some_and(|a| a.dhcp && a.addresses.iter().any(|x| x.from_dhcp) && a.gateway.is_some())
+        .is_some_and(on_a_lease)
 }
 
 /// What `netctl` leaves behind: nothing kept, eth0 back on a lease.
