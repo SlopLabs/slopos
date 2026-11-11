@@ -5,6 +5,7 @@ use crate::Result;
 use crate::repo::Repo;
 use crate::report::{self, Report};
 
+mod agents_doc;
 mod alloc_dep;
 mod app_deps;
 mod charge_linearity;
@@ -95,6 +96,10 @@ pub const GATES: &[Gate] = &[
     Gate {
         name: "app-deps",
         run: app_deps::run,
+    },
+    Gate {
+        name: "agents-doc",
+        run: agents_doc::run,
     },
 ];
 

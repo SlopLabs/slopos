@@ -51,11 +51,20 @@ impl Repo {
     /// Tracked and untracked alike, since a gate that saw only committed files
     /// would pass on the change being made; ignored files are left out.
     pub fn rs_files(&self) -> Result<Vec<String>> {
-        let mut files = match self.git_files() {
+        self.files("*.rs", |f| f.ends_with(".rs"))
+    }
+
+    /// Every file called `name`, at any depth, as `rs_files` lists sources.
+    pub fn files_named(&self, name: &str) -> Result<Vec<String>> {
+        self.files(&format!("*{name}"), |f| f.rsplit('/').next() == Some(name))
+    }
+
+    fn files(&self, pathspec: &str, wanted: impl Fn(&str) -> bool) -> Result<Vec<String>> {
+        let mut files = match self.git_files(pathspec) {
             Some(files) => files,
             None => self.walk_files()?,
         };
-        files.retain(|f| f.ends_with(".rs") && self.path(f).is_file());
+        files.retain(|f| wanted(f) && self.path(f).is_file());
         files.sort();
         files.dedup();
         Ok(files)
@@ -70,7 +79,7 @@ impl Repo {
             .collect())
     }
 
-    fn git_files(&self) -> Option<Vec<String>> {
+    fn git_files(&self, pathspec: &str) -> Option<Vec<String>> {
         if !self.root.join(".git").exists() {
             return None;
         }
@@ -84,7 +93,7 @@ impl Repo {
                 "--others",
                 "--exclude-standard",
                 "--",
-                "*.rs",
+                pathspec,
             ])
             .output()
             .ok()?;
