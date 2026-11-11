@@ -667,8 +667,8 @@ pub fn resolve_program(path: &[u8], cwd: &[u8], who: &Subject) -> Result<CanonPa
 /// against `/`. Answers the identity of what it loaded.
 ///
 /// `execve`'s road: it confers nothing, so the image runs `AT_SECURE` only
-/// when the caller's effective ids are not its real ones. `reexec` is
-/// [`may_keep_authority`]'s answer for it.
+/// when the caller's effective ids are not its real ones or the image is an
+/// extension's. `reexec` is [`may_keep_authority`]'s answer for it.
 #[allow(clippy::too_many_arguments)]
 pub fn do_exec(
     table: FdTable,
@@ -801,10 +801,13 @@ pub fn drop_authority_for_exec(task: &slopos_sched::task_struct::Task, task_id: 
     }
 }
 
-/// `secure` is what the image finds as `AT_SECURE`. `who` must be able to
-/// execute the image and its interpreter. Answers the identity of what it
-/// loaded: `program`'s, unless a file it mapped was one that program may not
-/// run. `reexec` is init re-executing itself, whose program stands meanwhile.
+/// The image finds `AT_SECURE` set when `secure` is, and whenever it is an
+/// extension's program: that speaks as its extension, which whoever started
+/// it does not, so it takes no library from where its starter points. `who`
+/// must be able to execute the image and its interpreter. Answers the
+/// identity of what it loaded: `program`'s, unless a file it mapped was one
+/// that program may not run. `reexec` is init re-executing itself, whose
+/// program stands meanwhile.
 #[allow(clippy::too_many_arguments)]
 fn exec_image(
     table: FdTable,
@@ -827,6 +830,12 @@ fn exec_image(
     }
     process_vm_end_prepay(vm_process);
 
+    let loaded = if admitted {
+        program.program
+    } else {
+        Program::Other
+    };
+    let secure = secure || matches!(loaded, Program::Extension(_));
     let stack_top = setup_user_stack(table, argv, envp, &exec_info, image, secure)?;
     *stack_ptr_out = stack_top;
     *tls_tp_out = exec_info.tls_tp;
@@ -842,11 +851,6 @@ fn exec_image(
         *tls_tp_out,
     );
 
-    let loaded = if admitted {
-        program.program
-    } else {
-        Program::Other
-    };
     Ok((loaded, standing))
 }
 

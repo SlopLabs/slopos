@@ -459,6 +459,41 @@ fn the_app_asks_its_extension_s_actions() -> bool {
         || fail(format!("greet, asked by root: {as_root:?}"))
 }
 
+/// What the extension's client, started as the person with `library_path`
+/// as its `LD_LIBRARY_PATH`, answers each of `lines`.
+fn told_the_client(library_path: Option<&str>, lines: &[&str]) -> Result<Vec<String>, String> {
+    let mut client = Command::new(format!("/opt/{NAME}/bin/client"));
+    client
+        .args(["client", &caps_drop()])
+        .uid(USER)
+        .gid(USER)
+        .env_remove(ENV_FD)
+        .env_remove("LD_LIBRARY_PATH")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    if let Some(dirs) = library_path {
+        client.env("LD_LIBRARY_PATH", dirs);
+    }
+    let mut child = client
+        .spawn()
+        .map_err(|e| format!("the client did not start: {e}"))?;
+    let (Some(mut to), Some(from)) = (child.stdin.take(), child.stdout.take()) else {
+        return Err("the client has no pipes".into());
+    };
+    let mut from = BufReader::new(from);
+    let said = lines
+        .iter()
+        .map(|line| {
+            let mut said = String::new();
+            let _ = writeln!(to, "{line}").and_then(|()| from.read_line(&mut said).map(drop));
+            said.trim().to_owned()
+        })
+        .collect();
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(said)
+}
+
 /// The extension's client asks privd on the connection it made: its own
 /// action runs for it until it maps code from outside its activation.
 fn its_own_program_is_a_principal_until_it_maps_foreign_code() -> bool {
@@ -468,42 +503,52 @@ fn its_own_program_is_a_principal_until_it_maps_foreign_code() -> bool {
     if staged.is_err() {
         return fail("could not stage code from outside the activation");
     }
-    let child = Command::new(format!("/opt/{NAME}/bin/client"))
-        .args(["client", &caps_drop()])
-        .uid(USER)
-        .gid(USER)
-        .env_remove(ENV_FD)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn();
-    let Ok(mut child) = child else {
-        return fail(format!("the client did not start: {child:?}"));
+    let said = told_the_client(
+        None,
+        &[
+            "ask ext.act.own",
+            &format!("map {foreign}"),
+            "ask ext.act.own",
+        ],
+    );
+    let [first, mapped, lapsed] = match said.as_deref() {
+        Ok([first, mapped, lapsed]) => [first, mapped, lapsed],
+        Ok(_) => return fail("the client answered other than it was told"),
+        Err(why) => return fail(why),
     };
-    let (Some(mut to), Some(from)) = (child.stdin.take(), child.stdout.take()) else {
-        return fail("the client has no pipes");
-    };
-    let mut from = BufReader::new(from);
-    let mut tell = |line: &str| {
-        let mut said = String::new();
-        let _ = writeln!(to, "{line}").and_then(|()| from.read_line(&mut said).map(drop));
-        said.trim().to_owned()
-    };
-    let first = tell("ask ext.act.own");
-    let mapped = tell(&format!("map {foreign}"));
-    let lapsed = tell("ask ext.act.own");
-    drop(tell);
-    let _ = child.kill();
-    let _ = child.wait();
     if first != "EXIT 0" {
         return fail(format!("own, asked by the client: {first}"));
     }
     if mapped != "mapped" {
         return fail(format!("the client could not map {foreign}: {mapped}"));
     }
-    lapsed == format!("DENIED {}", words::privd::LAPSED)
+    *lapsed == format!("DENIED {}", words::privd::LAPSED)
         || fail(format!(
             "own, once the client mapped foreign code: {lapsed}"
         ))
+}
+
+/// Whoever starts the client chooses its `LD_LIBRARY_PATH`. A library of
+/// its image's name there is not its image's, so the loader passes it over
+/// and the client still speaks as its extension.
+fn its_program_takes_no_library_its_starter_chose() -> bool {
+    let dir = format!("{DIR}/starters-lib");
+    let copy = format!("{dir}/libexttest.so");
+    let open = std::fs::Permissions::from_mode(0o755);
+    let staged = std::fs::create_dir_all(&dir)
+        .and_then(|()| std::fs::set_permissions(&dir, open.clone()))
+        .and_then(|()| std::fs::copy(LIB, &copy).map(drop))
+        .and_then(|()| std::fs::set_permissions(&copy, open));
+    if let Err(e) = staged {
+        return fail(format!("could not stage a library of the starter's: {e}"));
+    }
+    match told_the_client(Some(&dir), &["ask ext.act.own"]).as_deref() {
+        Ok([own]) if own == "EXIT 0" => true,
+        Ok(said) => fail(format!(
+            "own, asked by a client started with LD_LIBRARY_PATH={dir}: {said:?}"
+        )),
+        Err(why) => fail(why),
+    }
 }
 
 fn its_command_comes_last_on_path() -> bool {
@@ -971,6 +1016,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "its_own_program_is_a_principal_until_it_maps_foreign_code",
         its_own_program_is_a_principal_until_it_maps_foreign_code,
+    ),
+    (
+        "its_program_takes_no_library_its_starter_chose",
+        its_program_takes_no_library_its_starter_chose,
     ),
     (
         "its_command_comes_last_on_path",
