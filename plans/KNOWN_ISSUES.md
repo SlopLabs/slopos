@@ -126,15 +126,19 @@ frame is not known.
 
 **Status**: Open
 **Severity**: Low (limits, no wrong result)
-**Component**: `userland/src/tree.rs:271-320` (`tree::stage`),
-`userland/src/apps/tree_install.rs:54-65`
+**Component**: `userland/src/tree.rs:271-314` (`tree::stage`),
+`userland/src/apps/tree_install.rs:55-67`
 
 `org.slopos.software.install` copies the tree into
 `/var/lib/slopos/tree-install` before installing it, and both count against the
 mechanism's `DiskBlocks` ceiling, so a tree installed through privd is at most
 half of it. The copy takes only what everyone may read, reached through
 directories everyone may search, so once homes are 0700 a person installs for
-everyone only from a tree outside their home.
+everyone only from a tree outside their home. uid 0 running `tree-install`
+itself installs from the same copy, under the same two bounds, wherever the
+tree goes: on the medium's RAM root the copy is memory, and a run that is
+stopped keeps `tree-install.lock`, which privd's install then waits for
+holding its exclusive group.
 
 ---
 
@@ -156,15 +160,13 @@ session asks; root and the paired agent, whom nothing asks, add it.
 
 **Status**: Open
 **Severity**: Low (memory and boot time; only an `ExtensionUpdate` holder makes an activation)
-**Component**: `fs/src/extension/index.rs:153`, `fs/src/extension/device.rs:139-150`,
+**Component**: `fs/src/extension/index.rs:153`, `fs/src/extension/device.rs`,
 `extension-core/src/admit.rs:186-225`, `userland/src/apps/extctl/mod.rs:962-978`
 
 - An activation's index holds up to `MAX_ENTRIES` (65 536) names of up to 255
   bytes, about 17 MB of kernel heap, and 32 activations about 570 MB.
 - Image blocks are cached twice: by the root's filesystem the verifying device
   reads through, and by the activation's own `Ext4Mount`.
-- Each block that fails its tree logs `EXT: image block <n> fails its tree`,
-  unthrottled.
 - Every boot's `extctl activate-all` runs `admit::activation`, whose symbol
   check reads each extension's ELF files whole through the tree, before privd
   starts.
@@ -252,7 +254,7 @@ privd reads the first.
 
 **Status**: Open
 **Severity**: Low (robustness)
-**Component**: `userland/src/privd.rs:786-797`, `userland/src/held.rs:46-50`,
+**Component**: `userland/src/privd.rs:781-792`, `userland/src/held.rs:46-50`,
 `userland/src/apps/privd/mod.rs:697-706`, `userland/src/apps/remoted/serve.rs:142-213`
 
 - A request privd reads as its drain begins is refused as restarting, or finds
@@ -313,18 +315,6 @@ can add a second one.
   read the modifier state ignore.
 - On a machine with no xHCI controller, an LED byte the i8042 leaves
   unanswered is sent again only at its next byte or lock change.
-
----
-
-## Serial and console input drops what follows a signal character in one burst
-
-**Status**: Open
-**Severity**: Low (typed input lost)
-**Component**: `drivers/src/tty/io.rs:30-58`, `drivers/src/tty/ldisc.rs:1588-1612`
-
-`receive_buf` stops at the first signal-generating character and reports how
-many events it consumed; `drain_hw_input_locked` discards the rest of the
-burst it drained from the hardware.
 
 ---
 

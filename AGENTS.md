@@ -767,7 +767,13 @@ cannot read among them, until it reads them again. The loader searches
 `/opt/<name>/lib` after `/lib` and `/usr/lib` for a program the kernel
 attests is a file of `<name>`'s activation, which it asks through a socket
 pair's `SO_PEEREXTENSION` the first time a search gets there, so an
-`AT_SECURE` service finds its own libraries and nothing a path names.
+`AT_SECURE` service finds its own libraries and nothing a path names. Every
+program of an extension starts `AT_SECURE`, whoever starts it
+(`exec_image`): it speaks as its extension, so the loader takes for it no
+`LD_LIBRARY_PATH`, no `$ORIGIN` or relative directory and neither
+`$HOME/.local/lib` nor `/usr/local/lib`, where a library that maps nothing
+executable would leave it its extension's name; `secure_getenv` answers it
+nothing and it starts not dumpable, as any `AT_SECURE` program.
 
 **An extension's actions run as its first user.** privd reads, at its start
 and again on `SIGHUP`, the actions of every extension that runs (enabled,
@@ -2377,7 +2383,8 @@ delegates through `SpawnAttrs` — any subset of the spawner's own mask, else
 for ids other than the
 spawner's takes `SetId`, one at the `High` tier `SchedHigh`, and a child that
 holds a gated capability or runs with ids other than its spawner's real ones
-starts `AT_SECURE`. Init holds `CAP_MASK_ALL` and delegates each service what
+starts `AT_SECURE`, as does every program of an extension, by spawn or exec.
+Init holds `CAP_MASK_ALL` and delegates each service what
 its service table names (`userland/src/apps/init/service.rs`); a utest
 holds what its `utest!` declares, every capability as uid 0 unless it says
 `caps = …, uid = …`. exec keeps `caps & universal` in every thread of the
@@ -2420,7 +2427,13 @@ tells a process its own. `caps_get(pid)` tells anyone what a task holds, as
 Linux's `capget` does. The ext4 reserve is the
 superblock's `s_def_resuid` and `s_def_resgid`, uid 0's. A pty's slave
 belongs to whoever opened its master, mode 0620, as Linux's devpts gives it,
-judged on the slave an open takes. An `AF_UNIX` name is an inode of type
+judged on the slave an open takes; `TIOCGPTPEER` opens it through its master
+while it is locked, which Linux refuses, so the terminals privd's requesters
+and `/bin/login` hand on are never unlocked for opens by their path
+(`process::openpty_handed_on`, which unlocks for that one open only on a
+kernel from before this, known by its `EINVAL`), and a terminal ioctl holds its open file to its
+end, so a descriptor closed under it hands its index to no terminal
+allocated next. An `AF_UNIX` name is an inode of type
 socket, made through the parent's write and search checks at `bind` and
 reached through the name's write check at `connect`; a bound socket holds its
 inode open as a descriptor holds a file, so the inode is no other node's and
@@ -2493,7 +2506,10 @@ nothing, installing at `/usr/local` alone from a copy of the tree in
 `/var/lib/slopos/tree-install`, which only uid 0 enters and a run cut short
 leaves for the next to take away, made through descriptors that follow no
 link, of what everyone may read and with every link relative and climbing no
-higher than the tree's top before it names anything (`tree::stage`). Since
+higher than the tree's top before it names anything (`tree::stage`). uid 0
+running `tree-install` itself installs from such a copy too, whatever the
+destination, since it reads what the tree's owner may not; the copies take
+turns under `/var/lib/slopos/tree-install.lock`. Since
 that copy counts with the install against the mechanism's own `DiskBlocks`
 ceiling, a tree through privd is at most half of it. `tree-install` asks for
 it when its destination is `/usr/local` and its caller does not hold it, and
@@ -2855,8 +2871,9 @@ through the connection it inherited (`PRIVD_FD`, held to being the real
 privd's) or a fresh one and exits with the mechanism's status, relaying a
 terminal's output through pipes, and for the installer, the accounts'
 mechanisms and the rescue shell, whenever standard input is a terminal, every
-byte through a terminal of its own, locked against opens by its path once the
-requester holds it, fed nothing before the mechanism starts and relayed only
+byte through a terminal of its own, whose slave is taken through its master
+and never unlocked for opens by its path, fed nothing before the mechanism
+starts and relayed only
 once the requester's terminal is raw, which it stays while the mechanism
 runs, since the mechanism runs in another session; started by privd, a mechanism acts
 only for the action `PRIV_ACTION` names; while init starts privd again, a

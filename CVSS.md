@@ -3,8 +3,8 @@
 The ledger of open findings. A finding is removed once fixed, and an ID is
 never issued twice.
 
-The highest ID issued so far is **SLOPOS-2026-0085**. The next finding is
-`SLOPOS-2026-0086`.
+The highest ID issued so far is **SLOPOS-2026-0087**. The next finding is
+`SLOPOS-2026-0088`.
 
 ## Open findings
 
@@ -56,15 +56,6 @@ names the evidence that would lift it.
 - Evidence: `core/src/exec/mod.rs:384-394` (`account_for`); `slopos-ostd/src/process/quota/persons.rs:31-46` (the root once sixteen rows are taken); `slopos-ostd/src/process/quota/persons.rs:85-91` (the rows' limits).
 - Repro: an extension whose service forks in a loop; once the table is full, every person's spawn fails.
 - Remediation: a row per extension, keyed by its record's number, and a shared row bounded as one person's for every uid past the sixteenth.
-
-### SLOPOS-2026-0063
-- Title: `QEMU_DEBUG=1` opens a GDB stub on every interface and a monitor socket at a fixed `/tmp` path
-- Status: `open`
-- Confidence: 40 — evidence 30 (`-s` is QEMU's `-gdb tcp::1234`, which binds every address; the monitor path is fixed and removed with `rm -f` first), exploitability 5 (only while a developer debugs), reproducibility 5 (not run). Raised by: a connection from another host during a debug boot.
-- Impact: any host that reaches the developer's machine on TCP 1234 reads and writes the guest's memory and registers, and with them its root and the workspace clone; another local user who creates `/tmp/slopos-monitor.sock` first keeps QEMU from starting.
-- Evidence: `scripts/qemu_run.sh:569-576`.
-- Repro: `QEMU_DEBUG=1 just boot-log`; from another host, `gdb -ex 'target remote <host>:1234'`.
-- Remediation: `-gdb tcp:127.0.0.1:1234` and a monitor socket under `builddir/`.
 
 ### SLOPOS-2026-0064
 - Title: A mechanism reaches by path what the person allowed: its working directory and the files its command line names
@@ -121,22 +112,13 @@ names the evidence that would lift it.
 - Remediation: no kept answer for a command fed by the requester's input, and an extension's `keep` held to its key's ceiling.
 
 ### SLOPOS-2026-0070
-- Title: A mechanism's own terminal is open to session code in the unlock window, and then not held to its session
+- Title: A terminal's state-changing ioctls are not held to its session, one whose foreground group has died serves any session, and `/dev/tty` opens whatever terminal holds a stale index
 - Status: `open`
-- Confidence: 30 — evidence 25 (`openpty` unlocks the slave before privd's requester takes it by `TIOCGPTPEER` and locks it again; terminal ioctls check no session; a terminal whose foreground group has died serves any session), exploitability 5, reproducibility 0. Raised by: a utest that opens the slave in the window and turns echo on during `users passwd`.
-- Impact: a process of the requester's uid that opens `/dev/pts/N` in the window keeps a descriptor on the terminal the installer, an accounts mechanism or the rescue shell reads: it turns echo back on while a password is typed, flushes the input or stops the output, and between a rescue shell's programs reads what is typed.
-- Evidence: `userland/src/syscall/process.rs:323-338`; `userland/src/privd.rs:491-512`; `core/src/syscall/fs/poll_ioctl_handlers.rs:927-934`; `drivers/src/tty/session.rs:69`, `:82-91`, `:110-116`.
-- Repro: as uid 1000 loop opening the next `/dev/pts/N` while another process runs `users passwd`; once open, `TCSETS` with `ECHO` set as the prompt shows.
-- Remediation: never unlock a mechanism's slave (take it by `TIOCGPTPEER` alone); hold state-changing terminal ioctls to the terminal's session; treat a dead foreground group as no access from another session.
-
-### SLOPOS-2026-0071
-- Title: An extension's program keeps its extension's label with a library from `LD_LIBRARY_PATH` that maps nothing executable
-- Status: `open`
-- Confidence: 30 — evidence 25 (privd checks only base `program` principals for static linking; the loader honours `LD_LIBRARY_PATH` for a process that is not `AT_SECURE`; only an executable mapping forfeits the program), exploitability 5 (the interposed data must steer the program), reproducibility 0. Raised by: a utest in which an extension program under such a library asks privd and is admitted.
-- Impact: session code runs an extension's program with a data-only library interposing its data symbols, and the program still asks privd as that extension's `program` principal, reaching the actions its declaration lets the program ask unasked, with arguments the program would not send.
-- Evidence: `userland/src/apps/privd/mod.rs:346-347` and `:375-385`; `slibc/src/ld_so/mod.rs:644-655`; `core/src/syscall/memory_handlers.rs:64-71`; `mm/src/process_vm.rs:2924-2946`.
-- Repro: build a shared object whose only `PT_LOAD` is writable data defining a symbol the program imports; run the program with `LD_LIBRARY_PATH` naming it; `SO_PEEREXTENSION` on its privd connection still names the activation.
-- Remediation: forfeit the program when the loader maps any object from outside the base and the activation, or ignore `LD_LIBRARY_PATH` for an extension's program.
+- Confidence: 25 — evidence 20 (terminal ioctls check no session; a terminal whose foreground group has died admits a reader of any session; `/dev/tty` opens the slot a task's controlling-terminal index names with no lock, owner or session check), exploitability 5 (the terminals privd's requesters and `/bin/login` hand on are never unlocked for opens by their path, so they are reached by descriptor or through an index that went stale in a race with a hangup; what is left without a race is a person's own desktop terminal, whose slave their processes open by its path, as on Linux), reproducibility 0. Raised by: a utest in which a process of another session turns echo on at a desktop terminal while a requester reads a password there, or one whose child keeps a controlling terminal across its hangup and opens the next pty through `/dev/tty`.
+- Impact: a process of the person's own in another session opens their desktop terminal's `/dev/pts/N` and turns echo back on while they type a password at a requester's prompt, flushes its input or stops its output, and once the terminal's foreground group has died reads what is typed. A task spawned as its session's terminal hangs up can keep that terminal's index, and once the slot is the next pty's — a mechanism's or a console login's — reach it through `/dev/tty` the same way.
+- Evidence: `core/src/syscall/fs/poll_ioctl_handlers.rs:41` and `:165-204` (`TCSETS`, `TCFLSH`, `TCXONC` for any holder of a descriptor); `drivers/src/tty/session.rs:69`, `:82-91`, `:110-116`; `userland/src/apps/terminal/mod.rs:55` (the desktop terminal's slave is unlocked); `fs/src/fileio/fdops.rs:156-160` and `drivers/src/tty/backing.rs:258-267` (`/dev/tty` by index alone); `sched/src/task/task_session.rs:50-61` (a hangup clears registered tasks only).
+- Repro: as uid 1000, from a process outside the desktop terminal's session, open its `/dev/pts/N` while `users passwd` prompts there, and `TCSETS` with `ECHO` set.
+- Remediation: hold state-changing terminal ioctls to the terminal's session; treat a dead foreground group as no access from another session; open `/dev/tty` only for a task of the session the slot holds.
 
 ### SLOPOS-2026-0072
 - Title: Init ends a login tag's processes one `kill` at a time from a listing, so a process that forks fast outlives the end and many stall init
@@ -161,7 +143,7 @@ names the evidence that would lift it.
 - Status: `open`
 - Confidence: 25 — evidence 20, exploitability 5 (the typist and a console session must coincide with a compositor's exit), reproducibility 0. Raised by: a utest that types after a compositor exits and reads the keys from a console session.
 - Impact: what a person types into their desktop as its compositor exits, a password among it, lands at the console, which `/bin/login` relays to the console session running, another person's shell included.
-- Evidence: `drivers/src/input_event.rs:556-566`; `drivers/src/keyboard.rs:258`; `userland/src/apps/login.rs:89-91`.
+- Evidence: `drivers/src/input_event.rs:556-566`; `drivers/src/keyboard.rs:258`; `userland/src/apps/login.rs:84-86`.
 - Repro: with bob logged in at the console, kill uid 1000's compositor while typing; bob's shell reads the keys.
 - Remediation: while a graphical session is in front, keys reach no console until init hands the sink on.
 
@@ -191,15 +173,6 @@ names the evidence that would lift it.
 - Evidence: `boot/src/boot_services.rs:637`; `drivers/src/block/mod.rs:530-553`; `drivers/src/crash.rs:163`; `userland/src/apps/installer/disk.rs:56-61`.
 - Repro: give a stick the ISO's `boot/disk-guid` and a payload-type ext4 partition; boot the ISO from a CD with it plugged in.
 - Remediation: authenticate the payload against a digest the `install` module carries.
-
-### SLOPOS-2026-0078
-- Title: uid 0 running `tree-install` itself reads the tree by path, without the copy privd's runs make
-- Status: `open`
-- Confidence: 20 — evidence 20, exploitability 0 (uid 0 must install a tree another uid can change), reproducibility 0. Raised by: a utest that swaps a link into a tree root installs.
-- Impact: when a rescue shell or another uid-0 caller installs such a tree, its owner swaps a file for a link mid-copy and a file only uid 0 may read lands in `/usr/local`.
-- Evidence: `userland/src/apps/tree_install.rs:54-65`.
-- Repro: as root, `tree-install apps /home/user/tree /usr/local` while uid 1000 loops replacing a file in the tree with a link to `/etc/shadow`.
-- Remediation: stage the copy whenever the caller is uid 0.
 
 ### SLOPOS-2026-0079
 - Title: extctl's mechanism opens the paths a request names as uid 0
@@ -263,6 +236,24 @@ names the evidence that would lift it.
 - Evidence: `scripts/remote.py:996-997`; `userland/src/apps/remoted/serve.rs:226`.
 - Repro: the session writes `bootctl oneshot slopos-b` into `~/env.sh`; the operator runs `just remote sh '. ~/env.sh'`.
 - Remediation: `sh` runs without the connection unless the operator asks for it.
+
+### SLOPOS-2026-0086
+- Title: An extension's program keeps its extension's label with a library that maps nothing executable, where its own run path, `/usr/lib` or a relative needed name leads
+- Status: `open`
+- Confidence: 20 — evidence 15 (an extension's program starts `AT_SECURE`, which leaves an absolute `DT_RPATH` or `DT_RUNPATH` entry, `/usr/lib` and a needed name holding a slash searched as written; extctl reads neither a run path nor a slash in a needed name), exploitability 5 (an installed image must carry such a run path or name, or the attacker runs as uid 0, whose `/usr` it is, or holds `DacOverride`, to make `/usr/lib`), reproducibility 0. Raised by: an image whose program carries `DT_RUNPATH /usr/local/lib` asking privd as its extension with a data-only library there.
+- Impact: where an extension's program was linked with a run path a person can write — `/usr/local/lib`, a build tree — or needs `sub/libx.so`, session code places a library there, or under the directory it starts the program in, that maps only data; the program loads it ahead of its image's own and still asks privd as that extension's `program` principal. A uid-0 process or a `DacOverride` holder does the same through `/usr/lib`, which is no base directory. An extension's script keeps the label on the base's static shell, which takes its starter's environment, `PATH` among it.
+- Evidence: `slibc/src/ld_so/mod.rs:57` (`SEARCH_DIRS`); `slibc/src/ld_so/mod.rs:708-720` (a name with a slash as written; run paths ahead of every directory); `extension-core/src/elf.rs:218-219` (only `DT_NEEDED` and `DT_SONAME` are read); `abi/src/fs.rs:167-174` (`BASE_DIRS` without `/usr/lib`); `userland/src/apps/shell/env.rs:106-114` (the shell imports its environment).
+- Repro: pack an extension whose program is linked `-rpath /usr/local/lib` against a library also in its `lib/`; as the first person put a data-only library of that soname in `/usr/local/lib` and start the program: `SO_PEEREXTENSION` on its privd connection still names the activation.
+- Remediation: extctl refuses an ELF file that carries a run path or a needed name holding a slash, and `/usr/lib` becomes a base directory or leaves an `AT_SECURE` program's search.
+
+### SLOPOS-2026-0087
+- Title: `tree-install` run with `DacOverride` by a uid other than 0 reads the tree by path
+- Status: `open`
+- Confidence: 20 — evidence 15 (the copy `tree::stage` makes is taken for uid 0 and privd's runs alone; `tree::scan` and the install open by path and follow links), exploitability 5 (an administrator must run `priv tree-install` on a tree another person can change, while that person races it), reproducibility 0. Raised by: a utest that swaps a link into a tree `priv tree-install` reads.
+- Impact: while an administrator installs another person's tree with `priv tree-install`, that person swaps a file for a link and a file only uid 0 may read lands at the destination with the mode the scan read, as any `priv cp` of a tree its owner can change does.
+- Evidence: `userland/src/apps/tree_install.rs:62` (staged for uid 0 and privd alone); `userland/src/tree.rs:96` and `:478` (`scan` and `copy` by path); `assets/privd/actions:430-438` (`uid requester`, `DacOverride`).
+- Repro: as an administrator, `priv tree-install x /home/bob/tree /opt/x` while bob loops replacing a file in the tree with a link to `/etc/shadow`.
+- Remediation: stage the copy whenever the caller holds `DacOverride`, in a directory and under a lock of its own uid, or read every tree through descriptors that follow no link.
 
 ## Cadence
 
