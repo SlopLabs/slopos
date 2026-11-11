@@ -318,23 +318,46 @@ const PTMX_PATH: &[u8] = b"/dev/ptmx\0";
 /// Returns the master as an owned fd plus the slave pts number; open the
 /// slave via `/dev/pts/N` or `TIOCGPTPEER`. `Err` carries a negated errno.
 ///
-/// A freshly allocated slave is locked and answers `EIO` until `TIOCSPTLCK`
-/// clears it — Linux's `unlockpt`, which this does on the caller's behalf.
+/// A freshly allocated slave is locked, its path answering `EIO` until
+/// `TIOCSPTLCK` clears it — Linux's `unlockpt`, which this does on the
+/// caller's behalf.
 pub fn openpty() -> Result<(super::OwnedFd, u32), i64> {
     let master = Sys::open(PTMX_PATH.as_ptr(), slopos_abi::fs::O_RDWR as i32, 0)
         .map_err(|e| -(e.raw() as i64))?;
-    let mut unlock: i32 = 0;
-    if let Err(e) = Sys::ioctl(master, TIOCSPTLCK, (&mut unlock as *mut i32) as u64) {
-        let _ = Sys::close(master);
-        return Err(-(e.raw() as i64));
-    }
-    let mut slave_num: u32 = 0;
-    if let Err(e) = Sys::ioctl(master, TIOCGPTN, (&mut slave_num as *mut u32) as u64) {
-        let _ = Sys::close(master);
-        return Err(-(e.raw() as i64));
-    }
     // SAFETY: master is a valid fd just installed by the kernel.
-    Ok((unsafe { super::OwnedFd::from_raw(master) }, slave_num))
+    let master = unsafe { super::OwnedFd::from_raw(master) };
+    let mut unlock: i32 = 0;
+    Sys::ioctl(master.raw(), TIOCSPTLCK, (&mut unlock as *mut i32) as u64)
+        .map_err(|e| -(e.raw() as i64))?;
+    let mut slave_num: u32 = 0;
+    Sys::ioctl(master.raw(), TIOCGPTN, (&mut slave_num as *mut u32) as u64)
+        .map_err(|e| -(e.raw() as i64))?;
+    Ok((master, slave_num))
+}
+
+/// A pty whose slave only this process hands on: its master, and its slave
+/// taken through the master while it stays locked, so no open by its path
+/// ever succeeds. A kernel from before `TIOCGPTPEER` opened a locked slave
+/// answers `EINVAL`, which this one never does a master; there alone the
+/// slave is unlocked for the open and locked again, as it was until then.
+pub fn openpty_handed_on() -> super::SyscallResult<(super::OwnedFd, super::OwnedFd)> {
+    let master = Sys::open(PTMX_PATH.as_ptr(), slopos_abi::fs::O_RDWR as i32, 0)
+        .map_err(super::SyscallError::from)?;
+    // SAFETY: master is a valid fd just installed by the kernel.
+    let master = unsafe { super::OwnedFd::from_raw(master) };
+    match super::fs::ioctl_tiocgptpeer(master.raw()) {
+        Ok(slave) => return Ok((master, slave)),
+        Err(super::SyscallError::EINVAL) => {}
+        Err(e) => return Err(e),
+    }
+    let lock = |mut locked: i32| {
+        Sys::ioctl(master.raw(), TIOCSPTLCK, (&mut locked as *mut i32) as u64)
+            .map_err(super::SyscallError::from)
+    };
+    lock(0)?;
+    let slave = super::fs::ioctl_tiocgptpeer(master.raw());
+    lock(1)?;
+    Ok((master, slave?))
 }
 
 #[inline(always)]

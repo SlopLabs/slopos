@@ -465,7 +465,7 @@ pub fn tcgetattr(fd: RawFd) -> SyscallResult<UserTermios> {
 }
 
 /// POSIX `isatty(3)`. The TCGETS probe is exact, not approximate:
-/// `syscall_ioctl` resolves the descriptor through `file_get_tty_index`, which
+/// `syscall_ioctl` resolves the descriptor through `file_pin_tty`, which
 /// yields nothing unless the file's kind is `Tty`.
 #[inline]
 pub fn isatty(fd: RawFd) -> bool {

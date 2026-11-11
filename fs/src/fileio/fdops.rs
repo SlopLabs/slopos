@@ -780,6 +780,31 @@ pub fn file_access_at(
     0
 }
 
+/// The TTY `fd` names, held open: a slot is freed with its last open file
+/// and given to the next terminal allocated, so an index outlives the
+/// descriptor it was read from only by naming whatever took the slot.
+pub struct TtyPin {
+    index: TtyIndex,
+    _open: KArc<OpenFile>,
+}
+
+impl TtyPin {
+    pub fn index(&self) -> TtyIndex {
+        self.index
+    }
+}
+
+pub fn file_pin_tty(table: FdTable, fd: c_int) -> Option<TtyPin> {
+    let snap = {
+        let inner = lock_table_slot(table)?;
+        snapshot_fd(&inner, fd)?
+    };
+    (snap.ops().kind() == FileKind::Tty).then(|| TtyPin {
+        index: TtyIndex(snap.handle() as u8),
+        _open: snap.open_file,
+    })
+}
+
 pub fn file_get_tty_index(table: FdTable, fd: c_int) -> Option<TtyIndex> {
     let snap = {
         let Some(inner) = lock_table_slot(table) else {

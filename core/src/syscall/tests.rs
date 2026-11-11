@@ -4220,6 +4220,58 @@ pub fn test_close_while_dup_keeps_object_alive() -> TestResult {
     TestResult::Pass
 }
 
+/// What an ioctl holds of its terminal keeps the slot from the next terminal
+/// allocated once the descriptor is closed under it; a bare index does not.
+pub fn test_tty_pin_keeps_its_slot_from_the_next_terminal() -> TestResult {
+    let _fixture = KernelTestScope::enter();
+
+    let task_id = create_test_user_task();
+    assert_test!(task_id != INVALID_TASK_ID);
+    let task_guard = assert_some!(task_find_by_id(task_id));
+    let Some(pid) = task_guard
+        .process()
+        .as_deref()
+        .and_then(slopos_fs::fileio::FdTable::of)
+    else {
+        return TestResult::Fail;
+    };
+    let ptmx = || {
+        file_open_for_process(
+            pid,
+            b"/dev/ptmx",
+            O_RDONLY,
+            &slopos_fs::vfs::Subject::KERNEL,
+        )
+    };
+    let index_of = |fd| slopos_fs::fileio::file_get_tty_index(pid, fd);
+
+    let first = ptmx();
+    let bare = index_of(first);
+    let _ = file_close_fd(pid, first);
+    let reused = ptmx();
+    let unpinned_slot_is_reused = bare.is_some() && index_of(reused) == bare;
+    let _ = file_close_fd(pid, reused);
+
+    let held = ptmx();
+    let pinned = slopos_fs::fileio::file_pin_tty(pid, held);
+    let _ = file_close_fd(pid, held);
+    let next = ptmx();
+    let next_index = index_of(next);
+    let kept = pinned
+        .as_ref()
+        .is_some_and(|pinned| next_index.is_some() && next_index != Some(pinned.index()));
+    let _ = file_close_fd(pid, next);
+    drop(pinned);
+    task_terminate(task_id);
+
+    assert_test!(
+        unpinned_slot_is_reused,
+        "a closed master's slot was not the next one given out: the control is void"
+    );
+    assert_test!(kept, "a pinned terminal's slot went to the next terminal");
+    TestResult::Pass
+}
+
 /// The backing clone minted for the attempt drops exactly once inside the
 /// failed install, and the live tty survives untouched.
 pub fn test_open_tty_fd_emfile_no_double_teardown() -> TestResult {
@@ -4713,6 +4765,10 @@ slopos_testing::stest!(
 slopos_testing::stest!(name = test_close_twice_is_safe, suite = syscall_valid);
 slopos_testing::stest!(
     name = test_close_while_dup_keeps_object_alive,
+    suite = syscall_valid
+);
+slopos_testing::stest!(
+    name = test_tty_pin_keeps_its_slot_from_the_next_terminal,
     suite = syscall_valid
 );
 slopos_testing::stest!(

@@ -250,6 +250,7 @@ kernel	slopos_core::syscall::tests::test_tiocsctty_non_leader_rejected
 kernel	slopos_core::syscall::tests::test_tiocsctty_session_leader_acquires_ctty
 kernel	slopos_core::syscall::tests::test_try_transition_from_rejects_wrong_state
 kernel	slopos_core::syscall::tests::test_tty_ioctl_never_changes_open_state
+kernel	slopos_core::syscall::tests::test_tty_pin_keeps_its_slot_from_the_next_terminal
 kernel	slopos_core::syscall::tests::test_tty_poll_after_close_reuse_no_crossobject
 kernel	slopos_core::syscall::tests::test_umount2_busy_unless_detached
 kernel	slopos_core::syscall::tests::test_umount2_of_a_second_mount_spares_the_first
@@ -1317,6 +1318,7 @@ kernel	slopos_drivers::tty_tests::test_pty_core::test_get_lock_round_trip
 kernel	slopos_drivers::tty_tests::test_pty_core::test_ldisc_kind_ntty_delegation
 kernel	slopos_drivers::tty_tests::test_pty_core::test_ldisc_kind_raw_delegation
 kernel	slopos_drivers::tty_tests::test_pty_core::test_locked_slave_open_rejected
+kernel	slopos_drivers::tty_tests::test_pty_core::test_locked_slave_opens_through_its_master
 kernel	slopos_drivers::tty_tests::test_pty_core::test_master_close_slave_hangup
 kernel	slopos_drivers::tty_tests::test_pty_core::test_master_peer_link_targets_slave
 kernel	slopos_drivers::tty_tests::test_pty_core::test_max_ttys_is_32

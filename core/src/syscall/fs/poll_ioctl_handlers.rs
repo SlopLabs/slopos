@@ -15,7 +15,7 @@ use slopos_abi::syscall::{
 };
 
 use slopos_fs::fileio::{
-    file_fcntl_fd, file_get_tty_index, file_inode_flags_fd, file_open_tty_fd, file_poll_fused,
+    file_fcntl_fd, file_inode_flags_fd, file_open_tty_fd, file_pin_tty, file_poll_fused,
     file_poll_unfused_by_token, file_set_inode_flags_fd, fileio_get_open_file_handle,
 };
 
@@ -89,13 +89,29 @@ fn ioctl_winsize(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64) -> 
     }
 }
 
+/// `TIOCGPTPEER`, with its own errno rather than the pty requests' `EINVAL`,
+/// which a master is never answered here: it is what a kernel that refused a
+/// locked slave said, and a caller tells the two apart by it.
 #[inline(never)]
-fn ioctl_pty(
-    tty_idx: slopos_abi::syscall::TtyIndex,
-    cmd: u64,
-    arg: u64,
+fn ioctl_pty_peer(
+    master: slopos_abi::syscall::TtyIndex,
+    flags: u64,
     table: FdTable,
-) -> IoctlResult {
+) -> Result<u64, Errno> {
+    use crate::syscall::common::errno_from_neg;
+    use slopos_abi::KernelErrno;
+    let (peer_tty, backing) =
+        tty::open_pty_peer(master).map_err(|e| errno_from_neg(e.to_errno()))?;
+    let new_fd = file_open_tty_fd(table, peer_tty, flags as u32, backing);
+    if new_fd < 0 {
+        Err(errno_from_neg(new_fd))
+    } else {
+        Ok(new_fd as u64)
+    }
+}
+
+#[inline(never)]
+fn ioctl_pty(tty_idx: slopos_abi::syscall::TtyIndex, cmd: u64, arg: u64) -> IoctlResult {
     match cmd {
         TIOCGPTN => {
             if arg == 0 {
@@ -105,15 +121,6 @@ fn ioctl_pty(
             let pty_number = tty::get_pty_number(tty_idx).map_err(|_| ())?;
             copy_to_user(ptr, &pty_number).map_err(|_| ())?;
             Ok(0)
-        }
-        TIOCGPTPEER => {
-            let (peer_tty, backing) = tty::open_pty_peer(tty_idx).map_err(|_| ())?;
-            let new_fd = file_open_tty_fd(table, peer_tty, arg as u32, backing);
-            if new_fd < 0 {
-                Err(())
-            } else {
-                Ok(new_fd as u64)
-            }
         }
         TIOCSPTLCK => {
             if arg == 0 {
@@ -908,16 +915,18 @@ define_syscall!(syscall_ioctl
         return result;
     }
 
-    // `file_get_tty_index` cannot tell a non-TTY from a descriptor that does
-    // not exist, and the two answer differently: `isatty` keys on `EBADF` to
+    // `file_pin_tty` cannot tell a non-TTY from a descriptor that does not
+    // exist, and the two answer differently: `isatty` keys on `EBADF` to
     // report a bad descriptor rather than "not a terminal".
-    let tty_idx = match file_get_tty_index(pid, fd.raw()) {
-        Some(idx) => idx,
+    let pinned = match file_pin_tty(pid, fd.raw()) {
+        Some(pinned) => pinned,
         None if fileio_get_open_file_handle(pid, fd.raw()).is_none() => {
             return Err(Errno::EBADF);
         }
         None => return Err(Errno::ENOTTY),
     };
+    // Held to the end: closed under it, the index is the next terminal's.
+    let tty_idx = pinned.index();
 
     let hangup_safe = matches!(cmd, TIOCGPGRP | TIOCSPGRP | TIOCGSID | TIOCNOTTY);
     if !hangup_safe && tty::is_hung_up(tty_idx) {
@@ -927,8 +936,9 @@ define_syscall!(syscall_ioctl
     match cmd {
         TCGETS | TCSETS | TCSETSW | TCSETSF => ioctl_termios(tty_idx, cmd, arg).map_err(|_| Errno::EINVAL),
         TIOCGWINSZ | slopos_abi::syscall::TIOCSWINSZ => ioctl_winsize(tty_idx, cmd, arg).map_err(|_| Errno::EINVAL),
-        TIOCGPTN | TIOCGPTPEER | TIOCSPTLCK | TIOCGPTLCK | TIOCPKT => {
-            ioctl_pty(tty_idx, cmd, arg, pid).map_err(|_| Errno::EINVAL)
+        TIOCGPTPEER => ioctl_pty_peer(tty_idx, arg, pid),
+        TIOCGPTN | TIOCSPTLCK | TIOCGPTLCK | TIOCPKT => {
+            ioctl_pty(tty_idx, cmd, arg).map_err(|_| Errno::EINVAL)
         }
         TIOCGETD | TIOCSETD | FIONREAD | TIOCOUTQ | TCFLSH | TCSBRK | TCXONC | TIOCEXCL
         | TIOCNXCL | TIOCGEXCL => ioctl_misc(tty_idx, cmd, arg).map_err(|_| Errno::EINVAL),

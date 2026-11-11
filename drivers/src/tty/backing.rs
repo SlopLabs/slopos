@@ -351,7 +351,11 @@ pub fn pty_open_slave_as(
     Ok(open_slave_shared(existing)?)
 }
 
-/// Open the slave paired with the master at `master_idx` (`TIOCGPTPEER`).
+/// Open the slave paired with the master at `master_idx` (`TIOCGPTPEER`),
+/// locked or not: the lock keeps opens by path off a slave until its
+/// master's holder lets them in, and this open is that holder's. Linux
+/// answers `EIO` for a locked slave here, so its callers unlock first and
+/// leave a window in which the path opens too.
 pub fn pty_open_peer(master_idx: TtyIndex) -> Result<(TtyIndex, KArc<dyn FileBacking>), TtyError> {
     let master_slot = master_idx.0 as usize;
     if master_slot >= MAX_TTYS {
@@ -363,9 +367,6 @@ pub fn pty_open_peer(master_idx: TtyIndex) -> Result<(TtyIndex, KArc<dyn FileBac
     };
     let slave = master.slave_link().ok_or(TtyError::NotAllocated)?;
     let slave_idx = slave.index();
-    if slave_locked(slave_idx.0 as usize) {
-        return Err(TtyError::PermissionDenied);
-    }
     Ok((slave_idx, open_slave_shared(slave)?))
 }
 

@@ -10,8 +10,7 @@
 use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
 
-use slopos_abi::syscall::{POLLHUP, POLLIN, TIOCSPTLCK, UserPollFd};
-use slopos_slibc::pal::{Pal, Sys};
+use slopos_abi::syscall::{POLLHUP, POLLIN, UserPollFd};
 
 use crate::privd::run_feeding;
 use crate::syscall::{OwnedFd, RawFd, SyscallError, fs, process};
@@ -66,16 +65,12 @@ fn prompt_name() -> Option<String> {
     }
 }
 
-/// A terminal for the shell: its master here, its slave locked against
-/// opens by its path, so nothing but the descriptor init hands on reaches it.
+/// A terminal for the shell: its master here, its slave taken through it,
+/// locked against opens by its path, so only the descriptor init hands on
+/// reaches it.
 fn terminal() -> Result<(OwnedFd, OwnedFd), String> {
     let fail = |why: String| format!("no terminal for the shell: {why}");
-    let (master, _) =
-        process::openpty().map_err(|e| fail(SyscallError::from_errno((-e) as i32).to_string()))?;
-    let slave = fs::ioctl_tiocgptpeer(master.raw()).map_err(|e| fail(e.to_string()))?;
-    let mut locked: i32 = 1;
-    Sys::ioctl(master.raw(), TIOCSPTLCK, (&mut locked as *mut i32) as u64)
-        .map_err(|e| fail(SyscallError::from(e).to_string()))?;
+    let (master, slave) = process::openpty_handed_on().map_err(|e| fail(e.to_string()))?;
     if let Ok(size) = fs::tiocgwinsz(0) {
         let _ = fs::tiocswinsz(master.raw(), &size);
     }

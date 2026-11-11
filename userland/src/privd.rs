@@ -24,7 +24,7 @@ use slopos_abi::net::{AF_UNIX, SOCK_CLOEXEC, SOCK_STREAM};
 use slopos_abi::signal::SIGWINCH;
 use slopos_abi::syscall::{
     BOOT_FLAG_MEDIUM, F_DUPFD_CLOEXEC, F_GETFD, F_SETFD, FD_CLOEXEC, MSG_NOSIGNAL, O_CLOEXEC,
-    POLLIN, POLLOUT, TIOCSPTLCK, UserPollFd, UserTermios,
+    POLLIN, POLLOUT, UserPollFd, UserTermios,
 };
 use slopos_priv_core::wire::{self, CONNECTION, Exit, Reply, Request};
 use slopos_priv_core::{ENV_ACTION, ENV_FD, POLICY, PROGRAM, Policy, RunsAs, SOCKET};
@@ -588,16 +588,11 @@ fn dup(fd: &OwnedFd) -> Result<OwnedFd, String> {
     above_stdio(fs::dup(fd.raw()).map_err(|e| format!("dup: {e}"))?)
 }
 
-/// The slave is locked again once this process holds it, so no other process
-/// opens it by its path before the mechanism makes it its own.
+/// The slave is taken through its master, locked, so no process opens it by
+/// its path before the mechanism makes it its own or after.
 fn terminal_pair() -> Result<(OwnedFd, OwnedFd), String> {
     let fail = |why: String| format!("no terminal for the mechanism: {why}");
-    let (master, _) =
-        process::openpty().map_err(|e| fail(SyscallError::from_errno((-e) as i32).to_string()))?;
-    let slave = fs::ioctl_tiocgptpeer(master.raw()).map_err(|e| fail(e.to_string()))?;
-    let mut locked: i32 = 1;
-    Sys::ioctl(master.raw(), TIOCSPTLCK, (&mut locked as *mut i32) as u64)
-        .map_err(|e| fail(SyscallError::from(e).to_string()))?;
+    let (master, slave) = process::openpty_handed_on().map_err(|e| fail(e.to_string()))?;
     let (master, slave) = (above_stdio(master)?, above_stdio(slave)?);
     for end in [&master, &slave] {
         fs::set_fd_cloexec(end.raw()).map_err(|e| format!("fcntl: {e}"))?;

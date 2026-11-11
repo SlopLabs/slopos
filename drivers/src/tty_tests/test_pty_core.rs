@@ -1031,6 +1031,54 @@ pub fn test_locked_slave_open_rejected() -> TestResult {
     TestResult::Pass
 }
 
+/// The master's holder takes the slave through the master while it is
+/// locked, which leaves it locked and its path shut.
+pub fn test_locked_slave_opens_through_its_master() -> TestResult {
+    tty::table::tty_table_init();
+
+    let (master, _master_backing) =
+        match tty::pty_alloc(slopos_ostd::process::quota::root(), (0, 0)) {
+            Ok(pair) => pair,
+            Err(e) => {
+                klog_info!("TTY_TEST: BUG - pty_alloc failed: {:?}", e);
+                return TestResult::Fail;
+            }
+        };
+    let slave = TtyIndex(tty::get_pty_number(master).unwrap() as u8);
+
+    let peer = match tty::pty_open_peer(master) {
+        Ok((index, backing)) if index == slave => backing,
+        Ok((index, _)) => {
+            klog_info!("TTY_TEST: BUG - the peer of a master is {:?}", index);
+            return TestResult::Fail;
+        }
+        Err(e) => {
+            klog_info!(
+                "TTY_TEST: BUG - a locked slave did not open through its master: {:?}",
+                e
+            );
+            return TestResult::Fail;
+        }
+    };
+    if !crate::tty::pty::is_slave_locked(slave) {
+        klog_info!("TTY_TEST: BUG - opening the peer unlocked the slave");
+        return TestResult::Fail;
+    }
+    let by_path = tty::pty_open_slave(slave);
+    drop(peer);
+    match by_path {
+        Err(TtyError::PermissionDenied) => TestResult::Pass,
+        Ok(_) => {
+            klog_info!("TTY_TEST: BUG - a locked slave opened by its path");
+            TestResult::Fail
+        }
+        Err(other) => {
+            klog_info!("TTY_TEST: BUG - a locked slave's path answered {:?}", other);
+            TestResult::Fail
+        }
+    }
+}
+
 pub fn test_unlock_enables_open() -> TestResult {
     tty::table::tty_table_init();
 
@@ -1411,6 +1459,10 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_locked_slave_open_rejected,
+    suite = tty_test_pty_core
+);
+slopos_testing::stest!(
+    name = test_locked_slave_opens_through_its_master,
     suite = tty_test_pty_core
 );
 slopos_testing::stest!(name = test_unlock_enables_open, suite = tty_test_pty_core);
