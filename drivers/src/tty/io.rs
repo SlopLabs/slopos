@@ -37,21 +37,29 @@ impl Tty {
             events[i] = InputEvent::normal(scratch[i]);
         }
 
-        let batch = self.ldisc.receive_buf(&events[..count]);
+        // A batch ends at each signal it raises; what the burst holds after
+        // one is input all the same.
+        let mut rest = &events[..count];
+        let mut should_wake = false;
+        while !rest.is_empty() {
+            let batch = self.ldisc.receive_buf(rest);
+            if let Some((sig, _)) = batch.signal
+                && !deferred.add_signal_to_held_group(sig)
+                && let Some(pg) = self.session.fg_pgrp_handle()
+            {
+                deferred.add_signal(pg, sig);
+            }
+            should_wake = batch.should_wake;
+            rest = &rest[batch.consumed..];
+        }
         if let Some(xoff) = self.ldisc.ixoff_check_xoff() {
             self.ldisc.echo_stage(&[xoff]);
         }
         self.queue_echo_flush(deferred, WriteNesting::Toplevel);
 
-        if let Some((sig, _)) = batch.signal {
-            if let Some(pg) = self.session.fg_pgrp_handle() {
-                deferred.add_signal(pg, sig);
-            }
-        }
-
         // `should_wake` is a level: data already waiting was announced when it
         // arrived.
-        let arrived = count > 0 && batch.should_wake;
+        let arrived = count > 0 && should_wake;
         if arrived {
             deferred.wake_input_slot(self.index.0 as usize);
         }

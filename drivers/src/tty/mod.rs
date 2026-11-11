@@ -106,8 +106,10 @@ impl Drop for Tty {
 /// ```
 pub(crate) struct PostLockWork {
     /// Foreground group to signal, pinned strongly so the group's identity
-    /// survives across the off-lock delivery scan (no reused-pid window).
-    signal: Option<(KArc<ProcessGroup>, u8)>,
+    /// survives across the off-lock delivery scan (no reused-pid window), and
+    /// the signals one hold of its TTY's lock raised for it, in order, each
+    /// once; 0 is no signal.
+    signal: Option<(KArc<ProcessGroup>, [u8; HOLD_SIGNALS])>,
     /// Slots whose line discipline has echo staged for emission.
     echo_flush: u32,
     /// Nesting the staged emissions run under.  One value covers the mask:
@@ -125,6 +127,9 @@ const _: () = assert!(
     MAX_TTYS <= u32::BITS as usize,
     "PostLockWork tracks slots in a u32 bitmask"
 );
+
+/// One burst of input raises at most the signals of INTR, QUIT and SUSP.
+const HOLD_SIGNALS: usize = 3;
 
 impl PostLockWork {
     pub(crate) const fn new() -> Self {
@@ -156,7 +161,35 @@ impl PostLockWork {
 
     #[inline]
     pub(crate) fn add_signal(&mut self, pgrp: KArc<ProcessGroup>, signum: u8) {
-        self.signal = Some((pgrp, signum));
+        let mut signals = [0; HOLD_SIGNALS];
+        signals[0] = signum;
+        self.signal = Some((pgrp, signals));
+    }
+
+    /// `signum` for the group a signal is already held for, which one hold of
+    /// a TTY's lock cannot change; `false` when none is held yet. Takes no
+    /// handle, so none is dropped under that lock.
+    #[inline]
+    pub(crate) fn add_signal_to_held_group(&mut self, signum: u8) -> bool {
+        let Some((_, signals)) = &mut self.signal else {
+            return false;
+        };
+        if !signals.contains(&signum) {
+            let free = signals.iter_mut().find(|held| **held == 0);
+            debug_assert!(
+                free.is_some(),
+                "a burst raised more than HOLD_SIGNALS signals"
+            );
+            if let Some(free) = free {
+                *free = signum;
+            }
+        }
+        true
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn signals(&self) -> [u8; HOLD_SIGNALS] {
+        self.signal.as_ref().map_or([0; HOLD_SIGNALS], |(_, s)| *s)
     }
 
     /// Ask for `slot`'s staged echo to be emitted once its guard drops. Only ever
@@ -248,8 +281,10 @@ impl PostLockWork {
             bits &= bits - 1;
         }
 
-        if let Some((pgrp, sig)) = self.signal.take() {
-            let _ = signal_process_group(pgrp.id(), sig);
+        if let Some((pgrp, signals)) = self.signal.take() {
+            for sig in signals.into_iter().filter(|&sig| sig != 0) {
+                let _ = signal_process_group(pgrp.id(), sig);
+            }
         }
 
         if let Some((slave_idx, event_bits)) = self.packet_event {

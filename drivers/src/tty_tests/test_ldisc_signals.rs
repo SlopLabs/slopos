@@ -2,6 +2,69 @@
 //! and TtyError errno mappings.
 
 use super::fixtures::*;
+use crate::tty::PostLockWork;
+use crate::tty::driver::inject_vconsole_input;
+use crate::tty::vconsole;
+
+/// One burst from the hardware that holds a signal character: the character
+/// flushes what came before it, and what follows it is input like any other.
+pub fn test_hw_burst_keeps_what_follows_a_signal_char() -> TestResult {
+    let vt = TtyIndex(1);
+    let Ok(saved) = tty::get_termios(vt) else {
+        return TestResult::Fail;
+    };
+    let mirror = vconsole::serial_mirror_enabled();
+    vconsole::set_serial_mirror(false);
+    let mut t = saved;
+    t.c_iflag = InputFlags::empty();
+    t.c_lflag = LocalFlags::ICANON | LocalFlags::ISIG;
+    t.c_cc[CcIndex::Vintr.as_usize()] = 0x03;
+    let set = tty::set_termios(vt, &t).is_ok();
+
+    drain_tty_nonblock(vt);
+    inject_vconsole_input(b"a\x03b\n");
+    let ready = tty::has_data(vt);
+    let mut back = [0u8; 8];
+    let read = tty::read(vt, &mut back, true);
+
+    drain_tty_nonblock(vt);
+    let _ = tty::set_termios(vt, &saved);
+    vconsole::set_serial_mirror(mirror);
+
+    match read {
+        Ok(2) if set && ready && &back[..2] == b"b\n" => TestResult::Pass,
+        other => {
+            klog_info!(
+                "TTY_TEST: BUG - a burst of a, INTR, b, newline left {:?} {:?} (set {}, ready {})",
+                other,
+                &back[..3],
+                set,
+                ready
+            );
+            TestResult::Fail
+        }
+    }
+}
+
+/// The work of one lock hold carries every signal its burst raised, each once
+/// and in the order raised.
+pub fn test_post_lock_work_keeps_each_signal_of_a_burst() -> TestResult {
+    let scope = SessionScope::new(4410, 4411);
+    let mut work = PostLockWork::new();
+    let none_held = !work.add_signal_to_held_group(SIGINT);
+    work.add_signal(scope.pgrp.clone(), SIGINT);
+    let joined = [SIGTSTP, SIGINT, SIGQUIT, SIGTSTP]
+        .into_iter()
+        .all(|sig| work.add_signal_to_held_group(sig));
+    let held = work.signals();
+    work.discard();
+    if none_held && joined && held == [SIGINT, SIGTSTP, SIGQUIT] {
+        TestResult::Pass
+    } else {
+        klog_info!("TTY_TEST: BUG - a burst's signals were kept as {:?}", held);
+        TestResult::Fail
+    }
+}
 
 /// SIGQUIT: Ctrl+\ generates SIGQUIT (signal 3).
 pub fn test_ldisc_signal_ctrl_backslash() -> TestResult {
@@ -677,5 +740,13 @@ slopos_testing::stest!(
 );
 slopos_testing::stest!(
     name = test_read_with_data_succeeds,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_hw_burst_keeps_what_follows_a_signal_char,
+    suite = tty_test_ldisc_signals
+);
+slopos_testing::stest!(
+    name = test_post_lock_work_keeps_each_signal_of_a_burst,
     suite = tty_test_ldisc_signals
 );
