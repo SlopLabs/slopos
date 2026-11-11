@@ -37,6 +37,7 @@ const CARVE_OUTS: &[&str] = &[
     "terminal-core",
     "shell-core",
     "editor-core",
+    "shooter-core",
     "http-core",
     "tls-core",
     "fat-core",

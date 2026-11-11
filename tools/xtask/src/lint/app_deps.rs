@@ -1,5 +1,5 @@
 //! A crate under `apps/` depends on nothing but the crates an app is written
-//! against: appkit, editor-core and image. The kernel ABI, the drawing
+//! against: appkit, editor-core, shooter-core and image. The kernel ABI, the drawing
 //! internals and the compositor connection beneath appkit change when the base
 //! does, and an app naming one would have to change with it. Every dependency
 //! but a dev one counts: normal, renamed, target-specific and build alike.
@@ -13,7 +13,12 @@ use crate::Result;
 use crate::repo::Repo;
 use crate::report::Report;
 
-const ALLOWED: &[&str] = &["slopos-appkit", "slopos-editor-core", "slopos-image"];
+const ALLOWED: &[&str] = &[
+    "slopos-appkit",
+    "slopos-editor-core",
+    "slopos-image",
+    "slopos-shooter-core",
+];
 
 pub fn run(repo: &Repo) -> Result<Report> {
     let json = metadata(&repo.root, &repo.root)?;

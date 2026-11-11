@@ -17,7 +17,12 @@ struct Shipped {
     art: Art,
 }
 
-const ICONS: [Shipped; 7] = [
+const ICONS: [Shipped; 8] = [
+    Shipped {
+        dir: "apps/share/slopos/icons",
+        id: "org.slopos.breach",
+        art: Art::Breach,
+    },
     Shipped {
         dir: "apps/share/slopos/icons",
         id: "org.slopos.files",

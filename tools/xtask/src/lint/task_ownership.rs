@@ -94,6 +94,7 @@ const OUT_OF_SCOPE: &[&str] = &[
     "keymap-core",
     "shell-core",
     "editor-core",
+    "shooter-core",
     "http-core",
     "tls-core",
     "plans",

@@ -242,6 +242,7 @@ dependencies = [
  "slopos-appkit",
  "slopos-editor-core",
  "slopos-image",
+ "slopos-shooter-core",
 ]
 
 [[package]]
@@ -674,6 +675,10 @@ version = "0.1.0"
 dependencies = [
  "slopos-abi",
 ]
+
+[[package]]
+name = "slopos-shooter-core"
+version = "0.1.0"
 
 [[package]]
 name = "slopos-signalfd"

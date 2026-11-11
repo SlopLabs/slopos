@@ -58,6 +58,7 @@ members = [
   "verity-core",
   "shell-core",
   "editor-core",
+  "shooter-core",
   "video",
   "vt",
   "windowing",
@@ -177,6 +178,7 @@ slopos-settings-app = { path = "settings-app" }
 slopos-extension-core = { path = "extension-core" }
 slopos-shell-core = { path = "shell-core" }
 slopos-editor-core = { path = "editor-core" }
+slopos-shooter-core = { path = "shooter-core" }
 slopos-protocol = { path = "slop-protocol" }
 slopos-video = { path = "video" }
 slopos-vt = { path = "vt" }

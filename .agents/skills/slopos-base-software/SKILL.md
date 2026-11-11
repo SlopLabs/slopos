@@ -24,8 +24,8 @@ description: >
   answers `ENOSYS`.
 - `libc.so` only grows: no export removed, no `slibc/include` layout changed.
 - A program outside the base is dynamic, needs `libc.so` and holds no
-  `syscall` instruction. A crate under `apps/` depends only on
-  `slopos-appkit`, `slopos-editor-core` and `slopos-image`.
+  `syscall` instruction. A crate under `apps/` depends only on what
+  `xtask lint app-deps` allows.
 - Change what a valid base is only in `boot-core::base::check`, and the
   archive reader only in `boot-core::newc`, never in a caller.
 - Everything in `base_activate` that can fail runs before the switch; the

@@ -151,6 +151,17 @@ pub fn run_app<A: App>(mut app: A) -> ! {
                 _ => {}
             }
 
+            let change = match &widget_event {
+                WidgetEvent::KeyDown { key, .. } => Some((*key, true)),
+                WidgetEvent::TextInput { character } => Some((Key::Char(*character), true)),
+                WidgetEvent::KeyUp { key, .. } => Some((*key, false)),
+                _ => None,
+            };
+            if let Some((key, pressed)) = change {
+                let action = app.on_key_change(key, pressed);
+                process_action(action, &mut needs_rebuild, &mut needs_repaint);
+            }
+
             let (px, py) = win.pointer();
             let widget_event = fill_pointer_state(widget_event, px, py, modifiers);
             if tip.note(&widget_event, (px, py), slopos_windowing::get_time_ms()) {

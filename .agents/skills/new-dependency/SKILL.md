@@ -32,7 +32,7 @@ description: >
   vendor` and the `NOTICE.md` entry, in one commit.
 - A kernel crate carries `#![forbid(unsafe_code)]` and declares no `alloc`
   dependency. A crate under `apps/` depends on `slopos-appkit`,
-  `slopos-editor-core` and `slopos-image` alone.
+  `slopos-editor-core`, `slopos-shooter-core` and `slopos-image` alone.
 - A recipe pins an `https` tarball by SHA-256 and builds it as shipped. Its
   patch only teaches the target (see `toolchain/AGENTS.md`); a GPL-2.0-only
   or CDDL recipe carries no patch.

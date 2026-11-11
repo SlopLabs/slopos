@@ -15,6 +15,7 @@ const BEHIND: f32 = 0.6;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Art {
+    Breach,
     Files,
     Editor,
     ImageViewer,
@@ -29,6 +30,7 @@ struct Layer(Shape, f32);
 impl Art {
     fn tile(self) -> AppTile {
         match self {
+            Art::Breach => AppTile::Red,
             Art::Files => AppTile::Blue,
             Art::Editor => AppTile::Violet,
             Art::ImageViewer => AppTile::Orange,
@@ -41,6 +43,17 @@ impl Art {
 
     fn layers(self) -> Vec<Layer> {
         match self {
+            Art::Breach => {
+                let ticks = capsule((17.5, 32.0), (22.5, 32.0), WEIGHT)
+                    .union(capsule((41.5, 32.0), (46.5, 32.0), WEIGHT))
+                    .union(capsule((32.0, 17.5), (32.0, 22.5), WEIGHT))
+                    .union(capsule((32.0, 41.5), (32.0, 46.5), WEIGHT));
+                let ring = circle(32.0, 32.0, 12.0).minus(circle(32.0, 32.0, 7.0));
+                vec![
+                    Layer(ring, BEHIND),
+                    Layer(ticks.union(circle(32.0, 32.0, 2.5)), 1.0),
+                ]
+            }
             Art::Files => vec![
                 Layer(
                     rrect(13.0, 21.0, 51.0, 46.0, ROUND)
@@ -149,7 +162,8 @@ mod tests {
     const PORTRAIT: (f32, f32, f32, f32) = (17.0, 12.0, 47.0, 52.0);
     const SQUARE: (f32, f32, f32, f32) = (15.0, 15.0, 49.0, 49.0);
 
-    const ALL: [Art; 7] = [
+    const ALL: [Art; 8] = [
+        Art::Breach,
         Art::Files,
         Art::Editor,
         Art::ImageViewer,
@@ -163,7 +177,7 @@ mod tests {
         match art {
             Art::Files | Art::ImageViewer | Art::Terminal | Art::Sysmon => LANDSCAPE,
             Art::Editor => PORTRAIT,
-            Art::Installer | Art::Settings => SQUARE,
+            Art::Breach | Art::Installer | Art::Settings => SQUARE,
         }
     }
 

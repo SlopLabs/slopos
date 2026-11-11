@@ -16,6 +16,10 @@ test = false
 doctest = false
 
 [[bin]]
+name = "breach"
+path = "src/bin/breach.rs"
+
+[[bin]]
 name = "editor"
 path = "src/bin/editor.rs"
 
@@ -35,3 +39,4 @@ path = "src/bin/widget_gallery.rs"
 slopos-appkit = { workspace = true }
 slopos-editor-core = { workspace = true }
 slopos-image = { workspace = true }
+slopos-shooter-core = { workspace = true }

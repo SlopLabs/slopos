@@ -33,6 +33,7 @@ APPS = (
     ("editor", "editor", "org.slopos.editor"),
     ("files", "file_manager", "org.slopos.files"),
     ("image-viewer", "image_viewer /usr/share/slopos/wallpapers/default.png", "org.slopos.image-viewer"),
+    ("breach", "breach", "org.slopos.breach"),
     ("settings-network", "settings --page network", "org.slopos.settings"),
     ("settings-users", "settings --page users", "org.slopos.settings"),
     ("settings-keyboard", "settings --page keyboard", "org.slopos.settings"),

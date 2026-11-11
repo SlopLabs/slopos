@@ -49,6 +49,7 @@ const OUT_OF_SCOPE: &[&str] = &[
     "slop-protocol",
     "appkit",
     "editor-core",
+    "shooter-core",
     "http-core",
     "tls-core",
     "image",

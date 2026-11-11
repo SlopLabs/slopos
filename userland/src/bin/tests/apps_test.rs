@@ -36,6 +36,7 @@ const APPS: &[(&str, &str)] = &[
     ("/bin/settings", "org.slopos.settings"),
     ("/bin/sysmon", "org.slopos.sysmon"),
     ("/bin/terminal", "org.slopos.terminal"),
+    ("/usr/local/bin/breach", "org.slopos.breach"),
 ];
 
 fn entry_name(program: &str, id: &str) -> Option<String> {
@@ -221,12 +222,17 @@ fn the_terminal_runs() -> bool {
     run(APPS[4].0, APPS[4].1)
 }
 
+fn breach_runs() -> bool {
+    run(APPS[6].0, APPS[6].1)
+}
+
 const CASES: &[(&str, fn() -> bool)] = &[
     ("the_editor_runs", the_editor_runs),
     ("the_file_manager_runs", the_file_manager_runs),
     ("the_image_viewer_runs", the_image_viewer_runs),
     ("the_system_monitor_runs", the_system_monitor_runs),
     ("the_terminal_runs", the_terminal_runs),
+    ("breach_runs", breach_runs),
     (
         "a_refusal_names_the_cause_the_kernel_reports",
         a_refusal_names_the_cause_the_kernel_reports,

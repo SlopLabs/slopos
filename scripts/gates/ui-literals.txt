@@ -3,3 +3,4 @@
 # nothing fails the gate.
 colour apps/src/editor/syntax.rs the code view's syntax palette
 colour appkit/src/widgets/picture.rs the checks a picture's transparent pixels are judged against
+colour apps/src/breach/frame.rs the game's frame, drawn by its renderer

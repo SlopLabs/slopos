@@ -34,6 +34,7 @@ const OUT_OF_SCOPE: &[&str] = &[
     "userland",
     "terminal-core",
     "editor-core",
+    "shooter-core",
     "http-core",
     "tls-core",
     "slibc",

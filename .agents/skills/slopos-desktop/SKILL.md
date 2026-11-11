@@ -21,8 +21,8 @@ description: >
 - An app names a `Tone`, `Surface`, `TextRole`, `space` step or `inset`,
   never a colour or a number. A new role goes in `theme-core` with a contrast
   test for every surface it sits on.
-- A crate under `apps/` depends on `slopos-appkit`, `slopos-editor-core` and
-  `slopos-image` only.
+- A crate under `apps/` depends on `slopos-appkit`, `slopos-editor-core`,
+  `slopos-shooter-core` and `slopos-image` only.
 - A control waiting on the system is never disabled for being busy: keep what
   was asked in `appkit::Pending` and build the control from its `shown` value.
 - A new component owns its states, focus ring, `…` overflow and

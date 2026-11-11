@@ -407,6 +407,13 @@ pub trait App {
         Action::None
     }
 
+    /// Every key going down or coming up, a letter typed as text included,
+    /// before any widget sees it: a game steers by what is held. A repeat
+    /// comes again as a press.
+    fn on_key_change(&mut self, _key: Key, _pressed: bool) -> Action {
+        Action::None
+    }
+
     /// The selection, some time after [`crate::clipboard::request_paste`].
     fn on_paste(&mut self, _text: String) -> Action {
         Action::None
