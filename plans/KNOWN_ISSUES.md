@@ -210,6 +210,29 @@ every CPU.
 
 ---
 
+## The compositor takes input once a tick
+
+**Status**: Open
+**Severity**: Low (a key or a pointer event waits up to 16 ms to be dispatched)
+**Component**: `userland/src/apps/compositor/mod.rs` (the frame loop),
+`userland/src/apps/compositor/input.rs`, `abi/src/syscall/numbers.rs`
+(`SYSCALL_INPUT_POLL_BATCH`)
+
+The compositor drains the input sink with `input_poll_batch` at each 16 ms
+tick and at no other time, so an event queued just after a tick waits a whole
+tick before any client hears of it, 8 ms on average. A client's commit does
+not: the frame loop wakes for one and shows it a frame early.
+
+`input_poll_batch` only copies out what is queued, and a compositor init
+starts is handed the sink by `seat_switch` and holds no descriptor for it,
+so nothing its ring can poll turns readable when an event is queued and the
+loop has nothing to wake on. Waking on input needs a readiness source for
+the sink — a descriptor that polls readable while events wait, or a ring
+operation that completes when one is queued — which is a new private call
+and so the next `BASE_INTERFACE` number.
+
+---
+
 ## `recvmsg` on `AF_UNIX` takes every queued descriptor
 
 **Status**: Open
