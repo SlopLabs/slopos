@@ -101,8 +101,8 @@ impl FocusManager {
     /// the same role at the same position in a chain of the same length.
     ///
     /// Answers the widget now focused, which a rebuild always makes new. A
-    /// dialog that opens starts with nothing focused; one that closes gives
-    /// the page its focus back.
+    /// dialog that opens starts on its first field, or with nothing focused
+    /// when it has none; one that closes gives the page its focus back.
     pub fn rebuild_tab_chain(&mut self, root: &dyn Widget) -> Option<WidgetId> {
         self.tab_chain.clear();
         self.tab_stops.clear();
@@ -124,10 +124,17 @@ impl FocusManager {
             self.layer = layer;
             self.focused = None;
             self.set_index(None);
-            let back = self.beneath.take_if(|_| closed);
-            let Some(back) = back else {
-                return None;
-            };
+            if !closed {
+                let field = self
+                    .tab_stops
+                    .iter()
+                    .position(|stop| stop.role == Role::TextField);
+                let opened = field.and_then(|i| self.tab_chain.get(i).copied());
+                self.focused = opened;
+                self.set_index(opened.and(field));
+                return opened;
+            }
+            let back = self.beneath.take()?;
             self.focused_index = back.index;
             self.chain_len_at_focus = back.chain_len;
             self.focused_stop = back.stop;

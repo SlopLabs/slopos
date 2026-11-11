@@ -369,7 +369,7 @@ impl Settings {
                     Some(&first) => self.show(first),
                     None => Vec::new(),
                 },
-                field::Left::Nothing => Vec::new(),
+                field::Left::Escape | field::Left::Nothing => Vec::new(),
             },
             Msg::Network(network::Msg::Read(Ok(read))) if self.network.holds(&read) => {
                 return (Action::None, Vec::new());

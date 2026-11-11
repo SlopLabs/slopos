@@ -515,6 +515,7 @@ impl Network {
         };
         match typed.edit(input) {
             Left::Enter => self.save(),
+            Left::Escape => self.update(Msg::Cancel),
             Left::Nothing => Vec::new(),
         }
     }

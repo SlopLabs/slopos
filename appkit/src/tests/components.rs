@@ -504,6 +504,84 @@ pub(super) fn test_a_dialog_takes_focus_from_the_page() {
     );
 }
 
+pub(super) fn test_a_dialog_opens_on_its_first_field() {
+    use crate::components::column;
+    let page = || -> Node<()> { Button::new("Rename…").on_press(()).into() };
+    let asking = |focused: bool| -> Node<()> {
+        let field = |text: &str, focused: bool| Node::LineEdit {
+            text: String::from(text),
+            placeholder: String::new(),
+            caret: 0,
+            focused,
+            icon: None,
+            suffix: String::new(),
+            invalid: false,
+            tab_stop: true,
+            on_input: Some(|_| ()),
+        };
+        let rows = vec![
+            List::new(vec![ListRow::new("Keep"), ListRow::new("Change")])
+                .on_select(|_| ())
+                .into(),
+            field("first", false),
+            field("second", focused),
+        ];
+        Node::ZStack {
+            children: vec![
+                page(),
+                Dialog::new("Rename")
+                    .content(column(space::MD, rows))
+                    .footer(ButtonRow::new().confirm(Button::new("Save").on_press(())))
+                    .into(),
+            ],
+        }
+    };
+    fn fields(w: &dyn Widget, out: &mut Vec<crate::traits::WidgetId>) {
+        if w.role() == crate::traits::Role::TextField {
+            out.push(w.id());
+        }
+        w.children().iter().for_each(|c| fields(c.as_ref(), out));
+    }
+    let size = Size::new(640, 480);
+    let mut focus = crate::focus::FocusManager::new();
+    let mut before = built(page(), size);
+    crate::run::refocus(before.as_mut(), &mut focus);
+    let opener = crate::focus::FocusManager::tab_chain_of(before.as_ref())[0];
+    focus.set_focused(Some(opener));
+
+    let mut open = built(asking(false), size);
+    let mut found = Vec::new();
+    fields(open.as_ref(), &mut found);
+    crate::run::refocus(open.as_mut(), &mut focus);
+    assert_eq!(focus.focused(), Some(found[0]), "past the list, on a field");
+    let mut sink = MessageSink::new();
+    let typed = WidgetEvent::TextInput { character: 'x' };
+    crate::tree::send_to_id(open.as_mut(), found[0], &typed, &mut sink);
+    assert_eq!(
+        sink.drain_typed::<()>().len(),
+        1,
+        "the field takes what is typed"
+    );
+
+    focus.move_focus_next();
+    let mut again = built(asking(false), size);
+    let mut found = Vec::new();
+    fields(again.as_ref(), &mut found);
+    crate::run::refocus(again.as_mut(), &mut focus);
+    assert_eq!(focus.focused(), Some(found[1]), "where Tab left it");
+
+    let mut closed = built(page(), size);
+    crate::run::refocus(closed.as_mut(), &mut focus);
+    let opener = crate::focus::FocusManager::tab_chain_of(closed.as_ref())[0];
+    assert_eq!(focus.focused(), Some(opener), "back on the page");
+
+    let mut declared = built(asking(true), size);
+    let mut found = Vec::new();
+    fields(declared.as_ref(), &mut found);
+    crate::run::refocus(declared.as_mut(), &mut focus);
+    assert_eq!(focus.focused(), Some(found[1]), "the app's word wins");
+}
+
 pub(super) fn test_a_rebuild_keeps_what_was_scrolled() {
     let led = |title: &str, first: &str| -> Node<()> {
         let lines = (0..60).map(|i| Text::new(format!("Line {i}")).into());

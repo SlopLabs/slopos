@@ -521,6 +521,32 @@ fn a_typed_address_and_gateway_go_in_one_request() {
 }
 
 #[test]
+fn escape_typed_into_a_dialog_s_field_closes_the_dialog() {
+    let escape = || LineEditInput::Key {
+        key: Key::Named(NamedKey::Escape),
+        modifiers: Modifiers::default(),
+    };
+    let mut app = unaddressed();
+    edit_eth0(&mut app);
+    app.update(net(network::Msg::Method(1)));
+    assert!(shows(&app, "Gateway"));
+    app.update(net(network::Msg::Address(escape())));
+    assert!(!shows(&app, "Gateway"), "the address dialog is gone");
+
+    let mut app = read(Panel::Users, admin());
+    app.update(people(users::Msg::Rename));
+    assert!(shows(&app, "A new name"));
+    app.update(people(users::Msg::Name(escape())));
+    assert!(!shows(&app, "A new name"), "the rename dialog is gone");
+
+    let mut app = read(Panel::Desktop, admin());
+    app.update(Msg::Desktop(desktop::Msg::Add));
+    assert!(shows(&app, "Add a picture"));
+    app.update(Msg::Desktop(desktop::Msg::Path(escape())));
+    assert!(!shows(&app, "Add a picture"), "the picture dialog is gone");
+}
+
+#[test]
 fn a_wrong_address_says_why_once_left_and_holds_save() {
     let mut app = unaddressed();
     edit_eth0(&mut app);

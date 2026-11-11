@@ -543,6 +543,7 @@ impl Users {
         };
         match field.edit(input) {
             Left::Enter => self.confirm(),
+            Left::Escape => self.update(Msg::Cancel),
             Left::Nothing => Vec::new(),
         }
     }

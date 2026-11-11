@@ -240,8 +240,10 @@ impl Desktop {
                 let Some(field) = self.adding.as_mut() else {
                     return Vec::new();
                 };
-                if field.edit(input) == Left::Enter {
-                    return self.update(Msg::Confirm);
+                match field.edit(input) {
+                    Left::Enter => return self.update(Msg::Confirm),
+                    Left::Escape => return self.update(Msg::Cancel),
+                    Left::Nothing => {}
                 }
             }
             Msg::Cancel => {

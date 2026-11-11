@@ -56,7 +56,7 @@ pub fn run_app<A: App>(mut app: A) -> ! {
 
     let mut window_size = Size::new(width as i32, height as i32);
     tree::layout_tree(root.as_mut(), window_size, &style);
-    let _ = focus.rebuild_tab_chain(root.as_ref());
+    refocus(root.as_mut(), &mut focus);
 
     let mut last_tick_ms: u64 = slopos_windowing::get_time_ms();
     let mut modifiers = Modifiers::default();
@@ -265,28 +265,7 @@ pub fn run_app<A: App>(mut app: A) -> ! {
             root = tree::build_widget_tree(&node);
             tree::restore_kept(root.as_mut(), &scrolled);
             tree::layout_tree(root.as_mut(), window_size, &style);
-            // Every widget is new, so whoever holds focus is told again; one
-            // the app built focused wins over the remembered place.
-            let declared = find_declared_focus(super::focus::modal_layer(root.as_ref()));
-            let restored = focus.rebuild_tab_chain(root.as_ref());
-            let target = match declared {
-                Some(id) => {
-                    focus.set_focused(Some(id));
-                    Some(id)
-                }
-                None => restored,
-            };
-            if let Some(id) = target {
-                // Its own sink: anything emitted here would be applied after
-                // the rebuild that caused it.
-                let mut focus_sink = MessageSink::new();
-                tree::send_to_id(
-                    root.as_mut(),
-                    id,
-                    &WidgetEvent::FocusGained,
-                    &mut focus_sink,
-                );
-            }
+            refocus(root.as_mut(), &mut focus);
             needs_rebuild = false;
             needs_repaint = true;
             relit.clear();
@@ -541,6 +520,22 @@ fn move_focus_events(
     }
     if let Some(id) = next {
         tree::send_to_id(root, id, &WidgetEvent::FocusGained, sink);
+    }
+}
+
+/// Finds focus again in a tree just built, whose every widget is new, and
+/// tells its holder; one the app built focused wins over the remembered place.
+pub(crate) fn refocus(root: &mut dyn Widget, focus: &mut FocusManager) {
+    let declared = find_declared_focus(super::focus::modal_layer(root));
+    let restored = focus.rebuild_tab_chain(root);
+    if declared.is_some() {
+        focus.set_focused(declared);
+    }
+    if let Some(id) = declared.or(restored) {
+        // Its own sink: anything emitted here would be applied after the
+        // rebuild that caused it.
+        let mut unheard = MessageSink::new();
+        tree::send_to_id(root, id, &WidgetEvent::FocusGained, &mut unheard);
     }
 }
 

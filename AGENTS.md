@@ -1006,7 +1006,8 @@ keyboard row, through a rebuild that shows the same (`Widget::kept`; a
 `Page` shows the same while its title does, whatever leads its content), the
 wheel goes to the innermost view that can
 move, and a dialog is modal for Tab, the pointer and tooltips
-(`Widget::is_modal`, `Widget::covers`, `EventResponse::Blocked`), giving
+(`Widget::is_modal`, `Widget::covers`, `EventResponse::Blocked`), opening
+with the keyboard in its first field when it has one, giving
 focus back when it closes and scrolling its content when the window is too
 short for it. Icons are glyphs of Lucide
 (`/usr/share/fonts/Lucide.ttf`), named by `theme-core::Icon`, whose host test

@@ -2113,6 +2113,10 @@ pub fn cases() -> &'static [(&'static str, fn())] {
             components::test_a_dialog_takes_focus_from_the_page,
         ),
         (
+            "a_dialog_opens_on_its_first_field",
+            components::test_a_dialog_opens_on_its_first_field,
+        ),
+        (
             "a_rebuild_keeps_what_was_scrolled",
             components::test_a_rebuild_keeps_what_was_scrolled,
         ),

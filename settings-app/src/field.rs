@@ -20,11 +20,13 @@ impl std::fmt::Debug for Field {
     }
 }
 
-/// What a field did not take: Enter, which ends what it is part of.
+/// What a field did not take: Enter, which ends what it is part of, and
+/// Escape, which leaves it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Left {
     Nothing,
     Enter,
+    Escape,
 }
 
 impl Field {
@@ -52,6 +54,10 @@ impl Field {
                 key: Key::Named(NamedKey::Enter),
                 ..
             } => return Left::Enter,
+            LineEditInput::Key {
+                key: Key::Named(NamedKey::Escape),
+                ..
+            } => return Left::Escape,
             LineEditInput::Key { key, modifiers } => {
                 self.input.handle_key(key, modifiers);
             }

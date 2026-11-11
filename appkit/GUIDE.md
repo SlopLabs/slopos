@@ -184,6 +184,9 @@ shows every component in each of its states. Its pages are
   click gives focus to a field, a list or a table, and leaves it where it was
   for a button, so a toolbar button never takes the keyboard from a search
   field. While a dialog is open, Tab moves only among the dialog's controls.
+  A dialog opens with the keyboard in its first field, so what is typed goes
+  there at once; one without a field opens with nothing focused, and Enter
+  and Escape reach its footer.
 - **Keys.** Enter and Escape reach the page's `ButtonRow` when no control took
   them. A focused button takes Enter for itself; a checkbox and a switch take
   only Space.
