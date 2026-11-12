@@ -7,7 +7,7 @@ description: >
   Use when a task mentions boot-core, fat-core, installer-core, splash-core,
   fate-core, tools/bootdisk, bootctl, installer, installer-ui, roulette,
   limine.conf, slots, the ESP, the payload, `root=`, `panic=reboot`,
-  scripts/selfhost.sh, build_iso.sh or build_bootdisk.sh.
+  just install, build_iso.sh or build_bootdisk.sh.
 ---
 
 ## Read first

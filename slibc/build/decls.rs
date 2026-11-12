@@ -1149,16 +1149,8 @@ pub const HEADERS: &[HeaderSpec] = &[
         summary: "core POSIX API: descriptors, paths, identity, processes",
         includes: &["sys/types.h"],
         types: &[],
-        consts: &["F_OK", "X_OK", "W_OK", "R_OK", "SEEK_*", "_SC_*"],
-        slibc_consts: &[
-            "_SC_PHYS_PAGES",
-            "_SC_AVPHYS_PAGES",
-            "STDIN_FILENO",
-            "STDOUT_FILENO",
-            "STDERR_FILENO",
-            "_PC_NAME_MAX",
-            "_PC_PATH_MAX",
-        ],
+        consts: &["F_OK", "X_OK", "W_OK", "R_OK", "SEEK_*", "_SC_*", "_PC_*"],
+        slibc_consts: &["STDIN_FILENO", "STDOUT_FILENO", "STDERR_FILENO"],
         macros: &[],
         functions: &[
             "close",
@@ -1338,6 +1330,7 @@ pub const HEADERS: &[HeaderSpec] = &[
             "mkdir",
             "mkdirat",
             "mkfifo",
+            "mkfifoat",
             "mknod",
             "mknodat",
             "utimensat",
@@ -2482,10 +2475,8 @@ pub const HEADERS: &[HeaderSpec] = &[
         consts: &[],
         slibc_consts: &[],
         macros: &[],
-        functions: &["getpwuid_r"],
+        functions: &["getpwuid_r", "getpwnam_r"],
         extra: &[
-            "getpwnam_r(name: *const c_char, pwd: *mut passwd, buf: *mut c_char, \
-             buflen: size_t, result: *mut *mut passwd) -> c_int",
             "getpwnam(name: *const c_char) -> *mut passwd",
             "getpwuid(uid: uid_t) -> *mut passwd",
             "setpwent()",
@@ -2504,20 +2495,13 @@ pub const HEADERS: &[HeaderSpec] = &[
         consts: &[],
         slibc_consts: &[],
         macros: &[],
-        functions: &[],
+        functions: &["getgrgid_r", "getgrnam_r", "initgroups", "getgrouplist"],
         extra: &[
             "getgrgid(gid: gid_t) -> *mut group",
             "getgrnam(name: *const c_char) -> *mut group",
-            "getgrgid_r(gid: gid_t, grp: *mut group, buf: *mut c_char, buflen: size_t, \
-             result: *mut *mut group) -> c_int",
-            "getgrnam_r(name: *const c_char, grp: *mut group, buf: *mut c_char, \
-             buflen: size_t, result: *mut *mut group) -> c_int",
             "setgrent()",
             "getgrent() -> *mut group",
             "endgrent()",
-            "initgroups(user: *const c_char, group: gid_t) -> c_int",
-            "getgrouplist(user: *const c_char, group: gid_t, groups: *mut gid_t, \
-             ngroups: *mut c_int) -> c_int",
         ],
         variables: &[],
         raw: &[],

@@ -52,7 +52,7 @@ use slopos_userland::boot_disk::{
     register_firmware_entry,
 };
 use slopos_userland::selfhost::{
-    SCRATCH, check_out, git, selfhost_install, stdout_of, take_host_head, workspace,
+    SCRATCH, check_out, git, just_install, stdout_of, take_host_head, workspace,
 };
 use slopos_userland::syscall::UserUtsname;
 use slopos_userland::syscall::core::{clock_gettime_ns, uname};
@@ -163,7 +163,7 @@ fn install_guest_build() -> Option<bool> {
         let _ = std::fs::remove_file(format!("{root}/builddir/{built}"));
     }
     let started = Instant::now();
-    let installed = selfhost_install(root, "tests", &tag);
+    let installed = just_install(root, "tests", &tag);
     let returned = check_out(root, &head.before);
     if let Err(why) = installed {
         note(&why);

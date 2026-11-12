@@ -18,10 +18,10 @@
 //!   administrator the person the installer was told of, the other system's
 //!   entry is still in `BootOrder` and in Limine's menu, and the clone
 //!   fetches from the remote it was given. With a toolchain at
-//!   `/usr/local`, `scripts/selfhost.sh install tests` builds the system,
-//!   installs its base and puts its kernel into slot b, as a person at the
-//!   shell runs it; without one, slot a's kernel is cloned into b. Boot b
-//!   once.
+//!   `/usr/local`, `just install tests` builds the system and installs its
+//!   base, and `just install-kernel tests` puts its kernel into slot b, as a
+//!   person at the shell runs them; without one, slot a's kernel is cloned
+//!   into b. Boot b once.
 //! 2 (`slopos-b`): it runs the kernel and the base stage 1 built and tagged,
 //!   and `bootctl commit` makes it the default.
 //!
@@ -73,7 +73,7 @@ use slopos_userland::boot_disk::{
 };
 use slopos_userland::init_control::{self, Command as InitCommand};
 use slopos_userland::privd::{Connection, request_id};
-use slopos_userland::selfhost::{selfhost_install, workspace};
+use slopos_userland::selfhost::{just_install, workspace};
 use slopos_userland::syscall::core::{clock_gettime_ns, process_list, uname};
 use slopos_userland::syscall::efi::{efivar_get, efivar_set};
 use slopos_userland::syscall::error::SyscallError;
@@ -1275,7 +1275,7 @@ fn first_boot(status: &str) -> bool {
         Ok(root) => {
             let tag = format!("guest-{}", clock_gettime_ns());
             let started = Instant::now();
-            if let Err(why) = selfhost_install(root, "tests", &tag) {
+            if let Err(why) = just_install(root, "tests", &tag) {
                 note(&why);
                 return false;
             }

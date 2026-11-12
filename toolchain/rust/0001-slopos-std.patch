@@ -574,6 +574,28 @@ index 197931d..3e13619 100644
      target_os = "vxworks",
      target_os = "horizon",
      target_os = "aix",
+diff --git a/std/src/sys/env_consts.rs b/std/src/sys/env_consts.rs
+index b14160c..86066c2 100644
+--- a/std/src/sys/env_consts.rs
++++ b/std/src/sys/env_consts.rs
+@@ -290,6 +290,17 @@ pub mod os {
+     pub const EXE_EXTENSION: &str = "sgxs";
+ }
+ 
++#[cfg(target_os = "slopos")]
++pub mod os {
++    pub const FAMILY: &str = "unix";
++    pub const OS: &str = "slopos";
++    pub const DLL_PREFIX: &str = "lib";
++    pub const DLL_SUFFIX: &str = ".so";
++    pub const DLL_EXTENSION: &str = "so";
++    pub const EXE_SUFFIX: &str = "";
++    pub const EXE_EXTENSION: &str = "";
++}
++
+ #[cfg(target_os = "solaris")]
+ pub mod os {
+     pub const FAMILY: &str = "unix";
 diff --git a/std/src/sys/fs/unix.rs b/std/src/sys/fs/unix.rs
 index 74b4322..d202ba7 100644
 --- a/std/src/sys/fs/unix.rs

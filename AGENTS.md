@@ -55,7 +55,7 @@ In `.agents/skills/<name>/SKILL.md`.
 | Skill | Read it when the task touches |
 |---|---|
 | `slopos-toolchain` | `toolchain/`, the sysroot, the forks, recipes, vendoring, `--pgo` |
-| `slopos-dev-machine` | `just boot`'s root, image builders, guest git, `selfhost.sh` |
+| `slopos-dev-machine` | `just boot`'s root, image builders, guest git, `just install` |
 | `slopos-boot-install` | `boot-core`, `bootctl`, slots, the installer, rescue, crash records |
 | `slopos-base-software` | the base, its interface, `basefs`, `/usr/local` trees, `tree-install` |
 | `slopos-extensions` | `extctl`, `ext_activate`, extension images, services, grants |

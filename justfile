@@ -1,13 +1,24 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-cargo             := env("CARGO", "cargo")
 rust_channel      := `sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' rust-toolchain.toml`
+# The cargo a recipe builds with, chosen by the system it runs on. On Linux and
+# macOS rustup's: `cargo` the owned sysroot (`+slopos`) SlopOS's targets build
+# against, `host_cargo` the pinned nightly (`+<channel>`) the host's own tools
+# build with, both made by `ensure_toolchain`. On SlopOS the installed cargo is
+# both, and its check is the std stamp build_userland.sh holds it to.
+cargo             := if os() == "slopos" { "cargo" } else { env("CARGO", "cargo") + " +slopos" }
+host_cargo        := if os() == "slopos" { "cargo" } else { env("CARGO", "cargo") + " +" + rust_channel }
+ensure_toolchain  := if os() == "slopos" { "true" } else { "scripts/ensure_toolchain.sh" }
 rust_target       := "targets/x86_64-slos.json"
 userland_target   := "targets/x86_64-unknown-slopos.json"
 kernel_rustflags  := env("KERNEL_RUSTFLAGS", "-C force-frame-pointers=yes")
 # The tree's checks (tools/xtask): source gates, kernel-ELF gates, the loose
 # programs gate and clippy. Built for the host into the shared target dir.
-xtask             := cargo + " +" + rust_channel + " run --locked --release --quiet -p slopos-xtask --"
+xtask             := host_cargo + " run --locked --release --quiet -p slopos-xtask --"
+# The gates a build recipe holds its output to once built: xtask's on the host.
+# SlopOS builds no xtask yet, so a build there is graded by the host
+# (`just test-selfhost`).
+gate              := if os() == "slopos" { "true" } else { xtask }
 
 build_dir        := env("BUILD_DIR", "builddir")
 cargo_target_dir := build_dir / "target"
@@ -153,44 +164,60 @@ test_userland_bins  := `. scripts/lib/base.sh && printf %s "$BASE_TEST_PROGRAMS"
 test_shared_objects := `. scripts/lib/base.sh && printf %s "$BASE_TEST_SHARED_OBJECTS"`
 base_recipe_programs := `. scripts/lib/base.sh && printf %s "$BASE_RECIPE_PROGRAMS"`
 base_recipes        := `. scripts/lib/base.sh && printf %s "$BASE_RECIPES"`
-recipes_prefix      := build_dir / "slopos-recipes/prefix"
+recipes_prefix      := if os() == "slopos" { "/usr/local" } else { build_dir / "slopos-recipes/prefix" }
 apps_tree           := build_dir / "apps:/usr/local:apps"
 base_recipe_env     := "RECIPE_PREFIX=" + recipes_prefix + " RECIPE_PROGRAMS=\"" + base_recipe_programs + "\" RECIPE_LICENSES=\"" + base_recipes + "\""
+# A machine the host drives through remoted stays paired: on SlopOS the base it
+# builds carries the pairing the running base does.
+base_pairing        := if os() == "slopos" { if path_exists("/usr/share/slopos/remote/remote.conf") == "true" { "/usr/share/slopos/remote" } else { "" } } else { "" }
+
+# Where a recipe runs. A build or a gate runs on both systems. One that
+# emulates a machine, or needs the host's image or cross-build tools, depends
+# on `_host` first; one that installs into the machine it runs on, on
+# `_slopos`. Either refuses in one line before anything is built.
+[no-exit-message]
+_host recipe:
+    @[ "{{os()}}" != slopos ] || { echo "just {{recipe}}: runs on a Linux or macOS host; SlopOS builds with just build and puts a build to use with just install and just install-kernel" >&2; exit 1; }
+
+[no-exit-message]
+_slopos recipe:
+    @[ "{{os()}}" = slopos ] || { echo "just {{recipe}}: installs into the SlopOS machine it runs on; from this host, just remote-install installs on a paired one" >&2; exit 1; }
 
 [doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace")]
-setup:
+setup: (_host "setup")
     scripts/ensure_toolchain.sh
     scripts/ensure_go.sh
     mkdir -p {{build_dir}}
-    CARGO_TARGET_DIR={{cargo_target_dir}} {{cargo}} +{{rust_channel}} metadata --locked --format-version 1 >/dev/null
+    CARGO_TARGET_DIR={{cargo_target_dir}} {{host_cargo}} metadata --locked --format-version 1 >/dev/null
 
-# The host's half of a userland build; the guest runs scripts/build_userland.sh
-# alone. `+slopos` is the owned sysroot ensure_toolchain.sh materialises, whose
-# pinned std and libc forks `-Zbuild-std` resolves this target's std from.
-_build-userland:
-    scripts/ensure_toolchain.sh
-    CARGO="{{cargo}} +slopos" USERLAND_TARGET={{userland_target}} \
-        scripts/build_userland.sh "{{build_dir}}" "{{cargo_target_dir}}"
-    {{xtask}} programs {{build_dir}}/apps/bin/*
+# A userland build, the same on both systems: the base's programs, libc.so and
+# the apps, and with `--test` the suite's programs and the C++ runtime. On the
+# host `cargo` is the owned sysroot, whose pinned std and libc forks
+# `-Zbuild-std` resolves this target's std from.
+_userland mode:
+    {{ensure_toolchain}}
+    CARGO="{{cargo}}" USERLAND_TARGET={{userland_target}} \
+        scripts/build_userland.sh "{{build_dir}}" "{{cargo_target_dir}}" {{mode}}
 
-_build-userland-tests: _build-userland
-    CARGO="{{cargo}} +slopos" USERLAND_TARGET={{userland_target}} \
-        scripts/build_userland.sh "{{build_dir}}" "{{cargo_target_dir}}" --test
-    # The programs the extensions of `extension_test`, `extension_action_test`
-    # and `extension_service_test` carry.
-    {{xtask}} programs {{build_dir}}/libc_probe.elf {{build_dir}}/ext_daemon.elf
+_build-userland: (_userland "")
+    {{gate}} programs {{build_dir}}/apps/bin/*
+
+# The programs the extensions of `extension_test`, `extension_action_test` and
+# `extension_service_test` carry are held to the gate here.
+_build-userland-tests: _build-userland (_userland "--test")
+    {{gate}} programs {{build_dir}}/libc_probe.elf {{build_dir}}/ext_daemon.elf
 
 # `VERITY=off` for the tests image because the suite writes to it; the
 # shipped image keeps its trailer and `test_verity_artifact_*` mounts it.
 # `PRESERVE_FS_IMAGE=0` on the tests image is load-bearing: a persistent `/`
 # makes every filesystem test a mutation of the image the next run boots
 # from, so CI is order-independent only if each run starts from a fresh one.
-_fs-image: _build-userland
+_fs-image: (_host "_fs-image") _build-userland
     FS_IMAGE_SIZE={{fs_image_size}} VERITY=on PRESERVE_FS_IMAGE=0 COREUTILS_LINKS="{{coreutils_tools}}" \
         FS_HOST_TREES="{{apps_tree}}" \
         scripts/build_fs_image.sh "{{fs_image}}" "{{build_dir}}" {{userland_bins}}
 
-_fs-image-tests: _build-userland-tests
+_fs-image-tests: (_host "_fs-image-tests") _build-userland-tests
     FS_IMAGE_SIZE={{fs_image_size_tests}} VERITY=off PRESERVE_FS_IMAGE=0 COREUTILS_LINKS="{{coreutils_tools}}" \
         EXTRA_SHARED_OBJECTS="{{test_shared_objects}}" FS_HOST_TREES="{{apps_tree}}" \
         scripts/build_fs_image.sh "{{fs_image_tests}}" "{{build_dir}}" {{test_userland_bins}}
@@ -200,7 +227,7 @@ _fs-image-tests: _build-userland-tests
 # toolchain at /usr/local is the host's, replaced when it changes; the clone at
 # /src/slopos is the guest's once seeded, so it is staged only for a root
 # without one.
-_fs-image-persist: _build-userland
+_fs-image-persist: (_host "_fs-image-persist") _build-userland
     #!/usr/bin/env bash
     set -euo pipefail
     seed=""
@@ -216,7 +243,7 @@ _fs-image-persist: _build-userland
 # The persistent root's shape, with the clone seeded `--vendored`, so a build
 # in the guest reads no network, and the fixtures the toolchain ladder fetches
 # from. The tests base comes from the boot module.
-_fs-image-selfhost: _build-userland
+_fs-image-selfhost: (_host "_fs-image-selfhost") _build-userland
     #!/usr/bin/env bash
     set -euo pipefail
     rm -rf "{{selfhost_stage}}"
@@ -236,7 +263,7 @@ _fs-image-selfhost: _build-userland
 #
 # It comes up holding residency, not geometry alone: a checked-out copy of this
 # repository plus the pinned toolchain sysroot.
-_fs-image-capacity:
+_fs-image-capacity: (_host "_fs-image-capacity")
     #!/usr/bin/env bash
     set -euo pipefail
     populate=""
@@ -272,7 +299,7 @@ _fs-image-capacity:
         scripts/build_fs_image.sh "{{fs_image_capacity}}" "{{build_dir}}"
 
 [doc("Discard the persistent root so the next just boot builds it fresh, with a new clone of HEAD at /src/slopos: what the guest wrote and has not pushed goes with it")]
-reset DISK:
+reset DISK: (_host "reset")
     #!/usr/bin/env bash
     set -euo pipefail
     case "{{DISK}}" in
@@ -286,7 +313,7 @@ reset DISK:
 # literal argument rather than setting anything.
 [positional-arguments]
 [doc("Copy one file off the persistent root, or IMAGE, once the guest has shut down: just export-file PATH=/src/slopos/builddir/kernel-release.elf OUT=builddir/guest.elf")]
-export-file +ARGS:
+export-file +ARGS: (_host "export-file")
     #!/usr/bin/env bash
     set -euo pipefail
     file="" out="" image="{{fs_image_persist}}"
@@ -304,44 +331,75 @@ export-file +ARGS:
     fi
     scripts/export_fs_file.sh "$file" "$image" "$out"
 
-# The recipes whose programs every base carries. Their cross build needs the
-# tests userland's libraries.
-_base-recipes: _build-userland-tests
-    BUILD_DIR={{build_dir}} scripts/build_recipes.sh {{base_recipes}}
+# The recipes whose programs every base carries: cross-built on the host, where
+# their build needs the tests userland's libraries; on SlopOS the toolchain at
+# /usr/local carries them.
+_base-recipes: _build-userland (_userland if os() == "slopos" { "" } else { "--test" })
+    {{ if os() == "slopos" { "" } else { "BUILD_DIR=" + build_dir + " scripts/build_recipes.sh " + base_recipes } }}
 
 _initramfs: _build-userland _base-recipes
-    COREUTILS_LINKS="{{coreutils_tools}}" {{base_recipe_env}} \
+    COREUTILS_LINKS="{{coreutils_tools}}" {{base_recipe_env}} REMOTE_PAIRING_DIR="{{base_pairing}}" \
         scripts/build_initramfs.sh "{{initramfs}}" "{{build_dir}}" {{userland_bins}}
 
 _initramfs-tests: _build-userland-tests _base-recipes
     COREUTILS_LINKS="{{coreutils_tools}}" EXTRA_SHARED_OBJECTS="{{test_shared_objects}}" {{base_recipe_env}} \
+    REMOTE_PAIRING_DIR="{{base_pairing}}" \
         scripts/build_initramfs.sh "{{initramfs_tests}}" "{{build_dir}}" {{test_userland_bins}}
+
+# The base a variant boots with: the shipped one, or for a tests variant the
+# one carrying the suite's programs.
+_base variant:
+    just {{ if variant =~ '^(release|dev)$' { "_initramfs" } else if variant =~ '^(release-)?tests$' { "_initramfs-tests" } else { error("the variants are release, dev, tests and release-tests, not " + variant) } }}
 
 [doc("Pack the extension laid out in DIR (bin/, libexec/, lib/, share/ and .extension/{release,declare}) into builddir/extensions/<name>.ext and its sidecar <name>.meta, checked as extctl checks an install against this build's libc.so. EXTENSION_KEY names an SSH Ed25519 key to sign the sidecar with, for `extctl install-signed`; `scripts/remote.py install --extension` installs it on a paired machine")]
 extension DIR: _build-userland
     scripts/build_extension.sh "{{DIR}}" "{{build_dir}}/extensions" "{{build_dir}}/libc.so"
 
-# The host's half of a kernel build around scripts/build_kernel.sh, which the
-# guest runs alone: the toolchain before, the ELF gates after. `+slopos`, the
-# owned sysroot inside the checkout, so std's sources sit at the same
-# workspace-relative path here and in the guest.
+# A kernel build around scripts/build_kernel.sh, the same on both systems: the
+# toolchain before, the ELF gates after. On the host `cargo` is the owned
+# sysroot inside the checkout, so std's sources sit at the same
+# workspace-relative path there and on SlopOS.
 _kernel variant features='':
-    scripts/ensure_toolchain.sh
-    CARGO="{{cargo}} +slopos" RUST_TARGET={{rust_target}} KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
+    {{ensure_toolchain}}
+    CARGO="{{cargo}}" RUST_TARGET={{rust_target}} KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
     KERNEL_RELEASE={{ if variant =~ '^release' { "1" } else { "0" } }} \
         scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}" "{{features}}"
-    {{xtask}} elf --variant {{variant}} "{{build_dir}}/kernel-{{variant}}.elf"
-    {{xtask}} lint kernel-pml4-writer
+    {{gate}} elf --variant {{variant}} "{{build_dir}}/kernel-{{variant}}.elf"
+    {{gate}} lint kernel-pml4-writer
 
-[doc("Build the kernel (implies fs-image)")]
-build: _fs-image (_kernel kernel_variant)
+[doc("Build a system: the kernel, builddir/kernel-<VARIANT>.elf, and the base it boots with, builddir/initramfs.cpio, or builddir/initramfs-tests.cpio for a tests variant, whose kernel carries the suite and whose base the suite's programs. VARIANT is release, dev, tests or release-tests; KERNEL_RELEASE=1 makes release the default, dev otherwise")]
+build VARIANT=kernel_variant: (_kernel VARIANT if VARIANT =~ '^(release|dev)$' { "" } else if VARIANT =~ '^(release-)?tests$' { kernel_features_tests } else { error("the variants are release, dev, tests and release-tests, not " + VARIANT) }) (_base VARIANT)
 
-# No `_fs-image` dependency: building the userland binaries is most of the wall
+# No `_base` dependency: building the userland binaries is most of the wall
 # clock, and a gate-only job has no use for them.
-[doc("Build the kernel ELF alone, skipping the fs image — for gate-only jobs")]
+[doc("Build the kernel ELF alone, skipping the userland and the base — for gate-only jobs")]
 build-kernel-only: (_kernel kernel_variant)
 
-_install-medium: _build-userland
+# The apps go in as whoever runs this while /usr/local is theirs, and through
+# privd's org.slopos.software.install once it is the system's.
+[doc("On SlopOS, put a build's base to use: build the userland, the base and the apps for VARIANT (release, dev or tests) and make that base the one every slot boots, running it at once when the running kernel serves it and leaving it for the next boot otherwise; bootctl base rollback takes it back. The apps go to /usr/local once the running libc.so is the one they were built against; otherwise the command that installs them is printed. A base that needs a new kernel goes in first, then just install-kernel")]
+install VARIANT="release": (_slopos "install") (_base VARIANT)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bootctl base install "$PWD/{{build_dir}}/{{ if VARIANT =~ 'tests$' { "initramfs-tests.cpio" } else { "initramfs.cpio" } }}"
+    apps="/bin/tree-install apps {{build_dir}}/apps /usr/local"
+    if cmp -s /lib/libc.so "{{build_dir}}/libc.so"; then
+        $apps || echo "install: the apps stay as they were"
+    else
+        echo "install: the apps need this build's libc.so; once its base runs, run in $PWD: $apps"
+    fi
+    echo "install: bootctl base rollback takes the base back; a kernel it needs goes in with just install-kernel"
+
+[doc("On SlopOS, try a build's kernel: build the VARIANT kernel (release, dev, tests or release-tests) and put it into the boot slot that is not the default, arming one boot of it, which bootctl reboot tries and bootctl commit keeps")]
+install-kernel VARIANT="release": (_slopos "install-kernel") (_kernel VARIANT if VARIANT =~ '^(release|dev)$' { "" } else if VARIANT =~ '^(release-)?tests$' { kernel_features_tests } else { error("the variants are release, dev, tests and release-tests, not " + VARIANT) })
+    #!/usr/bin/env bash
+    set -euo pipefail
+    slot="$(bootctl spare)"
+    bootctl install "$slot" "$PWD/{{build_dir}}/kernel-{{VARIANT}}.elf"
+    bootctl oneshot "slopos-$slot"
+    echo "install-kernel: bootctl reboot tries slopos-$slot once; bootctl commit there keeps it"
+
+_install-medium: (_host "_install-medium") _build-userland
     #!/usr/bin/env bash
     set -euo pipefail
     toolchain=""
@@ -351,7 +409,7 @@ _install-medium: _build-userland
     LIMINE_DIR={{limine_dir}} scripts/build_install_medium.sh "{{install_medium}}" ${toolchain:+"$toolchain"}
 
 [doc("Build the live ISO (builddir/slop.iso): kernel + initramfs, runs from RAM with no disk, and installs from it with /bin/installer. PAYLOAD=1 builds the release kernel and adds the toolchain and a clone of HEAD in a partition the kernel mounts from the stick, which the installer copies to /usr/local and /src; booted as a CD, as boot-live attaches it, the kernel reads no payload. REMOTE=1 packs the base paired with this host's broker (builddir/initramfs-remote.cpio), so the live system and every system installed from it dial `just remote-serve`; that ISO carries the broker's token and is for your own machines. Honors BOOT_CMDLINE")]
-iso: _initramfs _install-medium (_kernel kernel_variant)
+iso: (_host "iso") _initramfs _install-medium (_kernel kernel_variant)
     #!/usr/bin/env bash
     set -euo pipefail
     base="{{initramfs}}"
@@ -367,7 +425,7 @@ iso: _initramfs _install-medium (_kernel kernel_variant)
 
 # The live system `test-installer` boots: the tests system, so installer_test
 # runs, and the medium with the payload unless INSTALLER_PAYLOAD=0.
-_iso-installer: _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
+_iso-installer: (_host "_iso-installer") _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
     #!/usr/bin/env bash
     set -euo pipefail
     toolchain=""
@@ -380,7 +438,7 @@ _iso-installer: _initramfs-tests (_kernel kernel_variant_tests kernel_features_t
         scripts/build_iso.sh "{{iso_installer}}" "{{build_dir}}" "{{installer_live_cmdline}}"
 
 # `_fs-image`: the harness attaches the shipped image as a snapshot disk.
-_iso-tests: _fs-image _fs-image-tests _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
+_iso-tests: (_host "_iso-tests") _fs-image _fs-image-tests _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
     KERNEL_ELF={{kernel_elf_tests}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
@@ -389,7 +447,7 @@ _iso-tests: _fs-image _fs-image-tests _initramfs-tests (_kernel kernel_variant_t
 
 # `tests.run=__userland_only__` is a glob that deliberately matches no kernel
 # test, leaving the userland phase as the only thing exercised.
-_iso-tests-userland-only: _fs-image-tests _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
+_iso-tests-userland-only: (_host "_iso-tests-userland-only") _fs-image-tests _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
     KERNEL_ELF={{kernel_elf_tests}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
@@ -398,14 +456,14 @@ _iso-tests-userland-only: _fs-image-tests _initramfs-tests (_kernel kernel_varia
             "{{test_cmdline_effective}} tests.run=__userland_only__"
 
 # Rebuilt from scratch every run: both slots hold this build and slot a is the default.
-_boot-disk: _fs-image-tests _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
+_boot-disk: (_host "_boot-disk") _fs-image-tests _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
     LIMINE_DIR={{limine_dir}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
     QEMU_FB_AUTO_OUTPUT="{{qemu_fb_auto_output}}" \
         scripts/build_bootdisk.sh "{{boot_disk}}" "{{kernel_elf_tests}}" "{{initramfs_tests}}" "{{test_cmdline_effective}}"
 
-_boot-disk-dev: _initramfs (_kernel kernel_variant)
+_boot-disk-dev: (_host "_boot-disk-dev") _initramfs (_kernel kernel_variant)
     LIMINE_DIR={{limine_dir}} \
     QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
     QEMU_FB_AUTO={{qemu_fb_auto}} QEMU_FB_AUTO_POLICY={{qemu_fb_auto_policy}} \
@@ -430,7 +488,7 @@ _qemu-boot mode video iso fs_image *extra_env:
 # unrefreshed, because the host cannot write into an image whose journal the
 # kernel has yet to replay.
 [doc("Boot the development machine and spin the Wheel of Fate: a persistent / carrying the toolchain and a clone of HEAD, and an A/B boot disk the guest installs into. KERNEL_RELEASE=0 for a dev kernel, VIDEO=0 for serial only, ports=7777,8080 to forward")]
-boot:
+boot: (_host "boot")
     #!/usr/bin/env bash
     set -euo pipefail
     export KERNEL_RELEASE="${KERNEL_RELEASE:-1}"
@@ -442,21 +500,21 @@ boot:
         refresh=""
     fi
     just _boot-disk-dev $refresh
-    echo "boot: in the guest: cd /src/slopos; git pull; scripts/selfhost.sh install; for a kernel, scripts/selfhost.sh install-kernel; bootctl reboot"
+    echo "boot: in the guest: cd /src/slopos; git pull; just install; for a kernel, just install-kernel; bootctl reboot"
     echo "boot: the guest's git push lands in {{guest_push_repo}}; git fetch {{guest_push_repo}} <branch> takes it"
     QEMU_MEM="${QEMU_MEM:-{{dev_qemu_mem}}}" GIT_PUSH_REPO="$PWD/{{guest_push_repo}}" \
         just _qemu-boot "interactive" "${VIDEO:-1}" {{boot_disk}} {{fs_image_persist}} BOOT_DISK_IMG={{boot_disk}} {{net_env}}
 
 [doc("just boot without the Wheel of Fate")]
-boot-fast:
+boot-fast: (_host "boot-fast")
     ROULETTE=0 just boot
 
 [doc("just boot-fast on the dev kernel with QEMU's GDB stub and monitor on Unix sockets in the build directory; attach with debug-gdb, debug-bt or debug-monitor")]
-boot-debug:
+boot-debug: (_host "boot-debug")
     QEMU_DEBUG=1 QEMU_MONITOR_SOCK="$PWD/{{monitor_sock}}" QEMU_GDB_SOCK="$PWD/{{gdb_sock}}" KERNEL_RELEASE=0 ROULETTE=0 just boot
 
 [doc("Boot the live ISO from RAM with no disk attached, as bare metal runs it; spins the Wheel of Fate unless ROULETTE=0")]
-boot-live: iso
+boot-live: (_host "boot-live") iso
     just _qemu-boot "interactive" "${VIDEO:-1}" {{iso}} {{fs_image}} QEMU_NO_ROOT_DISK=1 {{net_env}}
 
 ui_shots_width  := env("UI_SHOTS_WIDTH", "1280")
@@ -464,10 +522,10 @@ ui_shots_height := env("UI_SHOTS_HEIGHT", "800")
 
 [doc("Render the app icons the system and the apps ship, white glyphs on appkit's app tile, at 64 and 128 px; `just test-host` holds them to it")]
 icons:
-    {{cargo}} +{{rust_channel}} run -q -p slopos-icons
+    {{host_cargo}} run -q -p slopos-icons
 
 [doc("Boot the live ISO and save a PNG of every surface under builddir/ui-shots; name scenes to take only those, --no-install to stop the installer at review")]
-ui-shots *ARGS:
+ui-shots *ARGS: (_host "ui-shots")
     ROULETTE=0 QEMU_FB_AUTO=0 QEMU_FB_WIDTH={{ui_shots_width}} QEMU_FB_HEIGHT={{ui_shots_height}} just iso
     QEMU_BIN={{qemu_bin}} QEMU_SMP={{qemu_smp}} QEMU_MEM=2G QEMU_ACCEL={{qemu_accel}} \
     QEMU_CPU={{qemu_cpu}} GPU={{gpu}} OVMF_DIR={{ovmf_dir}} \
@@ -476,7 +534,7 @@ ui-shots *ARGS:
         --width {{ui_shots_width}} --height {{ui_shots_height}} {{ARGS}}
 
 [doc("Install check: on one disk in the bare-metal layout, register SlopOS's firmware entry, install a kernel into a boot slot, try it once, commit it, and roll back a slot that panics and one that aborts, each leaving its crash record; then install a base, which runs at once and a reboot keeps, roll it back, which runs at once too, and install one the kernel does not serve, which it passes over for the previous; across the reboots of one QEMU, with the ESP untouched")]
-test-install:
+test-install: (_host "test-install")
     #!/usr/bin/env bash
     set -euo pipefail
     TEST_CMDLINE="{{test_cmdline}} tests.run=*install*,*base_tests*" BOOTDISK_PANIC_ENTRY=1 \
@@ -541,7 +599,7 @@ test-install:
     echo "test-install: registered, installed, tried, committed and rolled back a kernel and a base, with the ESP untouched (qemu rc=$rc); log in $log"
 
 [doc("Guest install check: the guest takes HEAD over git, builds its kernel and base on the self-hosting root, installs the base as the one every slot boots and the kernel into slot b, and boots them; that system pushes a commit the host fetches; then it commits the slot and rolls back a slot that panics")]
-test-install-guest:
+test-install-guest: (_host "test-install-guest")
     #!/usr/bin/env bash
     set -euo pipefail
     [ -d "{{toolchain_install}}" ] || { echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain" >&2; exit 1; }
@@ -613,7 +671,7 @@ test-install-guest:
 # the medium in a CD drive the kernel has no driver for, so without its
 # payload.
 [doc("Installer check: from the ISO on a USB stick, visible as sda and never offered, its payload partition read over USB, install SlopOS onto a blank disk (erase), beside another system (free space) and over an existing partition (reuse), then boot each disk with the stick gone, build and install the system there and commit it, and, from the stick again, check, mount and roll back the blank disk in the rescue shell, interrupt one at a terminal, and reinstall keeping its root; from the ISO in a CD drive the kernel cannot read, install onto a blank disk without the toolchain (optical); the host holds every table to sfdisk, every root to e2fsck, every FAT volume to fsck.fat and the other system's partitions, entries and files to their bytes. INSTALLER_PAYLOAD=0 installs without the toolchain and clones a slot instead of building one; names a subset: just test-installer foreign")]
-test-installer *DISKS:
+test-installer *DISKS: (_host "test-installer")
     #!/usr/bin/env bash
     set -euo pipefail
     payload=1
@@ -876,7 +934,7 @@ test-installer *DISKS:
     exit "$failed"
 
 [doc("Boot the live ISO headless for BOOT_LOG_TIMEOUT seconds, serial log in test_output.log; fails unless /sbin/init launched")]
-boot-log: iso
+boot-log: (_host "boot-log") iso
     #!/usr/bin/env bash
     set -euo pipefail
     just _qemu-boot "logged" "0" {{iso}} {{fs_image}} "BOOT_LOG_TIMEOUT={{boot_log_timeout}} LOG_FILE={{log_file}} QEMU_NO_ROOT_DISK=1"
@@ -887,7 +945,7 @@ boot-log: iso
 # they never rebuild.
 
 [doc("Capture all-CPU backtraces from the running kernel (writes builddir/freeze-gdb.log)")]
-debug-bt:
+debug-bt: (_host "debug-bt")
     @test -f {{kernel_elf}} || { echo "missing {{kernel_elf}} — run 'just boot-debug' first" >&2; exit 1; }
     @test -S "{{gdb_sock}}" || { echo "no GDB socket at {{gdb_sock}} — boot with 'just boot-debug' first" >&2; exit 1; }
     @echo "Attaching to QEMU GDB stub at {{gdb_sock}}…"
@@ -901,7 +959,7 @@ debug-bt:
     @echo "Wrote {{build_dir}}/freeze-gdb.log"
 
 [doc("Interactive GDB attached to the running kernel (Ctrl-D to exit)")]
-debug-gdb:
+debug-gdb: (_host "debug-gdb")
     @test -f {{kernel_elf}} || { echo "missing {{kernel_elf}} — run 'just boot-debug' first" >&2; exit 1; }
     @test -S "{{gdb_sock}}" || { echo "no GDB socket at {{gdb_sock}} — boot with 'just boot-debug' first" >&2; exit 1; }
     gdb -q {{kernel_elf}} \
@@ -909,7 +967,7 @@ debug-gdb:
         -ex 'target remote {{gdb_sock}}'
 
 [doc("Connect to the QEMU monitor socket — info cpus, cpu N, info registers, …")]
-debug-monitor:
+debug-monitor: (_host "debug-monitor")
     @test -S "{{monitor_sock}}" || { echo "no monitor socket at {{monitor_sock}} — boot with 'just boot-debug' first" >&2; exit 1; }
     @echo "Connecting to QEMU monitor — type 'quit' or Ctrl-D to detach…"
     socat - "UNIX-CONNECT:{{monitor_sock}}"
@@ -922,12 +980,12 @@ debug-monitor:
 rr_skip := "slopos_core::syscall::tests::test_kill_process_group_semantics,slopos_drivers::tests::apic_timer_tests::test_lapic_timer_tick_rate_reasonable"
 
 [doc("Record a deterministic test run to builddir/replay.bin (TCG, smp=1)")]
-rr-record:
+rr-record: (_host "rr-record")
     TEST_CMDLINE="{{test_cmdline}} tests.skip={{rr_skip}}" just _iso-tests
     scripts/qemu_rr.sh record "{{iso_tests}}" "{{fs_image_tests}}"
 
 [doc("Replay builddir/replay.bin under interactive GDB (gdbstub halted on a Unix socket in the build directory)")]
-rr-replay:
+rr-replay: (_host "rr-replay")
     @test -f {{build_dir}}/replay.bin || { echo "no recording — run 'just rr-record' first" >&2; exit 1; }
     QEMU_GDB_SOCK="$PWD/{{gdb_sock}}" scripts/qemu_rr.sh replay "{{iso_tests}}" "{{fs_image_tests}}" &
     sleep 2
@@ -935,7 +993,7 @@ rr-replay:
     -pkill -f 'rr=replay'
 
 [doc("Batch reverse-debug: run to fault; pass WATCH=<VA> to reverse-find its writer")]
-rr-gdb WATCH='0':
+rr-gdb WATCH='0': (_host "rr-gdb")
     @test -f {{build_dir}}/replay.bin || { echo "no recording — run 'just rr-record' first" >&2; exit 1; }
     QEMU_GDB_SOCK="$PWD/{{gdb_sock}}" scripts/qemu_rr.sh replay "{{iso_tests}}" "{{fs_image_tests}}" &
     sleep 2
@@ -949,38 +1007,38 @@ _build-run-tests:
     cd tools/run_tests && go build -o ../../{{build_dir}}/run_tests .
 
 [doc("Run the SlopOS test harness — live progress bar, per-failure detail; pass a 'glob' filter as the positional argument")]
-test FILTER='': _build-run-tests
+test FILTER='': (_host "test") _build-run-tests
     {{build_dir}}/run_tests --filter "{{FILTER}}"
 
 [doc("Re-run only the tests that failed on the previous `just test` invocation.")]
-test-rerun-failed: _build-run-tests
+test-rerun-failed: (_host "test-rerun-failed") _build-run-tests
     {{build_dir}}/run_tests --rerun-failed
 
 [doc("Same as `just test` but dump captured klog of every test (not only failures).")]
-test-verbose FILTER='': _build-run-tests
+test-verbose FILTER='': (_host "test-verbose") _build-run-tests
     {{build_dir}}/run_tests --verbose --filter "{{FILTER}}"
 
 [doc("Suppress per-test output; render only failures + summary.")]
-test-quiet FILTER='': _build-run-tests
+test-quiet FILTER='': (_host "test-quiet") _build-run-tests
     {{build_dir}}/run_tests --quiet --filter "{{FILTER}}"
 
 [doc("Passthrough QEMU stdout verbatim — KTAP and klog interleaved. Last-resort debugging.")]
-test-raw: _build-run-tests
+test-raw: (_host "test-raw") _build-run-tests
     {{build_dir}}/run_tests --raw
 
 [doc("Append one JSON event per line to PATH (machine-consumable).")]
-test-json PATH: _build-run-tests
+test-json PATH: (_host "test-json") _build-run-tests
     {{build_dir}}/run_tests --json "{{PATH}}"
 
 [doc("Skip the kernel-side test phase; run only the userland tests.")]
-test-userland-only: _iso-tests-userland-only _build-run-tests
+test-userland-only: (_host "test-userland-only") _iso-tests-userland-only _build-run-tests
     {{build_dir}}/run_tests --no-build --iso "{{iso_tests}}" --fs-image "{{fs_image_tests}}"
 
 # Parsed here: after the recipe name, just passes `NAME=value` through as a
 # literal argument rather than setting anything.
 [positional-arguments]
 [doc("Run the suite on a tests kernel built elsewhere, e.g. by the guest, without building one: just test-elf [ELF=]builddir/guest-tests.elf [BASE=<tests base.cpio>] ['glob']")]
-test-elf +ARGS: _fs-image _fs-image-tests _initramfs-tests _build-run-tests
+test-elf +ARGS: (_host "test-elf") _fs-image _fs-image-tests _initramfs-tests _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
     elf="" base="{{initramfs_tests}}" filter=""
@@ -1001,7 +1059,7 @@ test-elf +ARGS: _fs-image _fs-image-tests _initramfs-tests _build-run-tests
 
 # In the body, not a dependency: `_iso-tests` rebuilds the fs image, which must not happen between the boots.
 [doc("Two-boot persistence check: write+fsync, power down, boot the same image, read the payload back")]
-test-persist: _build-run-tests
+test-persist: (_host "test-persist") _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
     TEST_CMDLINE="{{test_cmdline}} tests.run=*persist*" just _iso-tests
@@ -1024,7 +1082,7 @@ test-persist: _build-run-tests
 # The ISO is built in the body, not as a dependency, so it carries this
 # cmdline: the test runs only when named exactly, since it ends the machine.
 [doc("Rude-exit check: a boot fsyncs a file into the root's journal and dies holding it; the host's e2fsck must replay it")]
-test-rude-exit: _build-run-tests
+test-rude-exit: (_host "test-rude-exit") _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
     TEST_CMDLINE="{{test_cmdline}} tests.run=slopos_fs::tests::rude_exit::test_ext4_rude_exit" just _iso-tests
@@ -1042,7 +1100,7 @@ test-rude-exit: _build-run-tests
 # The ISO names the explicit tests, which run only when named since the host
 # must pull and plug devices for them.
 [doc("USB check: both QEMU xHCI models, qemu-xhci on MSI-X and nec-usb-xhci on MSI, each with a stick at every speed, QEMU's hub with two devices behind it and a full-speed keyboard, and an ext4 stick and a read-only drive; the guest must enumerate every device and bind every stick, through two rounds of QMP pulls and plugs give back every slot, page and claim, keep what it fsynced on the ext4 stick across a pull mid-write, mount the read-only drive read-only, then reset each controller")]
-test-usb: _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
+test-usb: (_host "test-usb") _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
     #!/usr/bin/env bash
     set -euo pipefail
     tests=slopos_drivers::tests::usb_tests::test_usb_01_controllers_run
@@ -1075,7 +1133,7 @@ test-usb: _initramfs-tests (_kernel kernel_variant_tests kernel_features_tests)
 # because the image takes minutes to build once and is then preserved; the
 # per-run ratchet that CI does grade is `run_tests gate fsperf` on the suite's capture.
 [doc("Capacity check: mount and write a 16 GiB volume, then grade the mount and write cost")]
-test-capacity: _build-run-tests _fs-image-capacity
+test-capacity: (_host "test-capacity") _build-run-tests _fs-image-capacity
     #!/usr/bin/env bash
     set -euo pipefail
     TEST_CMDLINE="{{test_cmdline}} tests.run=*capacity*" just _iso-tests
@@ -1097,8 +1155,8 @@ test-capacity: _build-run-tests _fs-image-capacity
 # leaves a clone on /, the second reads it back and climbs the ladder again.
 # Separate from `just test`, which runs the same utests on a root with no
 # toolchain and no clone, and they pass by saying so.
-[doc("Toolchain check at 6G on the self-hosting root: hold the toolchain to its manifest and the clone to its vendored crates, climb the ladder (rustc, rustc+cc, cargo with a build script and a proc macro, cargo fetching a git dependency through libgit2 and a crate over HTTPS from a loopback sparse registry, clang, git reading the clone and reaching the host, ssh and git over ssh to the host's sshd, git cloning GitHub, cargo resolving the lockfiles from crates.io over HTTPS, a bash script, a Ninja graph and a CMake project), and find a clone made on / intact after a power-off")]
-test-toolchain: _build-run-tests
+[doc("Toolchain check at 6G on the self-hosting root: hold the toolchain to its manifest and the clone to its vendored crates, climb the ladder (rustc, rustc+cc, cargo with a build script and a proc macro, cargo fetching a git dependency through libgit2 and a crate over HTTPS from a loopback sparse registry, clang, git reading the clone and reaching the host, ssh and git over ssh to the host's sshd, git cloning GitHub, cargo resolving the lockfiles from crates.io over HTTPS, a bash script, a Ninja graph, a CMake project, and just running a justfile and refusing `just boot` in the clone), and find a clone made on / intact after a power-off")]
+test-toolchain: (_host "test-toolchain") _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
     just _fs-image-selfhost
@@ -1144,7 +1202,7 @@ test-toolchain: _build-run-tests
     echo "test-toolchain: the ladder held on both boots, and the clone's commit $written survived the power-off"
 
 [doc("Self-hosting check: the guest takes HEAD over git and builds the dev and tests systems — kernel, userland and base — on the self-hosting root; the host holds the root to e2fsck, runs the ELF gates on both kernels and the suite on the guest's tests kernel and base")]
-test-selfhost: _build-run-tests
+test-selfhost: (_host "test-selfhost") _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
     [ -d "{{toolchain_install}}" ] || { echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain" >&2; exit 1; }
@@ -1180,7 +1238,7 @@ test-selfhost: _build-run-tests
 # builds HEAD. The libc.so the boot ran is kept beside the log: user ticks
 # symbolize against the objects that took them.
 [doc("Benchmark the guest's kernel build: boot the optimized tests kernel on the self-hosting root with prof=on, build the dev and tests kernels from clean, and summarize where the time went (builddir/bench-selfhost.log)")]
-bench-selfhost: _build-run-tests
+bench-selfhost: (_host "bench-selfhost") _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
     [ -d "{{toolchain_install}}" ] || { echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain" >&2; exit 1; }
@@ -1205,7 +1263,7 @@ initramfs_remote := build_dir / "initramfs-remote.cpio"
 
 [positional-arguments]
 [doc("Drive the paired SlopOS machine through the broker: just remote status | wait [--tag T] | run -- ARGV | sh CMDLINE | push LOCAL REMOTE | pull REMOTE LOCAL | klog [--follow] | install (scripts/remote.py --help)")]
-remote *ARGS:
+remote *ARGS: (_host "remote")
     scripts/remote.py "$@"
 
 # The shipped base paired with this host's broker, apart from
@@ -1213,7 +1271,7 @@ remote *ARGS:
 # carries a token. ARGS go to `remote.py provision`; none pairs with the
 # broker the last pairing named.
 [positional-arguments]
-_initramfs-remote *ARGS: _build-userland _base-recipes
+_initramfs-remote *ARGS: (_host "_initramfs-remote") _build-userland _base-recipes
     #!/usr/bin/env bash
     set -euo pipefail
     scripts/remote.py provision {{remote_pairing}} "$@"
@@ -1223,7 +1281,7 @@ _initramfs-remote *ARGS: _build-userland _base-recipes
 
 [positional-arguments]
 [doc("Run the broker remoted dials, on this host's LAN address (REMOTE_HOST) and port 7330 (REMOTE_PORT), offering the release kernel and a base paired with it (builddir/initramfs-remote.cpio) as bootstrap downloads; prints how to boot them on the machine and, with ufw active, the rule to add")]
-remote-serve *ARGS: (_kernel "release")
+remote-serve *ARGS: (_host "remote-serve") (_kernel "release")
     #!/usr/bin/env bash
     set -euo pipefail
     port="${REMOTE_PORT:-7330}"
@@ -1234,7 +1292,7 @@ remote-serve *ARGS: (_kernel "release")
 
 [positional-arguments]
 [doc("Build a base paired with the broker under a fresh SLOPOS_BUILD_TAG and install it on the paired machine, which runs it at once when its kernel serves it; when the release kernel differs from the one running, build it under the tag too, put it into the spare slot, boot it once and wait for it to come back with that tag; --commit then makes it the default")]
-remote-install *ARGS:
+remote-install *ARGS: (_host "remote-install")
     #!/usr/bin/env bash
     set -euo pipefail
     tag="remote-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -1262,7 +1320,7 @@ remote-install *ARGS:
 # dialled. The kernel carries a build tag and is built in a target directory
 # of its own, so the tag never rebuilds the shared one.
 [doc("Remote-control check: boot an installed machine whose base is paired with a broker on this host and drive it through scripts/remote.py — wait for its build tag; run commands and check stdout, stderr, exit codes, cwd, env, stdin, a timeout and two at once; push a random 8 MiB file, pull it back byte-identical; read /dev/kmsg; find the base's pairing unwritable and a pairing planted on the root ignored; serve from two daemons; install a base that runs at once; install into the spare slot, reboot into it and commit it, keeping that base; power off with /bin/halt and require QEMU to exit")]
-test-remote: _build-userland _base-recipes
+test-remote: (_host "test-remote") _build-userland _base-recipes
     #!/usr/bin/env bash
     set -euo pipefail
     work="$PWD/{{build_dir}}/remote-e2e"
@@ -1445,7 +1503,7 @@ test-remote: _build-userland _base-recipes
 
 [doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, shooter-core, net-core, nvme-core, rtl8168-core, usb-core, hid-core, cpufreq-core, ext4-core, verity-core, http-core, remote-core, installer-core, priv-core, fat-core, boot-core, tree-core, accounts-core, extension-core, tls-core, chrome-core, fate-core, splash-core, theme-core, settings-core, settings-app, slibc-core, kallsyms, initramfs, extension, icons, the gates of tools/xtask and tools/run_tests, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{cargo}} +{{rust_channel}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-shooter-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-verity-core -p slopos-http-core -p slopos-remote-core -p slopos-installer-core -p slopos-priv-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-accounts-core -p slopos-settings-core -p slopos-settings-app -p slopos-extension-core -p slopos-tls-core -p slopos-chrome-core -p slopos-fate-core -p slopos-splash-core -p slopos-theme-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs -p slopos-extension -p slopos-icons -p slopos-xtask
+    {{host_cargo}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-shooter-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-verity-core -p slopos-http-core -p slopos-remote-core -p slopos-installer-core -p slopos-priv-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-accounts-core -p slopos-settings-core -p slopos-settings-app -p slopos-extension-core -p slopos-tls-core -p slopos-chrome-core -p slopos-fate-core -p slopos-splash-core -p slopos-theme-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs -p slopos-extension -p slopos-icons -p slopos-xtask
     just check-tests-host
 
 [doc("Run the Go test runner's own unit tests and its log gates' (host-side, no QEMU)")]
@@ -1453,7 +1511,7 @@ check-tests-host:
     cd tools/run_tests && go vet ./... && go test ./...
 
 [doc("Hold an image a boot wrote to e2fsck -fn and to being at rest: clean, no journal to replay; the tests image, or any with --map, also to the ownership map")]
-check-fs-image *ARGS:
+check-fs-image *ARGS: (_host "check-fs-image")
     scripts/check_fs_image.sh {{ARGS}}
 
 # Every log gate over one or more raw captures (`run_tests --raw`), by default
@@ -1495,7 +1553,7 @@ check-miri:
     mkdir -p {{build_dir}}
     rustup component list --installed --toolchain {{rust_channel}} 2>/dev/null | grep -q '^miri' \
         || rustup component add miri --toolchain {{rust_channel}}
-    {{cargo}} +{{rust_channel}} miri setup
+    {{host_cargo}} miri setup
     pids=(); tags=()
     for model in stacked tree; do
         flags="-Zmiri-ignore-leaks"
@@ -1509,7 +1567,7 @@ check-miri:
                 sel=(--test '*')
             fi
             tag="$model-$shard"
-            MIRIFLAGS="$flags" {{cargo}} +{{rust_channel}} miri test -p slopos-ostd \
+            MIRIFLAGS="$flags" {{host_cargo}} miri test -p slopos-ostd \
                 "${sel[@]}" --no-fail-fast \
                 >"{{build_dir}}/kernmiri-$tag.log" 2>&1 &
             pids+=($!); tags+=("$tag")
@@ -1544,19 +1602,19 @@ check-offline-build: vendor
     scripts/check_offline_build.sh --require
 
 [doc("Materialise the pinned rustc source tree with the SlopOS target patch under third_party/slopos-rustc-src (fetches 265 MB)")]
-rustc-src:
+rustc-src: (_host "rustc-src")
     scripts/make_rustc_src.sh
 
 [doc("Cross-build the Rust toolchain that runs on SlopOS. Hours of CPU; `just check-bootstrap-config` is the affordable half. `--pgo` builds it as a Rust release is (ThinLTO, one codegen unit, PGO with the profiles `just toolchain-profile` gathers, made first when missing or stale).")]
-toolchain *ARGS:
+toolchain *ARGS: (_host "toolchain")
     scripts/bootstrap_slopos_toolchain.sh {{ARGS}}
 
 [doc("Gather the PGO profiles for `just toolchain` from an instrumented Linux-hosted build of the same compiler running the kernel build (builddir/slopos-pgo). `--optimized-host` also builds that compiler with them, for timing a host kernel build; `--force` regenerates.")]
-toolchain-profile *ARGS:
+toolchain-profile *ARGS: (_host "toolchain-profile")
     scripts/make_toolchain_profile.sh {{ARGS}}
 
 [doc("Build the recipes under toolchain/recipes/ (zlib, nghttp2, Mbed TLS, OpenSSL, curl, libssh2, libgit2, git, OpenSSH, and the programs the guest's builds run) for SlopOS from their pinned tarballs into builddir/slopos-recipes/prefix; names build only those and what they depend on")]
-recipes *NAMES: _build-userland-tests
+recipes *NAMES: (_host "recipes") _build-userland-tests
     BUILD_DIR={{build_dir}} scripts/build_recipes.sh {{NAMES}}
 
 [doc("Hold the cross-build plan and the compiler wrapper to the toolchain they claim to produce. Needs `just rustc-src` and a tests userland build first.")]
@@ -1568,7 +1626,7 @@ check-rustc-target:
     scripts/check_rustc_target.sh --require
 
 [doc("Materialise the pinned llvm-project sources with the SlopOS port applied under third_party/llvm-project-<version>.src (1.5 GB on disk)")]
-llvm-src:
+llvm-src: (_host "llvm-src")
     scripts/make_slopos_llvm_src.sh
 
 [doc("Compile LLVM's Support library for x86_64-unknown-slopos. Needs `just llvm-src` and a tests userland build first.")]
@@ -1632,12 +1690,12 @@ check-toolchain-coverage:
 
 [doc("Clippy over every target the tree builds — the host crates, the kernel's crate graph, the userland — each with its build's own flags; name `host`, `kernel` or `userland` to run one")]
 clippy *TARGETS:
-    scripts/ensure_toolchain.sh
+    {{ensure_toolchain}}
     {{xtask}} clippy {{TARGETS}}
 
 [doc("Run every framekernel-discipline gate: the toolchain pins, every source and dev-kernel ELF gate, clippy, fmt, KernMiri and Verus (requires a prior `just build`)")]
 check-framekernel: check-framekernel-gates clippy
-    {{cargo}} +{{rust_channel}} fmt --all -- --check
+    {{host_cargo}} fmt --all -- --check
     just check-miri
     just verify
 
@@ -1669,7 +1727,7 @@ ci-candidates:
     rustup component add rustc-codegen-cranelift-preview --toolchain {{rust_channel}} ||
         echo "ci-candidates: cranelift is not published for {{rust_channel}} — its gate reports skipped" >&2
     root="$PWD/{{build_dir}}/candidates"
-    [ -x "$root/bin/wild" ] || {{cargo}} install --locked wild-linker --version 0.10.0 --root "$root"
+    [ -x "$root/bin/wild" ] || {{host_cargo}} install --locked wild-linker --version 0.10.0 --root "$root"
     PATH="$root/bin:$PATH" scripts/check_codegen_backend.sh --backend cranelift
     PATH="$root/bin:$PATH" scripts/check_linker_script.sh --linker wild --require
 
@@ -1678,7 +1736,7 @@ ci-candidates:
 # rest. `--raw` because the progress renderer leaves klog out of a green run,
 # and the log gates read the LOCKDEP/SCHEDCPU lines in it.
 [doc("CI's suite lane: the tests system booted once, its capture (builddir/ci-test.log) held to the test list, lockdep and SMP gates, its image to e2fsck and the ownership map, the tests kernel to the authority gate; then test-persist, test-rude-exit, test-usb and test-toolchain. Fails at the end if any check did")]
-ci-suite: _build-run-tests
+ci-suite: (_host "ci-suite") _build-run-tests
     #!/usr/bin/env bash
     set -uo pipefail
     export RUSTC_WRAPPER="${CI_RUSTC_WRAPPER:-}"
@@ -1700,7 +1758,7 @@ ci-suite: _build-run-tests
 # A check runs whenever the inputs it reads were made, even if an unrelated
 # check before it failed, so one red check does not hide the rest.
 [doc("CI's toolchain lane: materialise the llvm-project and rustc sources, build the tests userland, then every check of the port; the lane fails at the end if any step did")]
-ci-toolchain:
+ci-toolchain: (_host "ci-toolchain")
     #!/usr/bin/env bash
     set -uo pipefail
     failed=()
@@ -1732,7 +1790,7 @@ ci-toolchain:
     fi
 
 [doc("Show detected QEMU framebuffer resolution")]
-show-qemu-resolution:
+show-qemu-resolution: (_host "show-qemu-resolution")
     #!/usr/bin/env bash
     set -euo pipefail
     detected="$(QEMU_FB_WIDTH={{qemu_fb_width}} QEMU_FB_HEIGHT={{qemu_fb_height}} \
@@ -1748,7 +1806,7 @@ show-qemu-resolution:
 
 [doc("Check formatting")]
 fmt:
-    {{cargo}} +{{rust_channel}} fmt --all -- --check
+    {{host_cargo}} fmt --all -- --check
 
 [doc("Clean build artifacts")]
 clean:
@@ -1765,7 +1823,7 @@ clean:
             '# For information about cache directory tags see https://bford.info/cachedir/' \
             > "$tag"
     fi
-    {{cargo}} +{{rust_channel}} clean --target-dir {{cargo_target_dir}}
+    {{host_cargo}} clean --target-dir {{cargo_target_dir}}
     rm -f {{build_dir}}/kernel-*.elf
     rm -rf {{build_dir}}/gates/codegen-probe {{build_dir}}/gates/rustc-target-probe-* {{build_dir}}/gates/rustc-target-test {{build_dir}}/gates/llvm-port {{build_dir}}/gates/clang-driver {{build_dir}}/gates/bootstrap-config {{build_dir}}/gates/offline-build
 

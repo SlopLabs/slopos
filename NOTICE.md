@@ -244,12 +244,12 @@ Apache-2.0`, LLVM, clang and lld `Apache-2.0 WITH LLVM-exception`.
 Beyond the forks above, that build applies patches of the same shape, each
 written to be contributed upstream and licensed as the project it patches:
 rustc's own llvm-project port (`toolchain/llvm-rustc/`, `Apache-2.0 WITH
-LLVM-exception`), and `target_os = "slopos"` ports of crates the compiler and
-cargo depend on (`toolchain/crates/`): `getrandom`, `errno`, `stacker` and
-`socket2` (`MIT OR Apache-2.0`), `libloading` (ISC), `nix` (MIT) and `rustix`
-(`Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`). Every added line is
-© 2025–2026 The SlopOS Authors; the crates themselves remain © their authors,
-and none is vendored into this repository.
+LLVM-exception`), and `target_os = "slopos"` ports of crates the compiler,
+cargo and just depend on (`toolchain/crates/`): `getrandom`, `errno`, `stacker`
+and `socket2` (`MIT OR Apache-2.0`), `libloading` (ISC), `nix` (MIT) and
+`rustix` (`Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`). Every added
+line is © 2025–2026 The SlopOS Authors; the crates themselves remain © their
+authors, and none is vendored into this repository.
 
 The C libraries cargo and git link for their network transports are built
 from pinned, unmodified upstream release tarballs by
@@ -349,6 +349,19 @@ its pinned release tarball, CMake's with the one patch its entry names:
   configure with: © 2025–2026 The SlopOS Authors, `BSD-3-Clause`, like the
   project the patch is written to be contributed to, the platform files
   following the shape of CMake's own `Modules/Platform/SerenityOS*.cmake`.
+
+just (`toolchain/recipes/just/`), the command runner the tree's justfile is
+written for, is built by cargo from its pinned crates.io `.crate` against
+`toolchain/recipes/just/Cargo.lock`, the lock the crate is published with but
+for `libc`, `nix`, `rustix`, `getrandom` and `errno`, which it resolves to the
+fork and the ports above: © Casey Rodarmor and the just contributors,
+`CC0-1.0`. The program links statically the crates that lock names for SlopOS,
+each © its authors and, but for the ports, unmodified and fetched by its
+checksum there: under `MIT`, or `MIT` elected where a crate also offers
+`Apache-2.0` or the `Unlicense`, all but these — `similar` (`Apache-2.0`),
+`blake3` and `constant_time_eq` (`CC0-1.0`, elected), and `option-ext`
+(`MPL-2.0`, whose source is the crate as crates.io publishes it). Its `LICENSE`
+travels with it at `share/licenses/just/LICENSE`.
 
 `tools/kallsyms`, which builds the kernel's symbol table on the host and in
 the guest, carries a Rust v0 symbol demangler derived from LLVM's

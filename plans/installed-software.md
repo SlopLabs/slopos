@@ -430,7 +430,7 @@ an installed image.
 ## Order
 
 Phase 1 changes the cross-built toolchain, so it shares the rebuild that
-`self-hosting-on-hardware.md`'s phases 1 and 2 need. Phase 2 needs phase
+`self-hosting-on-hardware.md`'s phase 2 needs. Phase 2 needs phase
 1's image and phase 3's. Phase 3 needs no toolchain and can come first.
 Phase 4 removes what the first three stopped using. Phase 5 depends on
 none of them and is small; it can come first. Phase 6 is needed before

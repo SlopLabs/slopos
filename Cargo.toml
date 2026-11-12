@@ -82,7 +82,8 @@ members = [
 # `third_party/` holds the materialised toolchain trees, which carry manifests
 # of their own. Without the exclusion cargo resolves the rustc tree's
 # `src/bootstrap` against *this* workspace and bootstrap refuses to build.
-exclude = ["vendor/gimli", "vendor/unwinding", "third_party"]
+# `builddir/` holds the crates a `cargo` recipe unpacks, for the same reason.
+exclude = ["vendor/gimli", "vendor/unwinding", "third_party", "builddir"]
 resolver = "2"
 
 [workspace.package]

@@ -22,12 +22,11 @@ The system is a kernel and a base, each replaced its own way:
 `BASE_INTERFACE` ties a kernel to a base, and `libc.so`'s exports tie a
 base to what runs outside it.
 
-A Linux machine is needed today for three things this plan takes on:
+A Linux machine is needed today for two things this plan takes on:
 
 | Step | What needs Linux |
 |------|------------------|
-| Running a recipe | No `just` runs on SlopOS, and the justfile names rustup toolchains (`cargo +slopos`, `cargo +<channel>`). The guest builds through `scripts/selfhost.sh`, a second orchestrator over the same build scripts |
-| Formatting, linting, gating | The cross-built toolchain carries `cargo` and `src` alone. `xtask elf` and `xtask programs` run from justfile recipes the guest skips. The base-interface and libc-exports gates need `python3`, and the second `llvm-readobj` |
+| Formatting, linting, gating | The cross-built toolchain carries `cargo` and `src` alone. On SlopOS the justfile's `gate` skips `xtask elf` and `xtask programs`. The base-interface and libc-exports gates need `python3`, and the second `llvm-readobj` |
 | Testing | The suite boots under QEMU, and the tests kernel starts the userland tests too, so a test of a program costs a kernel boot. A slot's kernel takes extra boot options only when it was compiled with `SLOPOS_BUILTIN_CMDLINE`; the rest are in `limine.conf` on the ESP, which nothing writes after install |
 
 Rules every phase keeps:
@@ -43,52 +42,20 @@ Rules every phase keeps:
   kernel or the base is checked by `bootctl` or the kernel, never by a
   comparison in the justfile. A tree is nobody's to refuse.
 
-## Phase 1: one build interface
+## Phase 1: one build interface (done)
 
-**For:** the commands in `AGENTS.md` and the docs to mean the same thing on
-both systems, and one place that says how a variant is built.
-
-`scripts/selfhost.sh` restates what the justfile holds: the variant's
-features (`kernel_features_tests`), the base's packing environment
-(`base_recipe_env`, `COREUTILS_LINKS`), and the order of the builds. It runs
-none of the gates the recipes run after a build. The tests grade the script
-(`slopos_userland::selfhost`), so the justfile's path into a slot is never
-the one tested.
-
-Build:
-
-1. `just` as a program of the toolchain, built by cargo for
-   `x86_64-unknown-slopos` during `just toolchain` and installed with it.
-   The recipes under `toolchain/recipes/` build C projects; this needs a
-   way to build a pinned crate. It is a new third-party input:
-   `NOTICE.md`, a vendored lock, a rung in `toolchain_test`.
-2. One `cargo` and one `xtask` variable in the justfile that resolve by
-   `os()`. On Linux they keep `+slopos`, `+<channel>` and
-   `scripts/ensure_toolchain.sh`. On SlopOS they are the installed `cargo`,
-   and the toolchain check is the stamp `build_userland.sh` reads.
-3. Three kinds of recipe, each saying where it runs:
-   - build and gate (`build`, `fmt`, `clippy`, the gates): both systems;
-   - install (`install [variant]`, `install-kernel [variant]`): SlopOS
-     only. On Linux they refuse in one line and name `just remote-install`;
-   - emulate (`boot`, `test`, `iso`, the image builders): Linux and macOS
-     only, refusing on SlopOS the same way.
-4. `scripts/selfhost.sh` deleted. `slopos_userland::selfhost` runs `just`,
-   and `install_test`, `installer_test` and `selfhost_test` follow, with
-   the line `just boot` prints and the installer's words. What the script
-   does for the apps moves into the recipe as it is;
-   `installed-software.md` replaces it with an image.
-
-The port is a recipe and, where a crate does not know the target, a line
-in `toolchain/crates/`, which already patches `nix` and `rustix`. What
-`just` calls that slibc or the kernel does not answer yet is a fix there,
-found by running it, and never a patch to `just`.
-
-Done when `just test-install-guest` and `just test-installer` pass with the
-script gone, and `just boot` on a SlopOS host refuses and says why.
-
-The rule in skill `slopos-dev-machine` that host-only steps stay in the
-justfile becomes "host-only steps carry the guard"; the change appends that
-to the skill's `pending.md`.
+The justfile is the one build interface; `scripts/selfhost.sh` is gone.
+`just` 1.59.0 is a toolchain program (`toolchain/recipes/just/`, built by
+the `cargo` recipe template against a lock that resolves `libc`, `nix`,
+`rustix`, `getrandom` and `errno` to the fork and the `toolchain/crates/`
+ports), held by the `just_runs_a_justfile` rung. `cargo`, `host_cargo`,
+`xtask`, `ensure_toolchain` and `gate` resolve by `os()`. A recipe that
+emulates or needs the host's tools depends on `_host`; `install [variant]`
+and `install-kernel [variant]` depend on `_slopos`; each refuses elsewhere in
+one line. `slopos_userland::selfhost` runs `just build`, `just install` and
+`just install-kernel`. Porting just grew slibc by `mkfifoat` and the libc
+fork by Linux's `sysconf`/`pathconf` names and five group and password
+declarations.
 
 ## Phase 2: the gates where the build runs
 
@@ -102,9 +69,8 @@ Build:
    `toolchain_test`. `just fmt` and `just clippy` then run on SlopOS.
 2. `xtask` built natively. Its dependencies are `syn`, `object`,
    `iced-x86`, `rustc-demangle` and `serde_json`, none of which reaches the
-   system beyond std. `_kernel` and `_build-userland` then run
-   `xtask elf` and `xtask programs` on both systems, and the split between
-   the build scripts and "what only the host does" goes.
+   system beyond std. The justfile's `gate` is then `xtask` on both
+   systems.
 3. The two contract gates as `xtask` modules, with their fixtures as tests:
    `scripts/check_base_interface.sh` (a Python parser over rustdoc's JSON)
    and `scripts/check_libc_exports.sh` (`llvm-readobj` and a Python
@@ -303,12 +269,10 @@ restart and stays.
 
 ## Order
 
-Phase 1 comes first: every later phase adds recipes, and adding them to
-`selfhost.sh` would grow what phase 1 deletes. Phase 2 needs phase 1's
-`just`, and its port of the base-interface gate decides when kernel work
-that touches a private call can be committed from SlopOS. Phase 3 changes
-what `just install` means. Phases 1 and 2 each change the cross-built
-toolchain, so one rebuild carries both.
+Phase 1 is done. Phase 2 runs on its `just`, and its port of the
+base-interface gate decides when kernel work that touches a private call can
+be committed from SlopOS. Phase 3 changes what `just install` means. Phase 2
+changes the cross-built toolchain again.
 
 ## What turns on at v1
 

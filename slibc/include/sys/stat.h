@@ -98,6 +98,7 @@ mode_t umask(mode_t mask);
 int mkdir(const char *path, mode_t mode);
 int mkdirat(int dirfd, const char *path, mode_t mode);
 int mkfifo(const char *path, mode_t mode);
+int mkfifoat(int dirfd, const char *pathname, mode_t mode);
 int mknod(const char *path, mode_t mode, dev_t dev);
 int mknodat(int dirfd, const char *path, mode_t mode, dev_t dev);
 int utimensat(int dirfd, const char *path, const struct timespec *times, int flags);

@@ -1,7 +1,7 @@
 use slopos_userland as _;
 
 use slopos_slibc::test_harness::note;
-use slopos_userland::selfhost::{HostHead, check_out, selfhost, take_host_head, workspace};
+use slopos_userland::selfhost::{HostHead, check_out, just, take_host_head, workspace};
 use std::fs;
 use std::sync::{LazyLock, OnceLock};
 use std::time::Instant;
@@ -57,19 +57,16 @@ fn guest_builds(variant: &str, base: &str, clean: bool) -> bool {
         let _ = FREE_WHEN_CLEAN.set(root_free_bytes());
     }
     let started = Instant::now();
-    let status = selfhost(root, &["build", variant]).status();
+    let status = just(root, &["build", variant]).status();
     let status = match status {
         Ok(status) => status,
         Err(e) => {
-            note(&format!("spawning selfhost.sh: {e}"));
+            note(&format!("spawning just: {e}"));
             return false;
         }
     };
     if !status.success() {
-        note(&format!(
-            "selfhost.sh build {variant} exited {:?}",
-            status.code()
-        ));
+        note(&format!("just build {variant} exited {:?}", status.code()));
         return false;
     }
     match (fs::metadata(&elf), fs::metadata(&base)) {

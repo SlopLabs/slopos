@@ -22,45 +22,46 @@ pub fn workspace() -> Result<&'static str, &'static str> {
     Ok(SOURCE)
 }
 
-/// `scripts/selfhost.sh <args>` in the tree at `root`, run as the guest's
-/// developer runs it: as the session, executed directly, so its `#!/bin/sh`
-/// picks the shell.
-pub fn selfhost(root: &str, args: &[&str]) -> Command {
-    let mut cmd = Command::new(format!("{root}/scripts/selfhost.sh"));
+/// `just <args>` in the tree at `root`, the `just` on the default search path,
+/// run as the guest's developer runs it: as the session, whose clone it is.
+/// cargo keeps its caches in the clone, where the session can write.
+pub fn just(root: &str, args: &[&str]) -> Command {
+    let mut cmd = Command::new("just");
     cmd.uid(SESSION_UID)
         .gid(SESSION_GID)
         .args(args)
         .current_dir(root)
+        .env("CARGO_HOME", format!("{root}/builddir/cargo-home"))
         .env("KERNEL_CARGO_TIMINGS", "1")
         .stdin(Stdio::null());
     cmd
 }
 
-/// [`selfhost`] for a command that installs: what the script asks privd is
-/// asked through a connection this process makes, so a root test's install is
-/// the test's own and waits for nobody at the machine. The connection is the
-/// caller's to keep until the script exits.
-pub fn selfhost_installing(
+/// [`just`] for a recipe that installs: what `bootctl` asks privd is asked
+/// through a connection this process makes, so a root test's install is the
+/// test's own and waits for nobody at the machine. The connection is the
+/// caller's to keep until the recipe exits.
+fn just_installing(
     root: &str,
     args: &[&str],
 ) -> Result<(Command, crate::privd::Connection), String> {
     let privd = crate::privd::Connection::open_within(crate::privd::SWITCH_WAIT)?;
-    let mut cmd = selfhost(root, args);
+    let mut cmd = just(root, args);
     privd.hand_to(&mut cmd);
     Ok((cmd, privd))
 }
 
-/// `selfhost.sh install <variant>`, then `install-kernel <variant>`, under
-/// the build tag `tag`, each through a privd connection of its own: a base
-/// that runs at once drains the privd the first one asked.
-pub fn selfhost_install(root: &str, variant: &str, tag: &str) -> Result<(), String> {
-    for command in ["install", "install-kernel"] {
-        let (mut cmd, privd) = selfhost_installing(root, &[command, variant])?;
+/// `just install <variant>`, then `just install-kernel <variant>`, under the
+/// build tag `tag`, each through a privd connection of its own: a base that
+/// runs at once drains the privd the first one asked.
+pub fn just_install(root: &str, variant: &str, tag: &str) -> Result<(), String> {
+    for recipe in ["install", "install-kernel"] {
+        let (mut cmd, privd) = just_installing(root, &[recipe, variant])?;
         let status = cmd.env("SLOPOS_BUILD_TAG", tag).status();
         drop(privd);
         match status {
             Ok(status) if status.success() => {}
-            status => return Err(format!("selfhost.sh {command} {variant}: {status:?}")),
+            status => return Err(format!("just {recipe} {variant}: {status:?}")),
         }
     }
     Ok(())

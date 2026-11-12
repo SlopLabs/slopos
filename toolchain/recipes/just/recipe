@@ -1,0 +1,16 @@
+# just: the command runner the tree's justfile is written for, so a recipe means
+# the same on the host and on SlopOS. The tarball is crates.io's `.crate` of
+# the release.
+#
+#   lock   the crate's own lock with the ports resolved: libc is the fork, and
+#          nix, rustix, getrandom and errno the `toolchain/crates/` ports, each
+#          locked without a source. Every other package keeps the version and
+#          checksum upstream locked.
+version=1.59.0
+url=https://static.crates.io/crates/just/just-1.59.0.crate
+sha256=7e46c1911c9c129f5b4f05edb3cd9aa75bba81e0198bbdbcf6181f7bcc21d74e
+license=CC0-1.0
+license_file=LICENSE
+template=cargo
+program=bin/just
+lock=Cargo.lock

@@ -5,7 +5,7 @@ description: >
   the apps and the clone land on it, the git road between host and guest, and
   building the whole tree in the guest. Use when a task mentions
   `scripts/build_fs_image.sh`, `fs_tree.py`, `gen_verity.py`,
-  `stage_workspace.sh`, `stage_ladder_fixtures.sh`, `selfhost.sh`,
+  `stage_workspace.sh`, `stage_ladder_fixtures.sh`, `just install`,
   `scripts/lib/base.sh`, `qemu_run.sh`'s git or ssh peer, host or seed trees,
   the self-hosting root, `toolchain_test`, `selfhost_test`, `test-toolchain`,
   `test-selfhost`, `test-install-guest` or `bench-selfhost`.
@@ -15,7 +15,7 @@ description: >
 
 - `docs/self-hosting/development-machine`: the root, the git road, the checks
 - `docs/self-hosting/toolchain`: what `just toolchain` builds and installs
-- `docs/self-hosting/updating`: slots, bases, what `selfhost.sh install` drives
+- `docs/self-hosting/updating`: slots, bases, what `just install` drives
 - `docs/architecture/filesystem`: checksummed images and the ownership map
 
 ## Rules a change must keep
@@ -38,10 +38,9 @@ description: >
 - Nothing listens on a host port for the guest; peers run per connection
   through `guestfwd`.
 - `build_kernel.sh` stays POSIX sh on `/bin/sh` and the coreutils; host-only
-  steps (`ensure_toolchain.sh`, `xtask elf`, `xtask programs`) stay in the
-  justfile.
+  steps carry the guard (`_host`).
 - What a base carries is `scripts/lib/base.sh` alone.
-- Tests run git and `selfhost.sh` in the clone as the session
+- Tests run git and `just` in the clone as the session
   (`slopos_userland::selfhost`): git refuses a clone another uid owns.
 - `just test` never needs `just toolchain`: a toolchain rung passes with a
   note on a root that carries none.

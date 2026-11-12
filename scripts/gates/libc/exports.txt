@@ -475,6 +475,7 @@ mkdir func
 mkdirat func
 mkdtemp func
 mkfifo func
+mkfifoat func
 mknod func
 mknodat func
 mkostemp func

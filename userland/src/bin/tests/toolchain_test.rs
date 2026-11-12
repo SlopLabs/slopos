@@ -1556,6 +1556,64 @@ fn std_is_the_clones_fork() -> bool {
     }
 }
 
+const JUSTFILE: &str = r#"set shell := ["bash", "-euo", "pipefail", "-c"]
+
+said := `echo backtick`
+
+default: (greet "ladder")
+    #!/usr/bin/env bash
+    echo "shebang $(basename "$BASH")"
+
+greet who:
+    @echo "{{who}} on {{os()}} ({{os_family()}}), {{said}}"
+
+fail:
+    exit 3
+"#;
+
+/// Rung 15: just runs a justfile, a backtick, a dependency with an argument
+/// and a shebang recipe among them, and answers with a failing recipe's
+/// status; in the clone, the tree's own justfile refuses a recipe that runs
+/// on the host and says so.
+fn just_runs_a_justfile() -> bool {
+    let prefix = match toolchain() {
+        Ok(p) => p,
+        Err(verdict) => return verdict,
+    };
+    let Some(dir) = scratch("just", &[("justfile", JUSTFILE)]) else {
+        return false;
+    };
+    let just = format!("{prefix}/bin/just");
+    let Some(ran) = run(&dir, &just, &[], &[]) else {
+        return false;
+    };
+    note(&format!("just in {} ms", ran.took.as_millis()));
+    if !ran.ok("just") {
+        return false;
+    }
+    if ran.stdout != "ladder on slopos (unix), backtick\nshebang bash\n" {
+        note(&format!("just printed {:?}", ran.stdout));
+        return false;
+    }
+    let Some(failed) = run(&dir, &just, &["fail"], &[]) else {
+        return false;
+    };
+    if failed.code != Some(3) {
+        note(&format!("just fail exited {:?}, not 3", failed.code));
+        return false;
+    }
+    if !Path::new(SOURCE).join(".git").is_dir() {
+        note("the root carries no workspace");
+        return true;
+    }
+    let Some(refused) = run(SOURCE, &just, &["boot"], &[]) else {
+        return false;
+    };
+    let said = refused.stderr.trim_end();
+    note(&format!("just boot: {said}"));
+    refused.code == Some(1) && said.starts_with("just boot: runs on a Linux or macOS host")
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
         (
@@ -1586,5 +1644,6 @@ fn main() {
         ("ninja_runs_a_graph", ninja_runs_a_graph),
         ("cmake_builds_a_project", cmake_builds_a_project),
         ("std_is_the_clones_fork", std_is_the_clones_fork),
+        ("just_runs_a_justfile", just_runs_a_justfile),
     ]);
 }

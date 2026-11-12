@@ -1,4 +1,4 @@
-# What a base image carries, sourced by the justfile, scripts/selfhost.sh and
+# What a base image carries, sourced by the justfile and
 # scripts/build_userland.sh so the host and the guest build one system. POSIX
 # sh.
 

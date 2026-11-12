@@ -8,7 +8,7 @@
 #     tarball, a known `template`, at least one `soname` or `program`, no
 #     unread key;
 #   - at most one `depends` line, naming other recipes, acyclic;
-#   - no file but `recipe`, its declared `config` and its declared `patch`es;
+#   - no file but `recipe`, its declared `config`, `lock` and `patch`es;
 #   - a patch has the shape of one that only teaches the project the target,
 #     which review holds it to: it is named `NNNN-slopos-<what>.patch`; it
 #     creates or extends files and never deletes, renames or changes the mode
@@ -41,6 +41,13 @@
 #   - an `openssl` `config`, which `Configure` evaluates as Perl, is data: one
 #     `%targets` entry for `target`, `CONFIG_FIELDS` only, non-interpolating
 #     strings, and only benign flags;
+#   - a `cargo` recipe is crates.io's `.crate` of the crate at `version`, with
+#     `bin/<binary>` programs, no soname, arg, config or target, and a `lock`
+#     beside it (no other template takes one). The lock takes every package
+#     with a source from crates.io with a checksum; one with no source is the
+#     crate itself at `version`, the libc fork at `toolchain/PIN`'s
+#     `libc_version`, or a port `toolchain/crates/PIN` pins as `crate=`, since
+#     that is all the driver patches in;
 #   - a NOTICE.md entry naming `toolchain/recipes/<name>/`;
 #   - a built recipe carries the stamp `build_recipes.sh --print-stamp` gives
 #     now (skipped when nothing is built, as in CI);
@@ -62,8 +69,10 @@ SELF="check_recipes"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-TEMPLATES="cmake meson openssl autotools"
-RECIPE_KEYS="version url sha256 license license_file template depends soname program arg patch config target"
+TEMPLATES="cmake meson openssl autotools cargo"
+RECIPE_KEYS="version url sha256 license license_file template depends soname program arg patch config target lock"
+CRATES_IO="registry+https://github.com/rust-lang/crates.io-index"
+CARGO_PROGRAM='^bin/[A-Za-z0-9_][A-Za-z0-9_.+-]*$'
 
 CMAKE_ARG_NAMES='^CMAKE_(BUILD_TYPE|POSITION_INDEPENDENT_CODE|(REQUIRE|DISABLE)_FIND_PACKAGE_[A-Za-z0-9_]+|USE_SYSTEM_[A-Z0-9_]+|INSTALL_(BINDIR|SBINDIR|LIBEXECDIR|SYSCONFDIR|DATAROOTDIR|DATADIR|INCLUDEDIR|DOCDIR|MANDIR)|DOC_DIR)$'
 # CMake's own project names its install directories without `INSTALL_`.
@@ -286,6 +295,49 @@ check_autotools_arg() {
     fail "$name: arg '$arg' is not an --enable/--disable/--with/--without switch or a <prefix>_cv_<name> answer"
 }
 
+check_cargo_arg() {
+    fail "$1: arg '$2': a cargo recipe takes no arg, building the crate as upstream locks it"
+}
+
+# `<name> <version> <source> <checksum>` per locked package, `-` for none.
+lock_packages() {
+    awk '
+        function f(x) { return x == "" ? "-" : x }
+        function flush() { if (p) print f(n), f(v), f(s), f(c); p = 0 }
+        /^\[\[package\]\]$/ { flush(); p = 1; n = v = s = c = ""; next }
+        /^\[/               { flush(); next }
+        p && /^name = /     { n = $3; gsub(/"/, "", n) }
+        p && /^version = /  { v = $3; gsub(/"/, "", v) }
+        p && /^source = /   { s = $3; gsub(/"/, "", s) }
+        p && /^checksum = / { c = $3; gsub(/"/, "", c) }
+        END                 { flush() }
+    ' "$1"
+}
+
+check_lock() {
+    local root="$1" name="$2" lock="$3" crate="$4" version="$5"
+    local pname pversion psource psum libc self=0
+    libc="$(sed -n 's/^libc_version=//p' "$root/toolchain/PIN" 2>/dev/null)"
+    while read -r pname pversion psource psum; do
+        if [ "$psource" != - ]; then
+            [ "$psource" = "$CRATES_IO" ] ||
+                fail "$name: $lock takes $pname $pversion from $psource, not crates.io"
+            [[ "$psum" =~ ^[0-9a-f]{64}$ ]] || fail "$name: $lock takes $pname $pversion with no checksum"
+        elif [ "$pname" = "$crate" ]; then
+            [ "$pversion" = "$version" ] || fail "$name: $lock locks $crate $pversion, not $version"
+            self=1
+        elif [ "$pname" = libc ]; then
+            [ "$pversion" = "$libc" ] ||
+                fail "$name: $lock takes libc $pversion with no source, and the fork is libc ${libc:-unpinned}"
+        else
+            sed -n 's/^crate=//p' "$root/toolchain/crates/PIN" 2>/dev/null |
+                awk -v n="$pname" -v v="$pversion" '$1 == n && $2 == v { ok = 1 } END { exit !ok }' ||
+                fail "$name: $lock takes $pname $pversion with no source, and toolchain/crates/PIN ports no such crate"
+        fi
+    done < <(lock_packages "$root/toolchain/recipes/$name/$lock")
+    [ "$self" -eq 1 ] || fail "$name: $lock does not lock $crate itself"
+}
+
 # Holds a unified diff to the one shape a target patch has. Arguments: the
 # patch, and the toolchain/cmake/Platform directory whose files a patch
 # creating `Modules/Platform/` files must reproduce.
@@ -402,7 +454,7 @@ check_recipe() {
             fail "$name: '$line' is not one of the keys the driver reads ($RECIPE_KEYS)"
     done <"$file"
 
-    local version url sha256 license template config target dep soname program arg
+    local version url sha256 license template config target dep soname program arg lock crate
     # `|| exit`: a self-test runs this under `if`, where `set -e` is off.
     version="$(single "$file" version "$name")" || exit 1
     url="$(single "$file" url "$name")" || exit 1
@@ -458,6 +510,21 @@ check_recipe() {
     else
         [ -z "$config$target" ] || fail "$name: config and target are for the openssl template, not $template"
     fi
+    lock="$(values "$file" lock)"
+    if [ "$template" = cargo ]; then
+        lock="$(single "$file" lock "$name")" || exit 1
+        [[ "$lock" =~ $FILE_NAME ]] || fail "$name: lock '$lock' is not a file name beside the recipe"
+        crate="${url#https://static.crates.io/crates/}"
+        crate="${crate%%/*}"
+        [[ "$crate" =~ ^[A-Za-z0-9_-]+$ && "$url" == "https://static.crates.io/crates/$crate/$crate-$version.crate" ]] ||
+            fail "$name: url is not crates.io's .crate of a crate at $version: $url"
+        [ -z "$(values "$file" soname)" ] || fail "$name: a cargo recipe installs programs, not a soname"
+        while IFS= read -r program; do
+            [[ "$program" =~ $CARGO_PROGRAM ]] || fail "$name: program '$program' is not bin/<binary>"
+        done < <(values "$file" program)
+    else
+        [ -z "$lock" ] || fail "$name: lock is for the cargo template, not $template"
+    fi
     while IFS= read -r arg; do
         "check_${template}_arg" "$name" "$arg"
     done < <(values "$file" arg)
@@ -467,6 +534,7 @@ check_recipe() {
         base="${entry#"$dir"/}"
         [ "$base" = recipe ] && continue
         [ -n "$config" ] && [ "$base" = "$config" ] && continue
+        [ -n "$lock" ] && [ "$base" = "$lock" ] && continue
         values "$file" patch | grep -qxF -- "$base" && continue
         fail "$name: $base is neither the recipe nor a file it declares"
     done < <(find "$dir" -mindepth 1 -print0)
@@ -475,6 +543,10 @@ check_recipe() {
         command -v perl >/dev/null 2>&1 || fail "$name: perl is needed to read $config"
         perl -e "$CONFIG_GRAMMAR" "$dir/$config" "$target" "$CONFIG_FIELDS" ||
             fail "$name: $config is not a data-only target definition"
+    fi
+    if [ -n "$lock" ]; then
+        [ -f "$dir/$lock" ] || fail "$name: declared lock $lock is missing"
+        check_lock "$root" "$name" "$lock" "$crate" "$version"
     fi
 
     grep -qF "\`toolchain/recipes/$name/\`" "$root/NOTICE.md" ||
@@ -697,10 +769,11 @@ self_test() {
     trap 'rm -rf "$tmp"' RETURN
 
     # alpha, beta, delta and gamma take the tree's real args and target
-    # definition; alpha carries a patch shaped as a target patch is.
+    # definition; alpha carries a patch shaped as a target patch is; zeta
+    # is a cargo recipe whose lock takes the libc fork and one port.
     local r="$tmp/toolchain/recipes" real
-    mkdir -p "$r/alpha" "$r/beta" "$r/delta" "$r/gamma" "$tmp/out" "$tmp/scripts" \
-        "$tmp/toolchain/cmake/Platform"
+    mkdir -p "$r/alpha" "$r/beta" "$r/delta" "$r/gamma" "$r/zeta" "$tmp/out" "$tmp/scripts" \
+        "$tmp/toolchain/cmake/Platform" "$tmp/toolchain/crates"
     printf 'set(SLOPOS 1)\n' >"$tmp/toolchain/cmake/Platform/SlopOS.cmake"
     cat >"$r/alpha/recipe" <<'EOF'
 # a comment
@@ -761,6 +834,45 @@ template=meson
 depends=alpha
 program=bin/delta
 EOF
+    cat >"$r/zeta/recipe" <<'EOF'
+version=0.1.0
+url=https://static.crates.io/crates/zeta/zeta-0.1.0.crate
+sha256=2222222222222222222222222222222222222222222222222222222222222222
+license=MIT
+license_file=LICENSE
+template=cargo
+program=bin/zeta
+lock=Cargo.lock
+EOF
+    cat >"$r/zeta/Cargo.lock" <<'EOF'
+version = 4
+
+[[package]]
+name = "zeta"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "memchr",
+ "nix",
+]
+
+[[package]]
+name = "libc"
+version = "0.2.189"
+
+[[package]]
+name = "memchr"
+version = "2.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3333333333333333333333333333333333333333333333333333333333333333"
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+EOF
+    printf 'libc_version=0.2.189\n' >"$tmp/toolchain/PIN"
+    printf 'crate=nix 0.31.3 4444444444444444444444444444444444444444444444444444444444444444\n' \
+        >"$tmp/toolchain/crates/PIN"
     for real in "$REPO_ROOT"/toolchain/recipes/*/recipe; do
         case "$(values "$real" template)" in
             cmake) grep '^arg=' "$real" >>"$r/alpha/recipe" ;;
@@ -774,7 +886,7 @@ EOF
     done
     [ -f "$r/beta/target.conf" ] || fail "--self-test: the tree has no openssl recipe to take a target definition from"
     notice() {
-        printf '`toolchain/recipes/alpha/`, `toolchain/recipes/beta/`, `toolchain/recipes/delta/`, `toolchain/recipes/gamma/`\n' >"$tmp/NOTICE.md"
+        printf '`toolchain/recipes/alpha/`, `toolchain/recipes/beta/`, `toolchain/recipes/delta/`, `toolchain/recipes/gamma/`, `toolchain/recipes/zeta/`\n' >"$tmp/NOTICE.md"
     }
     notice
     printf '#!/bin/sh\nshift\nfor n; do echo "$n good"; done\n' >"$tmp/scripts/build_recipes.sh"
@@ -818,6 +930,12 @@ EOF
     }
     reject_gamma() {
         reject_in "$r/gamma/recipe" "$@"
+    }
+    reject_zeta() {
+        reject_in "$r/zeta/recipe" "$@"
+    }
+    reject_lock() {
+        reject_in "$r/zeta/Cargo.lock" "$@"
     }
     reject_patch() {
         reject_in "$r/alpha/0001-slopos-port.patch" "$@"
@@ -914,6 +1032,26 @@ EOF
     reject_delta 's|^program=.*|program=/bin/delta|' "an absolute program path" "not a path under bin/"
     reject_delta 's|^program=.*|program=share/delta|' "a program outside bin/ and libexec/" "not a path under bin/"
     reject_delta '$ a target=x' "a target on a meson recipe" "are for the openssl template"
+
+    reject_zeta '/^lock=/d' "a cargo recipe with no lock" "no lock"
+    reject_beta '$ a lock=target.conf' "a lock on an openssl recipe" "lock is for the cargo template"
+    reject_zeta '$ a arg=--features=x' "an arg on a cargo recipe" "a cargo recipe takes no arg"
+    reject_zeta 's|^program=.*|program=libexec/zeta|' "a cargo program outside bin/" "is not bin/<binary>"
+    reject_zeta '$ a soname=libzeta.so' "a soname on a cargo recipe" "not a soname"
+    reject_zeta '$ a config=x.conf' "a config on a cargo recipe" "are for the openssl template"
+    reject_zeta 's|^url=.*|url=https://example.org/zeta-0.1.0.tar.gz|' "a cargo url not crates.io's" \
+        "not crates.io's .crate"
+    reject_zeta 's/^lock=.*/lock=Other.lock/' "a lock file the recipe does not declare" "Cargo.lock is neither"
+    reject_lock 's/"0.31.3"/"0.31.4"/' "a sourceless lock package with no port" "ports no such crate"
+    reject_lock 's/"0.2.189"/"0.2.188"/' "a sourceless libc other than the fork" "the fork is libc 0.2.189"
+    reject_lock 's/^version = "0.1.0"/version = "0.1.1"/' "a lock of another version of the crate" \
+        "locks zeta 0.1.1"
+    reject_lock '/^checksum = /d' "a registry package with no checksum" "with no checksum"
+    reject_lock 's|^source = .*|source = "git+https://example.org/memchr#abc"|' "a package from git" \
+        "not crates.io"
+    mv "$r/zeta/Cargo.lock" "$tmp/Cargo.lock"
+    expect_reject "a declared lock that is missing" "declared lock Cargo.lock is missing"
+    mv "$tmp/Cargo.lock" "$r/zeta/Cargo.lock"
 
     reject_gamma '$ a arg=--prefix=/etc' "a second prefix" "is not an --enable"
     reject_gamma '$ a arg=CFLAGS=-include/etc/shim.h' "a CFLAGS assignment" "is not an --enable"

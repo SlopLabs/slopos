@@ -988,6 +988,19 @@ pub unsafe extern "C" fn mkfifo(path: *const c_char, mode: mode_t) -> c_int {
 ///
 /// `path` must point to a NUL-terminated string.
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn mkfifoat(dirfd: c_int, path: *const c_char, mode: mode_t) -> c_int {
+    mknodat(
+        dirfd,
+        path,
+        slopos_abi::fs::S_IFIFO | (mode & !slopos_abi::fs::S_IFMT),
+        0,
+    )
+}
+
+/// # Safety
+///
+/// `path` must point to a NUL-terminated string.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mknod(path: *const c_char, mode: mode_t, dev: dev_t) -> c_int {
     mknodat(AT_FDCWD, path, mode, dev)
 }

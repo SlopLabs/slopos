@@ -20,7 +20,8 @@ set -euo pipefail
 #   version, url, sha256, license   the tarball and what it is
 #   license_file                    each licence text in the tarball, installed
 #                                   as share/licenses/<name>/<its path there>
-#   template                        `cmake`, `meson`, `openssl` or `autotools`
+#   template                        `cmake`, `meson`, `openssl`, `autotools`
+#                                   or `cargo`
 #   depends                         recipes built first, space-separated
 #   soname                          each shared library it must install
 #   program                         each program it must install, relative
@@ -31,6 +32,8 @@ set -euo pipefail
 #   config, target                  `openssl`: the out-of-tree target
 #                                   definition beside the recipe, and the
 #                                   target it defines
+#   lock                            `cargo`: the lockfile beside the recipe,
+#                                   which replaces the crate's own
 #
 # Templates:
 #
@@ -48,6 +51,13 @@ set -euo pipefail
 #              name taken as the `ac_cv_host` cache answer because upstream's
 #              `config.sub` lists the systems it knows, and `--prefix` the
 #              guest path, as for meson; `make`, `make install`.
+#   cargo      the crate's `.crate`, built by `cargo +slopos` for the target
+#              JSON with std from the owned sysroot's forks and linked by the
+#              SlopOS compiler wrapper, `--locked` to the recipe's lock; each
+#              `program` is `bin/<one of its binaries>`. A package that lock
+#              takes with no source is the libc fork or the
+#              `toolchain/crates/` port of that name and version, unpacked
+#              and patched beside the build and patched in for crates.io.
 #
 # Everything builds shared into `<recipes dir>/prefix` with `-z defs`, so a
 # libc function slibc lacks fails here rather than at `dlopen` on SlopOS. A
@@ -55,8 +65,8 @@ set -euo pipefail
 # `libexec/<name>/`. A recipe that declares no library installs nothing under
 # `include/` or `lib/`. Each recipe's stamp covers its directory, this file,
 # `make_slopos_cross.sh --print-stamp`, the host tools its template runs, the
-# prefixes and its dependencies' stamps; `--print-stamp` prints `<name>
-# <stamp>` per recipe.
+# prefixes and its dependencies' stamps, and a `cargo` one the std stamp and
+# the crate ports; `--print-stamp` prints `<name> <stamp>` per recipe.
 #
 # `--install-programs` copies what each built recipe that declares a program
 # installed outside `include/` and `lib/` into another prefix; its libraries
@@ -148,7 +158,8 @@ fetch() {
         *.tar.gz) ext=tar.gz ;;
         *.tar.xz) ext=tar.xz ;;
         *.tar.bz2) ext=tar.bz2 ;;
-        *) die "$name: $url is not a .tar.gz, .tar.xz or .tar.bz2" ;;
+        *.crate) ext=crate ;;
+        *) die "$name: $url is not a .tar.gz, .tar.xz, .tar.bz2 or .crate" ;;
     esac
     file="$CACHE/$name-$version.$ext"
     var="$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')_URL"
@@ -230,6 +241,7 @@ template_tools() {
         meson) echo meson ninja pkg-config ;;
         openssl) echo perl make ;;
         autotools) echo make pkg-config ;;
+        cargo) echo cargo git ;;
     esac
 }
 tool_version() {
@@ -238,6 +250,7 @@ tool_version() {
         # head's early exit would kill it with SIGPIPE under pipefail.
         cmake | make) "$1" --version | sed -n 1p ;;
         perl) perl -e 'print "perl $]\n"' ;;
+        cargo) cargo +slopos --version ;;
         git) git --version ;;
         *) printf '%s %s\n' "$1" "$("$1" --version)" ;;
     esac
@@ -264,6 +277,13 @@ CROSS_STAMP="$(BUILD_DIR="$BUILD_DIR" "$SCRIPT_DIR/make_slopos_cross.sh" --print
 DRIVER_STAMP="$(sha256sum "$SCRIPT_DIR/$SELF.sh" | cut -d' ' -f1)"
 CMAKE_PLATFORM="$REPO_ROOT/toolchain/cmake"
 CMAKE_PLATFORM_STAMP="$(cd "$CMAKE_PLATFORM" && find . -type f -print | LC_ALL=C sort | xargs sha256sum)"
+. "$SCRIPT_DIR/lib/toolchain_pin.sh"
+# What a `cargo` recipe compiles beside its crate: std and the libc fork, and
+# the ports its lock may take.
+CARGO_STAMP="$(
+    tp_std_stamp "$REPO_ROOT"
+    (cd "$REPO_ROOT" && find "$TP_CRATES_OVERLAY_REL" -type f -print | tp_hash_lines "$REPO_ROOT")
+)"
 
 declare -A WANT=()
 stamp_want() {
@@ -274,6 +294,7 @@ stamp_want() {
             recipe_tools "$name"
             (cd "$RECIPES/$name" && find . -type f -print | LC_ALL=C sort | xargs sha256sum)
             [ "$(recipe_value "$name" template)" != cmake ] || printf '%s\n' "$CMAKE_PLATFORM_STAMP"
+            [ "$(recipe_value "$name" template)" != cargo ] || printf '%s\n' "$CARGO_STAMP"
             for dep in $(recipe_value "$name" depends); do
                 printf 'depends %s %s\n' "$dep" "$(stamp_want "$dep")"
             done
@@ -360,10 +381,11 @@ unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS LDLIBS ASFLAGS ARFLAGS RCFLAGS \
     CC CXX CPP AS AR RANLIB LD NM OBJCOPY OBJDUMP STRIP RC MT CROSS_COMPILE PERL HASHBANGPERL \
     CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH OBJC_INCLUDE_PATH LIBRARY_PATH COMPILER_PATH \
     GCC_EXEC_PREFIX CCC_OVERRIDE_OPTIONS SDKROOT MAKEFLAGS MFLAGS MAKEFILES GNUMAKEFLAGS \
-    NINJA_STATUS DESTDIR
+    NINJA_STATUS DESTDIR RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTDOCFLAGS RUSTC RUSTC_WRAPPER \
+    RUSTC_WORKSPACE_WRAPPER CARGO_TARGET_DIR CARGO_BUILD_TARGET
 for var in $(compgen -e); do
     case "$var" in
-        CMAKE_* | *_ROOT) unset "$var" ;;
+        CMAKE_* | *_ROOT | CARGO_BUILD_* | CARGO_TARGET_* | CARGO_PROFILE_*) unset "$var" ;;
     esac
 done
 
@@ -450,6 +472,84 @@ template_openssl() {
         { tail -n 20 "$work/install.log" >&2; die "$name: install failed; see $work/install.log"; }
 }
 
+# What a lock takes with no source, as `<name> <version>` lines: the crate
+# itself and the packages patched in for crates.io.
+sourceless() {
+    awk '
+        function flush() { if (n != "" && !s) print n, v }
+        /^\[\[package\]\]$/ { flush(); n = ""; v = ""; s = 0; next }
+        /^name = /          { n = $3; gsub(/"/, "", n) }
+        /^version = /       { v = $3; gsub(/"/, "", v) }
+        /^source = /        { s = 1 }
+        END                 { flush() }
+    ' "$1"
+}
+
+# The libc fork, or the port `toolchain/crates/PIN` pins at that name and
+# version, unpacked into <dest> and patched as its PIN pins the patch.
+stage_port() {
+    local name="$1" cname="$2" version="$3" dest="$4" pin sha patch rel patches=()
+    if [ "$cname" = libc ]; then
+        pin="$TP_PIN_REL"
+        [ "$version" = "$(tp_pin_value "$REPO_ROOT/$pin" libc_version)" ] ||
+            die "$name: its lock takes libc $version with no source, and the fork is libc $(tp_pin_value "$REPO_ROOT/$pin" libc_version)"
+        tp_unpack_libc_crate "$REPO_ROOT" "$dest" || die "$name: could not stage the libc fork"
+        patches=("$REPO_ROOT/$TP_OVERLAY_REL/libc"/*.patch)
+    else
+        pin="$TP_CRATES_PIN_REL"
+        sha="$(tp_pin_crates "$REPO_ROOT/$pin" | awk -v n="$cname" -v v="$version" '$1 == n && $2 == v { print $3 }')"
+        [ -n "$sha" ] || die "$name: its lock takes $cname $version with no source, and $pin ports no such crate"
+        tp_unpack_crate "$cname" "$version" "$sha" "$dest" "$pin" || die "$name: could not stage $cname $version"
+        patches=("$REPO_ROOT/$TP_CRATES_OVERLAY_REL/$cname-$version.patch")
+    fi
+    for patch in "${patches[@]}"; do
+        rel="${patch#"$REPO_ROOT"/}"
+        [ "$(tp_sha256_file "$patch")" = "$(tp_pin_patch_sha "$REPO_ROOT/$pin" "$rel")" ] ||
+            die "$name: $rel does not match its pin in $pin"
+        (cd "$dest" && GIT_CEILING_DIRECTORIES="$(dirname "$dest")" git apply -p1 --whitespace=nowarn "$patch") ||
+            die "$name: $rel does not apply to $cname $version"
+    done
+}
+
+# std is built as `build_userland.sh` builds the apps': from the owned
+# sysroot, `compiler_builtins` one intrinsic per object. A build script's C
+# goes through the `cc` crate, which takes the target's compiler from
+# `CC_<target>`.
+template_cargo() {
+    local name="$1" work="$2" crate cname version program config programs=() bins=()
+    [ "$(cat "$(rustc +slopos --print sysroot)/$TP_LIBRARY_REL/$TP_STD_STAMP_NAME" 2>/dev/null)" = \
+        "$(tp_std_stamp "$REPO_ROOT")" ] ||
+        die "$name: the slopos sysroot carries another std fork than this tree pins — run scripts/ensure_toolchain.sh"
+    crate="$(basename "$(recipe_value "$name" url)" "-$(recipe_value "$name" version).crate")"
+    mapfile -t programs < <(recipe_values "$name" program)
+    for program in "${programs[@]}"; do
+        case "$program" in
+            bin/*/* | bin/) die "$name: a cargo recipe installs bin/<binary>, not $program" ;;
+            bin/*) bins+=(--bin "${program#bin/}") ;;
+            *) die "$name: a cargo recipe installs bin/<binary>, not $program" ;;
+        esac
+    done
+    config="$work/cargo.toml"
+    {
+        printf '[target.%s]\nlinker = "%s"\n\n[patch.crates-io]\n' "$TARGET" "$CC_WRAPPER"
+        while read -r cname version; do
+            [ "$cname" != "$crate" ] || continue
+            stage_port "$name" "$cname" "$version" "$work/crates/$cname-$version"
+            printf '%s = { path = "%s" }\n' "$cname" "$work/crates/$cname-$version"
+        done < <(sourceless "$work/src/Cargo.lock")
+    } >"$config"
+    (cd "$work/src" && env "CC_${TARGET//-/_}=$CC_WRAPPER" "CXX_${TARGET//-/_}=$CXX_WRAPPER" \
+        "AR_${TARGET//-/_}=$LLVM_AR" cargo +slopos build --release --locked -j "$JOBS" \
+        --config "$config" --config profile.release.package.compiler_builtins.codegen-units=10000 \
+        -Zbuild-std=std,panic_unwind -Zunstable-options -Zjson-target-spec \
+        --target "$REPO_ROOT/targets/$TARGET.json" --target-dir "$work/build" "${bins[@]}") \
+        >"$work/build.log" 2>&1 ||
+        { tail -n 40 "$work/build.log" >&2; die "$name: build failed; see $work/build.log"; }
+    for program in "${programs[@]}"; do
+        install -D -m 0755 "$work/build/$TARGET/release/${program#bin/}" "$work/dest$PREFIX/$program"
+    done
+}
+
 # `git apply` under a ceiling, so the checkout around the build tree is never
 # taken for the repository the patch applies to.
 # `--whitespace=nowarn` overrides an `apply.whitespace` a user's git config
@@ -487,6 +587,9 @@ build_recipe() {
     mkdir -p "$work/src"
     tar -xf "$tarball" -C "$work/src" --strip-components=1 --no-same-owner || die "$name: could not unpack $tarball"
     apply_patches "$name" "$work/src"
+    if [ -n "$(recipe_value "$name" lock)" ]; then
+        cp "$RECIPES/$name/$(recipe_value "$name" lock)" "$work/src/Cargo.lock"
+    fi
     source_manifest "$work/src" >"$work/source.manifest"
     "template_$template" "$name" "$work"
     source_manifest "$work/src" | diff "$work/source.manifest" - >"$work/source.diff" || {
