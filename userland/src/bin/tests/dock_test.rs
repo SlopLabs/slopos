@@ -17,6 +17,7 @@ const HOME: &str = "/var/tmp/dock_test";
 const INSTALLER: &str = "org.slopos.installer";
 
 const INSTALLED: &[(&str, &str)] = &[
+    ("org.slopos.breach", "/usr/local/bin/breach"),
     ("org.slopos.editor", "/usr/local/bin/editor"),
     ("org.slopos.files", "/usr/local/bin/file_manager"),
     ("org.slopos.image-viewer", "/usr/local/bin/image_viewer"),
