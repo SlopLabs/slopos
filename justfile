@@ -1348,7 +1348,7 @@ test-remote: _build-userland _base-recipes
         fail "run: exit $rc, stdout '$(cat "$work/out")', stderr '$(cat "$work/err")'; want 3, 'out', 'err'"
     [ "$(remote run --cwd /etc -- pwd)" = /etc ] || fail "run --cwd /etc did not run in /etc"
     remote run --env SLOPOS_E2E=yes -- env >"$work/env"
-    grep -qx 'SLOPOS_E2E=yes' "$work/env" && grep -qx 'PATH=/bin:/sbin:/usr/local/bin' "$work/env" ||
+    grep -qx 'SLOPOS_E2E=yes' "$work/env" && grep -qx 'PATH=/bin:/sbin:/usr/local/bin:/opt/bin' "$work/env" ||
         fail "the child's environment: $(tr '\n' ' ' <"$work/env")"
     [ "$(printf 'piped stdin' | remote run --stdin -- cat)" = 'piped stdin' ] || fail "stdin did not reach the child"
     rc=0; remote run -- /bin/no-such-program 2>"$work/err" || rc=$?
