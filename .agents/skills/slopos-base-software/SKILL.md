@@ -19,9 +19,8 @@ description: >
 ## Rules a change must keep
 
 - Any change to a private syscall, or a structure or constant it takes, takes
-  the next `BASE_INTERFACE` and a ledger row. Raise `BASE_INTERFACE_MIN` only
-  when an older base could no longer run; a retired call keeps its slot and
-  answers `ENOSYS`.
+  the next `BASE_INTERFACE` and a ledger row. Before v1 a kernel serves that
+  number alone (`BASE_INTERFACE_MIN` follows it), so a call may change or go.
 - `libc.so` only grows: no export removed, no `slibc/include` layout changed.
 - A program outside the base is dynamic, needs `libc.so` and holds no
   `syscall` instruction. A crate under `apps/` depends only on what

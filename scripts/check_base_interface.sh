@@ -542,19 +542,15 @@ if [ -n "$GATE_FINDINGS" ]; then
 
   A base built against BASE_INTERFACE trusts every private call to keep the
   shape it had when that number was recorded. To change the surface: bump
-  BASE_INTERFACE in abi/src/base_interface.rs; decide whether
-  BASE_INTERFACE_MIN rises (only when the change reshapes something an
-  older base calls — an addition leaves it, and so does a call retired to
-  ENOSYS in a slot never reused); then run
-  scripts/check_base_interface.sh --record. To see what moved, compare
-  `scripts/check_base_interface.sh --print` before and after the change.
+  BASE_INTERFACE in abi/src/base_interface.rs, then run
+  scripts/check_base_interface.sh --record. Before v1 BASE_INTERFACE_MIN
+  follows the number, so the change weighs no older base. To see what moved,
+  compare `scripts/check_base_interface.sh --print` before and after it.
 MSG
     elif printf '%s\n' "$GATE_FINDINGS" | grep -q '^unrecorded	'; then
         cat >&2 <<'MSG'
 
-  If the bump is deliberate and BASE_INTERFACE_MIN has been decided (it rises
-  only when the change reshapes something an older base calls; a call
-  retired to ENOSYS leaves it), run scripts/check_base_interface.sh --record
+  If the bump is deliberate, run scripts/check_base_interface.sh --record
   and commit the new row.
 MSG
     fi

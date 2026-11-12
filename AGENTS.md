@@ -35,7 +35,7 @@ This file is the rules. The long form is the docs, and a skill routes you to the
 - **A check is Rust.** A new check is a module of `tools/xtask` or a Go log gate with its fixtures as tests. A new `scripts/check_*.sh` is refused.
 - **Gate data.** Never hand-edit `scripts/gates/**` to make a run pass. Re-measure, and say what added the delta.
 - **Licensing.** `GPL-3.0-or-later`. No verbatim code or prose from a GPL-2.0-only or CDDL source. `slibc/`, `slibc-core/` and `abi/` stay `MIT OR Apache-2.0`, and hold no symlink. Fonts and the CA bundle load at runtime, never `include_bytes!`. Third-party code takes a `NOTICE.md` entry.
-- **Interfaces only grow.** The private call surface is numbered by `slopos_abi::BASE_INTERFACE`, and a change takes the next number. `libc.so`'s exports and layouts only grow. Syscall numbers hold Linux's x86-64 allocation.
+- **Interfaces only grow.** The private call surface is numbered by `slopos_abi::BASE_INTERFACE`, and a change takes the next number, the only one a kernel serves before v1. `libc.so`'s exports and layouts only grow. Syscall numbers hold Linux's x86-64 allocation.
 - **Hardware.** LAPIC and IOAPIC are required (QEMU `q35`), and VirtIO needs MSI-X or MSI.
 
 ## Docs
