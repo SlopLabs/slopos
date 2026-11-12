@@ -31,7 +31,7 @@
 ## This Is Not QEMU
 
 <p align="center">
-  <img src="assets/hardware.webp" alt="SlopOS desktop running on a real Lenovo laptop: terminal, text editor, file manager, system monitor, and image viewer" width="640" />
+  <img src="assets/hardware.webp" alt="SlopOS desktop running on a real Lenovo laptop: terminal, text editor, settings, file manager, system monitor, and image viewer" width="640" />
 </p>
 
 That is a real laptop. The desktop — compositor, terminal, text editor, file
