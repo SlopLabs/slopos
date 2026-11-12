@@ -156,6 +156,24 @@ session asks; root and the paired agent, whom nothing asks, add it.
 
 ---
 
+## An administrator's approval replaces an image with another publisher's
+
+**Status**: Open (read from the code, not run)
+**Severity**: Medium (it takes an administrator's click, on a question that does not say so)
+**Component**: `extension-core/src/admit.rs:88-98` (`Authority::Person`),
+`extension-core/src/record.rs:138-150`
+
+A person's install is held to the image's name and grant and to no signer.
+So an image an administrator approves goes in over one of the same name
+that a trusted key installed, once its version is above the floor: the
+record's signer is cleared, and the newcomer keeps the name's uid,
+`/var/lib/<name>` and `/etc/<name>`. The question shows the name and the
+grant, not that another publisher's image is being replaced.
+`plans/installed-software.md`, phase 5, holds an install to the record's
+signer.
+
+---
+
 ## Extension activations cost more than their images
 
 **Status**: Open
@@ -280,6 +298,31 @@ A base that passes `boot_core::base::check` and fails in userland stays
 current for every slot until a reinstall that keeps the root writes the
 medium's, or the medium's rescue shell rolls it back. A power cut between the
 two base writes leaves one image twice, which the default kernel still boots.
+
+---
+
+## A base write can leave the spare slot's kernel serving neither base
+
+**Status**: Open (derived from the code, not reproduced)
+**Severity**: Low (needs a boot of the spare slot that nobody asked for)
+**Component**: `userland/src/apps/bootctl.rs:433` (`guarded_kernels`),
+`boot/src/base.rs:131`
+
+A base write holds three kernels to serving one of the two bases: the
+default slot's, the running one and one armed to boot once. The other slot's
+kernel is not among them. Once a kernel that no longer serves the old
+interface is committed, which before v1 is every change to the private
+call surface, the kernel it replaced serves `previous.img` alone, and the
+next base install replaces that image. A boot of that slot then
+stops at `BOOT: no base this kernel serves`, and `bootctl status` prints no
+slot's served range, so nothing says the slot is dead. Nothing boots it by
+default, but a deleted `LoaderEntryDefault` (below) makes Limine boot its
+first entry, slot `a`, and under `panic=reboot` every reset lands there
+again until someone picks the other entry in the menu.
+
+Fix: hold every slot's kernel to a base, and before a base write that would
+strand the spare slot, copy the default kernel into it as `bootctl clone`
+does.
 
 ---
 
