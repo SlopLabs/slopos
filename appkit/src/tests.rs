@@ -352,6 +352,7 @@ fn table_column(label: &str) -> TableColumn {
     TableColumn {
         label: String::from(label),
         width: TableColumnWidth::Flex(1),
+        align: Default::default(),
         sort_indicator: None,
     }
 }
@@ -2309,6 +2310,10 @@ pub fn cases() -> &'static [(&'static str, fn())] {
         (
             "a_sorted_heading_shows_a_chevron",
             components::test_a_sorted_heading_shows_a_chevron,
+        ),
+        (
+            "a_heading_of_figures_ends_where_they_end",
+            components::test_a_heading_of_figures_ends_where_they_end,
         ),
         ("tight_constraints", test_tight_constraints),
         ("loose_constraints", test_loose_constraints),

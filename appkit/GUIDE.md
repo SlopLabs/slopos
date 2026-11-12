@@ -158,7 +158,7 @@ A view of many things, or a document, takes a widget the app steers:
 
 | Node | Use it for |
 |---|---|
-| `Node::Table` | Rows of cells under column headings, as files or processes. One tab stop; the arrows move the choice, Enter or a second click opens it (`on_activate`), a heading click sorts (`on_header_click`), and a secondary click or the Menu key asks for a context menu (`on_context_menu`, at a `ContextMenuAt`). Give it a `shows` that changes when its rows are of something else. |
+| `Node::Table` | Rows of cells under column headings, as files or processes. One tab stop; the arrows move the choice, Enter or a second click opens it (`on_activate`), a heading click sorts (`on_header_click`), and a secondary click or the Menu key asks for a context menu (`on_context_menu`, at a `ContextMenuAt`). A column of figures is `align: TextAlignment::End`, its cells' text aligned the same, so the heading sits over the digits it heads and they line up to compare. Give it a `shows` that changes when its rows are of something else. |
 | `Node::TreeView` | A tree whose rows, expansion and scroll the app keeps, handing over the rows in view, as a file sidebar does. Every gesture comes back as a `TreeInput`. |
 | `Node::CodeView` | Lines of code with a caret and a selection, every gesture back in document coordinates. Its text is `Mono`. |
 | `Node::TabBar` | Tabs that switch which of its panels shows. |

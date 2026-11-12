@@ -91,13 +91,23 @@ pub struct Process {
     pub key: TaskKey,
     pub name: String,
     pub uid: u32,
+    /// The login tag of its session, 0 for none.
+    pub login: u32,
     pub kernel: bool,
     pub threads: u32,
     /// Of every CPU's last interval.
     pub cpu: u32,
     pub memory: Option<u64>,
+    /// The most it has held at once.
+    pub peak_memory: Option<u64>,
     pub cpu_time_us: u64,
     pub state: TaskStatus,
+    /// The process that started it, by the id it is listed under.
+    pub parent: Option<u32>,
+    /// `cpu` over the last minute.
+    pub busy: History,
+    /// `memory` over the last minute.
+    pub resident: History,
 }
 
 #[derive(Clone, Default)]
@@ -130,7 +140,7 @@ impl Monitor {
         self.record_adapters(&prev, interval_ms);
         self.record_disks(&prev, interval_ms);
         self.record_display(&prev, interval_ms);
-        self.processes = processes(&prev, &self.now, interval_ms);
+        self.processes = processes(&prev, &self.now, interval_ms, &self.processes);
     }
 
     pub fn process_count(&self) -> usize {
@@ -353,13 +363,19 @@ enum Group {
 }
 
 /// A process is named by its first thread, whose task id is what `getpid`
-/// answers and `kill` takes.
-fn processes(prev: &Sample, now: &Sample, interval_ms: Option<u64>) -> Vec<Process> {
+/// answers and `kill` takes. One listed in `was` goes on from its histories.
+fn processes(
+    prev: &Sample,
+    now: &Sample,
+    interval_ms: Option<u64>,
+    was: &[Process],
+) -> Vec<Process> {
     let before: HashMap<TaskKey, u64> = prev
         .tasks
         .iter()
         .map(|task| (TaskKey::of(task), task.total_runtime_us))
         .collect();
+    let was: HashMap<TaskKey, &Process> = was.iter().map(|p| (p.key, p)).collect();
     let cpus = now.cpus.len().max(1) as u128;
     let spent = |task: &UserTaskEntry| -> u64 {
         match before.get(&TaskKey::of(task)) {
@@ -368,10 +384,14 @@ fn processes(prev: &Sample, now: &Sample, interval_ms: Option<u64>) -> Vec<Proce
             None => 0,
         }
     };
-    let resident: HashMap<u32, u64> = now
+    let bytes = |pages: u64| pages.saturating_mul(PAGE_SIZE);
+    let held: HashMap<u32, (u64, u64)> = now
         .memory
         .iter()
-        .map(|m| (m.process_id, m.resident_pages.saturating_mul(PAGE_SIZE)))
+        .map(|m| {
+            let held = (bytes(m.resident_pages), bytes(m.peak_resident_pages));
+            (m.process_id, held)
+        })
         .collect();
 
     let mut order: Vec<Group> = Vec::new();
@@ -389,12 +409,22 @@ fn processes(prev: &Sample, now: &Sample, interval_ms: Option<u64>) -> Vec<Proce
             })
             .push(task);
     }
+    let listed_under: HashMap<u32, u32> = groups
+        .values()
+        .flat_map(|threads| {
+            let under = threads.iter().map(|t| t.task_id).min();
+            threads
+                .iter()
+                .filter_map(move |t| Some((t.task_id, under?)))
+        })
+        .collect();
 
     order
         .into_iter()
         .filter_map(|group| {
             let threads = groups.remove(&group)?;
             let leader = threads.iter().min_by_key(|t| t.task_id)?;
+            let key = TaskKey::of(leader);
             let spent: u64 = threads.iter().map(|t| spent(t)).sum();
             let cpu = match interval_ms {
                 Some(ms) => {
@@ -403,24 +433,43 @@ fn processes(prev: &Sample, now: &Sample, interval_ms: Option<u64>) -> Vec<Proce
                 }
                 None => 0,
             };
-            let memory = match group {
-                Group::Process(id) => resident.get(&id).copied(),
+            let held = match group {
+                Group::Process(id) => held.get(&id).copied(),
                 Group::Kernel(_) => None,
             };
+            let memory = held.map(|(resident, _)| resident);
+            let (mut busy, mut resident) = was
+                .get(&key)
+                .map(|p| (p.busy.clone(), p.resident.clone()))
+                .unwrap_or_default();
+            if interval_ms.is_some() {
+                busy.push(u64::from(cpu));
+                if let Some(memory) = memory {
+                    resident.push(memory);
+                }
+            }
             Some(Process {
-                key: TaskKey::of(leader),
+                key,
                 name: task_name_string(leader),
                 uid: leader.uid,
+                login: leader.login,
                 kernel: matches!(group, Group::Kernel(_)),
                 threads: threads.len() as u32,
                 cpu,
                 memory,
+                peak_memory: held.map(|(_, peak)| peak),
                 cpu_time_us: threads.iter().map(|t| t.total_runtime_us).sum(),
                 state: threads
                     .iter()
                     .map(|t| TaskStatus::from_u8(t.state))
                     .min_by_key(|s| task_state(*s).0)
                     .unwrap_or(TaskStatus::Invalid),
+                parent: listed_under
+                    .get(&leader.parent_task_id)
+                    .copied()
+                    .filter(|&parent| parent != key.pid),
+                busy,
+                resident,
             })
         })
         .collect()

@@ -8,10 +8,10 @@ use slopos_abi::syscall::types::{
 };
 use slopos_abi::task::{INVALID_PROCESS_ID, TaskStatus};
 use slopos_appkit::{App, Node};
-use slopos_userland::apps::sysmon::monitor::{Monitor, Process, WHOLE};
+use slopos_userland::apps::sysmon::monitor::{History, Monitor, Process, WHOLE};
 use slopos_userland::apps::sysmon::sample::{Disk, Iface, Sample};
 use slopos_userland::apps::sysmon::selection::{TaskKey, index_of, key_at_row, row_of};
-use slopos_userland::apps::sysmon::{SysmonApp, SysmonMsg};
+use slopos_userland::apps::sysmon::{Ending, SysmonApp, SysmonMsg};
 
 const MIB: u64 = 1024 * 1024;
 
@@ -20,12 +20,17 @@ fn process(pid: u32, started_ms: u64) -> Process {
         key: TaskKey { pid, started_ms },
         name: format!("app{pid}"),
         uid: 1000,
+        login: 0,
         kernel: false,
         threads: 1,
         cpu: 0,
         memory: None,
+        peak_memory: None,
         cpu_time_us: 0,
         state: TaskStatus::Blocked,
+        parent: None,
+        busy: History::default(),
+        resident: History::default(),
     }
 }
 
@@ -54,7 +59,7 @@ fn test_filtered_out_process_has_no_row() -> bool {
 
 fn test_every_ending_is_said_as_a_sentence() -> bool {
     use slopos_appkit::theme::words::sentence;
-    use slopos_userland::apps::sysmon::{KillOutcome, status_line};
+    use slopos_userland::apps::sysmon::{KillOutcome, ending_line, status_line};
     let name = || String::from("terminal");
     let refusals = [
         KillOutcome::Powerful { name: name() },
@@ -80,11 +85,12 @@ fn test_every_ending_is_said_as_a_sentence() -> bool {
     ];
     let said = |outcome: Option<&KillOutcome>| status_line(outcome).0;
     let mut refused: Vec<String> = refusals.iter().map(|o| said(Some(o))).collect();
+    let foretold = Ending::ALL.map(Some).into_iter().chain([None]);
     let every = refused
         .iter()
         .cloned()
         .chain(rest.iter().map(|o| said(Some(o))))
-        .chain([said(None)]);
+        .chain(foretold.map(|ending| String::from(ending_line(ending))));
     let mut kept = true;
     for line in every {
         if sentence(&line, &[]).is_err() {
@@ -256,6 +262,38 @@ fn test_threads_fold_into_their_process() -> bool {
     folded && resident && kept_apart && m.processes.len() == 2 && m.process_count() == 1
 }
 
+/// What the page graphs of a process is that process's alone: it goes on
+/// from sample to sample and never passes to whatever takes its id.
+fn test_a_process_carries_its_own_minute() -> bool {
+    let of = |m: &Monitor, pid: u32| m.processes.iter().find(|p| p.key.pid == pid).cloned();
+    let mut m = monitor(4);
+    let (Some(app), Some(kernel)) = (of(&m, 10), of(&m, 2)) else {
+        eprintln!("sysmon_test: a process is missing: {:?}", m.processes);
+        return false;
+    };
+    let carried = app.busy.values() == [WHOLE / 4; 3] && app.resident.values() == [100 * 4096; 3];
+    let unmeasured = kernel.busy.values() == [0; 3] && kernel.resident.values().is_empty();
+
+    let mut next = sample(4, 1);
+    for task in &mut next.tasks {
+        task.creation_time_ms = next.at_ms - 500;
+    }
+    let mut child = task(20, 3, 0);
+    child.parent_task_id = 11;
+    next.tasks.push(child);
+    m.record(next);
+    let afresh = of(&m, 10).is_some_and(|p| p.busy.values().len() == 1);
+    // Thread 11 started it, which is listed under its process's first thread.
+    let started_by = of(&m, 20).and_then(|p| p.parent) == Some(10);
+    if !(carried && unmeasured && afresh && started_by) {
+        eprintln!(
+            "sysmon_test: {app:?}, kernel {kernel:?}, then {:?}",
+            m.processes
+        );
+    }
+    carried && unmeasured && afresh && started_by
+}
+
 fn audited(app: &mut SysmonApp, page: &str, width: i32) -> Vec<String> {
     app.on_resize(width as u32, 720);
     let node: Node<SysmonMsg> = app.view();
@@ -281,6 +319,17 @@ fn test_every_page_reads_whole() -> bool {
     app.update(SysmonMsg::Tab(1));
     for width in widths {
         found.extend(audited(&mut app, "processes", width));
+    }
+    // The process's row and the kernel task's, which has no memory to graph.
+    for row in 0..2 {
+        app.update(SysmonMsg::Select(row));
+        for ending in Ending::ALL.map(Some).into_iter().chain([None]) {
+            app.ending = ending;
+            let page = format!("process {row}, {ending:?}");
+            for width in widths {
+                found.extend(audited(&mut app, &page, width));
+            }
+        }
     }
     for finding in &found {
         eprintln!("sysmon_test: {finding}");
@@ -312,6 +361,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "threads_fold_into_their_process",
         test_threads_fold_into_their_process,
+    ),
+    (
+        "a_process_carries_its_own_minute",
+        test_a_process_carries_its_own_minute,
     ),
     ("every_page_reads_whole", test_every_page_reads_whole),
 ];

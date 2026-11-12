@@ -7,7 +7,7 @@ use slopos_theme_core::{Icon, TextRole, space};
 
 use super::RowState;
 use super::scrollbar::Bar;
-use crate::constraints::{BoxConstraints, Rect, Size};
+use crate::constraints::{BoxConstraints, Rect, Size, TextAlignment};
 use crate::event::{EventResponse, Key, MessageSink, NamedKey, PointerButton, WidgetEvent};
 use crate::node::{ContextMenuAt, SortIndicator, TableColumn, TableColumnWidth};
 use crate::paint::PaintContext;
@@ -349,13 +349,22 @@ impl TableWidget {
             SortIndicator::Ascending => Icon::ChevronUp,
             SortIndicator::Descending => Icon::ChevronDown,
         });
-        let room = width - CELL_PAD * 2 - sort.map_or(0, |_| icon + space::XS);
-        let x = x + CELL_PAD;
-        let cut = ctx.draw_text_fitted(x, top, &col.label, HEADING, room, theme.text);
+        let arrow = sort.map_or(0, |_| icon + space::XS);
+        let room = width - CELL_PAD * 2 - arrow;
+        let label = ui::elided_width(&col.label, HEADING, room);
+        let spare = (room - label).max(0);
+        let left = x + CELL_PAD;
+        // At the end the arrow leads, so sorting never moves the label off
+        // the edge its cells keep.
+        let (text_x, arrow_x) = match col.align {
+            TextAlignment::Start => (left, left + label + space::XS),
+            TextAlignment::Center => (left + spare / 2, left + spare / 2 + label + space::XS),
+            TextAlignment::End => (left + arrow + spare, left + spare),
+        };
+        let cut = ctx.draw_text_fitted(text_x, top, &col.label, HEADING, room, theme.text);
         if let Some(sort) = sort {
-            let after = x + ui::elided_width(&col.label, HEADING, room) + space::XS;
             let y = self.layout_rect().y + (self.header_height() - icon) / 2;
-            ctx.draw_icon(sort, after, y, icon, theme.text_secondary);
+            ctx.draw_icon(sort, arrow_x, y, icon, theme.text_secondary);
         }
         cut
     }

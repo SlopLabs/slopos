@@ -773,26 +773,32 @@ impl Catalogue {
             true => SortIndicator::Descending,
             false => SortIndicator::Ascending,
         };
-        let heading = |label: &str, width, sorted: bool| TableColumn {
+        let heading = |label: &str, width, align, sorted: bool| TableColumn {
             label: String::from(label),
             width,
+            align,
             sort_indicator: sorted.then_some(sort),
         };
-        let cell = |text: &str| -> Node<Msg> { Text::new(text).into() };
+        let cell = |text: &str, align| -> Node<Msg> { Text::new(text).align(align).into() };
+        let (start, end) = (TextAlignment::Start, TextAlignment::End);
         let mut files = FILES.to_vec();
         if self.descending {
             files.reverse();
         }
         let table = Node::Table {
             columns: vec![
-                heading("Name", TableColumnWidth::Flex(2), true),
-                heading("Size", TableColumnWidth::Fixed(SIZE_COLUMN), false),
-                heading("Kind", TableColumnWidth::Flex(1), false),
+                heading("Name", TableColumnWidth::Flex(2), start, true),
+                heading("Size", TableColumnWidth::Fixed(SIZE_COLUMN), end, false),
+                heading("Kind", TableColumnWidth::Flex(1), start, false),
             ],
             rows: files
                 .iter()
                 .map(|&(name, size, kind)| {
-                    vec![cell(name), cell(&Bytes(size).to_string()), cell(kind)]
+                    vec![
+                        cell(name, start),
+                        cell(&Bytes(size).to_string(), end),
+                        cell(kind, start),
+                    ]
                 })
                 .collect(),
             selected: self.file,

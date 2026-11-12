@@ -24,9 +24,9 @@ use super::monitor::{
 };
 use super::state::{Resource, SysmonApp};
 
-const CPU: usize = 0;
+pub(super) const CPU: usize = 0;
 const DISK: usize = 1;
-const MEMORY: usize = 4;
+pub(super) const MEMORY: usize = 4;
 const GPU: usize = 5;
 const NETWORK: usize = 6;
 
@@ -57,20 +57,21 @@ fn keyed(label: &'static str, value: impl Into<String>, key: GraphKey) -> Figure
     }
 }
 
-fn caption(text: impl Into<String>) -> Text {
+pub(super) fn caption(text: impl Into<String>) -> Text {
     Text::new(text)
         .role(TextRole::Caption)
         .tone(Tone::Secondary)
 }
 
-fn expand(child: Node<SysmonMsg>) -> Node<SysmonMsg> {
+pub(super) fn expand(child: Node<SysmonMsg>) -> Node<SysmonMsg> {
     Node::Expand {
         weight: 1,
         child: Box::new(child),
     }
 }
 
-fn plotted(what: &str, top: String, graph: Graph) -> Node<SysmonMsg> {
+/// `graph` under what it plots and the value at its top.
+pub(super) fn scaled(what: &str, top: String, graph: Graph) -> Node<SysmonMsg> {
     column(
         space::XS,
         vec![
@@ -79,15 +80,23 @@ fn plotted(what: &str, top: String, graph: Graph) -> Node<SysmonMsg> {
                 vec![expand(caption(what).into()), caption(top).into()],
             ),
             graph.into(),
-            row(
-                space::SM,
-                vec![
-                    expand(caption(format!("{WINDOW} seconds")).into()),
-                    caption("0").into(),
-                ],
-            ),
         ],
     )
+}
+
+/// What a graph's width spans and the value at its foot.
+pub(super) fn span() -> Node<SysmonMsg> {
+    row(
+        space::SM,
+        vec![
+            expand(caption(format!("{WINDOW} seconds")).into()),
+            caption("0").into(),
+        ],
+    )
+}
+
+fn plotted(what: &str, top: String, graph: Graph) -> Node<SysmonMsg> {
+    column(space::XS, vec![scaled(what, top, graph), span()])
 }
 
 fn throughput_ceiling(histories: &[&History]) -> u64 {
@@ -155,7 +164,7 @@ impl SysmonApp {
         }
     }
 
-    fn graph(&self, label: &str) -> Graph {
+    pub(super) fn graph(&self, label: &str) -> Graph {
         Graph::new(label, WINDOW).elapsed(self.monitor.intervals)
     }
 

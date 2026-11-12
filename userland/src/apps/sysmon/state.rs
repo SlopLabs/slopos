@@ -52,6 +52,39 @@ pub(crate) struct ContextMenu {
     pub(crate) y: i32,
 }
 
+/// What asking to end the chosen process would come to, read once when it is
+/// chosen so the page says so before anyone asks. Asking decides afresh.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ending {
+    /// The kernel lets this app end it.
+    Here,
+    /// Another person's: privd ends it once someone allows that.
+    Asked,
+    /// System Monitor's own process.
+    Itself,
+    /// It holds a capability beyond those every program holds.
+    Powerful,
+    /// The system runs it, for itself or for everyone.
+    System,
+    /// Who it runs as, or what it holds, could not be read.
+    Unowned,
+}
+
+impl Ending {
+    pub const ALL: [Ending; 6] = [
+        Ending::Here,
+        Ending::Asked,
+        Ending::Itself,
+        Ending::Powerful,
+        Ending::System,
+        Ending::Unowned,
+    ];
+
+    pub(crate) fn offered(self) -> bool {
+        matches!(self, Ending::Here | Ending::Asked)
+    }
+}
+
 pub enum KillOutcome {
     Sent {
         name: String,
@@ -96,17 +129,32 @@ pub(crate) enum SortColumn {
     User,
     Cpu,
     Memory,
-    Threads,
-    CpuTime,
     Pid,
 }
 
 impl SortColumn {
     fn descends_first(self) -> bool {
-        matches!(
-            self,
-            SortColumn::Cpu | SortColumn::Memory | SortColumn::Threads | SortColumn::CpuTime
-        )
+        matches!(self, SortColumn::Cpu | SortColumn::Memory)
+    }
+}
+
+/// Whose a process is, which its row's icon says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Runner {
+    Person,
+    System,
+    Kernel,
+}
+
+impl Runner {
+    pub(crate) fn of(process: &Process) -> Self {
+        match process.kernel {
+            true => Runner::Kernel,
+            false if crate::apps::endtask::of_a_person(process.uid, process.login) => {
+                Runner::Person
+            }
+            false => Runner::System,
+        }
     }
 }
 
@@ -122,6 +170,8 @@ pub struct SysmonApp {
     pub(crate) order: Vec<usize>,
     /// A process, not a row: the table re-sorts every refresh.
     pub(crate) selected: Option<TaskKey>,
+    /// Of the selected process; `None` with none, or once it is gone.
+    pub ending: Option<Ending>,
     pub(crate) sort_column: SortColumn,
     pub(crate) sort_ascending: bool,
     pub(crate) confirm_kill: Option<KillTarget>,
@@ -158,6 +208,7 @@ impl SysmonApp {
             filter_focused: false,
             order: Vec::new(),
             selected: None,
+            ending: None,
             sort_column: SortColumn::Cpu,
             sort_ascending: false,
             confirm_kill: None,
@@ -188,9 +239,6 @@ impl SysmonApp {
             self.resource = Resource::Cpu;
         }
         self.reorder();
-        if self.selected.is_some_and(|key| self.row_of(key).is_none()) {
-            self.selected = None;
-        }
         // A target that exited designates nothing, rather than whatever
         // inherits its number.
         if self
@@ -256,6 +304,11 @@ impl SysmonApp {
         &self.monitor.processes
     }
 
+    /// The process `pid` is listed under, while it runs.
+    pub(crate) fn listed(&self, pid: u32) -> Option<&Process> {
+        self.processes().iter().find(|p| p.key.pid == pid)
+    }
+
     fn live(&self, target: &KillTarget) -> Option<usize> {
         selection::index_of(target.key, self.processes())
     }
@@ -269,13 +322,17 @@ impl SysmonApp {
     }
 
     pub(crate) fn select_row(&mut self, row: usize) {
-        self.selected = selection::key_at_row(self.processes(), &self.order, row);
+        let key = selection::key_at_row(self.processes(), &self.order, row);
+        if key != self.selected {
+            self.selected = key;
+            self.ending = key.and_then(|key| self.ending_of(key.pid));
+        }
     }
 
-    /// Refuses only sysmon itself, which would vanish mid-frame; the kernel,
-    /// and for a task of another user privd, decide the rest.
-    pub(crate) fn is_killable(&self, pid: u32) -> bool {
-        pid != self.self_pid
+    /// The selected process, which always has a row.
+    pub(crate) fn chosen(&self) -> Option<&Process> {
+        let at = selection::index_of(self.selected?, self.processes())?;
+        self.processes().get(at)
     }
 
     pub(crate) fn target_for_row(&self, row: usize) -> Option<KillTarget> {
@@ -287,15 +344,11 @@ impl SysmonApp {
     }
 
     pub(crate) fn target_for_selection(&self) -> Option<KillTarget> {
-        let process = self.processes().get(self.live_key(self.selected?)?)?;
+        let process = self.chosen()?;
         Some(KillTarget {
             key: process.key,
             name: process.name.clone(),
         })
-    }
-
-    fn live_key(&self, key: TaskKey) -> Option<usize> {
-        selection::index_of(key, self.processes())
     }
 
     pub(crate) fn pending_kill_target(&self) -> Option<&KillTarget> {
@@ -311,6 +364,8 @@ impl SysmonApp {
             || process.key.pid.to_string().contains(&wanted)
     }
 
+    /// A selected process that left the rows, by ending or by the search,
+    /// is selected no longer: nothing acts on what is not shown.
     pub(crate) fn reorder(&mut self) {
         let processes = self.processes();
         let mut order: Vec<usize> = (0..processes.len())
@@ -326,6 +381,10 @@ impl SysmonApp {
             ord.then_with(|| processes[a].key.pid.cmp(&processes[b].key.pid))
         });
         self.order = order;
+        if self.selected.is_some_and(|key| self.row_of(key).is_none()) {
+            self.selected = None;
+            self.ending = None;
+        }
     }
 
     fn compare(&self, a: &Process, b: &Process) -> Ordering {
@@ -334,8 +393,6 @@ impl SysmonApp {
             SortColumn::User => self.user_of(a).cmp(self.user_of(b)),
             SortColumn::Cpu => a.cpu.cmp(&b.cpu),
             SortColumn::Memory => a.memory.cmp(&b.memory),
-            SortColumn::Threads => a.threads.cmp(&b.threads),
-            SortColumn::CpuTime => a.cpu_time_us.cmp(&b.cpu_time_us),
             SortColumn::Pid => a.key.pid.cmp(&b.key.pid),
         }
     }

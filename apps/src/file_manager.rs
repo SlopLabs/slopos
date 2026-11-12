@@ -39,11 +39,13 @@ fn columns() -> Vec<TableColumn> {
         TableColumn {
             label: "Name".into(),
             width: TableColumnWidth::Flex(1),
+            align: TextAlignment::Start,
             sort_indicator: None,
         },
         TableColumn {
             label: "Size".into(),
             width: size_width(),
+            align: TextAlignment::End,
             sort_indicator: None,
         },
     ]

@@ -8,7 +8,9 @@ use super::components::{
     Button, ButtonRow, Disclosure, Gallery, Graph, GraphKey, IconButton, KeyboardMap, List,
     PropertyList, Switch, Tag, Text, WindowSpec,
 };
-use super::constraints::{CrossAxisAlignment, ImageScale, Length, Orientation, Rect};
+use super::constraints::{
+    CrossAxisAlignment, ImageScale, Length, Orientation, Rect, TextAlignment,
+};
 use super::event::{Key, Modifiers};
 use super::sender::AppSender;
 use super::widgets::code_view::{CodeInput, CodeLine};
@@ -120,6 +122,8 @@ pub struct BarSegment {
 pub struct TableColumn {
     pub label: String,
     pub width: TableColumnWidth,
+    /// Where its heading sits, as its cells' text does: `End` over numbers.
+    pub align: TextAlignment,
     pub sort_indicator: Option<SortIndicator>,
 }
 

@@ -40,6 +40,12 @@ pub enum Endable {
     Unknown,
 }
 
+/// Whether a task running as `uid` under login tag `login` is a person's:
+/// of a person's session and running as a person, not the system's.
+pub fn of_a_person(uid: u32, login: u32) -> bool {
+    PERSON_UIDS.contains(&uid) && SESSION_LOGINS.contains(&login)
+}
+
 /// What this program would make of task `pid`.
 pub fn endable(pid: u32) -> Endable {
     let Some(task) = listed(pid) else {
@@ -55,7 +61,7 @@ pub fn endable(pid: u32) -> Endable {
     if held & !UNIVERSAL != 0 {
         return Endable::Powerful;
     }
-    if !PERSON_UIDS.contains(&task.uid) || !SESSION_LOGINS.contains(&task.login) {
+    if !of_a_person(task.uid, task.login) {
         return Endable::System;
     }
     match crate::accounts::name_of(task.uid) {

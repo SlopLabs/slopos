@@ -650,6 +650,7 @@ pub(super) fn test_a_rebuild_keeps_what_was_scrolled() {
             columns: vec![crate::node::TableColumn {
                 label: String::from("Name"),
                 width: crate::node::TableColumnWidth::Flex(1),
+                align: Default::default(),
                 sort_indicator: None,
             }],
             rows: (0..rows)
@@ -709,6 +710,7 @@ pub(super) fn test_the_wheel_moves_the_innermost_view() {
         columns: vec![crate::node::TableColumn {
             label: String::from("Name"),
             width: crate::node::TableColumnWidth::Flex(1),
+            align: Default::default(),
             sort_indicator: None,
         }],
         rows: (0..100)
@@ -846,6 +848,7 @@ pub(super) fn test_a_table_names_a_cut_cell() {
         columns: vec![crate::node::TableColumn {
             label: String::from("Name"),
             width: crate::node::TableColumnWidth::Fixed(90),
+            align: Default::default(),
             sort_indicator: None,
         }],
         rows: vec![vec![Text::new(name).into()]],
@@ -1333,6 +1336,7 @@ pub(super) fn test_a_sorted_heading_shows_a_chevron() {
     let column = |label: &str, sort_indicator| TableColumn {
         label: String::from(label),
         width: TableColumnWidth::Flex(1),
+        align: Default::default(),
         sort_indicator,
     };
     let table: Node<()> = Node::Table {
@@ -1360,6 +1364,43 @@ pub(super) fn test_a_sorted_heading_shows_a_chevron() {
     assert_eq!(texts[..2], ["Name", "Size"]);
 }
 
+/// Sorting by a column of figures must not move its heading off the edge
+/// the figures end at.
+pub(super) fn test_a_heading_of_figures_ends_where_they_end() {
+    use crate::constraints::TextAlignment;
+    use crate::node::{SortIndicator, TableColumn, TableColumnWidth};
+    const FIGURE: &str = "1023.9 MiB";
+    let ends = |sort_indicator| {
+        let table: Node<()> = Node::Table {
+            columns: vec![TableColumn {
+                label: String::from("Size"),
+                width: TableColumnWidth::Flex(1),
+                align: TextAlignment::End,
+                sort_indicator,
+            }],
+            rows: vec![vec![Text::new(FIGURE).align(TextAlignment::End).into()]],
+            selected: None,
+            on_select: None,
+            on_activate: None,
+            on_header_click: None,
+            on_context_menu: None,
+            shows: 0,
+        };
+        let size = Size::new(240, 200);
+        let root = built(table, size);
+        let runs = crate::audit::paint_recording(root.as_ref(), size, &style());
+        let end = |text: &str| {
+            let run = runs.iter().find(|run| run.text == text);
+            run.map(|run| run.x + run.width)
+        };
+        (end("Size"), end(FIGURE))
+    };
+    let (heading, figure) = ends(None);
+    assert!(heading.is_some(), "the heading is drawn");
+    assert_eq!(heading, figure);
+    assert_eq!(ends(Some(SortIndicator::Descending)).0, heading);
+}
+
 pub(super) fn test_every_label_cut_short_shows_whole() {
     use crate::components::SearchField;
     use crate::node::{MenuItem, MenuItemKind, TableColumn, TableColumnWidth};
@@ -1368,6 +1409,7 @@ pub(super) fn test_every_label_cut_short_shows_whole() {
     let column = |label: &str| TableColumn {
         label: String::from(label),
         width: TableColumnWidth::Flex(1),
+        align: Default::default(),
         sort_indicator: None,
     };
     let table = |heading: &str, cell: Node<()>| Node::Table {

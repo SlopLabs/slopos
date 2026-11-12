@@ -40,6 +40,9 @@ APPS = (
     ("settings-desktop", "settings --page desktop", "org.slopos.settings"),
     ("settings-about", "settings --page about", "org.slopos.settings"),
 )
+# A click that follows an app's shot, where the window opens on a 1280 by 800
+# screen, and the shot of what it changed: the first process, chosen.
+THEN = {"system-monitor-processes": ("system-monitor-process", 300, 166)}
 TABLET_MAX = 0x7FFF
 QCODES = {" ": "spc", "\n": "ret", "-": "minus", "/": "slash", ".": "dot"}
 BLANK_BYTES = 16 << 30
@@ -275,6 +278,10 @@ def run_app(g, name, command, app_id):
     g.wait_line(rf"COMPOSITOR: shown {re.escape(app_id)}", 300)
     # A terminal's caret blinks for as long as it runs.
     g.shot(name, timeout=30)
+    if name in THEN:
+        after, x, y = THEN[name]
+        g.click(x, y)
+        g.shot(after, timeout=30, changed=True)
     g.serial("kill $!\n")
     time.sleep(2)
 

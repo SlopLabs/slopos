@@ -6,7 +6,7 @@ use slopos_abi::errno::Errno;
 use slopos_abi::signal::SIGKILL;
 use slopos_appkit::{
     Action, App, AppSender, ContextMenuAt, Key, LineEditInput, Modifiers, NamedKey, Node,
-    SIDEBAR_WIDE_WIDTH, TableColumn, WindowSpec,
+    SIDEBAR_WIDE_WIDTH, WindowSpec,
 };
 
 mod format;
@@ -18,10 +18,10 @@ pub mod selection;
 mod state;
 
 pub(crate) use format::task_name_string;
-pub use processes::status_line;
+pub use processes::{ending_line, status_line};
 use selection::TaskKey;
 use state::{ContextMenu, KillTarget};
-pub use state::{KillOutcome, Resource, SysmonApp, Tab};
+pub use state::{Ending, KillOutcome, Resource, SysmonApp, Tab};
 
 const MENU_KILL: usize = 0;
 
@@ -214,7 +214,8 @@ impl App for SysmonApp {
     }
 
     fn window(&self) -> WindowSpec {
-        let least = TableColumn::least_width(&self.table_columns())
+        let least = self
+            .processes_least_width()
             .max(SIDEBAR_WIDE_WIDTH + PAGE_LEAST_WIDTH);
         WindowSpec::new(WIDTH.max(least), HEIGHT).min_size(least, LEAST_HEIGHT)
     }
@@ -238,13 +239,34 @@ impl SysmonApp {
         self.reorder();
     }
 
+    /// What [`choose_to_end`](Self::choose_to_end) would come to for `pid`,
+    /// by the questions it asks; `None` for a task that is gone.
+    pub(crate) fn ending_of(&self, pid: u32) -> Option<Ending> {
+        if pid == self.self_pid {
+            return Some(Ending::Itself);
+        }
+        let rc = sys_proc::kill(pid, 0);
+        let refused = rc == Errno::EPERM.raw();
+        if !refused && rc != Errno::ESRCH.raw() {
+            return Some(Ending::Here);
+        }
+        match (refused, endtask::endable(pid)) {
+            (_, Endable::System) => Some(Ending::System),
+            (false, _) | (true, Endable::Gone) => None,
+            (true, Endable::Yes { .. }) if sys_proc::getuid() == 0 => Some(Ending::Here),
+            (true, Endable::Yes { .. }) => Some(Ending::Asked),
+            (true, Endable::Powerful) => Some(Ending::Powerful),
+            (true, Endable::Unknown) => Some(Ending::Unowned),
+        }
+    }
+
     /// Confirm here a task the kernel lets this process end, or one root may
     /// have privd end unasked; for any other, privd's question is the
-    /// confirmation.
+    /// confirmation. Never itself, which would vanish mid-frame.
     fn choose_to_end(&mut self, target: KillTarget) {
         self.last_kill = None;
         self.confirm_kill = None;
-        if !self.is_killable(target.pid()) || self.asking.is_some() {
+        if target.pid() == self.self_pid || self.asking.is_some() {
             return;
         }
         match sys_proc::kill(target.pid(), 0) {
