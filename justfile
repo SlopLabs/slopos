@@ -21,7 +21,9 @@ fs_image_size    := env("FS_IMAGE_SIZE", "32M")
 # The tests image carries `bigprog_test`, a 24 MiB binary `exec` must map
 # without staging it in kernel memory, and the C++ runtime with the two
 # fixtures that exercise it. Sized on its own so the shipped root stays 32M.
-fs_image_size_tests := env("FS_IMAGE_SIZE_TESTS", "192M")
+# Kept tight: free blocks the suite writes stay in the block cache, and the 1G
+# machine has no frames to spare by the time `sessions_test` forks its bomb.
+fs_image_size_tests := env("FS_IMAGE_SIZE_TESTS", "136M")
 # Sized on its own: this disk holds work, not the shipped appliance root. What
 # bounds it is the 4 bytes of resident verity hash per 4 KiB block the
 # machine's RAM can hold, which the mount refuses past rather than discovering.
