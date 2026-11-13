@@ -339,7 +339,7 @@ fn install_tree(
     .run(new, &mut |n| copying.add(n))?;
     events.log(match installed {
         Some(bytes) => format!(
-            "installed {what} at {LOCAL} ({})",
+            "installed the {what} at {LOCAL} ({})",
             slopos_installer_core::disk_size(bytes)
         ),
         None => format!("{LOCAL} already holds this medium's {what}"),
@@ -502,7 +502,7 @@ pub fn fill(
         install_tree(
             root,
             slopos_tree_core::TOOLCHAIN,
-            "the toolchain",
+            "toolchain",
             &source,
             &new,
             (holder, (0, 0)),
@@ -514,7 +514,7 @@ pub fn fill(
     install_tree(
         root,
         slopos_tree_core::APPS,
-        "the apps",
+        "apps",
         &apps,
         &new,
         (holder, holder),
