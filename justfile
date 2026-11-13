@@ -171,6 +171,13 @@ base_recipe_env     := "RECIPE_PREFIX=" + recipes_prefix + " RECIPE_PROGRAMS=\""
 # builds carries the pairing the running base does.
 base_pairing        := if os() == "slopos" { if path_exists("/usr/share/slopos/remote/remote.conf") == "true" { "/usr/share/slopos/remote" } else { "" } } else { "" }
 
+[doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace")]
+setup: (_host "setup")
+    scripts/ensure_toolchain.sh
+    scripts/ensure_go.sh
+    mkdir -p {{build_dir}}
+    CARGO_TARGET_DIR={{cargo_target_dir}} {{host_cargo}} metadata --locked --format-version 1 >/dev/null
+
 # Where a recipe runs. A build or a gate runs on both systems. One that
 # emulates a machine, or needs the host's image or cross-build tools, depends
 # on `_host` first; one that installs into the machine it runs on, on
@@ -182,13 +189,6 @@ _host recipe:
 [no-exit-message]
 _slopos recipe:
     @[ "{{os()}}" = slopos ] || { echo "just {{recipe}}: installs into the SlopOS machine it runs on; from this host, just remote-install installs on a paired one" >&2; exit 1; }
-
-[doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace")]
-setup: (_host "setup")
-    scripts/ensure_toolchain.sh
-    scripts/ensure_go.sh
-    mkdir -p {{build_dir}}
-    CARGO_TARGET_DIR={{cargo_target_dir}} {{host_cargo}} metadata --locked --format-version 1 >/dev/null
 
 # A userland build, the same on both systems: the base's programs, libc.so and
 # the apps, and with `--test` the suite's programs and the C++ runtime. On the
@@ -346,9 +346,12 @@ _initramfs-tests: _build-userland-tests _base-recipes
     REMOTE_PAIRING_DIR="{{base_pairing}}" \
         scripts/build_initramfs.sh "{{initramfs_tests}}" "{{build_dir}}" {{test_userland_bins}}
 
-# The base a variant boots with: the shipped one, or for a tests variant the
-# one carrying the suite's programs.
-_base variant:
+# A variant is a kernel and the base it boots with: release and dev the shipped
+# base, tests and release-tests a kernel carrying the suite and the base its
+# programs.
+_variant-kernel variant: (_kernel variant if variant =~ '^(release|dev)$' { "" } else if variant =~ '^(release-)?tests$' { kernel_features_tests } else { error("the variants are release, dev, tests and release-tests, not " + variant) })
+
+_variant-base variant:
     just {{ if variant =~ '^(release|dev)$' { "_initramfs" } else if variant =~ '^(release-)?tests$' { "_initramfs-tests" } else { error("the variants are release, dev, tests and release-tests, not " + variant) } }}
 
 [doc("Pack the extension laid out in DIR (bin/, libexec/, lib/, share/ and .extension/{release,declare}) into builddir/extensions/<name>.ext and its sidecar <name>.meta, checked as extctl checks an install against this build's libc.so. EXTENSION_KEY names an SSH Ed25519 key to sign the sidecar with, for `extctl install-signed`; `scripts/remote.py install --extension` installs it on a paired machine")]
@@ -368,9 +371,9 @@ _kernel variant features='':
     {{gate}} lint kernel-pml4-writer
 
 [doc("Build a system: the kernel, builddir/kernel-<VARIANT>.elf, and the base it boots with, builddir/initramfs.cpio, or builddir/initramfs-tests.cpio for a tests variant, whose kernel carries the suite and whose base the suite's programs. VARIANT is release, dev, tests or release-tests; KERNEL_RELEASE=1 makes release the default, dev otherwise")]
-build VARIANT=kernel_variant: (_kernel VARIANT if VARIANT =~ '^(release|dev)$' { "" } else if VARIANT =~ '^(release-)?tests$' { kernel_features_tests } else { error("the variants are release, dev, tests and release-tests, not " + VARIANT) }) (_base VARIANT)
+build VARIANT=kernel_variant: (_variant-kernel VARIANT) (_variant-base VARIANT)
 
-# No `_base` dependency: building the userland binaries is most of the wall
+# No base: building the userland binaries is most of the wall
 # clock, and a gate-only job has no use for them.
 [doc("Build the kernel ELF alone, skipping the userland and the base — for gate-only jobs")]
 build-kernel-only: (_kernel kernel_variant)
@@ -378,7 +381,7 @@ build-kernel-only: (_kernel kernel_variant)
 # The apps go in as whoever runs this while /usr/local is theirs, and through
 # privd's org.slopos.software.install once it is the system's.
 [doc("On SlopOS, put a build's base to use: build the userland, the base and the apps for VARIANT (release, dev or tests) and make that base the one every slot boots, running it at once when the running kernel serves it and leaving it for the next boot otherwise; bootctl base rollback takes it back. The apps go to /usr/local once the running libc.so is the one they were built against; otherwise the command that installs them is printed. A base that needs a new kernel goes in first, then just install-kernel")]
-install VARIANT="release": (_slopos "install") (_base VARIANT)
+install VARIANT="release": (_slopos "install") (_variant-base VARIANT)
     #!/usr/bin/env bash
     set -euo pipefail
     bootctl base install "$PWD/{{build_dir}}/{{ if VARIANT =~ 'tests$' { "initramfs-tests.cpio" } else { "initramfs.cpio" } }}"
@@ -391,7 +394,7 @@ install VARIANT="release": (_slopos "install") (_base VARIANT)
     echo "install: bootctl base rollback takes the base back; a kernel it needs goes in with just install-kernel"
 
 [doc("On SlopOS, try a build's kernel: build the VARIANT kernel (release, dev, tests or release-tests) and put it into the boot slot that is not the default, arming one boot of it, which bootctl reboot tries and bootctl commit keeps")]
-install-kernel VARIANT="release": (_slopos "install-kernel") (_kernel VARIANT if VARIANT =~ '^(release|dev)$' { "" } else if VARIANT =~ '^(release-)?tests$' { kernel_features_tests } else { error("the variants are release, dev, tests and release-tests, not " + VARIANT) })
+install-kernel VARIANT="release": (_slopos "install-kernel") (_variant-kernel VARIANT)
     #!/usr/bin/env bash
     set -euo pipefail
     slot="$(bootctl spare)"

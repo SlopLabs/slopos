@@ -12,7 +12,7 @@ Pinned forks as patches, and recipes for third-party programs. Nothing here is b
 
 ## Recipes
 
-- `recipes/<name>/recipe` pins an `https` release tarball by SHA-256, names its licence and template, and holds no file beside `recipe` but its declared `config` and `patch`es.
+- `recipes/<name>/recipe` pins an `https` release tarball (a `cargo` recipe: crates.io's `.crate`) by SHA-256, names its licence and template, and holds no file beside `recipe` but its declared `config`, `lock` and `patch`es. A `cargo` lock is the crate's own but for packages the libc fork and `crates/` ports replace.
 - A patch only teaches the target: named `NNNN-slopos-<what>.patch`, it only adds lines (a removed run is replaced in place by lines that start with it), patches each file in one section, and names SlopOS in every hunk or in the path of a file it creates.
 - A build that needs any other edit to upstream is a slibc or kernel finding. Fix it there.
 - A recipe under a licence this tree may not hold the text of (GPL-2.0-only, CDDL) carries no patch: a diff quotes upstream's lines as context.

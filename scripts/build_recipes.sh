@@ -75,7 +75,9 @@ set -euo pipefail
 # with what a medium distributes of it.
 #
 # Tarballs are cached in third_party/recipes/; offline, pre-populate it or set
-# `<NAME>_URL` (`ZLIB_URL`, ...) to a local copy.
+# `<NAME>_URL` (`ZLIB_URL`, ...) to a local copy. A `cargo` recipe's lock is
+# fetched into `$CARGO_HOME` as cargo fetches any; offline, set
+# `CARGO_NET_OFFLINE=true` over a `$CARGO_HOME` an online build filled.
 #
 # Environment:
 #   BUILD_DIR            where the userland build staged libc (default: builddir)
@@ -278,11 +280,12 @@ DRIVER_STAMP="$(sha256sum "$SCRIPT_DIR/$SELF.sh" | cut -d' ' -f1)"
 CMAKE_PLATFORM="$REPO_ROOT/toolchain/cmake"
 CMAKE_PLATFORM_STAMP="$(cd "$CMAKE_PLATFORM" && find . -type f -print | LC_ALL=C sort | xargs sha256sum)"
 . "$SCRIPT_DIR/lib/toolchain_pin.sh"
-# What a `cargo` recipe compiles beside its crate: std and the libc fork, and
-# the ports its lock may take.
+# What a `cargo` recipe compiles beside its crate: std and the libc fork, the
+# ports its lock may take, and the target it is compiled for.
 CARGO_STAMP="$(
     tp_std_stamp "$REPO_ROOT"
-    (cd "$REPO_ROOT" && find "$TP_CRATES_OVERLAY_REL" -type f -print | tp_hash_lines "$REPO_ROOT")
+    (cd "$REPO_ROOT" && find "$TP_CRATES_OVERLAY_REL" "targets/$TARGET.json" -type f -print |
+        tp_hash_lines "$REPO_ROOT")
 )"
 
 declare -A WANT=()
@@ -538,7 +541,7 @@ template_cargo() {
             printf '%s = { path = "%s" }\n' "$cname" "$work/crates/$cname-$version"
         done < <(sourceless "$work/src/Cargo.lock")
     } >"$config"
-    (cd "$work/src" && env "CC_${TARGET//-/_}=$CC_WRAPPER" "CXX_${TARGET//-/_}=$CXX_WRAPPER" \
+    (cd "$work/src" && env RUSTFLAGS= "CC_${TARGET//-/_}=$CC_WRAPPER" "CXX_${TARGET//-/_}=$CXX_WRAPPER" \
         "AR_${TARGET//-/_}=$LLVM_AR" cargo +slopos build --release --locked -j "$JOBS" \
         --config "$config" --config profile.release.package.compiler_builtins.codegen-units=10000 \
         -Zbuild-std=std,panic_unwind -Zunstable-options -Zjson-target-spec \
