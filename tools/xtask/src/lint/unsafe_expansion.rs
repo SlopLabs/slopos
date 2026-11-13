@@ -31,7 +31,6 @@
 //! and a run that sees no `TrivialClone` impl at all refuses to pass.
 
 use std::collections::HashSet;
-use std::process::Command;
 use std::time::Instant;
 
 use proc_macro2::{Span, TokenStream};
@@ -42,6 +41,7 @@ use crate::Result;
 use crate::repo::{Repo, under};
 use crate::report::Report;
 use crate::rust::{self, unsafe_keywords};
+use crate::toolchain;
 use crate::workspace::Workspace;
 
 /// Crate directories that legitimately author unsafe, as in the
@@ -126,7 +126,7 @@ pub fn run(repo: &Repo) -> Result<Report> {
     let started = Instant::now();
     let ws = Workspace::load(repo)?;
     let crates = ws.kernel_crates()?;
-    let channel = toolchain_channel(repo)?;
+    let channel = toolchain::channel(repo)?;
     let target = std::env::var("RUST_TARGET").unwrap_or_else(|_| "targets/x86_64-slos.json".into());
     let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "builddir/target".into());
     let ksyms = match std::env::var("SLOPOS_KSYMS_RS") {
@@ -157,9 +157,8 @@ pub fn run(repo: &Repo) -> Result<Report> {
             } else {
                 format!("{} [{}]", p.dir, flags.join(" "))
             };
-            let out = Command::new("cargo")
+            let out = toolchain::cargo(&channel)
                 .current_dir(&repo.root)
-                .arg(format!("+{channel}"))
                 .args([
                     "rustc",
                     "-Zbuild-std=core,alloc",
@@ -215,25 +214,6 @@ pub fn run(repo: &Repo) -> Result<Report> {
         stats.trivial_clone + stats.derived_unreachable
     ));
     Ok(report)
-}
-
-/// `RUST_CHANNEL`, else the channel rust-toolchain.toml pins.
-fn toolchain_channel(repo: &Repo) -> Result<String> {
-    if let Ok(c) = std::env::var("RUST_CHANNEL") {
-        return Ok(c);
-    }
-    repo.read("rust-toolchain.toml")?
-        .lines()
-        .find_map(|l| {
-            let v = l
-                .trim()
-                .strip_prefix("channel")?
-                .trim()
-                .strip_prefix('=')?
-                .trim();
-            Some(v.trim_matches('"').to_string())
-        })
-        .ok_or_else(|| "rust-toolchain.toml: no `channel = \"...\"`".into())
 }
 
 /// Counts of the compiler-emitted shapes recognised, kept so a run that sees
@@ -603,10 +583,9 @@ mod tests {
     #[test]
     fn the_compiler_emitted_shapes_have_not_moved() {
         let repo = Repo::at(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
-        let channel = toolchain_channel(&repo).unwrap();
-        let mut child = Command::new("rustc")
+        let channel = toolchain::channel(&repo).unwrap();
+        let mut child = toolchain::rustc(&channel)
             .current_dir(&repo.root)
-            .arg(format!("+{channel}"))
             .args([
                 "--edition",
                 "2024",

@@ -116,14 +116,18 @@ RECIPE_DEPENDS="$(
 # and a config that builds every artifact and installs none of them is a
 # toolchain nobody can put on a disk. `src` is the `rust-src` component
 # `-Zbuild-std` needs in the guest, and it is installed for the build triple
-# because it is the same sources either way.
+# because it is the same sources either way. rustdoc rides `rustc`'s install
+# only while `build.tools` names it, so its build is the step graded.
 WANTED_STEPS="
 Building LLVM for $TARGET
 Building stage2 cargo (stage1:x86_64-unknown-linux-gnu -> stage2:$TARGET)
 Building stage2 compiler artifacts (stage1:x86_64-unknown-linux-gnu -> stage2:$TARGET)
 Building stage1 library artifacts (stage1:x86_64-unknown-linux-gnu -> stage1:$TARGET)
+Building stage2 rustdoc-tool-binary (stage1:x86_64-unknown-linux-gnu -> stage2:$TARGET)
 Installing stage2 rustc (stage1:x86_64-unknown-linux-gnu -> stage2:$TARGET)
 Installing stage2 cargo (stage1:x86_64-unknown-linux-gnu -> stage2:$TARGET)
+Installing stage2 rustfmt (stage1:x86_64-unknown-linux-gnu -> stage2:$TARGET)
+Installing stage2 clippy (stage1:x86_64-unknown-linux-gnu -> stage2:$TARGET)
 Installing stage2 std (stage1:x86_64-unknown-linux-gnu -> stage2:$TARGET)
 Installing llvm-tools for $TARGET
 Installing src for x86_64-unknown-linux-gnu

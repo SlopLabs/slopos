@@ -656,15 +656,24 @@ diff --git a/std/src/sys/paths/unix.rs b/std/src/sys/paths/unix.rs
 index e023451..18576c8 100644
 --- a/std/src/sys/paths/unix.rs
 +++ b/std/src/sys/paths/unix.rs
-@@ -360,6 +360,13 @@ pub fn current_exe() -> io::Result<PathBuf> {
+@@ -360,6 +360,22 @@ pub fn current_exe() -> io::Result<PathBuf> {
      crate::fs::read_to_string("/scheme/sys/exe").map(PathBuf::from)
  }
  
 +#[cfg(target_os = "slopos")]
 +pub fn current_exe() -> io::Result<PathBuf> {
-+    // SlopOS has no procfs and no `sys:exe`-style query, so a process cannot
-+    // name its own image.
-+    Err(io::const_error!(io::ErrorKind::Unsupported, "SlopOS cannot name a process's own image"))
++    // No procfs: the kernel hands every image the absolute path it opened as
++    // `AT_EXECFN`.
++    // SAFETY: `getauxval` only reads the vector the loader recorded at entry.
++    let addr = unsafe { libc::getauxval(libc::AT_EXECFN) } as usize;
++    let name = ptr::with_exposed_provenance::<c_char>(addr);
++    if name.is_null() {
++        return Err(io::const_error!(io::ErrorKind::NotFound, "no AT_EXECFN in the auxiliary vector"));
++    }
++    // SAFETY: `AT_EXECFN` points at a NUL-terminated string on the entry stack,
++    // which lives as long as the process.
++    let name = unsafe { CStr::from_ptr(name) }.to_bytes();
++    Ok(PathBuf::from(<OsStr as OsStrExt>::from_bytes(name)))
 +}
 +
  #[cfg(target_os = "rtems")]

@@ -31,6 +31,7 @@ use serde_json::Value;
 
 use crate::Result;
 use crate::repo::Repo;
+use crate::toolchain::{self, SLOPOS};
 use crate::workspace::Workspace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -134,7 +135,7 @@ impl Tree {
         }
 
         Ok(Tree {
-            channel: toolchain_channel(&repo.read("rust-toolchain.toml")?)?,
+            channel: toolchain::channel(repo)?,
             host_packages,
             kernel_tests_features: just_variable(&justfile, "kernel_features_tests")?,
             base_programs,
@@ -142,16 +143,6 @@ impl Tree {
             apps: shell_words(&base, "APPS")?,
         })
     }
-}
-
-/// `rust-toolchain.toml`'s `channel = "..."`.
-fn toolchain_channel(toml: &str) -> Result<String> {
-    toml.lines()
-        .filter_map(|l| l.trim().strip_prefix("channel"))
-        .filter_map(|rest| rest.trim_start().strip_prefix('='))
-        .map(|v| v.trim().trim_matches('"').to_string())
-        .find(|v| !v.is_empty())
-        .ok_or_else(|| "clippy: rust-toolchain.toml names no channel".into())
 }
 
 /// Every `-p NAME` in the body of justfile recipe `name`.
@@ -256,9 +247,8 @@ impl Invocation {
     }
 
     fn command(&self, repo: &Repo) -> Command {
-        let mut cmd = Command::new("cargo");
+        let mut cmd = toolchain::cargo(&self.toolchain);
         cmd.current_dir(&repo.root)
-            .arg(format!("+{}", self.toolchain))
             .args(&self.args)
             .args(["--message-format=json", "--keep-going"])
             .env("CARGO_TARGET_DIR", repo.path(self.target.target_dir()))
@@ -283,8 +273,8 @@ impl Invocation {
             s.push_str(&format!("RUSTFLAGS='{flags}' "));
         }
         s.push_str(&format!(
-            "cargo +{} {}",
-            self.toolchain,
+            "{} {}",
+            toolchain::shown(&self.toolchain),
             self.args.join(" ")
         ));
         s
@@ -304,7 +294,7 @@ fn plan(target: Target, tree: &Tree) -> Vec<Invocation> {
                 Invocation::new(
                     &format!("kernel {variant}"),
                     target,
-                    "slopos",
+                    SLOPOS,
                     Some(KERNEL_RUSTFLAGS),
                 )
                 .args([
@@ -341,7 +331,7 @@ fn userland_plan(tree: &Tree) -> Vec<Invocation> {
         "{SYSTEM_RUSTFLAGS} -C relocation-model=pic -Z tls-model=initial-exec -C force-unwind-tables"
     );
     let clippy = |label: &str, flags: &str, build_std: &str| {
-        Invocation::new(label, Target::Userland, "slopos", Some(flags)).args([
+        Invocation::new(label, Target::Userland, SLOPOS, Some(flags)).args([
             "--config",
             "profile.release.package.compiler_builtins.codegen-units=10000",
             "clippy",
@@ -577,7 +567,10 @@ mod tests {
         assert_eq!(plan.len(), 1);
         assert_eq!(
             plan[0].display(),
-            "cargo +nightly-2026-09-03 clippy --locked --all-targets -p slopos-abi -p slopos-xtask"
+            format!(
+                "{} clippy --locked --all-targets -p slopos-abi -p slopos-xtask",
+                toolchain::shown("nightly-2026-09-03")
+            )
         );
         assert_eq!(plan[0].rustflags, None);
     }
@@ -586,13 +579,16 @@ mod tests {
     fn kernel_checks_the_dev_and_tests_variants_as_build_kernel_builds_them() {
         let plan = plan(Target::Kernel, &tree());
         let shown: Vec<String> = plan.iter().map(Invocation::display).collect();
-        let common = "CLIPPY_CONF_DIR=kernel \
+        let common = format!(
+            "CLIPPY_CONF_DIR=kernel \
             RUSTFLAGS='-C force-frame-pointers=yes -Zunstable-options -Zemit-stack-sizes' \
-            cargo +slopos clippy --locked -Zbuild-std=core,alloc \
+            {} clippy --locked -Zbuild-std=core,alloc \
             -Zbuild-std-features=compiler-builtins-mem -Zunstable-options -Ztrim-paths \
             --config profile.dev.trim-paths=\"all\" --config profile.release.trim-paths=\"all\" \
             --config future-incompat-report.frequency=\"never\" \
-            --target targets/x86_64-slos.json --package kernel --bin kernel";
+            --target targets/x86_64-slos.json --package kernel --bin kernel",
+            toolchain::shown(SLOPOS)
+        );
         assert_eq!(
             shown,
             vec![
@@ -622,7 +618,10 @@ mod tests {
                 "dl_probe"
             ]
         );
-        let common = "cargo +slopos --config profile.release.package.compiler_builtins.codegen-units=10000 clippy --locked";
+        let common = format!(
+            "{} --config profile.release.package.compiler_builtins.codegen-units=10000 clippy --locked",
+            toolchain::shown(SLOPOS)
+        );
         let spec = "-Zunstable-options -Zjson-target-spec --target targets/x86_64-unknown-slopos.json --release";
         let system = "-C linker=rust-lld -C linker-flavor=ld.lld -C panic=abort";
         let shown: Vec<String> = plan.iter().map(Invocation::display).collect();
@@ -721,7 +720,12 @@ mod tests {
                     .get_args()
                     .map(|a| a.to_string_lossy().into_owned())
                     .collect();
-                assert_eq!(args[0], format!("+{}", inv.toolchain));
+                let expected = toolchain::cargo(&inv.toolchain);
+                let lead: Vec<_> = expected
+                    .get_args()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect();
+                assert!(args.starts_with(&lead));
                 assert!(args.ends_with(&strings(&["--message-format=json", "--keep-going"])));
             }
         }
@@ -776,13 +780,6 @@ EMPTY=\"\"
         );
         assert!(shell_words(base, "EMPTY").is_err());
         assert!(shell_words(base, "MISSING").is_err());
-    }
-
-    #[test]
-    fn the_channel_comes_from_rust_toolchain_toml() {
-        let toml = "[toolchain]\nchannel = \"nightly-2026-09-03\"\ncomponents = [\"clippy\"]\n";
-        assert_eq!(toolchain_channel(toml).unwrap(), "nightly-2026-09-03");
-        assert!(toolchain_channel("[toolchain]\n").is_err());
     }
 
     #[test]

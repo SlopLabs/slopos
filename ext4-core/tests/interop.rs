@@ -102,6 +102,26 @@ fn e2fsck(path: &Path, flag: &str) -> (i32, String) {
     (out.status.code().unwrap_or(-1), text(&out))
 }
 
+/// `bytes` at `path`, with a hole for every all-zero 4 KiB block, as
+/// `mke2fs` leaves one. SlopOS charges a process for the blocks it holds,
+/// and a dense copy of every image would hold hundreds of MiB at once.
+fn write_sparse(path: &Path, bytes: &[u8]) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut f = std::fs::File::create(path).unwrap();
+    for block in bytes.chunks(4096) {
+        if block.iter().all(|&b| b == 0) {
+            f.seek(SeekFrom::Current(block.len() as i64)).unwrap();
+        } else {
+            f.write_all(block).unwrap();
+        }
+    }
+    f.set_len(bytes.len() as u64).unwrap();
+}
+
+fn copy_sparse(from: &Path, to: &Path) {
+    write_sparse(to, &std::fs::read(from).unwrap());
+}
+
 struct Image {
     bytes: Vec<u8>,
     bs: usize,
@@ -115,7 +135,7 @@ impl Image {
     }
 
     fn save(&self, path: &Path) {
-        std::fs::write(path, &self.bytes).unwrap();
+        write_sparse(path, &self.bytes);
     }
 
     fn sb(&self) -> &[u8] {
@@ -655,7 +675,7 @@ fn replay_matches_e2fsck() {
     assert!(!out.contains("rror"), "{out}");
 
     let theirs = s.path("theirs.img");
-    std::fs::copy(&base, &theirs).unwrap();
+    copy_sparse(&base, &theirs);
     let (code, log) = e2fsck(&theirs, "-y");
     assert!(code == 0 || code == 1, "{log}");
     let theirs = Image::load(&theirs);
@@ -717,7 +737,7 @@ fn replay_spans_full_descriptors_like_e2fsck() {
     assert!(!out.contains("rror"), "{out}");
 
     let theirs = s.path("theirs.img");
-    std::fs::copy(&base, &theirs).unwrap();
+    copy_sparse(&base, &theirs);
     let (code, log) = e2fsck(&theirs, "-y");
     assert!(code == 0 || code == 1, "{log}");
     let theirs = Image::load(&theirs);

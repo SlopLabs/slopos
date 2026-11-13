@@ -2,6 +2,25 @@
 
 ---
 
+## The kernel faults in the VMA map's B-tree under a guest's `cargo test` build
+
+**Status**: Open
+**Severity**: High (a kernel panic; seen once in four `just test-selfhost` runs)
+**Component**: `mm/src/process_vm.rs`, the `BTreeMap<u64, (u64, VmaRegion)>`
+
+In a `just test-selfhost` run of the commit that ported the gates to xtask,
+the release tests kernel panicked while the guest's `just precommit` built
+the host crates' tests
+(`cargo test`, 10 of 156 units): a supervisor read of user address `0x401272`
+(error code `0x1`, page present) at `0xffffffff806b2630`, which
+`kernel-release-tests.elf` places in `BTreeMap::remove`'s `remove_leaf_kv` on
+the VMA map. The emergency reporter then faulted again, so there is no
+backtrace. A node pointer into user space means the map's memory was
+overwritten or freed while still linked. The three runs before it got past
+the same build.
+
+---
+
 ## An install from the live ISO at 512 MiB aborts writing the slots
 
 **Status**: Open

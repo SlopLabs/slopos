@@ -8,8 +8,8 @@
 # definition across four callers is how a stamp that never goes stale gets
 # shipped, so they live here once.
 #
-# Portability matches scripts/lib/gate_common.sh: bash 3.2, no `mapfile`, no
-# `declare -A`, no GNU-only `realpath`.
+# Portability: bash 3.2, no `mapfile`, no `declare -A`, no GNU-only
+# `realpath`.
 
 # The materialised sysroot, the rustup name it is linked under, and the stamp
 # inside it. Repo-relative so the self-test can point them at a scratch tree.

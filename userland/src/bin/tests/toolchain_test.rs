@@ -307,8 +307,13 @@ fn toolchain_starts() -> bool {
         rustc.took.as_millis()
     ));
     let rust_lld = format!("{prefix}/lib/rustlib/x86_64-unknown-slopos/bin/rust-lld");
-    let tools: [(String, &[&str]); 4] = [
+    let tools: [(String, &[&str]); 9] = [
         (format!("{prefix}/bin/cargo"), &["--version"]),
+        (format!("{prefix}/bin/rustdoc"), &["--version"]),
+        (format!("{prefix}/bin/rustfmt"), &["--version"]),
+        (format!("{prefix}/bin/cargo-fmt"), &["--version"]),
+        (format!("{prefix}/bin/clippy-driver"), &["--version"]),
+        (format!("{prefix}/bin/cargo-clippy"), &["--version"]),
         (format!("{prefix}/bin/clang"), &["--version"]),
         (format!("{prefix}/bin/ld.lld"), &["--version"]),
         (rust_lld, &["-flavor", "gnu", "--version"]),
@@ -1614,6 +1619,112 @@ fn just_runs_a_justfile() -> bool {
     refused.code == Some(1) && said.starts_with("just boot: runs on a Linux or macOS host")
 }
 
+const TIDY_MANIFEST: &str = "[package]
+name = \"tidy\"
+version = \"0.1.0\"
+edition = \"2024\"
+
+[workspace]
+";
+
+const TIDY_UNFORMATTED: &str = "fn main(){let answer=6*7;println!(\"{answer}\");}\n";
+
+const TIDY_FORMATTED: &str = "fn main() {
+    let answer = 6 * 7;
+    println!(\"{answer}\");
+}
+";
+
+/// Rung 16: `cargo fmt` finds rustfmt beside it, `--check` refuses a crate
+/// out of its form, and a plain run rewrites the crate into it.
+fn rustfmt_formats_a_crate() -> bool {
+    let prefix = match toolchain() {
+        Ok(p) => p,
+        Err(verdict) => return verdict,
+    };
+    let Some(dir) = scratch(
+        "rustfmt",
+        &[
+            ("Cargo.toml", TIDY_MANIFEST),
+            ("src/main.rs", TIDY_UNFORMATTED),
+        ],
+    ) else {
+        return false;
+    };
+    let cargo = format!("{prefix}/bin/cargo");
+    let Some(refused) = run(&dir, &cargo, &["fmt", "--", "--check"], &[]) else {
+        return false;
+    };
+    if refused.code != Some(1) || !refused.stdout.contains("let answer = 6 * 7;") {
+        note(&format!(
+            "cargo fmt --check on an unformatted crate exited {:?}, printing {:?} and {:?}",
+            refused.code, refused.stdout, refused.stderr
+        ));
+        return false;
+    }
+    let Some(formatted) = run(&dir, &cargo, &["fmt"], &[]) else {
+        return false;
+    };
+    if !formatted.ok("cargo fmt") {
+        return false;
+    }
+    match fs::read_to_string(format!("{dir}/src/main.rs")) {
+        Ok(text) if text == TIDY_FORMATTED => {}
+        Ok(text) => {
+            note(&format!("cargo fmt wrote {text:?}"));
+            return false;
+        }
+        Err(e) => {
+            note(&format!("src/main.rs: {e}"));
+            return false;
+        }
+    }
+    note(&format!("cargo fmt in {} ms", formatted.took.as_millis()));
+    run(&dir, &cargo, &["fmt", "--", "--check"], &[])
+        .is_some_and(|again| again.ok("cargo fmt --check, formatted"))
+}
+
+const LINTED_MAIN: &str = "fn main() {
+    let v = vec![1, 2, 3];
+    if v.len() == 0 {
+        println!(\"empty\");
+    }
+}
+";
+
+/// Rung 17: `cargo clippy` runs clippy-driver over a crate: one of clippy's
+/// own lints, denied, fails the build with its own diagnostic.
+fn clippy_lints_a_crate() -> bool {
+    let prefix = match toolchain() {
+        Ok(p) => p,
+        Err(verdict) => return verdict,
+    };
+    let Some(dir) = scratch(
+        "clippy",
+        &[("Cargo.toml", TIDY_MANIFEST), ("src/main.rs", LINTED_MAIN)],
+    ) else {
+        return false;
+    };
+    let Some(linted) = run(
+        &dir,
+        &format!("{prefix}/bin/cargo"),
+        &["clippy", "--offline", "--", "-D", "clippy::len_zero"],
+        &[],
+    ) else {
+        return false;
+    };
+    note(&format!("cargo clippy in {} ms", linted.took.as_millis()));
+    if linted.code == Some(0) || !linted.stderr.contains("length comparison to zero") {
+        note(&format!(
+            "cargo clippy exited {:?} without clippy::len_zero's diagnostic: {}",
+            linted.code,
+            linted.stderr.trim()
+        ));
+        return false;
+    }
+    true
+}
+
 fn main() {
     slopos_slibc::test_harness::run(&[
         (
@@ -1645,5 +1756,7 @@ fn main() {
         ("cmake_builds_a_project", cmake_builds_a_project),
         ("std_is_the_clones_fork", std_is_the_clones_fork),
         ("just_runs_a_justfile", just_runs_a_justfile),
+        ("rustfmt_formats_a_crate", rustfmt_formats_a_crate),
+        ("clippy_lints_a_crate", clippy_lints_a_crate),
     ]);
 }

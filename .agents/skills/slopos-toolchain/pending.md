@@ -19,3 +19,19 @@
   just's `os()`, which the justfile resolves recipes by, read nothing.
 - The root workspace excludes `builddir/`, where a `cargo` recipe unpacks its
   crate.
+- The cross-built toolchain carries rustdoc, rustfmt (`cargo fmt`) and clippy
+  (`cargo clippy`): `build.tools` in `bootstrap_slopos_toolchain.sh` names
+  them, and `check_bootstrap_config.sh` holds the plan to building rustdoc
+  and installing rustfmt and clippy for SlopOS. rustdoc is what the
+  base-interface gate reads the abi through; `toolchain_test` gains
+  `rustfmt_formats_a_crate` and `clippy_lints_a_crate`, and `toolchain_starts`
+  asks every new program its version. Compiler patch
+  `0004-bootstrap-cross-tool-llvm-libdir.patch`: bootstrap hands a
+  `rustc_private` tool the build triple's `llvm-config --libdir`, so a tool
+  cross-built for SlopOS linked the Linux libLLVM; it now takes the target's,
+  as `rustc_llvm`'s build script maps it. Pages: `self-hosting/toolchain`
+  (the patch table, the components).
+- The std fork's `env::current_exe()` on SlopOS reads `AT_EXECFN`, the
+  absolute path the kernel opened, through slibc's `getauxval`; it answered
+  `Unsupported` before, and `cargo-fmt` and `cargo-clippy` find `rustfmt` and
+  `clippy-driver` beside themselves through it.

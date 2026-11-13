@@ -42,8 +42,8 @@ description: >
 - A new CI check joins the lane that has its inputs.
 - `kcommand!` goes in a kernel-only crate. Triggers only queue; commands run
   at the bottom half, never in NMI; no program reaches a destructive one.
-- Before a commit: `cargo fmt --all`, `just ci` (or the lanes touched), then
-  the `caveman-commit` skill (`/skill:caveman-commit`) writes the message.
+- Before a commit: `cargo fmt --all`, `just ci` (or the lanes touched; on
+  SlopOS `just precommit`), then the `caveman-commit` skill writes the message.
 
 ## Checks
 

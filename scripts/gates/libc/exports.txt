@@ -1,8 +1,8 @@
-# libc.so dynamic symbol table, held by scripts/check_libc_exports.sh.
+# libc.so dynamic symbol table, held by `xtask libc-exports`.
 #
 # `<name> func`, `<name> object|tls <size>` for data (a data export's size
 # is ABI: a non-PIE executable copy-relocates it), or `<name> <type>` for any
-# other symbol type. Lines are only ever added, by `scripts/check_libc_exports.sh
+# other symbol type. Lines are only ever added, by `xtask libc-exports
 # --record`; removing or changing one breaks programs built outside the base.
 
 _Exit func

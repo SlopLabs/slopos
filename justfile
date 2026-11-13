@@ -12,13 +12,11 @@ ensure_toolchain  := if os() == "slopos" { "true" } else { "scripts/ensure_toolc
 rust_target       := "targets/x86_64-slos.json"
 userland_target   := "targets/x86_64-unknown-slopos.json"
 kernel_rustflags  := env("KERNEL_RUSTFLAGS", "-C force-frame-pointers=yes")
-# The tree's checks (tools/xtask): source gates, kernel-ELF gates, the loose
-# programs gate and clippy. Built for the host into the shared target dir.
+# The tree's checks (tools/xtask): source gates, kernel-ELF gates, the
+# contract gates, the loose programs gate and clippy. Built by `host_cargo` for
+# the system it runs on, into the shared target dir; a build recipe holds its
+# output to them once built, on either system.
 xtask             := host_cargo + " run --locked --release --quiet -p slopos-xtask --"
-# The gates a build recipe holds its output to once built: xtask's on the host.
-# SlopOS builds no xtask yet, so a build there is graded by the host
-# (`just test-selfhost`).
-gate              := if os() == "slopos" { "true" } else { xtask }
 
 build_dir        := env("BUILD_DIR", "builddir")
 cargo_target_dir := build_dir / "target"
@@ -55,9 +53,10 @@ capacity_stage        := build_dir / "capacity-stage"
 # unless TOOLCHAIN_STAGE names another. A root without one builds all the same.
 toolchain_install     := env("TOOLCHAIN_STAGE", build_dir / "slopos-toolchain/install")
 # Free space a root keeps for a checkout's builds: a clean dev and tests system
-# build, kernels, userlands, bases and the C++ runtime, holds 3.8G of it. A root
-# with less is grown.
-root_free_floor       := env("ROOT_FREE_FLOOR", "6G")
+# build, kernels, userlands, bases and the C++ runtime, holds 4.8G of it, and
+# `just precommit` over them (the host crates' tests, clippy's three targets)
+# 11.8G. A root with less is grown.
+root_free_floor       := env("ROOT_FREE_FLOOR", "16G")
 # The log both roots carry: sized for the volume the floor grows a root into,
 # not the size it starts at.
 root_journal_size     := "64M"
@@ -200,12 +199,12 @@ _userland mode:
         scripts/build_userland.sh "{{build_dir}}" "{{cargo_target_dir}}" {{mode}}
 
 _build-userland: (_userland "")
-    {{gate}} programs {{build_dir}}/apps/bin/*
+    {{xtask}} programs {{build_dir}}/apps/bin/*
 
 # The programs the extensions of `extension_test`, `extension_action_test` and
 # `extension_service_test` carry are held to the gate here.
 _build-userland-tests: _build-userland (_userland "--test")
-    {{gate}} programs {{build_dir}}/libc_probe.elf {{build_dir}}/ext_daemon.elf
+    {{xtask}} programs {{build_dir}}/libc_probe.elf {{build_dir}}/ext_daemon.elf
 
 # `VERITY=off` for the tests image because the suite writes to it; the
 # shipped image keeps its trailer and `test_verity_artifact_*` mounts it.
@@ -367,8 +366,8 @@ _kernel variant features='':
     CARGO="{{cargo}}" RUST_TARGET={{rust_target}} KERNEL_RUSTFLAGS="{{kernel_rustflags}}" \
     KERNEL_RELEASE={{ if variant =~ '^release' { "1" } else { "0" } }} \
         scripts/build_kernel.sh "{{build_dir}}" "{{cargo_target_dir}}" "{{features}}"
-    {{gate}} elf --variant {{variant}} "{{build_dir}}/kernel-{{variant}}.elf"
-    {{gate}} lint kernel-pml4-writer
+    {{xtask}} elf --variant {{variant}} "{{build_dir}}/kernel-{{variant}}.elf"
+    {{xtask}} lint kernel-pml4-writer
 
 [doc("Build a system: the kernel, builddir/kernel-<VARIANT>.elf, and the base it boots with, builddir/initramfs.cpio, or builddir/initramfs-tests.cpio for a tests variant, whose kernel carries the suite and whose base the suite's programs. VARIANT is release, dev, tests or release-tests; KERNEL_RELEASE=1 makes release the default, dev otherwise")]
 build VARIANT=kernel_variant: (_variant-kernel VARIANT) (_variant-base VARIANT)
@@ -380,8 +379,8 @@ build-kernel-only: (_kernel kernel_variant)
 
 # The apps go in as whoever runs this while /usr/local is theirs, and through
 # privd's org.slopos.software.install once it is the system's.
-[doc("On SlopOS, put a build's base to use: build the userland, the base and the apps for VARIANT (release, dev or tests) and make that base the one every slot boots, running it at once when the running kernel serves it and leaving it for the next boot otherwise; bootctl base rollback takes it back. The apps go to /usr/local once the running libc.so is the one they were built against; otherwise the command that installs them is printed. A base that needs a new kernel goes in first, then just install-kernel")]
-install VARIANT="release": (_slopos "install") (_variant-base VARIANT)
+[doc("On SlopOS, put a build's base to use: build the userland, the base and the apps for VARIANT (release, dev or tests), hold the build to the base interface and libc.so's growth, and make that base the one every slot boots, running it at once when the running kernel serves it and leaving it for the next boot otherwise; bootctl base rollback takes it back. The apps go to /usr/local once the running libc.so is the one they were built against; otherwise the command that installs them is printed. A base that needs a new kernel goes in first, then just install-kernel")]
+install VARIANT="release": (_slopos "install") (_variant-base VARIANT) base-interface libc-exports
     #!/usr/bin/env bash
     set -euo pipefail
     bootctl base install "$PWD/{{build_dir}}/{{ if VARIANT =~ 'tests$' { "initramfs-tests.cpio" } else { "initramfs.cpio" } }}"
@@ -393,8 +392,8 @@ install VARIANT="release": (_slopos "install") (_variant-base VARIANT)
     fi
     echo "install: bootctl base rollback takes the base back; a kernel it needs goes in with just install-kernel"
 
-[doc("On SlopOS, try a build's kernel: build the VARIANT kernel (release, dev, tests or release-tests) and put it into the boot slot that is not the default, arming one boot of it, which bootctl reboot tries and bootctl commit keeps")]
-install-kernel VARIANT="release": (_slopos "install-kernel") (_variant-kernel VARIANT)
+[doc("On SlopOS, try a build's kernel: build the VARIANT kernel (release, dev, tests or release-tests), hold the tree to the base interface, and put the kernel into the boot slot that is not the default, arming one boot of it, which bootctl reboot tries and bootctl commit keeps")]
+install-kernel VARIANT="release": (_slopos "install-kernel") (_variant-kernel VARIANT) base-interface
     #!/usr/bin/env bash
     set -euo pipefail
     slot="$(bootctl spare)"
@@ -1158,7 +1157,7 @@ test-capacity: (_host "test-capacity") _build-run-tests _fs-image-capacity
 # leaves a clone on /, the second reads it back and climbs the ladder again.
 # Separate from `just test`, which runs the same utests on a root with no
 # toolchain and no clone, and they pass by saying so.
-[doc("Toolchain check at 6G on the self-hosting root: hold the toolchain to its manifest and the clone to its vendored crates, climb the ladder (rustc, rustc+cc, cargo with a build script and a proc macro, cargo fetching a git dependency through libgit2 and a crate over HTTPS from a loopback sparse registry, clang, git reading the clone and reaching the host, ssh and git over ssh to the host's sshd, git cloning GitHub, cargo resolving the lockfiles from crates.io over HTTPS, a bash script, a Ninja graph, a CMake project, and just running a justfile and refusing `just boot` in the clone), and find a clone made on / intact after a power-off")]
+[doc("Toolchain check at 6G on the self-hosting root: hold the toolchain to its manifest and the clone to its vendored crates, climb the ladder (rustc, rustc+cc, cargo with a build script and a proc macro, cargo fetching a git dependency through libgit2 and a crate over HTTPS from a loopback sparse registry, clang, git reading the clone and reaching the host, ssh and git over ssh to the host's sshd, git cloning GitHub, cargo resolving the lockfiles from crates.io over HTTPS, a bash script, a Ninja graph, a CMake project, just running a justfile and refusing `just boot` in the clone, cargo fmt formatting a crate and cargo clippy linting one), and find a clone made on / intact after a power-off")]
 test-toolchain: (_host "test-toolchain") _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1204,7 +1203,7 @@ test-toolchain: (_host "test-toolchain") _build-run-tests
         { echo "FAIL: boot 1 committed '${written:-nothing}' in /home/user/clone and boot 2 found '${survived:-nothing}'" >&2; exit 1; }
     echo "test-toolchain: the ladder held on both boots, and the clone's commit $written survived the power-off"
 
-[doc("Self-hosting check: the guest takes HEAD over git and builds the dev and tests systems — kernel, userland and base — on the self-hosting root; the host holds the root to e2fsck, runs the ELF gates on both kernels and the suite on the guest's tests kernel and base")]
+[doc("Self-hosting check: the guest takes HEAD over git, builds the dev and tests systems — kernel, userland and base — on the self-hosting root and grades its own build with `just precommit`; the host holds the root to e2fsck, confirms the ELF gates on both kernels and runs the suite on the guest's tests kernel and base")]
 test-selfhost: (_host "test-selfhost") _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1240,7 +1239,7 @@ test-selfhost: (_host "test-selfhost") _build-run-tests
 # prof=on. No clean-tree check, so it runs on an uncommitted kernel; the guest
 # builds HEAD. The libc.so the boot ran is kept beside the log: user ticks
 # symbolize against the objects that took them.
-[doc("Benchmark the guest's kernel build: boot the optimized tests kernel on the self-hosting root with prof=on, build the dev and tests kernels from clean, and summarize where the time went (builddir/bench-selfhost.log)")]
+[doc("Benchmark the guest's loop: boot the optimized tests kernel on the self-hosting root with prof=on, build the dev and tests kernels from clean, grade them with `just precommit`, and summarize where the time went (builddir/bench-selfhost.log)")]
 bench-selfhost: (_host "bench-selfhost") _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1504,13 +1503,15 @@ test-remote: (_host "test-remote") _build-userland _base-recipes
     fi
     echo "test-remote: identity, commands, files, kernel log, the sealed pairing, install and power-off all held"
 
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, shooter-core, net-core, nvme-core, rtl8168-core, usb-core, hid-core, cpufreq-core, ext4-core, verity-core, http-core, remote-core, installer-core, priv-core, fat-core, boot-core, tree-core, accounts-core, extension-core, tls-core, chrome-core, fate-core, splash-core, theme-core, settings-core, settings-app, slibc-core, kallsyms, initramfs, extension, icons, the gates of tools/xtask and tools/run_tests, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+# /tmp is memory on SlopOS, and some of these tests write disk images: there
+# they take the root's /var/tmp.
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, shooter-core, net-core, nvme-core, rtl8168-core, usb-core, hid-core, cpufreq-core, ext4-core, verity-core, http-core, remote-core, installer-core, priv-core, fat-core, boot-core, tree-core, accounts-core, extension-core, tls-core, chrome-core, fate-core, splash-core, theme-core, settings-core, settings-app, slibc-core, kallsyms, initramfs, extension, icons, the gates of tools/xtask and, on Linux and macOS, tools/run_tests, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{host_cargo}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-shooter-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-verity-core -p slopos-http-core -p slopos-remote-core -p slopos-installer-core -p slopos-priv-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-accounts-core -p slopos-settings-core -p slopos-settings-app -p slopos-extension-core -p slopos-tls-core -p slopos-chrome-core -p slopos-fate-core -p slopos-splash-core -p slopos-theme-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs -p slopos-extension -p slopos-icons -p slopos-xtask
-    just check-tests-host
+    {{ if os() == "slopos" { "TMPDIR=/var/tmp " } else { "" } }}{{host_cargo}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-shooter-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-verity-core -p slopos-http-core -p slopos-remote-core -p slopos-installer-core -p slopos-priv-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-accounts-core -p slopos-settings-core -p slopos-settings-app -p slopos-extension-core -p slopos-tls-core -p slopos-chrome-core -p slopos-fate-core -p slopos-splash-core -p slopos-theme-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs -p slopos-extension -p slopos-icons -p slopos-xtask
+    {{ if os() == "slopos" { "" } else { "just check-tests-host" } }}
 
 [doc("Run the Go test runner's own unit tests and its log gates' (host-side, no QEMU)")]
-check-tests-host:
+check-tests-host: (_host "check-tests-host")
     cd tools/run_tests && go vet ./... && go test ./...
 
 [doc("Hold an image a boot wrote to e2fsck -fn and to being at rest: clean, no journal to replay; the tests image, or any with --map, also to the ownership map")]
@@ -1644,18 +1645,36 @@ check-clang-driver:
 verify FILTER='':
     scripts/verify.sh "{{FILTER}}"
 
+[doc("Hold the private call surface (abi's private calls and the Linux calls the kernel answers) to BASE_INTERFACE; --record appends the next ledger row, --print writes the surface")]
+base-interface *FLAGS:
+    {{xtask}} base-interface {{FLAGS}}
+
+# The layouts are dumped by the clang scripts/cxx_host_tools.sh resolves: the
+# host's, or SlopOS's own.
+[doc("Hold this build's libc.so exports and slibc/include's record layouts to only growing (scripts/gates/libc/); --record adds what is new and refuses a removal or change (requires a prior userland build)")]
+libc-exports *FLAGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tools="$(scripts/cxx_host_tools.sh)"
+    eval "$tools"
+    CLANG="$CLANG" {{xtask}} libc-exports {{FLAGS}} "{{build_dir}}/libc.so"
+
+[doc("Run the gates over the tree and the dev kernel, on either system: the base interface, every source gate (`xtask lint`) and the dev kernel's ELF gates (requires a prior `just build-kernel-only` or `just build dev`)")]
+check-gates: base-interface
+    {{xtask}} lint
+    {{xtask}} elf --variant dev {{build_dir}}/kernel-dev.elf stack-sizes softfloat registry-sections stack-rewind authority
+
 # Single source of truth for the gate list: CI calls this recipe rather than
 # duplicating it inline. The Rust and Go gates' own fixtures run under
-# `just test-host`; the toolchain gates that stay shell scripts carry a
-# `--self-test`, run first, since a gate whose patterns have rotted produces
-# output nobody can trust.
-[doc("Run every framekernel gate — the toolchain and pin gates, every source gate (`xtask lint`) and the dev kernel's ELF gates — no fmt, clippy, KernMiri or Verus (requires a prior `just build`)")]
-check-framekernel-gates:
+# `just test-host`; the toolchain and image gates that stay shell scripts read
+# the host's tools and carry a `--self-test`, run first, since a gate whose
+# patterns have rotted produces output nobody can trust.
+[doc("Run every framekernel gate — check-gates, then the host's toolchain, pin and image-tool gates — no fmt, clippy, KernMiri or Verus (requires a prior `just build`)")]
+check-framekernel-gates: (_host "check-framekernel-gates") check-gates
     scripts/check_fs_image.sh --self-test
     scripts/check_fs_replay.sh --self-test
     python3 scripts/fs_tree.py --self-test
     python3 scripts/gen_verity.py --self-test
-    scripts/check_base_interface.sh --self-test
     scripts/check_toolchain_pin.sh --self-test
     scripts/check_rustc_target.sh --self-test
     scripts/check_cxx_pin.sh --self-test
@@ -1664,7 +1683,6 @@ check-framekernel-gates:
     scripts/check_bootstrap_config.sh --self-test
     scripts/check_recipes.sh --self-test
     scripts/check_libc_license.sh --self-test
-    scripts/check_libc_exports.sh --self-test
     scripts/check_codegen_backend.sh --self-test
     scripts/check_linker_script.sh --self-test
     scripts/check_offline_build.sh --self-test
@@ -1678,10 +1696,6 @@ check-framekernel-gates:
     scripts/check_bootstrap_config.sh
     scripts/check_recipes.sh
     scripts/check_libc_license.sh
-    scripts/check_libc_exports.sh {{build_dir}}/libc.so
-    scripts/check_base_interface.sh
-    {{xtask}} lint
-    {{xtask}} elf --variant dev {{build_dir}}/kernel-dev.elf stack-sizes softfloat registry-sections stack-rewind authority
     just check-toolchain-coverage
 
 [doc("Hold every codegen backend and linker to what targets/x86_64-slos.json and link.ld need. `llvm`/`lld` are the shipping pair; `cranelift`/`wild` skip when not installed.")]
@@ -1709,6 +1723,12 @@ check-framekernel: check-framekernel-gates clippy
 # fresh answer, not a cached one.
 [doc("Every CI lane on this machine, in CI's order: what a green CI run proves, reproduced locally. The toolchain lane fetches ~2 GB of pinned sources")]
 ci: ci-gates ci-candidates ci-suite ci-toolchain check-miri verify
+
+# The lane a SlopOS machine runs before a commit, and the same command on the
+# host. `just ci` adds what needs the host: the suite under QEMU, the
+# toolchain and image gates, KernMiri and Verus.
+[doc("Before a commit, on either system: formatting, the host crates' tests, clippy over every target, the dev system built, and every gate over the tree and that build, the base interface and libc.so's growth among them")]
+precommit: fmt test-host clippy (build "dev") check-gates libc-exports
 
 [doc("CI's gates lane: formatting, the host tests, clippy, the dev kernel and every framekernel gate, the offline build, and the release kernel with its gates")]
 ci-gates:
@@ -1775,7 +1795,7 @@ ci-toolchain: (_host "ci-toolchain")
     fi
     if [ "$userland" = 1 ]; then
         ok scripts/check_cxx_pin.sh
-        ok scripts/check_libc_exports.sh --self-test && ok scripts/check_libc_exports.sh --require {{build_dir}}/libc.so
+        ok just libc-exports
         ok scripts/build_recipes.sh && ok scripts/check_recipes.sh
     fi
     if [ "$userland" = 1 ] && [ "$llvm" = 1 ]; then

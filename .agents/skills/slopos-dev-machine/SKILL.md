@@ -50,7 +50,7 @@ description: >
 - `python3 scripts/fs_tree.py --self-test`: tree installs, manifests, refusals
 - `python3 scripts/gen_verity.py --self-test`: seals, the record, guest-owned blocks
 - `just test-toolchain`: manifest, vendored clone, the ladder, a clone across a power-off
-- `just test-selfhost`: the guest's build of `HEAD` under the host's gates and suite
+- `just test-selfhost`: the guest's build of `HEAD`, graded by its `just precommit` and the host's suite
 - `just test-install-guest`: a guest build installed into a slot and booted
 
 ## Not yet in the docs

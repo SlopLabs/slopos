@@ -102,6 +102,41 @@ fn guest_builds_the_tests_system() -> bool {
     guest_builds("tests", "initramfs-tests.cpio", false)
 }
 
+/// The lane a commit made on SlopOS passes, run in the workspace over its
+/// own build: formatting, the host crates' tests, clippy and every gate over
+/// the tree and the dev system.
+fn guest_grades_its_build() -> bool {
+    let root = match &*TREE {
+        Ok((root, _)) => root,
+        Err((verdict, why)) => {
+            note(why);
+            return *verdict;
+        }
+    };
+    let started = Instant::now();
+    match just(root, &["precommit"]).status() {
+        Ok(status) if status.success() => {
+            let used = FREE_WHEN_CLEAN
+                .get()
+                .map_or(0, |clean| clean.saturating_sub(root_free_bytes()));
+            note(&format!(
+                "just precommit in {:.1} s; the builds and checks hold {} MiB of the root",
+                started.elapsed().as_secs_f64(),
+                used >> 20
+            ));
+            true
+        }
+        Ok(status) => {
+            note(&format!("just precommit exited {:?}", status.code()));
+            false
+        }
+        Err(e) => {
+            note(&format!("spawning just: {e}"));
+            false
+        }
+    }
+}
+
 /// The tree's developer finds it where they left it.
 fn guest_returns_to_its_checkout() -> bool {
     match &*TREE {
@@ -124,6 +159,7 @@ fn main() {
             "guest_builds_the_tests_system",
             guest_builds_the_tests_system,
         ),
+        ("guest_grades_its_build", guest_grades_its_build),
         (
             "guest_returns_to_its_checkout",
             guest_returns_to_its_checkout,

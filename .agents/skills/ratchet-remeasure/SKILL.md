@@ -3,8 +3,8 @@ name: ratchet-remeasure
 description: >
   Re-measure a tracked gate file under `scripts/gates/` after a gate fails on
   a cap, an allowlist or a recorded list. Use when `xtask elf`, `run_tests
-  gate`, `check_base_interface.sh` or `check_libc_exports.sh` rejects a change
-  you meant to make.
+  gate`, `xtask base-interface` or `xtask libc-exports` rejects a change you
+  meant to make.
 ---
 
 A ratchet failure is a measurement to re-take, not a number to raise. First
@@ -44,10 +44,9 @@ that inverted or a call path that reached a power primitive may be the bug.
   `builddir/ci-test.log`; then `builddir/run_tests gate <name> --variant
   tests --emit-allowlist --log builddir/ci-test.log >
   scripts/gates/<name>/tests.txt`.
-- Base interface: `scripts/check_base_interface.sh --record`, with
-  `BASE_INTERFACE` in `slopos-abi` raised by one. `--print` shows the surface
-  for a diff.
-- libc: `scripts/check_libc_exports.sh --record builddir/libc.so`.
+- Base interface: `just base-interface --record`, with `BASE_INTERFACE` in
+  `slopos-abi` raised by one. `--print` shows the surface for a diff.
+- libc: `just libc-exports --record`, after a userland build.
 - Codegen and linker verdicts (`scripts/gates/{codegen,linker}/`) fail in
   both directions: a `lacks` the probe now finds present is a decision to
   re-take, not a line to flip.

@@ -9,7 +9,7 @@ use std::string::{String, ToString};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::vec::Vec;
-use std::{format, fs, thread, vec};
+use std::{eprintln, format, fs, thread, vec};
 
 use crate::client::{Client, ClientConfig};
 use crate::conn::Error;
@@ -18,6 +18,10 @@ use crate::server::{Server, ServerConfig};
 use crate::suite::CipherSuite;
 use crate::testpki::{self, AltName, Key, Profile};
 use crate::x509::TrustStore;
+
+fn host_openssl() -> bool {
+    Command::new("openssl").arg("version").output().is_ok()
+}
 
 fn openssl(args: &[&str], dir: &Path) {
     let out = Command::new("openssl")
@@ -249,6 +253,10 @@ fn against_s_server(key_args: &[&str], suite: CipherSuite, openssl_suite: &str) 
 
 #[test]
 fn client_against_openssl_with_ecdsa_p256() {
+    if !host_openssl() {
+        eprintln!("skipped: needs openssl");
+        return;
+    }
     let args = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256"];
     against_s_server(
         &args,
@@ -269,6 +277,10 @@ fn client_against_openssl_with_ecdsa_p256() {
 
 #[test]
 fn client_against_openssl_with_ecdsa_p384_and_p521() {
+    if !host_openssl() {
+        eprintln!("skipped: needs openssl");
+        return;
+    }
     let args = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-384"];
     against_s_server(
         &args,
@@ -285,6 +297,10 @@ fn client_against_openssl_with_ecdsa_p384_and_p521() {
 
 #[test]
 fn client_against_openssl_with_rsa_pss() {
+    if !host_openssl() {
+        eprintln!("skipped: needs openssl");
+        return;
+    }
     let args = ["-newkey", "rsa:2048"];
     against_s_server(
         &args,
@@ -405,6 +421,10 @@ fn s_client_against_server(suite: CipherSuite, openssl_suite: &str) {
 
 #[test]
 fn openssl_client_against_server() {
+    if !host_openssl() {
+        eprintln!("skipped: needs openssl");
+        return;
+    }
     s_client_against_server(CipherSuite::Aes128GcmSha256, "TLS_AES_128_GCM_SHA256");
     s_client_against_server(CipherSuite::Aes256GcmSha384, "TLS_AES_256_GCM_SHA384");
     s_client_against_server(

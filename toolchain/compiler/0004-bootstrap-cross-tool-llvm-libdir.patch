@@ -1,0 +1,15 @@
+--- a/src/bootstrap/src/core/builder/cargo.rs
++++ b/src/bootstrap/src/core/builder/cargo.rs
+@@ -1242,7 +1242,11 @@
+                 .arg("--libdir")
+                 .run_capture_stdout(self)
+                 .stdout();
+-            let llvm_libdir = llvm_libdir_raw.trim();
++            // The build triple's llvm-config answers with its own libdir. A tool
++            // cross-built for another host links that host's LLVM, in the
++            // directory `rustc_llvm`'s build script maps it to the same way.
++            let llvm_libdir =
++                llvm_libdir_raw.trim().replace(&*self.host_target.triple, &target.triple);
+             if target.is_msvc() {
+                 rustflags.arg(&format!("-Clink-arg=-LIBPATH:{llvm_libdir}"));
+             } else {

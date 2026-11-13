@@ -1,19 +1,20 @@
-# The private call surface behind slopos_abi::BASE_INTERFACE. Data for
-# scripts/check_base_interface.sh.
+# The call surface behind slopos_abi::BASE_INTERFACE. Data for
+# `xtask base-interface`.
 #
 # The surface is every SlopOS-private syscall's number and signature, the abi
 # items those signatures name or the calls' docs link, everything reachable
 # from them through field and alias types — and the `root` globs below, for
 # what a call reads or writes that its signature cannot name: records behind
-# a byte buffer, op and flag families, wire-packing helpers. A glob matches
-# `::`-joined canonical paths, inherent members included
-# (`slopos_abi::ring::*` takes `RingLayout::new`'s offsets too). A glob that
-# matches nothing fails as dead. Never root slopos_abi::base_interface: the
-# number cannot digest itself.
+# a byte buffer, op and flag families, wire-packing helpers. It also holds the
+# Linux-numbered calls the kernel answers, read from the SYSCALL_TABLE in
+# core/src/syscall/handlers.rs. A glob matches `::`-joined canonical paths,
+# inherent members included (`slopos_abi::ring::*` takes `RingLayout::new`'s
+# offsets too). A glob that matches nothing fails as dead. Never root
+# slopos_abi::base_interface: the number cannot digest itself.
 #
 # Below the roots, the ledger: `interface <n> <sha256 of the surface>`, oldest
-# first, contiguous from 1, appended only by `check_base_interface.sh
-# --record`. A row is never rewritten: a changed surface takes the next number.
+# first, contiguous from 1, appended only by `xtask base-interface --record`.
+# A row is never rewritten: a changed surface takes the next number.
 
 # caps_drop's mask bits; spawn_path's `caps`.
 root slopos_abi::caps::*
@@ -99,3 +100,4 @@ interface 9 8cdf3e3f163853973b864a916963d002f2efe55a8f65caf20e062d575eb11b2e
 interface 10 b080ae677942152163ca6d5c2cb74bc2b92383489c10528d21e4a9207090865a
 interface 11 f657b7ccd820e252a47954fe434f375957ffb52adb153f2bcdb64da684369803
 interface 12 6e24dbac1b584a2a56930c0a37da392544ce594af3744e1a5e4ef79353678010
+interface 13 d1cef7c29028038296011a5951051aced415f16b0d190e9fcb85ca3b7cd02928

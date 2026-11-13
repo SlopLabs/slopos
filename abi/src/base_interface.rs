@@ -1,13 +1,14 @@
 //! The interface number that ties a base to the kernels that can run it.
 //!
 //! A base is built against one number; a kernel serves a range of them.
-//! `scripts/check_base_interface.sh` holds the private call surface — the
-//! private syscalls and every structure they take — to the number, so the
-//! surface cannot change while the number stays.
+//! `xtask base-interface` holds the call surface — the private syscalls and
+//! every structure they take, and the Linux-numbered calls the kernel answers
+//! — to the number, so the surface cannot change while the number stays.
 
-/// The interface of this tree's private call surface. Any change to a
-/// SlopOS-only call's number, arguments or structures takes the next number.
-pub const BASE_INTERFACE: u32 = 12;
+/// The interface of this tree's call surface. Any change to a SlopOS-only
+/// call's number, arguments or structures, or to which Linux calls the kernel
+/// answers, takes the next number.
+pub const BASE_INTERFACE: u32 = 13;
 
 /// The oldest interface a kernel built from this tree still serves. Before v1
 /// that is [`BASE_INTERFACE`]: a kernel serves the base of its own tree alone,

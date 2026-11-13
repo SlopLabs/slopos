@@ -83,9 +83,9 @@ Tests are `stest!` (kernel) and `utest!` (userland), run under QEMU. Verify with
 ## Pre-commit
 
 1. `cargo fmt --all`, and stage what it reformatted. Never commit unformatted Rust.
-2. `just ci`, or the lanes the change touches.
-3. Write the message with skill `caveman-commit`, always. Never hand-write one.
-4. Commit directly to `develop`. Do not create a branch, open a PR or push unless asked.
+2. `just ci` or the lanes the change touches; on SlopOS `just precommit`.
+3. Write the message with skill `caveman-commit`, always; never by hand.
+4. Commit directly to `develop`; no branch, PR or push unless asked.
 
 Say in the message what moved a ratchet.
 

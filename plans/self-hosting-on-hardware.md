@@ -22,12 +22,11 @@ The system is a kernel and a base, each replaced its own way:
 `BASE_INTERFACE` ties a kernel to a base, and `libc.so`'s exports tie a
 base to what runs outside it.
 
-A Linux machine is needed today for two things this plan takes on:
-
-| Step | What needs Linux |
-|------|------------------|
-| Formatting, linting, gating | The cross-built toolchain carries `cargo` and `src` alone. On SlopOS the justfile's `gate` skips `xtask elf` and `xtask programs`. The base-interface and libc-exports gates need `python3`, and the second `llvm-readobj` |
-| Testing | The suite boots under QEMU, and the tests kernel starts the userland tests too, so a test of a program costs a kernel boot. A slot's kernel takes extra boot options only when it was compiled with `SLOPOS_BUILTIN_CMDLINE`; the rest are in `limine.conf` on the ESP, which nothing writes after install |
+A Linux machine is needed today for one thing this plan takes on: testing.
+The suite boots under QEMU, and the tests kernel starts the userland tests
+too, so a test of a program costs a kernel boot. A slot's kernel takes extra
+boot options only when it was compiled with `SLOPOS_BUILTIN_CMDLINE`; the
+rest are in `limine.conf` on the ESP, which nothing writes after install.
 
 Rules every phase keeps:
 
@@ -48,8 +47,8 @@ The justfile is the one build interface; `scripts/selfhost.sh` is gone.
 `just` 1.59.0 is a toolchain program (`toolchain/recipes/just/`, built by
 the `cargo` recipe template against a lock that resolves `libc`, `nix`,
 `rustix`, `getrandom` and `errno` to the fork and the `toolchain/crates/`
-ports), held by the `just_runs_a_justfile` rung. `cargo`, `host_cargo`,
-`xtask`, `ensure_toolchain` and `gate` resolve by `os()`. A recipe that
+ports), held by the `just_runs_a_justfile` rung. `cargo`, `host_cargo` and
+`ensure_toolchain` resolve by `os()`. A recipe that
 emulates or needs the host's tools depends on `_host`; `install [variant]`
 and `install-kernel [variant]` depend on `_slopos`; each refuses elsewhere in
 one line. `slopos_userland::selfhost` runs `just build`, `just install` and
@@ -57,51 +56,24 @@ one line. `slopos_userland::selfhost` runs `just build`, `just install` and
 fork by Linux's `sysconf`/`pathconf` names and five group and password
 declarations.
 
-## Phase 2: the gates where the build runs
+## Phase 2: the gates where the build runs (done)
 
-**For:** a build made on SlopOS to be held to what CI holds a host build to,
-and the pre-commit steps to be possible there.
-
-Build:
-
-1. `rustfmt` and `clippy` in the cross-built toolchain: the `tools` list in
-   `scripts/bootstrap_slopos_toolchain.sh`, and a rung each in
-   `toolchain_test`. `just fmt` and `just clippy` then run on SlopOS.
-2. `xtask` built natively. Its dependencies are `syn`, `object`,
-   `iced-x86`, `rustc-demangle` and `serde_json`, none of which reaches the
-   system beyond std. The justfile's `gate` is then `xtask` on both
-   systems.
-3. The two contract gates as `xtask` modules, with their fixtures as tests:
-   `scripts/check_base_interface.sh` (a Python parser over rustdoc's JSON)
-   and `scripts/check_libc_exports.sh` (`llvm-readobj` and a Python
-   canonicaliser). They guard the two contracts an install depends on, so
-   they run before `just install` writes anything.
-4. `check-framekernel-gates` split by what each line reads: the gates over
-   the tree and the built binaries run on both systems; the self-tests of
-   the host's image tools (`fs_tree.py`, `gen_verity.py`,
-   `check_fs_image.sh`) stay with the emulate recipes.
-5. A lane a SlopOS machine can run before a commit, named in `AGENTS.md`'s
-   pre-commit steps beside `just ci`.
-6. The Linux-numbered calls the kernel answers, in the surface the
-   base-interface gate digests. The gate reads `slopos-abi` alone, and
-   which calls are answered is the dispatch table in
-   `core/src/syscall/handlers.rs`. So a base that starts using a call the
-   kernel has just gained installs live, under the same number, on a
-   kernel without it. In the digest, a newly answered call takes the next
-   number and the pair path of phase 3.
-
-The same holds for `xtask` and for `cargo test` (which needs std's `test`
-crate for the target, and decides whether `just test-host` joins the
-lane): what they call and SlopOS lacks is a slibc or kernel fix. Still to
-settle: how the layout half of the libc-exports gate gets its input
-without Python.
-
-Until step 3 lands, a change to a private call cannot be recorded on
-SlopOS: `--record` needs `python3`.
-
-Done when `just test-selfhost` has the guest grade its own build with that
-lane, and the host's second grading of the exported kernels only confirms
-it.
+The cross-built toolchain carries rustdoc, rustfmt and clippy (compiler
+patch 0004 links a cross-built `rustc_private` tool against SlopOS's
+libLLVM; std's `current_exe` reads `AT_EXECFN`), held by the
+`rustfmt_formats_a_crate` and `clippy_lints_a_crate` rungs. `xtask` builds
+natively, taking `cargo +<toolchain>` only where
+rustup is, so the justfile's `gate` is gone. The two contract gates are
+`xtask base-interface` and `xtask libc-exports`, their scripts and Python
+helpers gone: the first also digests the Linux calls `SYSCALL_TABLE`
+answers (interface 13), the second reads `.dynsym` with `object` and dumps
+layouts with the clang `cxx_host_tools.sh` finds on either system.
+`install` runs them before it writes. `check-gates` (both systems) holds
+the tree and the dev kernel; `check-framekernel-gates` adds the host's
+toolchain and image-tool gates. `just precommit` (`fmt`, `test-host`,
+`clippy`, `build dev`, `check-gates`, `libc-exports`) is the lane
+`AGENTS.md` names for SlopOS, and `test-selfhost`'s guest runs it over its
+own build before the host confirms the kernels.
 
 ## Phase 3: only a kernel change needs a reboot
 
@@ -269,10 +241,7 @@ restart and stays.
 
 ## Order
 
-Phase 1 is done. Phase 2 runs on its `just`, and its port of the
-base-interface gate decides when kernel work that touches a private call can
-be committed from SlopOS. Phase 3 changes what `just install` means. Phase 2
-changes the cross-built toolchain again.
+Phases 1 and 2 are done. Phase 3 changes what `just install` means.
 
 ## What turns on at v1
 

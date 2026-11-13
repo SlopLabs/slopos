@@ -18,9 +18,10 @@ description: >
 
 ## Rules a change must keep
 
-- Any change to a private syscall, or a structure or constant it takes, takes
-  the next `BASE_INTERFACE` and a ledger row. Before v1 a kernel serves that
-  number alone (`BASE_INTERFACE_MIN` follows it), so a call may change or go.
+- Any change to a private syscall, or a structure or constant it takes, or to
+  which Linux calls the kernel answers, takes the next `BASE_INTERFACE` and a
+  ledger row. Before v1 a kernel serves that number alone (`BASE_INTERFACE_MIN`
+  follows it), so a call may change or go.
 - `libc.so` only grows: no export removed, no `slibc/include` layout changed.
 - A program outside the base is dynamic, needs `libc.so` and holds no
   `syscall` instruction. A crate under `apps/` depends only on what
@@ -44,8 +45,8 @@ description: >
 ## Checks
 
 - `just test-host`: `boot-core`, `tree-core` and the packer's host tests
-- `scripts/check_base_interface.sh`: the private surface against its number
-- `scripts/check_libc_exports.sh builddir/libc.so`: exports and layouts only grew
+- `just base-interface`: the private surface against its number
+- `just libc-exports`: exports and layouts only grew
 - `cargo run -p slopos-xtask -- lint app-deps`: what a crate under `apps/` depends on
 - `just test-install`: base choice at boot, install, live switch and rollback
 

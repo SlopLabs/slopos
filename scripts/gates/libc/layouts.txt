@@ -1,11 +1,11 @@
 # Layout of every struct/union slibc/include defines, held by
-# scripts/check_libc_exports.sh.
+# `xtask libc-exports`.
 #
 # `<record> size <n> align <n>`, then `<record> <member.path> <offset>` per
 # field in declaration order (bit-fields as `<byte>:<first>-<last>`). An
 # anonymous record named by a typedef is `typedef <name>`. Lines are only ever
-# added, by `scripts/check_libc_exports.sh --record`; changing one breaks
-# programs built outside the base.
+# added, by `xtask libc-exports --record`; changing one breaks programs built
+# outside the base.
 
 struct __jmp_buf_tag size 200 align 8
 struct __jmp_buf_tag __jmpbuf 0

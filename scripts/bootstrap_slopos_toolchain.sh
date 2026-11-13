@@ -7,9 +7,10 @@ set -euo pipefail
 #                                      [--stage <dir>] [-- <x.py args>]
 #
 # One bootstrap invocation, `--build=x86_64-unknown-linux-gnu
-# --host=x86_64-unknown-slopos`, producing rustc, cargo, rust-lld, clang and
-# libLLVM for SlopOS out of `third_party/slopos-rustc-src`. This script
-# supplies what bootstrap cannot work out itself:
+# --host=x86_64-unknown-slopos`, producing rustc, rustdoc, cargo, rustfmt,
+# clippy, rust-lld, clang and libLLVM for SlopOS out of
+# `third_party/slopos-rustc-src`. This script supplies what bootstrap cannot
+# work out itself:
 #
 #   * A C and C++ compiler for the target. `[target.<triple>].cc` takes no
 #     flags, and only a clang built from this tree knows SlopOS, so the
@@ -298,7 +299,9 @@ build-dir = "$RUSTC_BUILD"
 host = ["$TARGET"]
 target = ["$HOST_TRIPLE", "$TARGET"]
 extended = true
-tools = ["cargo", "src"]
+# rustdoc for the base-interface gate, rustfmt and clippy for \`just fmt\` and
+# \`just clippy\`: what a build made on SlopOS is held to.
+tools = ["cargo", "src", "rustdoc", "rustfmt", "clippy"]
 $(rbs_build_settings)
 
 [llvm]

@@ -860,6 +860,7 @@ dependencies = [
  "quote",
  "rustc-demangle",
  "serde_json",
+ "slopos-verity-core",
  "syn 2.0.119",
 ]
 
