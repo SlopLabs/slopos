@@ -1610,7 +1610,7 @@ fn just_runs_a_justfile() -> bool {
         return false;
     };
     let said = refused.stderr.trim_end();
-    note(&format!("just boot: {said}"));
+    note(said);
     refused.code == Some(1) && said.starts_with("just boot: runs on a Linux or macOS host")
 }
 

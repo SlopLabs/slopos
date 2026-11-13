@@ -1,11 +1,13 @@
 //! The self-hosting workspace as a test sees it: the clone the host seeds at
 //! `/src/slopos`, built with the toolchain it installs at `/usr/local`.
 
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use slopos_abi::fs::{SESSION_GID, SESSION_UID};
+use slopos_abi::fs::{DEFAULT_PATH, SESSION_GID, SESSION_UID};
 
 pub const SOURCE: &str = "/src/slopos";
 /// Room on the root disk; `/tmp` is memory.
@@ -22,15 +24,19 @@ pub fn workspace() -> Result<&'static str, &'static str> {
     Ok(SOURCE)
 }
 
-/// `just <args>` in the tree at `root`, the `just` on the default search path,
-/// run as the guest's developer runs it: as the session, whose clone it is.
-/// cargo keeps its caches in the clone, where the session can write.
+/// `just <args>` in the tree at `root`, run as the guest's developer runs it:
+/// as the session, whose clone it is, with the `PATH` their shell exports.
+/// bash exports none it was not given, and rustc hands a linker it finds no
+/// `PATH` for only its own tools directories. cargo keeps its caches in the
+/// clone, where the session can write.
 pub fn just(root: &str, args: &[&str]) -> Command {
     let mut cmd = Command::new("just");
     cmd.uid(SESSION_UID)
         .gid(SESSION_GID)
         .args(args)
         .current_dir(root)
+        .env("PATH", OsStr::from_bytes(DEFAULT_PATH.to_bytes()))
+        .env_remove("LD_LIBRARY_PATH")
         .env("CARGO_HOME", format!("{root}/builddir/cargo-home"))
         .env("KERNEL_CARGO_TIMINGS", "1")
         .stdin(Stdio::null());

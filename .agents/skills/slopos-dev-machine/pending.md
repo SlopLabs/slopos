@@ -21,8 +21,11 @@
   (the host grades a guest build, `just test-selfhost`). On SlopOS the base's
   recipe programs come from `/usr/local`, and a paired machine's base keeps its
   pairing.
-- Tests run `just` in the clone as the session with `CARGO_HOME` in the
-  clone's `builddir/cargo-home` (`slopos_userland::selfhost::just`).
+- Tests run `just` in the clone as the session with the shell's `PATH`
+  (`DEFAULT_PATH`), no `LD_LIBRARY_PATH` and `CARGO_HOME` in the clone's
+  `builddir/cargo-home` (`slopos_userland::selfhost::just`). A person's
+  `just` keeps their own `CARGO_HOME` (`~/.cargo`), where `selfhost.sh`
+  defaulted to the clone's.
 - `just` is a program of the toolchain (`toolchain/recipes/just/`, the `cargo`
   recipe template); `toolchain_test`'s rung `just_runs_a_justfile` runs a
   justfile and has the clone's `just boot` refuse.
