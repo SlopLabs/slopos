@@ -1,6 +1,6 @@
 # Pending for the docs
 
-- `docs/development/adding-tests`, `docs/development/qemu-options`: a kernel
+- `docs/development/adding-tests`, `docs/getting-started/qemu-options`: a kernel
   test reaches a disk the suite attaches only by identity, through
   `slopos_fs::tests::suite_disks` (feature `tests`).
   `scratch_disk(TestDisk::…)` and `scratch_disk_by_id(b"<by-id name>")`
