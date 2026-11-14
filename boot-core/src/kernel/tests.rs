@@ -145,3 +145,136 @@ fn a_file_cut_or_flipped_anywhere_is_refused_without_a_panic() {
         let _ = served_interfaces(&flipped);
     }
 }
+
+fn section_holding(words: &[u8]) -> Vec<u8> {
+    let mut bytes = words.to_vec();
+    bytes.resize(CMDLINE_BYTES, 0);
+    bytes
+}
+
+fn kernel_with(cmdline: &[u8]) -> Vec<u8> {
+    elf(&[
+        (".text", 1, b"\x90\x90"),
+        (NOTE_SECTION, SHT_NOTE, &served(2, 5)),
+        (CMDLINE_SECTION, SHT_PROGBITS, cmdline),
+        (".rodata", 1, b"after"),
+    ])
+}
+
+#[test]
+fn the_words_the_kernel_carries_read_back() {
+    let file = kernel_with(&section_holding(b"tp.poll watchdog=off"));
+    assert_eq!(cmdline(&file), Ok("tp.poll watchdog=off"));
+    assert_eq!(cmdline(&kernel_with(&section_holding(b""))), Ok(""));
+}
+
+#[test]
+fn stamped_words_read_back_normalised_and_touch_nothing_else() {
+    let file = kernel_with(&section_holding(b"old=1"));
+    let mut stamped = file.clone();
+    assert_eq!(
+        stamp_cmdline(&mut stamped, "\t root=auto \n  quiet  "),
+        Ok(())
+    );
+    assert_eq!(cmdline(&stamped), Ok("root=auto quiet"));
+    let at = file
+        .windows(5)
+        .position(|w| w == b"old=1")
+        .expect("section in file");
+    assert_eq!(file[..at], stamped[..at]);
+    assert_eq!(file[at + CMDLINE_BYTES..], stamped[at + CMDLINE_BYTES..]);
+    assert_eq!(served_interfaces(&stamped), Ok(2..=5));
+    assert_eq!(stamp_cmdline(&mut stamped, ""), Ok(()));
+    assert_eq!(cmdline(&stamped), Ok(""));
+    assert_eq!(stamped[at..at + CMDLINE_BYTES], [0; CMDLINE_BYTES]);
+}
+
+#[test]
+fn the_longest_words_fill_all_but_the_last_byte() {
+    let longest = "x".repeat(CMDLINE_BYTES - 1);
+    let mut file = kernel_with(&section_holding(b""));
+    assert_eq!(stamp_cmdline(&mut file, &longest), Ok(()));
+    assert_eq!(cmdline(&file), Ok(longest.as_str()));
+    let spaced = std::format!("{} y", "x".repeat(CMDLINE_BYTES - 3));
+    assert_eq!(cmdline_fits(&spaced), Ok(()));
+    let spaced = std::format!("{} y", "x".repeat(CMDLINE_BYTES - 2));
+    assert_eq!(cmdline_fits(&spaced), Err(CmdlineError::TooLong));
+}
+
+#[test]
+fn words_that_break_the_rule_are_refused_and_nothing_is_written() {
+    let file = kernel_with(&section_holding(b"keep"));
+    let too_long = "x".repeat(CMDLINE_BYTES);
+    let cases = [
+        (too_long.as_str(), CmdlineError::TooLong),
+        ("a\x01b", CmdlineError::BadWord),
+        ("a\x7f", CmdlineError::BadWord),
+        ("a \x0b", CmdlineError::BadWord),
+        ("caf\u{e9}", CmdlineError::BadWord),
+    ];
+    for (words, want) in cases {
+        assert_eq!(cmdline_fits(words), Err(want), "{words:?}");
+        let mut stamped = file.clone();
+        assert_eq!(stamp_cmdline(&mut stamped, words), Err(want), "{words:?}");
+        assert_eq!(stamped, file);
+    }
+}
+
+#[test]
+fn a_kernel_without_the_section_or_with_a_bad_one_is_refused() {
+    let mut garbage_tail = section_holding(b"a");
+    garbage_tail[CMDLINE_BYTES - 1] = b'z';
+    let cases: [(Vec<u8>, CmdlineError); 10] = [
+        (b"MZ not an elf".to_vec(), CmdlineError::NotElf),
+        (elf(&[(".text", 1, b"x")]), CmdlineError::NoSection),
+        (
+            elf(&[(CMDLINE_SECTION, SHT_NOTE, &section_holding(b""))]),
+            CmdlineError::BadSection,
+        ),
+        (
+            kernel_with(&[0; CMDLINE_BYTES - 1]),
+            CmdlineError::BadSection,
+        ),
+        (
+            kernel_with(&[0; CMDLINE_BYTES + 1]),
+            CmdlineError::BadSection,
+        ),
+        (
+            kernel_with(&[b'x'; CMDLINE_BYTES]),
+            CmdlineError::BadSection,
+        ),
+        (kernel_with(&garbage_tail), CmdlineError::BadSection),
+        (
+            kernel_with(&section_holding(b"two  spaces")),
+            CmdlineError::BadSection,
+        ),
+        (
+            kernel_with(&section_holding(b" leading")),
+            CmdlineError::BadSection,
+        ),
+        (
+            kernel_with(&section_holding(b"tab\there")),
+            CmdlineError::BadSection,
+        ),
+    ];
+    for (mut file, want) in cases {
+        assert_eq!(cmdline(&file), Err(want));
+        let before = file.clone();
+        assert_eq!(stamp_cmdline(&mut file, "ok"), Err(want));
+        assert_eq!(file, before);
+    }
+}
+
+#[test]
+fn a_cmdline_file_cut_or_flipped_anywhere_is_refused_without_a_panic() {
+    let file = kernel_with(&section_holding(b"a b"));
+    for len in 0..file.len() {
+        assert!(cmdline(&file[..len]).is_err(), "cut at {len}");
+    }
+    for at in 0..file.len() {
+        let mut flipped = file.clone();
+        flipped[at] ^= 0xA5;
+        let _ = cmdline(&flipped);
+        let _ = stamp_cmdline(&mut flipped, "c");
+    }
+}

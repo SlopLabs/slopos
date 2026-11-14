@@ -1,10 +1,11 @@
 //! A kernel installed into a boot slot, tried once, committed, and a broken
-//! one rolled back; then a base installed and rolled back, and one the kernel
-//! does not serve passed over for the previous — across the reboots that
-//! takes, on a boot disk `just test-install` attaches, and through the
-//! firmware entry an installer registers for SlopOS's loader. Each boot runs
-//! this test again; a non-volatile UEFI variable says which stage the last
-//! boot reached.
+//! one rolled back; then a base tried and committed, a trial ended, a base
+//! rolled back, and one the kernel does not serve put on the disk beside the
+//! kernel that would serve it, then passed over for the previous — across
+//! the reboots that takes, on a boot disk `just test-install` attaches, and
+//! through the firmware entry an installer registers for SlopOS's loader.
+//! Each boot runs this test again; a non-volatile UEFI variable says which
+//! stage the last boot reached.
 //!
 //! 0 (booted `slopos-a` by the removable-media path, as a disk the firmware
 //!   has no entry for is): register SlopOS's firmware entry first in
@@ -25,17 +26,24 @@
 //!   panic left in the crash partition to `/var/log/crash`, which `bootctl
 //!   status` reports as slot bad's last boot. Boot `slopos-abort` once — its
 //!   kernel takes the format-free abort a lockup takes — and reboot.
-//! 3 (booted `slopos-b` again): that abort left a record too. Install a base
-//!   repacked from the current one under the tag [`TAG_B`], which moves the
-//!   running base to previous, and reboot.
-//! 4: the boot runs base b from current. Roll back, and reboot.
-//! 5: the boot runs the first base from current again, b is previous.
-//!   Install one tagged [`TAG_C`] naming an interface this kernel does not
-//!   serve, which moves the running base to previous again, and reboot.
-//! 6: the kernel passed base c over and runs previous. A base installed now
-//!   replaces c alone, since previous runs; a kernel serving neither base is
-//!   refused a slot, and with such a kernel the default, a base it would serve
-//!   neither of is refused too.
+//! 3 (booted `slopos-b` again): that abort left a record too. Try a base
+//!   repacked from the current one under the tag [`TAG_B`], which runs it
+//!   and writes nothing, commit it, which moves the running base to
+//!   previous, and reboot.
+//! 4: the boot runs base b from current, the first base previous. Try one
+//!   tagged [`TAG_T`] and commit it: b ran before the trial and was
+//!   current, so b moves to previous. Roll back to b, and reboot.
+//! 5: the boot runs b from current, t is previous. Try one tagged
+//!   [`TAG_U`] and end the trial with a rollback, which runs b again and
+//!   writes nothing. One tagged [`TAG_C`] naming an interface this kernel
+//!   does not serve is refused a trial alone and beside a kernel serving
+//!   neither; beside one serving it, it goes to the disk, moving the running
+//!   base to previous, and that kernel into slot a, armed to boot once.
+//!   Clone b into a, which disarms it, and reboot.
+//! 6: the kernel passed base c over and runs b from previous. A base
+//!   installed now replaces c alone, since previous runs; a kernel serving
+//!   neither base is refused a slot, and with such a kernel the default, a
+//!   base it would serve neither of is refused too.
 //!
 //! Without a boot disk it has nothing to do and passes, as `toolchain_test`
 //! does without a toolchain.
@@ -66,6 +74,8 @@ const TAG_B: &str = "install-test-base-b";
 const TAG_C: &str = "install-test-base-c";
 const TAG_D: &str = "install-test-base-d";
 const TAG_E: &str = "install-test-base-e";
+const TAG_T: &str = "install-test-base-t";
+const TAG_U: &str = "install-test-base-u";
 /// Where a repacked base waits for `bootctl`: memory, since the tests root
 /// has no room for one.
 const FIXTURE: &str = "/tmp/install-test-base.img";
@@ -325,8 +335,8 @@ fn panic_collected(status: &str, slot: &str, panic: &str, heading: &str) -> bool
     true
 }
 
-/// The current base repacked as `tag` at [`FIXTURE`].
-fn write_fixture(disk: &BootDisk, tag: &str, interface: Option<u32>) -> bool {
+/// The current base repacked as `tag` at [`FIXTURE`], and its SHA-256.
+fn write_fixture(disk: &BootDisk, tag: &str, interface: Option<u32>) -> Option<String> {
     let written = open_fat(&disk.boot_node)
         .and_then(|mut volume| {
             volume
@@ -334,39 +344,67 @@ fn write_fixture(disk: &BootDisk, tag: &str, interface: Option<u32>) -> bool {
                 .map_err(|e| format!("{}: {e:?}", layout::BASE_CURRENT))
         })
         .and_then(|current| retagged(&current, tag, interface))
-        .and_then(|image| std::fs::write(FIXTURE, image).map_err(|e| format!("{FIXTURE}: {e}")));
-    if let Err(why) = written {
-        note(&why);
-        return false;
-    }
-    true
+        .and_then(|image| {
+            std::fs::write(FIXTURE, &image).map_err(|e| format!("{FIXTURE}: {e}"))?;
+            Ok(sha256(&image).iter().map(|b| format!("{b:02x}")).collect())
+        });
+    written.map_err(|why| note(&why)).ok()
 }
 
-/// Install the current base repacked as `tag` through `bootctl`, naming its
-/// SHA-256 as `remote.py` does, once another digest is refused.
-fn install_repacked(disk: &BootDisk, tag: &str, interface: Option<u32>) -> Option<String> {
-    if !write_fixture(disk, tag, interface) {
+/// `bootctl base <sub> FIXTURE <digest> <rest>`, once the same naming
+/// another digest is refused, as `remote.py` names the bytes it pushed.
+fn with_fixture(sub: &str, digest: &str, rest: &[&str]) -> Option<String> {
+    let other = "0".repeat(64);
+    if !refused(
+        &[&["base", sub, FIXTURE, &other][..], rest].concat(),
+        "not the image whose sha256 is",
+    ) {
+        note(&format!(
+            "bootctl base {sub} took a base whose sha256 is not the one named"
+        ));
         return None;
     }
-    let said = std::fs::read(FIXTURE)
-        .map_err(|e| note(&format!("{FIXTURE}: {e}")))
-        .ok()
-        .and_then(|image| {
-            let digest: String = sha256(&image).iter().map(|b| format!("{b:02x}")).collect();
-            let other = "0".repeat(64);
-            if !refused(
-                &["base", "install", FIXTURE, &other],
-                "not the image whose sha256 is",
-            ) {
-                note("bootctl installed a base whose sha256 is not the one named");
-                return None;
-            }
-            bootctl(&["base", "install", FIXTURE, &digest])
-        });
+    bootctl(&[&["base", sub, FIXTURE, digest][..], rest].concat())
+}
+
+/// Install the current base repacked as `tag` through `bootctl base install`.
+fn install_repacked(disk: &BootDisk, tag: &str, interface: Option<u32>) -> Option<String> {
+    let digest = write_fixture(disk, tag, interface)?;
+    let said = with_fixture("install", &digest, &[]);
     let _ = std::fs::remove_file(FIXTURE);
     let said = said?;
     println!("INSTALL-BASE-INSTALLED {tag}");
     Some(said)
+}
+
+/// The base tagged `tag` runs, tried: `bootctl status` says so and marks
+/// neither base on the disk as running.
+fn runs_tried(stage: u8, tag: &str) -> bool {
+    let running = std::fs::read_to_string(BASE_TAG_FILE).unwrap_or_default();
+    let Some(status) = bootctl(&["status"]) else {
+        return false;
+    };
+    let tried = field(&status, "base tried")
+        .is_some_and(|line| line.contains(&format!("build tag {tag}, running")));
+    let on_disk = ["base current", "base previous"]
+        .iter()
+        .any(|which| field(&status, which).is_some_and(|line| line.ends_with(", running")));
+    if running.trim() != tag || !tried || on_disk {
+        note(&format!(
+            "stage {stage}: the base running is tagged {running:?}, not the trial of {tag}:\n{status}"
+        ));
+        return false;
+    }
+    println!("INSTALL-BASE-TRIED {tag} at stage {stage}");
+    true
+}
+
+/// What `bootctl status` says of the bases on the disk.
+fn disk_bases(status: &str) -> [Option<&str>; 2] {
+    [
+        field(status, "base current"),
+        field(status, "base previous"),
+    ]
 }
 
 /// The base installed or rolled back to runs without a boot: the build tag
@@ -422,7 +460,7 @@ fn default_kept_bootable(disk: &BootDisk, kernel: &[u8]) -> bool {
         note(&why);
         return false;
     }
-    if !write_fixture(disk, TAG_E, Some(slopos_abi::BASE_INTERFACE + 1)) {
+    if write_fixture(disk, TAG_E, Some(slopos_abi::BASE_INTERFACE + 1)).is_none() {
         return false;
     }
     let base_refused = refused(
@@ -482,8 +520,9 @@ fn bases_are(
     false
 }
 
-/// A kernel file whose note serves `min..=max` and that holds nothing else:
-/// what `bootctl install` must refuse a slot when it serves neither base.
+/// A kernel file whose note serves `min..=max`, with a command line section
+/// to stamp, and that holds nothing else: what `bootctl install` must refuse
+/// a slot when it serves neither base.
 fn unserved_kernel(min: u32, max: u32) -> Vec<u8> {
     let mut note = Vec::new();
     for word in [
@@ -496,13 +535,15 @@ fn unserved_kernel(min: u32, max: u32) -> Vec<u8> {
     note.extend_from_slice(b"SlopOS\0\0");
     note.extend_from_slice(&min.to_le_bytes());
     note.extend_from_slice(&max.to_le_bytes());
-    let names = b"\0.note.slopos.base-interface\0.shstrtab\0";
+    let names = b"\0.note.slopos.base-interface\0.shstrtab\0.slopos.cmdline\0";
     let mut file = vec![0u8; 64];
     file[..6].copy_from_slice(b"\x7fELF\x02\x01");
     let note_at = file.len() as u64;
     file.extend_from_slice(&note);
     let names_at = file.len() as u64;
     file.extend_from_slice(names);
+    let cmdline_at = file.len() as u64;
+    file.resize(file.len() + slopos_boot_core::kernel::CMDLINE_BYTES, 0);
     file.resize(file.len().next_multiple_of(8), 0);
     let table = file.len() as u64;
     let section = |name: u32, kind: u32, at: u64, len: usize| {
@@ -517,11 +558,88 @@ fn unserved_kernel(min: u32, max: u32) -> Vec<u8> {
     file.extend_from_slice(&[0u8; 64]);
     file.extend_from_slice(&section(1, 7, note_at, note.len()));
     file.extend_from_slice(&section(29, 3, names_at, names.len()));
+    file.extend_from_slice(&section(
+        39,
+        1,
+        cmdline_at,
+        slopos_boot_core::kernel::CMDLINE_BYTES,
+    ));
     file[0x28..0x30].copy_from_slice(&table.to_le_bytes());
     file[0x3A..0x3C].copy_from_slice(&64u16.to_le_bytes());
-    file[0x3C..0x3E].copy_from_slice(&3u16.to_le_bytes());
+    file[0x3C..0x3E].copy_from_slice(&4u16.to_le_bytes());
     file[0x3E..0x40].copy_from_slice(&2u16.to_le_bytes());
     file
+}
+
+/// A trial of a base tagged [`TAG_U`] ended by `bootctl base rollback`,
+/// which runs b again and leaves the bases on the disk as `status` found
+/// them.
+fn trial_ends(disk: &BootDisk, status: &str) -> bool {
+    let tried = write_fixture(disk, TAG_U, None)
+        .is_some_and(|digest| bootctl(&["base", "try", FIXTURE, &digest]).is_some());
+    let _ = std::fs::remove_file(FIXTURE);
+    let ended = tried
+        && runs_tried(5, TAG_U)
+        && bootctl(&["base", "rollback"]).is_some_and(|said| said.contains("ended the trial"));
+    let after = bootctl(&["status"]).unwrap_or_default();
+    let back = std::fs::read_to_string(BASE_TAG_FILE).unwrap_or_default();
+    if !ended
+        || back.trim() != TAG_B
+        || disk_bases(&after) != disk_bases(status)
+        || field(&after, "base tried").is_some()
+    {
+        note(&format!(
+            "stage 5: ending the trial left the base tagged {back:?}:\n{after}"
+        ));
+        return false;
+    }
+    println!("INSTALL-TRIAL-ENDED at stage 5");
+    true
+}
+
+/// A base tagged [`TAG_C`], naming an interface this kernel does not serve,
+/// is refused a trial alone and beside a kernel serving neither, and beside
+/// one serving it goes to the disk with that kernel in slot a, armed to boot
+/// once; slot b's kernel then goes into a, which disarms it.
+fn pair_goes_to_disk(disk: &BootDisk) -> bool {
+    let unserved = slopos_abi::BASE_INTERFACE + 1;
+    let Some(digest) = write_fixture(disk, TAG_C, Some(unserved)) else {
+        return false;
+    };
+    let kernel = "/tmp/install-test-pair.elf";
+    let unchanged =
+        |status: String| bases_are(&status, 5, (Some(TAG_B), true), (Some(TAG_T), false));
+    let refusals = refused(
+        &["base", "try", FIXTURE],
+        "--kernel <kernel.elf> names the kernel it needs",
+    ) && std::fs::write(kernel, unserved_kernel(90, 99)).is_ok()
+        && refused(
+            &["base", "try", FIXTURE, "--kernel", kernel],
+            "nothing written",
+        )
+        && bootctl(&["status"]).is_some_and(unchanged);
+    if refusals {
+        println!("INSTALL-REFUSED a pair no kernel serves");
+    }
+    let armed = refusals
+        && std::fs::write(kernel, unserved_kernel(unserved, unserved)).is_ok()
+        && bootctl(&["base", "try", FIXTURE, &digest, "--kernel", kernel])
+            .is_some_and(|said| said.contains("so it takes a reboot"))
+        && bootctl(&["status"]).is_some_and(|status| {
+            field(&status, "oneshot") == Some("slopos-a")
+                && bases_are(&status, 5, (Some(TAG_C), false), (None, true))
+        });
+    let _ = std::fs::remove_file(FIXTURE);
+    let _ = std::fs::remove_file(kernel);
+    if !armed {
+        note(
+            "bootctl did not put a base the running kernel does not serve on the disk beside the kernel that serves it",
+        );
+        return false;
+    }
+    println!("INSTALL-PAIR-ARMED slopos-a");
+    println!("INSTALL-BASE-INSTALLED {TAG_C}");
+    bootctl(&["clone", "b", "a"]).is_some_and(|said| said.contains("no longer armed"))
 }
 
 fn reboot_default(next: u8) -> bool {
@@ -694,11 +812,24 @@ fn boot_slot_install_commit_rollback() -> bool {
             }
             if !booted_through_entry(&disk, 3)
                 || !panic_collected(&status, "abort", "panic.boot=abort", "=== KERNEL ABORT ===")
-                || install_repacked(&disk, TAG_B, None).is_none()
             {
                 let _ = set_stage(None);
                 return false;
             }
+            let Some(digest) = write_fixture(&disk, TAG_B, None) else {
+                let _ = set_stage(None);
+                return false;
+            };
+            let kept = with_fixture("try", &digest, &[]).is_some()
+                && runs_tried(3, TAG_B)
+                && bootctl(&["base", "commit", FIXTURE, &digest])
+                    .is_some_and(|said| said.contains("base committed: "));
+            let _ = std::fs::remove_file(FIXTURE);
+            if !kept {
+                let _ = set_stage(None);
+                return false;
+            }
+            println!("INSTALL-BASE-COMMITTED {TAG_B}");
             if !runs_live(3, |tag| tag == TAG_B, (Some(TAG_B), true), (None, false)) {
                 let _ = set_stage(None);
                 return false;
@@ -709,8 +840,7 @@ fn boot_slot_install_commit_rollback() -> bool {
             let running = std::fs::read_to_string(BASE_TAG_FILE).unwrap_or_default();
             let ok = booted == "slopos-b"
                 && running.trim() == TAG_B
-                && bases_are(&status, 4, (Some(TAG_B), true), (None, false))
-                && bootctl(&["base", "rollback"]).is_some();
+                && bases_are(&status, 4, (Some(TAG_B), true), (None, false));
             if !ok {
                 note(&format!(
                     "stage 4 runs {booted} on the base tagged {running:?}"
@@ -718,7 +848,37 @@ fn boot_slot_install_commit_rollback() -> bool {
                 let _ = set_stage(None);
                 return false;
             }
-            if !runs_live(4, |tag| tag != TAG_B, (None, true), (Some(TAG_B), false)) {
+            let Some(digest) = write_fixture(&disk, TAG_T, None) else {
+                let _ = set_stage(None);
+                return false;
+            };
+            let kept = bootctl(&["base", "try", FIXTURE, &digest]).is_some()
+                && runs_tried(4, TAG_T)
+                && bootctl(&["base", "commit", FIXTURE, &digest])
+                    .is_some_and(|said| said.contains("base committed: "));
+            let _ = std::fs::remove_file(FIXTURE);
+            // b ran before the trial and was current, so it moves to previous
+            // where the first base was.
+            if !kept
+                || !runs_live(
+                    4,
+                    |tag| tag == TAG_T,
+                    (Some(TAG_T), true),
+                    (Some(TAG_B), false),
+                )
+            {
+                let _ = set_stage(None);
+                return false;
+            }
+            println!("INSTALL-BASE-COMMITTED {TAG_T}");
+            if bootctl(&["base", "rollback"]).is_none()
+                || !runs_live(
+                    4,
+                    |tag| tag == TAG_B,
+                    (Some(TAG_B), true),
+                    (Some(TAG_T), false),
+                )
+            {
                 let _ = set_stage(None);
                 return false;
             }
@@ -726,14 +886,12 @@ fn boot_slot_install_commit_rollback() -> bool {
         }
         Some(5) => {
             let running = std::fs::read_to_string(BASE_TAG_FILE).unwrap_or_default();
-            let unserved = slopos_abi::BASE_INTERFACE + 1;
-            let ok = booted == "slopos-b"
-                && running.trim() != TAG_B
-                && bases_are(&status, 5, (None, true), (Some(TAG_B), false))
-                && install_repacked(&disk, TAG_C, Some(unserved)).is_some_and(|said| {
-                    said.contains(&format!("only a boot of one that serves {unserved}"))
-                });
-            if !ok {
+            if booted != "slopos-b"
+                || running.trim() != TAG_B
+                || !bases_are(&status, 5, (Some(TAG_B), true), (Some(TAG_T), false))
+                || !trial_ends(&disk, &status)
+                || !pair_goes_to_disk(&disk)
+            {
                 note(&format!(
                     "stage 5 runs {booted} on the base tagged {running:?}"
                 ));
@@ -789,7 +947,7 @@ fn boot_slot_install_commit_rollback() -> bool {
                 return false;
             }
             note(
-                "slot b installed, tried and committed; a panicking and an aborting slot rolled back, each leaving its record; a base installed, rolled back, and one the kernel does not serve passed over",
+                "slot b installed, tried and committed; a panicking and an aborting slot rolled back, each leaving its record; a base tried and committed, a trial ended, a base rolled back, and one the kernel does not serve put on the disk beside its kernel and passed over",
             );
             true
         }

@@ -32,6 +32,7 @@ const CLONE_CONFIG: &str = "slopos/.git/config";
 const COPY_CHUNK: usize = 1 << 20;
 const LOG: &str = "/var/log/installer.log";
 const LOG_MODE: u32 = 0o644;
+const CMDLINE_MODE: u32 = 0o644;
 
 /// The new root, mounted in a directory made under a name nobody could
 /// foresee, so no planted link redirects the mount, and that only uid 0 may
@@ -144,6 +145,19 @@ impl Mounted {
         write_durably(&path, text.as_bytes())?;
         fs::set_permissions(&path, fs::Permissions::from_mode(LOG_MODE))
             .map_err(|e| format!("{LOG}: {e}"))
+    }
+
+    /// `words` as the machine's kernel command line, which every kernel a
+    /// later `bootctl install` puts in a slot is stamped with, replacing any
+    /// an earlier install left.
+    pub fn write_cmdline(&self, words: &str) -> Result<(), String> {
+        let file = layout::MACHINE_CMDLINE;
+        let dir = file.rsplit_once('/').map_or("", |(dir, _)| dir);
+        self.owned_dir(dir, (0, 0), 0o755)?;
+        let path = self.path(file);
+        write_durably(&path, format!("{words}\n").as_bytes())?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(CMDLINE_MODE))
+            .map_err(|e| format!("{file}: {e}"))
     }
 
     /// Write everything back and unmount, saying so if either fails.

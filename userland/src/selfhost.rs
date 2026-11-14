@@ -43,34 +43,51 @@ pub fn just(root: &str, args: &[&str]) -> Command {
     cmd
 }
 
-/// [`just`] for a recipe that installs: what `bootctl` asks privd is asked
-/// through a connection this process makes, so a root test's install is the
-/// test's own and waits for nobody at the machine. The connection is the
-/// caller's to keep until the recipe exits.
-fn just_installing(
-    root: &str,
-    args: &[&str],
-) -> Result<(Command, crate::privd::Connection), String> {
+/// `cmd`, a step that installs, with what `bootctl` asks privd asked through
+/// a connection this process makes, so a root test's install is the test's
+/// own and waits for nobody at the machine.
+fn installing(mut cmd: Command, what: &str) -> Result<(), String> {
     let privd = crate::privd::Connection::open_within(crate::privd::SWITCH_WAIT)?;
-    let mut cmd = just(root, args);
     privd.hand_to(&mut cmd);
-    Ok((cmd, privd))
+    let status = cmd.status();
+    drop(privd);
+    match status {
+        Ok(status) if status.success() => Ok(()),
+        status => Err(format!("{what}: {status:?}")),
+    }
 }
 
-/// `just install <variant>`, then `just install-kernel <variant>`, under the
-/// build tag `tag`, each through a privd connection of its own: a base that
-/// runs at once drains the privd the first one asked.
+/// `just install <variant>`, which tries the base it builds, `bootctl base
+/// commit` of that base once it runs, and `just install-kernel <variant>`,
+/// under the build tag `tag`, each through a privd connection of its own: a
+/// base that runs at once drains the privd the first one asked.
 pub fn just_install(root: &str, variant: &str, tag: &str) -> Result<(), String> {
-    for recipe in ["install", "install-kernel"] {
-        let (mut cmd, privd) = just_installing(root, &[recipe, variant])?;
-        let status = cmd.env("SLOPOS_BUILD_TAG", tag).status();
-        drop(privd);
-        match status {
-            Ok(status) if status.success() => {}
-            status => return Err(format!("just {recipe} {variant}: {status:?}")),
-        }
+    let tagged = |recipe: &str| {
+        let mut cmd = just(root, &[recipe, variant]);
+        cmd.env("SLOPOS_BUILD_TAG", tag);
+        cmd
+    };
+    installing(tagged("install"), &format!("just install {variant}"))?;
+    let runs = std::fs::read_to_string(slopos_boot_core::base::BUILD_TAG_PATH)
+        .is_ok_and(|running| running.trim() == tag);
+    if runs {
+        let base = if variant.ends_with("tests") {
+            "initramfs-tests.cpio"
+        } else {
+            "initramfs.cpio"
+        };
+        let mut commit = Command::new("bootctl");
+        commit
+            .uid(SESSION_UID)
+            .gid(SESSION_GID)
+            .args(["base", "commit", &format!("{root}/builddir/{base}")])
+            .stdin(Stdio::null());
+        installing(commit, "bootctl base commit")?;
     }
-    Ok(())
+    installing(
+        tagged("install-kernel"),
+        &format!("just install-kernel {variant}"),
+    )
 }
 
 /// `git <args>` in `dir`, the git on the default search path, as the session,

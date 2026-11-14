@@ -4,7 +4,7 @@
 
 use slopos_boot_core::gpt::Partition;
 use slopos_boot_core::limine::{self, Config, MenuEntry};
-use slopos_boot_core::{Guid, bli, layout};
+use slopos_boot_core::{Guid, bli, kernel, layout};
 use slopos_fat_core::{Error as FatError, Volume};
 
 use super::engine::Events;
@@ -54,10 +54,18 @@ fn write_verified(volume: &mut Volume<BlockFile>, path: &str, bytes: &[u8]) -> R
     Ok(())
 }
 
-/// The medium's kernel into every slot, its base as both the current and the
-/// previous base, which every entry loads, and its notices beside them.
-pub fn write_boot(boot_node: &str, medium: &Medium, events: &mut dyn Events) -> Result<(), String> {
-    let kernel = medium.read(layout::MEDIUM_KERNEL)?;
+/// The medium's kernel, stamped with `cmdline`, into every slot, its base as
+/// both the current and the previous base, which every entry loads, and its
+/// notices beside them.
+pub fn write_boot(
+    boot_node: &str,
+    medium: &Medium,
+    cmdline: &str,
+    events: &mut dyn Events,
+) -> Result<(), String> {
+    let mut kernel = medium.read(layout::MEDIUM_KERNEL)?;
+    kernel::stamp_cmdline(&mut kernel, cmdline)
+        .map_err(|e| format!("{}: stamping {cmdline:?}: {e:?}", layout::MEDIUM_KERNEL))?;
     let base = medium.read(layout::MEDIUM_BASE)?;
     let mut volume = open_fat(boot_node)?;
     make_dir(&mut volume, layout::SLOTS_DIR)?;
@@ -119,13 +127,13 @@ pub struct Menu {
 }
 
 /// The configuration the new disk boots from: both slots on `boot`, each
-/// with `root` as its root and `cmdline` after it, then every other system
-/// `options` lists, but one an entry already in the menu collides with and
-/// one whose loader is on a partition in `gone`, which the install removes.
+/// with `root` as its root and no other word, since the machine's words
+/// travel in the slot's kernel, then every other system `options` lists, but
+/// one an entry already in the menu collides with and one whose loader is on
+/// a partition in `gone`, which the install removes.
 pub fn menu(
     boot: Guid,
     root: Guid,
-    cmdline: &str,
     own_esp: Option<&Guid>,
     options: &[ListedOption],
     gone: &[Guid],
@@ -154,7 +162,7 @@ pub fn menu(
         serial: false,
         boot_partition: boot,
         root_partition: Some(root),
-        cmdline,
+        cmdline: "",
         resolution: None,
         entries: &entries,
     }

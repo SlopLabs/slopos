@@ -102,8 +102,65 @@ action org.slopos.base.rollback
   allow    admin confirm
   allow    paired
   describe "go back to the version of the system that ran before"
-  detail   "The version running now is kept, so you can return to it."
+  detail   "The version running now is kept, unless it was only being tried."
   verb     "Go back"
+
+action org.slopos.base.try
+  program  /bin/bootctl
+  args     base try ?
+  args     base try ? ?
+  caps     BaseUpdate
+  uid      0
+  cwd
+  exclusive boot-slots
+  allow    root
+  allow    admin confirm
+  allow    paired
+  describe "try a new version of the system"
+  detail   "Restarting the computer goes back to the version that ran before."
+  verb     "Install"
+
+action org.slopos.base.pair
+  program  /bin/bootctl
+  args     base try ? --kernel *
+  args     base try ? ? --kernel *
+  caps     RawBlock Power BaseUpdate
+  uid      0
+  cwd
+  exclusive boot-slots
+  allow    root
+  allow    admin confirm
+  allow    paired
+  describe "try a new version of the system, with the kernel it needs"
+  detail   "If it needs that kernel, both start once at the next restart, and the kernel that starts by default stays."
+  verb     "Install"
+
+action org.slopos.base.commit
+  program  /bin/bootctl
+  args     base commit *
+  caps     RawBlock Power
+  uid      0
+  cwd
+  exclusive boot-slots
+  allow    root
+  allow    admin confirm
+  allow    paired
+  describe "keep the version of the system that is running now"
+  detail   "The version that ran before it is kept, so you can go back to it."
+  verb     "Keep"
+
+action org.slopos.boot.cmdline
+  program  /bin/bootctl
+  args     cmdline set *
+  caps
+  uid      0
+  exclusive boot-slots
+  allow    root
+  allow    admin confirm
+  allow    paired
+  describe "change the options every kernel installed from now on starts with"
+  detail   "They can turn off the system's safeguards."
+  verb     "Change"
 
 action org.slopos.boot.oneshot
   program  /bin/bootctl

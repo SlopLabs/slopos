@@ -499,6 +499,7 @@ fn encode_issue(issue: &Issue) -> W {
         Issue::Person(why) => w.text("issue", "person").text("text", why),
         Issue::Menu(why) => w.text("issue", "menu").text("text", why),
         Issue::Remote(url) => w.text("issue", "remote").text("text", url),
+        Issue::Cmdline(words) => w.text("issue", "cmdline").text("text", words),
         Issue::RootSize => w.text("issue", "root-size"),
         Issue::Unprobed => w.text("issue", "unprobed"),
         Issue::Unopened(node) => w.text("issue", "unopened").text("node", node),
@@ -608,6 +609,7 @@ fn decode_issue(bytes: &[u8]) -> Result<Issue, Malformed> {
         "person" => text(Issue::Person)?,
         "menu" => text(Issue::Menu)?,
         "remote" => text(Issue::Remote)?,
+        "cmdline" => text(Issue::Cmdline)?,
         "root-size" => {
             only(&[])?;
             Issue::RootSize

@@ -10,7 +10,7 @@ use slopos_boot_core::install::{self, Mode as PlanMode, Place, Plan, ROLES, Role
 use slopos_boot_core::layout::{
     self, BOOT_LABEL, BOOT_TYPE, CRASH_TYPE, ESP_LABEL, ESP_TYPE, ROOT_TYPE,
 };
-use slopos_boot_core::{Guid, bli};
+use slopos_boot_core::{Guid, bli, kernel};
 use slopos_installer_core::{
     self as view, Choices, DEFAULT_CMDLINE, DEFAULT_REMOTE, EspTrouble, Event, FIRST_PERSON,
     Failure, FirstPerson, Issue, Mode, Opened, Person, Planned, Proposal, Refusal, Setup, Step,
@@ -396,7 +396,14 @@ impl System {
             .boot_options
             .as_ref()
             .map_err(|why| Issue::Menu(why.clone()))?;
-        let cmdline = choices.cmdline.as_deref().unwrap_or(DEFAULT_CMDLINE);
+        let given = choices.cmdline.as_deref().unwrap_or(DEFAULT_CMDLINE);
+        let cmdline = given.split_ascii_whitespace().collect::<Vec<_>>().join(" ");
+        // The stamped words follow the loader's `root=`, so one of theirs would win.
+        if kernel::cmdline_fits(&cmdline).is_err()
+            || cmdline.split(' ').any(|word| word.starts_with("root="))
+        {
+            return Err(Issue::Cmdline(given.to_owned()));
+        }
         let after: Vec<Guid> = header
             .partitions(&array)
             .filter_map(Result::ok)
@@ -411,7 +418,6 @@ impl System {
         let menu = boot::menu(
             boot_unique,
             unique(Role::Root)?,
-            cmdline,
             own_esp.then_some(&esp_unique),
             options,
             &gone,
@@ -463,7 +469,7 @@ impl System {
                     name: p.name.clone(),
                     password: p.password.is_some(),
                 }),
-                cmdline: cmdline.to_owned(),
+                cmdline,
                 first: choices.first,
                 menu: menu.offered.into_iter().map(|other| other.title).collect(),
                 beside,
@@ -750,13 +756,14 @@ impl System {
             &owners,
             run,
         )?;
+        mounted.write_cmdline(&p.view.setup.cmdline)?;
         if let Some(person) = &p.person {
             root::make_people(&mounted, &person.name, person.password.clone())?;
         }
         mounted.finish()?;
 
         run.step(Step::CopyStartup);
-        boot::write_boot(&boot_node, medium, run)?;
+        boot::write_boot(&boot_node, medium, &p.view.setup.cmdline, run)?;
 
         run.step(Step::Menu);
         boot::write_loader(&esp_node, p.own_esp, &p.limine_conf, medium)?;

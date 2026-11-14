@@ -15,7 +15,7 @@ use limine::{
 };
 
 use slopos_abi::DisplayInfo;
-use slopos_boot_core::{Guid, layout};
+use slopos_boot_core::{Guid, kernel, layout};
 use slopos_ostd::sync::{InitInPlace, OnceLock};
 use slopos_ostd::{klog_debug, klog_info};
 
@@ -162,10 +162,34 @@ pub fn date_at_boot_unix() -> Option<u64> {
     u64::try_from(stamp).ok().filter(|&s| s != 0)
 }
 
-/// Appended to the loader's command line, so a kernel built for one
-/// experiment carries its own options into a slot whose loader entry is fixed:
-/// an option read by its last occurrence takes this value.
-const BUILTIN_CMDLINE: Option<&str> = option_env!("SLOPOS_BUILTIN_CMDLINE");
+const BUILTIN_CMDLINE_BYTES: [u8; kernel::CMDLINE_BYTES] =
+    match kernel::cmdline_bytes(match option_env!("SLOPOS_BUILTIN_CMDLINE") {
+        Some(words) => words,
+        None => "",
+    }) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            panic!("SLOPOS_BUILTIN_CMDLINE: words of ASCII graphic bytes, at most 511 joined")
+        }
+    };
+
+slopos_ostd::cmdline_section! {
+    /// Appended to the loader's command line, so a kernel carries its own
+    /// options into a slot whose loader entry is fixed: an option read by its
+    /// last occurrence takes this value. Built from `SLOPOS_BUILTIN_CMDLINE`,
+    /// then rewritten in the linked file by whoever installs it.
+    static BUILTIN_CMDLINE: [u8; kernel::CMDLINE_BYTES] = BUILTIN_CMDLINE_BYTES;
+}
+
+fn builtin_cmdline() -> &'static str {
+    match kernel::cmdline_words(core::hint::black_box(&BUILTIN_CMDLINE)) {
+        Ok(words) => words,
+        Err(error) => {
+            klog_info!("BOOT: built-in command line dropped: {:?}", error);
+            ""
+        }
+    }
+}
 
 const CMDLINE_MAX: usize = 1024;
 
@@ -176,7 +200,7 @@ static MERGED_CMDLINE: InitInPlace<[u8; CMDLINE_MAX]> = InitInPlace::new([0; CMD
 /// The loader's command line with [`BUILTIN_CMDLINE`] after it; the loader's
 /// alone when there is no built-in one or the two do not fit together.
 fn merged_cmdline(loader: &'static str) -> &'static str {
-    let builtin = BUILTIN_CMDLINE.map_or("", str::trim);
+    let builtin = builtin_cmdline();
     let fits = loader.len() + 1 + builtin.len() < CMDLINE_MAX;
     if builtin.is_empty() || !fits {
         if !builtin.is_empty() {

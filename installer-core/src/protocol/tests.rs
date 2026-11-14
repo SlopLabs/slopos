@@ -88,6 +88,7 @@ fn issues() -> Vec<Issue> {
         Issue::Unopened("/dev/vda".into()),
         Issue::Unproposed,
         Issue::Changed("/dev/vda".into()),
+        Issue::Cmdline("a\tb".into()),
     ];
     issues.extend(no_tables().into_iter().map(|contents| Issue::OnlyErase {
         node: "/dev/vda".into(),

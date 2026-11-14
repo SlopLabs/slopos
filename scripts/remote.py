@@ -37,6 +37,7 @@ import hmac
 import io
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -1174,54 +1175,74 @@ def cmd_kernel_changed(args):
     print("same" if same else "changed")
 
 
-def install_base(args, base):
-    """Install `base` and wait for it to run, when the running kernel serves it."""
+def install_base(args, base, kernel):
+    """Try `base` with `bootctl base try`, naming the pushed `kernel` beside it
+    when there is one, and keep it once the agent answers from it. The slot
+    bootctl armed when the running kernel does not serve the base, which puts
+    both on the disk for the next boot instead; `None` otherwise."""
     paired = check_paired(State(args.state), base)
     tag = base_build_tag(base)
     log(f"{base} is paired with {paired}, build tag {tag or '-'}")
     remote_base, size, base_sha = push(args, base, f"{SCRATCH}/base.img", INSTALL_MODE)
     log(f"pushed {base}: {size} bytes, sha256 {base_sha}")
-    # The session may replace what was pushed; bootctl installs only these bytes.
+    # The session may replace what was pushed; bootctl takes only these bytes.
+    argv = ["bootctl", "base", "try", remote_base, base_sha]
+    if kernel:
+        argv += ["--kernel", *kernel]
+    said = ""
     try:
-        said = capture(args, ["bootctl", "base", "install", remote_base, base_sha], timeout=600)
+        said = capture(args, argv, timeout=600)
         sys.stdout.write(said)
-        live = "runs it now" in said or "runs already" in said
     except CommandFailed:
         raise
     except RemoteError as e:
         # A base that changes the pairing ends what remoted runs, this command among it.
         log(f"the agent went while the base went in ({e}); waiting for it on the new base")
-        live = True
-    if not live:
-        log(f"the base does not run yet: {said.strip().splitlines()[-1] if said.strip() else '-'}")
-        capture(args, ["rm", "-f", remote_base])
-        return
+    armed = re.search(r"^next boot: slopos-(\S+), once", said, re.M)
+    if armed:
+        log(f"the running kernel does not serve the base: it waits on the disk for slopos-{armed[1]}")
+        capture(args, ["rm", "-f", remote_base, *kernel[:1]])
+        return armed[1]
     if tag is None:
-        log(f"{base} names no build tag to recognise it running by; not waiting for it")
-        return
+        log(f"{base} names no build tag to recognise it running by; not keeping it: "
+            f"`remote.py run -- bootctl base commit {remote_base} {base_sha}` does")
+        return None
     args.boot = None
     agent = wait_agent(args, base_tag=tag, timeout=args.timeout)
     args.boot = agent["boot"]
-    log(f"the base runs now, without a reboot: boot {agent['boot'][:12]}, base tag {tag}")
+    log(f"the base runs now, without a reboot: boot {agent['boot'][:12]}, base tag {tag}; keeping it")
+    sys.stdout.write(capture(args, ["bootctl", "base", "commit", remote_base, base_sha], timeout=600))
     capture(args, ["rm", "-f", remote_base])
+    return None
 
 
-def install_kernel(args, kernel):
-    """Put `kernel` into the spare slot and boot it once, then commit it with --commit."""
-    link = BrokerLink(args.socket)
-    try:
-        old_boots = [a["boot"] for a in link.control(op="status")["agents"]]
-    finally:
-        link.close()
+def push_kernel(args, kernel):
+    """`kernel` on the machine: its path there and its sha256."""
     remote_kernel, size, kernel_sha = push(args, kernel, f"{SCRATCH}/kernel.elf", INSTALL_MODE)
     log(f"pushed {kernel}: {size} bytes, sha256 {kernel_sha}")
+    return [remote_kernel, kernel_sha]
+
+
+def install_kernel(args, pushed):
+    """Put the `pushed` kernel into the spare slot and arm one boot of it."""
+    remote_kernel, kernel_sha = pushed
     slot = capture(args, ["bootctl", "spare"]).strip()
     if not slot:
         die("install: bootctl spare named no slot")
     sys.stdout.write(capture(args, ["bootctl", "install", slot, remote_kernel, kernel_sha], timeout=600))
     capture(args, ["rm", "-f", remote_kernel])
     capture(args, ["bootctl", "oneshot", f"slopos-{slot}"])
-    log(f"slot {slot} installed; rebooting into slopos-{slot} once")
+    return slot
+
+
+def boot_armed(args, slot):
+    """Boot slot `slot`, armed to boot once, then commit it with --commit."""
+    link = BrokerLink(args.socket)
+    try:
+        old_boots = [a["boot"] for a in link.control(op="status")["agents"]]
+    finally:
+        link.close()
+    log(f"rebooting into slopos-{slot} once")
     try:
         execute(args, ["bootctl", "reboot"], io.BytesIO(), io.BytesIO(), timeout=30)
     except RemoteError:
@@ -1312,16 +1333,18 @@ def cmd_install(args):
     args.boot = before["boot"]
     log(f"installing onto boot {before['boot'][:12]} ({before['version']})")
     capture(args, ["mkdir", "-p", SCRATCH])
-    # The base first: a kernel serving only a newer interface is refused a
-    # slot until a base it serves is on the boot partition.
-    if base:
-        install_base(args, base)
+    pushed = push_kernel(args, kernel) if kernel else None
+    # The base first, with the kernel beside it: a base the running kernel
+    # does not serve goes to the disk, and the kernel into the spare slot.
+    armed = install_base(args, base, pushed) if base else None
     # Before a kernel, whose boot would take them off until they are
     # activated again.
     for extension in extensions:
         install_extension(args, extension)
-    if kernel:
-        install_kernel(args, kernel)
+    if armed:
+        boot_armed(args, armed)
+    elif pushed:
+        boot_armed(args, install_kernel(args, pushed))
     elif args.commit:
         sys.stdout.write(capture(args, ["bootctl", "commit"]))
     print(capture(args, ["bootctl", "status"]), end="")
@@ -1389,7 +1412,7 @@ def main():
     p.add_argument("--follow", "-f", action="store_true")
     p.set_defaults(func=cmd_klog)
 
-    p = sub.add_parser("install", help="install a base, running it at once, extensions, and a kernel into the spare slot, booting it")
+    p = sub.add_parser("install", help="try a base, keeping it once it answers, install extensions, and a kernel into the spare slot, booting it")
     p.add_argument("--kernel")
     p.add_argument("--base")
     p.add_argument("--extension", action="append", default=[],

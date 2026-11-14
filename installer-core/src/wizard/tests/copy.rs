@@ -213,13 +213,14 @@ fn window_issues() -> Vec<Issue> {
 }
 
 /// The window's issues and those only the CLI's own choices raise: a name,
-/// a size for a reused root or a root to keep.
+/// a size for a reused root, a root to keep or a kernel command line.
 fn issues() -> Vec<Issue> {
     let mut issues = window_issues();
     issues.extend([
         Issue::NothingToKeep("/dev/nvme0n1p3".into()),
         Issue::Person("bad".into()),
         Issue::RootSize,
+        Issue::Cmdline("a\tb".into()),
     ]);
     issues
 }

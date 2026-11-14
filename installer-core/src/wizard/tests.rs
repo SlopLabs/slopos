@@ -684,6 +684,7 @@ fn a_tile_says_what_it_does_or_why_not_without_a_flag() {
         Issue::NothingToKeep("/dev/nvme0n1p3".into()),
         Issue::RootSize,
         Issue::Remote("x\n".into()),
+        Issue::Cmdline("a\tb".into()),
         Issue::Plan {
             error: PlanError::Installed(3),
             node: NODE.into(),

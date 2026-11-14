@@ -76,9 +76,10 @@ pub const TRAIT_ALLOWLIST: &[&str] = &[
     "::core::clone::TrivialClone",
 ];
 
-/// The twelve sections link.ld brackets and the three the Limine boot
-/// protocol reads. OSTD's `registry_entry!` / `limine_request!` own every
-/// one of these.
+/// The twelve sections link.ld brackets, the three the Limine boot protocol
+/// reads, and the built-in command line an installer rewrites after link.
+/// OSTD's `registry_entry!` / `limine_request!` / `cmdline_section!` own
+/// every one of these.
 pub const SECTION_ALLOWLIST: &[&str] = &[
     ".boot_init_early_hw",
     ".boot_init_memory",
@@ -95,6 +96,7 @@ pub const SECTION_ALLOWLIST: &[&str] = &[
     ".limine_requests",
     ".limine_requests_start_marker",
     ".limine_requests_end_marker",
+    ".slopos.cmdline",
 ];
 
 /// C-ABI entry points whose callers are assembly, so the symbol has to

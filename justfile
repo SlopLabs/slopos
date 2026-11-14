@@ -379,18 +379,18 @@ build-kernel-only: (_kernel kernel_variant)
 
 # The apps go in as whoever runs this while /usr/local is theirs, and through
 # privd's org.slopos.software.install once it is the system's.
-[doc("On SlopOS, put a build's base to use: build the userland, the base and the apps for VARIANT (release, dev or tests), hold the build to the base interface and libc.so's growth, and make that base the one every slot boots, running it at once when the running kernel serves it and leaving it for the next boot otherwise; bootctl base rollback takes it back. The apps go to /usr/local once the running libc.so is the one they were built against; otherwise the command that installs them is printed. A base that needs a new kernel goes in first, then just install-kernel")]
-install VARIANT="release": (_slopos "install") (_variant-base VARIANT) base-interface libc-exports
+[doc("On SlopOS, try a build: build the kernel, the userland, the base and the apps for VARIANT (release, dev or tests), hold the build to the base interface and libc.so's growth, and hand the base and the kernel to bootctl base try, which runs the base at once when the running kernel serves it, writing nothing, and otherwise writes it for the next boot and puts the kernel into the spare slot, armed to boot once; it prints the command that keeps the trial. The apps go to /usr/local once the running libc.so is the one they were built against; otherwise the command that installs them is printed")]
+install VARIANT="release": (_slopos "install") (_variant-kernel VARIANT) (_variant-base VARIANT) base-interface libc-exports
     #!/usr/bin/env bash
     set -euo pipefail
-    bootctl base install "$PWD/{{build_dir}}/{{ if VARIANT =~ 'tests$' { "initramfs-tests.cpio" } else { "initramfs.cpio" } }}"
+    bootctl base try "$PWD/{{build_dir}}/{{ if VARIANT =~ 'tests$' { "initramfs-tests.cpio" } else { "initramfs.cpio" } }}" \
+        --kernel "$PWD/{{build_dir}}/kernel-{{VARIANT}}.elf"
     apps="/bin/tree-install apps {{build_dir}}/apps /usr/local"
     if cmp -s /lib/libc.so "{{build_dir}}/libc.so"; then
         $apps || echo "install: the apps stay as they were"
     else
         echo "install: the apps need this build's libc.so; once its base runs, run in $PWD: $apps"
     fi
-    echo "install: bootctl base rollback takes the base back; a kernel it needs goes in with just install-kernel"
 
 [doc("On SlopOS, try a build's kernel: build the VARIANT kernel (release, dev, tests or release-tests), hold the tree to the base interface, and put the kernel into the boot slot that is not the default, arming one boot of it, which bootctl reboot tries and bootctl commit keeps")]
 install-kernel VARIANT="release": (_slopos "install-kernel") (_variant-kernel VARIANT) base-interface
@@ -535,7 +535,7 @@ ui-shots *ARGS: (_host "ui-shots")
         python3 scripts/ui_shots.py --iso {{iso}} --out {{build_dir}}/ui-shots \
         --width {{ui_shots_width}} --height {{ui_shots_height}} {{ARGS}}
 
-[doc("Install check: on one disk in the bare-metal layout, register SlopOS's firmware entry, install a kernel into a boot slot, try it once, commit it, and roll back a slot that panics and one that aborts, each leaving its crash record; then install a base, which runs at once and a reboot keeps, roll it back, which runs at once too, and install one the kernel does not serve, which it passes over for the previous; across the reboots of one QEMU, with the ESP untouched")]
+[doc("Install check: on one disk in the bare-metal layout, register SlopOS's firmware entry, install a kernel into a boot slot, try it once, commit it, and roll back a slot that panics and one that aborts, each leaving its crash record; then try a base, which runs at once and writes nothing, and commit it, which a reboot keeps; end a trial with a rollback, which writes nothing; roll a base back, which runs at once too; and hand over one the kernel does not serve beside a kernel that does, which goes to the disk with that kernel in the spare slot, and which the kernel passes over for the previous; across the reboots of one QEMU, with the ESP untouched")]
 test-install: (_host "test-install")
     #!/usr/bin/env bash
     set -euo pipefail
@@ -557,9 +557,12 @@ test-install: (_host "test-install")
     for marker in "INSTALL-FIRMWARE-ENTRY ${entry:-Boot????} first" "INSTALL-STAGE 1: rebooting into slopos-b" \
         "INSTALL-THROUGH $entry at stage 1" "INSTALL-STAGE 2: rebooting into slopos-bad" "panic=reboot: resetting" \
         "INSTALL-THROUGH $entry at stage 2" "INSTALL-CRASH-RECORD /var/log/crash/" "INSTALL-STAGE 3: rebooting into slopos-abort" \
-        "crash record: written" "INSTALL-THROUGH $entry at stage 3" "INSTALL-BASE-INSTALLED install-test-base-b" \
-        "INSTALL-BASE-LIVE at stage 3" "INSTALL-STAGE 4: rebooting into the default" \
-        "INSTALL-BASES at stage 4" "INSTALL-BASE-LIVE at stage 4" "INSTALL-STAGE 5: rebooting into the default" \
+        "crash record: written" "INSTALL-THROUGH $entry at stage 3" "INSTALL-BASE-TRIED install-test-base-b at stage 3" \
+        "INSTALL-BASE-COMMITTED install-test-base-b" "INSTALL-BASE-LIVE at stage 3" "INSTALL-STAGE 4: rebooting into the default" \
+        "INSTALL-BASES at stage 4" "INSTALL-BASE-TRIED install-test-base-t at stage 4" "INSTALL-BASE-COMMITTED install-test-base-t" \
+        "INSTALL-BASE-LIVE at stage 4" "INSTALL-STAGE 5: rebooting into the default" \
+        "INSTALL-BASE-TRIED install-test-base-u at stage 5" "INSTALL-TRIAL-ENDED at stage 5" \
+        "INSTALL-REFUSED a pair no kernel serves" "INSTALL-PAIR-ARMED slopos-a" \
         "INSTALL-BASE-INSTALLED install-test-base-c" "INSTALL-STAGE 6: rebooting into the default" \
         "BOOT: base previous (" "INSTALL-PASSED-OVER install-test-base-c" "INSTALL-REFUSED a kernel" \
         "INSTALL-REFUSED a base" \
@@ -582,8 +585,8 @@ test-install: (_host "test-install")
         mcopy -o -i "{{boot_disk}}@@$boot_at" "::$base" "$bases/${base##*/}"
         "$(bootdisk_tool)" base "$bases/${base##*/}" >/dev/null || missing=1
     done
-    cmp -s "$bases/current.img" {{initramfs_tests}} ||
-        { echo "FAIL: the last rollback left $BASE_CURRENT other than the base the disk was built with" >&2; missing=1; }
+    grep -qx "build-tag install-test-base-b" < <("$(bootdisk_tool)" base "$bases/current.img") ||
+        { echo "FAIL: the last rollback left $BASE_CURRENT other than base b, which ran before it" >&2; missing=1; }
     grep -qx "build-tag install-test-base-d" < <("$(bootdisk_tool)" base "$bases/previous.img") ||
         { echo "FAIL: $BASE_PREVIOUS is not the base the last rollback replaced" >&2; missing=1; }
     rm -rf "$bases"
@@ -1293,7 +1296,7 @@ remote-serve *ARGS: (_host "remote-serve") (_kernel "release")
         --offer base={{initramfs_remote}} "$@"
 
 [positional-arguments]
-[doc("Build a base paired with the broker under a fresh SLOPOS_BUILD_TAG and install it on the paired machine, which runs it at once when its kernel serves it; when the release kernel differs from the one running, build it under the tag too, put it into the spare slot, boot it once and wait for it to come back with that tag; --commit then makes it the default")]
+[doc("Build a base paired with the broker under a fresh SLOPOS_BUILD_TAG and try it on the paired machine with bootctl base try, which runs it at once when its kernel serves it, and keep it once its agent answers from it; when the release kernel differs from the one running, build it under the tag too and hand it over beside the base: a base the running kernel does not serve goes to the disk with it, and otherwise it goes into the spare slot alone; either way boot it once and wait for it to come back with that tag; --commit then makes it the default")]
 remote-install *ARGS: (_host "remote-install")
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1462,16 +1465,18 @@ test-remote: (_host "test-remote") _build-userland _base-recipes
     EOF
     [ "$(remote run -- echo via-second)" = via-second ] || fail "a command through the second daemon"
 
-    echo "── a base installed, running at once ──"
+    echo "── a base tried, running at once, then kept ──"
     # A fresh boot disk names no default; an installed machine's does.
     remote run -- bootctl set-default slopos-a
     REMOTE_STEP_TIMEOUT=600 remote install --base "$work/base-next.cpio" \
         >"$work/install-base.log" 2>&1 || fail "base install: $(tail -n 5 "$work/install-base.log")"
-    grep -q '^base installed: .*the system runs it now' "$work/install-base.log" ||
+    grep -q '^base tried: .*the system runs it now' "$work/install-base.log" ||
         fail "the base did not run at once; see $work/install-base.log"
+    grep -q '^base committed: ' "$work/install-base.log" ||
+        fail "the base that answered was not kept; see $work/install-base.log"
     grep -q "^base current: .*, build tag $tag-next, .*, running\$" "$work/install-base.log" &&
         grep -q "^base previous: .*, build tag $tag, " "$work/install-base.log" ||
-        fail "the base install did not make the new base current and keep the one that ran; see $work/install-base.log"
+        fail "the commit did not make the tried base current and keep the one that ran; see $work/install-base.log"
     [ "$(remote run -- cat /usr/share/slopos/build-tag)" = "$tag-next" ] || fail "the base that runs is not $tag-next"
     remote klog >"$work/klog-base.txt"
     grep -q 'BASE: generation 2 is the base' "$work/klog-base.txt" ||

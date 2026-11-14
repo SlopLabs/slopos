@@ -1187,8 +1187,8 @@ fn first_person(name: &str, password: Option<&str>) -> Result<(), String> {
     }
 }
 
-/// The disk's ESP holds a configuration offering the other system.
-fn menu_offers_foreign(disk: &str) -> Result<(), String> {
+/// The disk's limine.conf, read from its ESP.
+fn loader_conf(disk: &str) -> Result<String, String> {
     let table = table_of(disk).ok_or("the disk has no table")?;
     let esp = table
         .partitions()
@@ -1198,9 +1198,29 @@ fn menu_offers_foreign(disk: &str) -> Result<(), String> {
     let conf = volume
         .read_file(&layout::LOADER_CONFIG.replace('\\', "/"))
         .map_err(|e| format!("limine.conf: {e:?}"))?;
-    let conf = String::from_utf8_lossy(&conf);
+    Ok(String::from_utf8_lossy(&conf).into_owned())
+}
+
+/// The disk's ESP holds a configuration offering the other system.
+fn menu_offers_foreign(disk: &str) -> Result<(), String> {
+    let conf = loader_conf(disk)?;
     if !conf.lines().any(|l| l == format!("/{FOREIGN_TITLE}")) {
         return Err(format!("limine.conf offers no {FOREIGN_TITLE}:\n{conf}"));
+    }
+    Ok(())
+}
+
+/// The words the install was given are the root's, and limine.conf holds
+/// none of them: this boot's `tests=on` came from the slot's kernel.
+fn cmdline_travels(disk: &str) -> Result<(), String> {
+    let file = std::fs::read_to_string(layout::MACHINE_CMDLINE)
+        .map_err(|e| format!("{}: {e}", layout::MACHINE_CMDLINE))?;
+    if file != format!("{INSTALLED_CMDLINE}\n") {
+        return Err(format!("{}: {file:?}", layout::MACHINE_CMDLINE));
+    }
+    let conf = loader_conf(disk)?;
+    if conf.contains("tests=on") {
+        return Err(format!("limine.conf carries the machine's words:\n{conf}"));
     }
     Ok(())
 }
@@ -1231,6 +1251,10 @@ fn first_boot(status: &str) -> bool {
         }
     };
     if let Err(why) = install_log(&disk, false) {
+        note(&why);
+        return false;
+    }
+    if let Err(why) = cmdline_travels(&disk) {
         note(&why);
         return false;
     }

@@ -119,6 +119,8 @@ pub enum Issue {
     RootSize,
     /// A remote holding what a line of git's configuration cannot.
     Remote(String),
+    /// Kernel command line words a kernel's section cannot hold.
+    Cmdline(String),
     /// Asked of the engine before it read the disks.
     Unprobed,
     /// A proposal asked for a disk the engine has not opened.
@@ -158,6 +160,10 @@ impl Issue {
             Issue::Remote(_) => {
                 "The address of the source code can't contain control characters.".into()
             }
+            Issue::Cmdline(_) => format!(
+                "The kernel command line must be printable words, at most {} bytes in all, and no root=, which the install sets.",
+                slopos_boot_core::kernel::CMDLINE_BYTES - 1
+            ),
             Issue::Unprobed => "The installer hasn't read the disks yet.".into(),
             Issue::Unopened(_) => "The installer hasn't read this disk yet.".into(),
             Issue::Unproposed => "The installer was asked for an install it didn't propose.".into(),
@@ -249,7 +255,9 @@ impl Issue {
     fn advice(&self) -> Option<String> {
         let instead = |kind: Kind| format!("Choose {} instead.", kind.title());
         Some(match self {
-            Issue::NothingToKeep(_) | Issue::Person(_) | Issue::RootSize => return None,
+            Issue::NothingToKeep(_) | Issue::Person(_) | Issue::RootSize | Issue::Cmdline(_) => {
+                return None;
+            }
             Issue::Medium(_) => "Start this computer from it, then try again.".into(),
             Issue::Probe(_)
             | Issue::Menu(_)
@@ -313,6 +321,9 @@ impl Issue {
             Issue::Person(_) => "Pass another --person.".into(),
             Issue::RootSize => "Leave out --root-size.".into(),
             Issue::Remote(_) => "Pass an address without them.".into(),
+            Issue::Cmdline(_) => {
+                "Pass a shorter --cmdline of printable words without root=.".into()
+            }
             Issue::Plan { error, root, .. } => match (error, root) {
                 (PlanError::Installed(_) | PlanError::RootElsewhere(_), Some(root)) => {
                     format!("Reinstall it with --mode reuse --root {root}.")
@@ -345,6 +356,7 @@ impl fmt::Display for Issue {
             | Issue::Unopened(node)
             | Issue::Changed(node) => write!(f, "{node}: ")?,
             Issue::Remote(url) => write!(f, "--remote {url:?}: ")?,
+            Issue::Cmdline(words) => write!(f, "--cmdline {words:?}: ")?,
             _ => {}
         }
         let fact = self.fact();

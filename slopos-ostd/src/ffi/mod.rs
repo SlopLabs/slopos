@@ -2,8 +2,8 @@
 //! spell for itself.
 //!
 //! Linker registries live in [`registry`]; this module hosts `extern_block!`,
-//! the Edition-2024 `no_mangle` wrappers, and the Limine request placement
-//! macro.
+//! the Edition-2024 `no_mangle` wrappers, and the Limine request and built-in
+//! command line placement macros.
 //!
 //! # `extern_block!` shape
 //!
@@ -85,6 +85,30 @@ macro_rules! __limine_request {
         $(#[$attr])*
         #[used]
         #[unsafe(link_section = $section)]
+        $vis static $name : $ty = $init;
+    };
+}
+
+/// Place the kernel's built-in command line in `.slopos.cmdline`, the
+/// section an installer rewrites in the linked file. Read it through
+/// `core::hint::black_box`: the bytes the compiler saw are not the ones that
+/// boot.
+///
+/// ```ignore
+/// slopos_ostd::cmdline_section! {
+///     static BUILTIN_CMDLINE: [u8; CMDLINE_BYTES] = BUILTIN_CMDLINE_BYTES;
+/// }
+/// ```
+#[macro_export]
+#[allow_internal_unsafe]
+macro_rules! cmdline_section {
+    (
+        $(#[$attr:meta])*
+        $vis:vis static $name:ident : $ty:ty = $init:expr ;
+    ) => {
+        $(#[$attr])*
+        #[used]
+        #[unsafe(link_section = ".slopos.cmdline")]
         $vis static $name : $ty = $init;
     };
 }

@@ -51,6 +51,15 @@ SECTIONS
   ASSERT(SIZEOF(.note.slopos.base-interface) == 28,
     "link.ld: .note.slopos.base-interface must hold exactly the base-interface note")
 
+  /* The words the kernel appends to its loader's command line, rewritten in
+     the linked file by whoever installs it, so it must be one fixed-size
+     section the installer finds by name. */
+  .slopos.cmdline : {
+    KEEP(*(.slopos.cmdline))
+  } :rodata
+  ASSERT(SIZEOF(.slopos.cmdline) == 512,
+    "link.ld: .slopos.cmdline must hold exactly the 512-byte built-in command line")
+
   /* Binary-search index over .eh_frame, consumed by the unwinder's
      fde-gnu-eh-frame-hdr finder. Emitted only when the target spec sets
      "eh-frame-header": true; the ASSERT turns a missing index into a link

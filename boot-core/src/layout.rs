@@ -86,6 +86,11 @@ pub const MEDIUM_APPS: &str = "apps";
 /// the toolchain and the clone where an installed root has them.
 pub const PAYLOAD_DIR: &str = "/media/payload";
 
+/// On the root, the machine's own kernel options: the words an install
+/// stamps into each slot's kernel, after the loader's command line, so a
+/// fixed loader entry still boots this machine with what it needs.
+pub const MACHINE_CMDLINE: &str = "/etc/kernel/cmdline";
+
 /// The description of SlopOS's firmware boot entry.
 pub const FIRMWARE_ENTRY: &str = "SlopOS";
 
