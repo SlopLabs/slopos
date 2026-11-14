@@ -110,13 +110,11 @@ struct KlogRing {
 }
 
 impl KlogRing {
-    const fn new() -> Self {
-        Self {
-            buf: [0; KLOG_RING_SIZE],
-            head: 0,
-            len: 0,
-        }
-    }
+    const EMPTY: Self = Self {
+        buf: [0; KLOG_RING_SIZE],
+        head: 0,
+        len: 0,
+    };
 
     fn push(&mut self, b: u8) {
         self.buf[self.head] = b;
@@ -160,7 +158,7 @@ impl KlogRing {
 }
 
 static KLOG_RING: SpinLock<KlogRing> = SpinLock::new(
-    KlogRing::new(),
+    KlogRing::EMPTY,
     lock_class!("KLOG_RING", LOCK_LEVEL_UNORDERED),
 );
 
@@ -407,7 +405,7 @@ mod tests {
     use super::KlogRing;
 
     fn ring_of(text: &[u8]) -> alloc::boxed::Box<KlogRing> {
-        let mut ring = alloc::boxed::Box::new(KlogRing::new());
+        let mut ring = alloc::boxed::Box::new(KlogRing::EMPTY);
         for &b in text {
             ring.push(b);
         }
@@ -443,7 +441,7 @@ mod tests {
 
     #[test]
     fn a_wrapped_ring_gives_its_newest_lines() {
-        let mut ring = alloc::boxed::Box::new(KlogRing::new());
+        let mut ring = alloc::boxed::Box::new(KlogRing::EMPTY);
         let line = b"0123456789abcde\n";
         for _ in 0..(super::KLOG_RING_SIZE / line.len() + 3) {
             for &b in line {

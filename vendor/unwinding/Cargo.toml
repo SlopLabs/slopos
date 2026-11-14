@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.88"
 name = "unwinding"
-version = "0.2.9"
+version = "0.2.11"
 authors = ["Gary Guo <gary@garyguo.net>"]
 build = false
 autolib = false
@@ -83,7 +83,7 @@ optional = true
 package = "rustc-std-workspace-core"
 
 [dependencies.gimli]
-version = "0.33"
+version = "0.34"
 features = ["read"]
 default-features = false
 

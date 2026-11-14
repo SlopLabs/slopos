@@ -77,45 +77,6 @@ pub struct KernelSlab {
 }
 
 impl KernelSlab {
-    const fn new_uninit() -> Self {
-        Self {
-            state: AtomicU8::new(Lifecycle::Uninit.as_u8()),
-            slab16: allocator::SlabAllocator::<16>::new_with_class(
-                0,
-                lock_class!("SLAB_16", LOCK_LEVEL_ALLOCATOR),
-            ),
-            slab32: allocator::SlabAllocator::<32>::new_with_class(
-                1,
-                lock_class!("SLAB_32", LOCK_LEVEL_ALLOCATOR),
-            ),
-            slab64: allocator::SlabAllocator::<64>::new_with_class(
-                2,
-                lock_class!("SLAB_64", LOCK_LEVEL_ALLOCATOR),
-            ),
-            slab128: allocator::SlabAllocator::<128>::new_with_class(
-                3,
-                lock_class!("SLAB_128", LOCK_LEVEL_ALLOCATOR),
-            ),
-            slab256: allocator::SlabAllocator::<256>::new_with_class(
-                4,
-                lock_class!("SLAB_256", LOCK_LEVEL_ALLOCATOR),
-            ),
-            slab512: allocator::SlabAllocator::<512>::new_with_class(
-                5,
-                lock_class!("SLAB_512", LOCK_LEVEL_ALLOCATOR),
-            ),
-            slab1024: allocator::SlabAllocator::<1024>::new_with_class(
-                6,
-                lock_class!("SLAB_1024", LOCK_LEVEL_ALLOCATOR),
-            ),
-            slab2048: allocator::SlabAllocator::<2048>::new_with_class(
-                7,
-                lock_class!("SLAB_2048", LOCK_LEVEL_ALLOCATOR),
-            ),
-            large: large::LargeAlloc::new(),
-        }
-    }
-
     #[inline]
     fn is_live(&self) -> bool {
         self.state.load(Ordering::Acquire) == Lifecycle::Live.as_u8()
@@ -187,7 +148,42 @@ impl KernelHeapBackend for KernelSlab {
     }
 }
 
-pub(crate) static KERNEL_SLAB: KernelSlab = KernelSlab::new_uninit();
+pub(crate) static KERNEL_SLAB: KernelSlab = KernelSlab {
+    state: AtomicU8::new(Lifecycle::Uninit.as_u8()),
+    slab16: allocator::SlabAllocator::<16>::new_with_class(
+        0,
+        lock_class!("SLAB_16", LOCK_LEVEL_ALLOCATOR),
+    ),
+    slab32: allocator::SlabAllocator::<32>::new_with_class(
+        1,
+        lock_class!("SLAB_32", LOCK_LEVEL_ALLOCATOR),
+    ),
+    slab64: allocator::SlabAllocator::<64>::new_with_class(
+        2,
+        lock_class!("SLAB_64", LOCK_LEVEL_ALLOCATOR),
+    ),
+    slab128: allocator::SlabAllocator::<128>::new_with_class(
+        3,
+        lock_class!("SLAB_128", LOCK_LEVEL_ALLOCATOR),
+    ),
+    slab256: allocator::SlabAllocator::<256>::new_with_class(
+        4,
+        lock_class!("SLAB_256", LOCK_LEVEL_ALLOCATOR),
+    ),
+    slab512: allocator::SlabAllocator::<512>::new_with_class(
+        5,
+        lock_class!("SLAB_512", LOCK_LEVEL_ALLOCATOR),
+    ),
+    slab1024: allocator::SlabAllocator::<1024>::new_with_class(
+        6,
+        lock_class!("SLAB_1024", LOCK_LEVEL_ALLOCATOR),
+    ),
+    slab2048: allocator::SlabAllocator::<2048>::new_with_class(
+        7,
+        lock_class!("SLAB_2048", LOCK_LEVEL_ALLOCATOR),
+    ),
+    large: large::LargeAlloc::new(),
+};
 
 /// Inner static behind [`slab_handle`]; OSTD's `register_kernel_slab_handle`
 /// takes a doubly-indirect `&'static &'static dyn KernelHeapBackend`.

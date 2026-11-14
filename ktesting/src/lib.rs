@@ -1,6 +1,5 @@
 #![no_std]
 #![forbid(unsafe_code)]
-#![feature(allocator_api)]
 
 pub mod capture;
 pub mod config;

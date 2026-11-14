@@ -28,8 +28,11 @@
 //! `unsafe { ::core::intrinsics::unreachable() }`, both inside
 //! `#[automatically_derived]` impls. `-Zunpretty=expanded` is unstable; a test
 //! expands a fixture with the pinned toolchain and fails if those shapes move,
-//! and a run that sees no `TrivialClone` impl at all refuses to pass.
+//! and a run that sees no `TrivialClone` impl at all refuses to pass. It also
+//! prints what `offset_of!` expands to as `k#offset_of(..)`, which no parser
+//! reads; [`parseable`] respells it `builtin # offset_of(..)` before parsing.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::time::Instant;
 
@@ -227,7 +230,8 @@ struct Stats {
 /// Parse one expansion and report every unsafe it carries beyond the
 /// constant.
 fn check(label: &str, text: &str, report: &mut Report, stats: &mut Stats) -> Result<()> {
-    let file = syn::parse_file(text).map_err(|e| {
+    let source = parseable(text);
+    let file = syn::parse_file(&source).map_err(|e| {
         let line = e.span().start().line;
         format!(
             "{label}: expansion line {line} does not parse: {e}: `{}`",
@@ -248,6 +252,29 @@ fn check(label: &str, text: &str, report: &mut Report, stats: &mut Stats) -> Res
     };
     v.visit_file(&file);
     Ok(())
+}
+
+/// The expansion with rustc's builtin-syntax spelling `k#name` turned into
+/// `builtin # name`, which syn keeps as verbatim tokens. Lines keep their
+/// numbers.
+fn parseable(text: &str) -> Cow<'_, str> {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::new();
+    let mut copied = 0;
+    for (at, _) in text.match_indices("k#") {
+        let bare = !text[..at].chars().next_back().is_some_and(ident);
+        let named = text[at + 2..].chars().next().is_some_and(ident);
+        if bare && named {
+            out.push_str(&text[copied..at]);
+            out.push_str("builtin # ");
+            copied = at + 2;
+        }
+    }
+    if copied == 0 {
+        return Cow::Borrowed(text);
+    }
+    out.push_str(&text[copied..]);
+    Cow::Owned(out)
 }
 
 struct Checker<'a> {
@@ -604,7 +631,8 @@ mod tests {
             child.stdin.as_mut().unwrap(),
             b"#![no_std]\n\
               #[derive(Clone, Copy)]\npub struct P { a: u8 }\n\
-              #[derive(PartialEq)]\npub enum E { A(u8), B(u16) }\n",
+              #[derive(PartialEq)]\npub enum E { A(u8), B(u16) }\n\
+              pub const O: usize = core::mem::offset_of!(P, a);\n",
         )
         .unwrap();
         let out = child.wait_with_output().unwrap();
@@ -668,5 +696,16 @@ mod tests {
         );
         let (hits, _) = findings(text);
         assert_eq!(lines(&hits), [1, 2, 3, 4, 5, 6, 7, 9, 12, 14, 15, 16, 17]);
+    }
+
+    #[test]
+    fn builtin_syntax_parses_and_hides_no_unsafe() {
+        let text = concat!(
+            "fn a() -> usize { const { k#offset_of(S, a) } }\n",
+            "fn b() -> usize { unsafe { x(k#offset_of(S, a)) } }\n",
+            "fn c() { let disk = \"disk#1\"; }\n",
+        );
+        let (hits, _) = findings(text);
+        assert_eq!(lines(&hits), [2]);
     }
 }

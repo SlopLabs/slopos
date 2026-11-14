@@ -131,17 +131,20 @@ once at the end of this section and applies to every entry.
 | Component | Version | Copyright |
 |---|---|---|
 | [`bitflags`](https://github.com/bitflags/bitflags) | 2.13.2 | Copyright (c) 2014 The Rust Project Developers |
-| [`libc`](https://github.com/rust-lang/libc) | 0.2.189, forked | Copyright (c) 2014 The Rust Project Developers |
+| [`libc`](https://github.com/rust-lang/libc) | 0.2.191, forked | Copyright (c) 2014 The Rust Project Developers |
 | [`libm`](https://github.com/rust-lang/libm) | 0.2.16 | **MIT only** — see the note below |
 | [`limine`](https://github.com/limine-bootloader/limine-rs) | 0.6.5 | Copyright © 2026 Julian Scheffers |
 | [`paste`](https://github.com/dtolnay/paste) | 1.0.15 | David Tolnay (upstream ships no copyright line) |
-| [`gimli`](https://github.com/gimli-rs/gimli) | 0.33.0 | Copyright (c) 2015 The Rust Project Developers |
-| [`unwinding`](https://github.com/nbdd0121/unwinding/) | 0.2.9 | Gary Guo (upstream ships no copyright line) |
+| [`gimli`](https://github.com/gimli-rs/gimli) | 0.34.0 | Copyright (c) 2015 The Rust Project Developers |
+| [`unwinding`](https://github.com/nbdd0121/unwinding/) | 0.2.11, modified | Gary Guo (upstream ships no copyright line) |
 | Rust `core`, `alloc`, `std` | pinned nightly, `std` forked | Copyright © The Rust Project Contributors |
 | [`hashbrown`](https://github.com/rust-lang/hashbrown), linked by `std` | 0.17.1 | Copyright (c) 2016 Amanieu d'Antras |
 | [`rustc-demangle`](https://github.com/rust-lang/rustc-demangle), linked by `std` | 0.1.28 | Copyright (c) 2014 Alex Crichton |
 
-`gimli` and `unwinding` are vendored verbatim under [`vendor/`](vendor/); each
+`gimli` is vendored verbatim under [`vendor/`](vendor/). `unwinding` is vendored
+with three edits the kernel's rules need: it takes gimli's `read` feature and
+keeps unwind state in `Vec`s rather than in stack arrays, and its x86-64
+context save and restore leave MXCSR and the x87 control word alone. Each
 directory retains its upstream `LICENSE-MIT` and `LICENSE-APACHE`.
 
 `libm` 0.2.16 is licensed **MIT only** — no Apache option is available — and

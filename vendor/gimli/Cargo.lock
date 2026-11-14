@@ -222,12 +222,12 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "gimli"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "criterion",
  "fallible-iterator",
  "fnv",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
  "indexmap",
  "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
@@ -254,9 +254,9 @@ checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
 
 [[package]]
 name = "hashbrown"
-version = "0.16.1"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "indexmap"

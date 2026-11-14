@@ -1,8 +1,8 @@
 diff --git a/src/new/mod.rs b/src/new/mod.rs
-index f4387e7..f6a7785 100644
+index 5f3accb..e4277fd 100644
 --- a/src/new/mod.rs
 +++ b/src/new/mod.rs
-@@ -107,6 +107,9 @@ cfg_if! {
+@@ -110,6 +110,9 @@ cfg_if! {
      } else if #[cfg(target_os = "redox")] {
          mod redox;
          // pub(crate) use redox::*;
@@ -12,7 +12,7 @@ index f4387e7..f6a7785 100644
      } else if #[cfg(target_os = "rtems")] {
          mod rtems;
          // pub(crate) use rtems::*;
-@@ -161,6 +164,9 @@ cfg_if! {
+@@ -164,6 +167,9 @@ cfg_if! {
      } else if #[cfg(target_env = "relibc")] {
          mod relibc;
          pub(crate) use relibc::*;
@@ -56,10 +56,10 @@ index 0000000..54fe1cf
 +//!
 +//! * Headers: SlopOS's `abi` crate
 diff --git a/src/unix/mod.rs b/src/unix/mod.rs
-index 6c64020..0ec764e 100644
+index 62d48c9..b7d297a 100644
 --- a/src/unix/mod.rs
 +++ b/src/unix/mod.rs
-@@ -580,6 +580,11 @@ cfg_if! {
+@@ -634,6 +634,11 @@ cfg_if! {
          #[link(name = "c")]
          #[link(name = "m")]
          extern "C" {}
@@ -71,7 +71,7 @@ index 6c64020..0ec764e 100644
      } else if #[cfg(target_os = "redox")] {
          #[cfg_attr(
              feature = "rustc-dep-of-std",
-@@ -2496,6 +2501,9 @@ cfg_if! {
+@@ -2541,6 +2546,9 @@ cfg_if! {
      } else if #[cfg(target_os = "haiku")] {
          mod haiku;
          pub use self::haiku::*;
@@ -83,10 +83,10 @@ index 6c64020..0ec764e 100644
          pub use self::redox::*;
 diff --git a/src/unix/slopos/mod.rs b/src/unix/slopos/mod.rs
 new file mode 100644
-index 0000000..c95e451
+index 0000000..680fc59
 --- /dev/null
 +++ b/src/unix/slopos/mod.rs
-@@ -0,0 +1,2312 @@
+@@ -0,0 +1,2310 @@
 +//! SlopOS, over the `slibc` C library.
 +//!
 +//! * Headers: `slibc/include`
@@ -1646,9 +1646,7 @@ index 0000000..c95e451
 +            *slot = 0;
 +        }
 +    }
-+}
 +
-+safe_f! {
 +    /// The lowest realtime signal an application may use, as slibc reports it.
 +    pub safe fn SIGRTMIN() -> c_int {
 +        unsafe { __libc_current_sigrtmin() }

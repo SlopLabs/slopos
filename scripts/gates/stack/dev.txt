@@ -27,7 +27,6 @@ expect-test-registry few
 # hot path. The DWARF CFI evaluation is inherently frame-heavy.
 2216	*9unwinding8unwinder8find_fde16gnu_eh_frame_hdr*find_fde*
 3864	*CallFrameInstruction*E5parse*9unwinding*
-2744	*unwinding9panicking12catch_unwind8do_catch*slopos_ostd6unwind11KernelPanic*
 2616	*unwinding8unwinder5frame*Frame12from_context*
 2072	*unwinding8unwinder19force_unwind_phase2*
 2072	*UnwindTable*StoreInVec*E8evaluate*
@@ -36,17 +35,17 @@ expect-test-registry few
 # residual frame is inherent local/format-args state, still under the guard
 # page.
 2424	*slopos_acpi3aml14process_device*
-2344	*slopos_net4ipv49handle_rx*
+2328	*slopos_net4ipv49handle_rx*
 2200	*slopos_acpi3aml6interp*Interp4eval*
 
 # `task_clone` holds the `KArc<SigHandTable>` a `CLONE_SIGHAND` thread shares,
 # its group leader's `real_parent` and the task charge a registered clone
 # takes.
-2152	*slopos_sched4task14task_lifecycle10task_clone*
+2136	*slopos_sched4task14task_lifecycle10task_clone*
 
 # Library smallsort monomorphizations: scratch is the element size, not
 # reducible without changing the sorted element type. One per bus, since
 # `sort_candidates` monomorphizes over the `Bus` impl.
-2248	*sort4_stable*slopos_drivers11driver_core3bus15sort_candidates*3pci6PciBus*
-2248	*sort4_stable*slopos_drivers11driver_core3bus15sort_candidates*12platform_bus11PlatformBus*
+2056	*sort4_stable*slopos_drivers11driver_core3bus15sort_candidates*3pci6PciBus*
+2056	*sort4_stable*slopos_drivers11driver_core3bus15sort_candidates*12platform_bus11PlatformBus*
 2056	*sort4_stable*slopos_drivers11driver_core3bus15sort_candidates*3usb3bus6UsbBus*

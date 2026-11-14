@@ -35,7 +35,7 @@ index 98856b5..f235e87 100644
          || target_os == "vxworks"
          || target_arch == "wasm32"
 diff --git a/std/src/os/mod.rs b/std/src/os/mod.rs
-index 8068f92..26089c5 100644
+index f95c6ac..49d0c28 100644
 --- a/std/src/os/mod.rs
 +++ b/std/src/os/mod.rs
 @@ -129,6 +129,8 @@ pub mod nuttx;
@@ -550,7 +550,7 @@ index 0000000..566ae9f
 +    pub __unused: [c_long; 3],
 +}
 diff --git a/std/src/os/unix/mod.rs b/std/src/os/unix/mod.rs
-index c994174..2f32ad4 100644
+index 436062c..4b9c28b 100644
 --- a/std/src/os/unix/mod.rs
 +++ b/std/src/os/unix/mod.rs
 @@ -78,6 +78,8 @@ mod platform {
@@ -597,44 +597,44 @@ index b14160c..86066c2 100644
  pub mod os {
      pub const FAMILY: &str = "unix";
 diff --git a/std/src/sys/fs/unix.rs b/std/src/sys/fs/unix.rs
-index 74b4322..d202ba7 100644
+index 4b384ae..c6d58b5 100644
 --- a/std/src/sys/fs/unix.rs
 +++ b/std/src/sys/fs/unix.rs
-@@ -1334,6 +1334,7 @@ impl File {
-                 target_os = "aix",
+@@ -1338,6 +1338,7 @@ impl File {
                  target_os = "android",
+                 target_os = "redox",
                  target_vendor = "apple",
 +                target_os = "slopos",
              ) => {
                  cvt(unsafe { libc::flock(self.as_raw_fd(), libc::LOCK_EX) })?;
                  Ok(())
-@@ -1356,6 +1357,7 @@ impl File {
-                 target_os = "aix",
+@@ -1362,6 +1363,7 @@ impl File {
                  target_os = "android",
+                 target_os = "redox",
                  target_vendor = "apple",
 +                target_os = "slopos",
              ) => {
                  cvt(unsafe { libc::flock(self.as_raw_fd(), libc::LOCK_SH) })?;
                  Ok(())
-@@ -1378,6 +1380,7 @@ impl File {
-                 target_os = "aix",
+@@ -1386,6 +1388,7 @@ impl File {
                  target_os = "android",
+                 target_os = "redox",
                  target_vendor = "apple",
 +                target_os = "slopos",
              ) => {
                  let result =
                      cvt(unsafe { libc::flock(self.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) });
-@@ -1412,6 +1415,7 @@ impl File {
-                 target_os = "aix",
+@@ -1422,6 +1425,7 @@ impl File {
                  target_os = "android",
+                 target_os = "redox",
                  target_vendor = "apple",
 +                target_os = "slopos",
              ) => {
                  let result =
                      cvt(unsafe { libc::flock(self.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) });
-@@ -1446,6 +1450,7 @@ impl File {
-                 target_os = "aix",
+@@ -1458,6 +1462,7 @@ impl File {
                  target_os = "android",
+                 target_os = "redox",
                  target_vendor = "apple",
 +                target_os = "slopos",
              ) => {
@@ -653,10 +653,10 @@ index 5f60abf..bbe37dd 100644
          link_name = "__errno_location"
      )]
 diff --git a/std/src/sys/paths/unix.rs b/std/src/sys/paths/unix.rs
-index e023451..18576c8 100644
+index 756c5ec..b4eae90 100644
 --- a/std/src/sys/paths/unix.rs
 +++ b/std/src/sys/paths/unix.rs
-@@ -360,6 +360,22 @@ pub fn current_exe() -> io::Result<PathBuf> {
+@@ -359,6 +359,22 @@ pub fn current_exe() -> io::Result<PathBuf> {
      crate::fs::read_to_string("/scheme/sys/exe").map(PathBuf::from)
  }
  
@@ -694,7 +694,7 @@ index 86397ec..bb463cc 100644
              cvt(libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC))?;
              Ok((Pipe::from_raw_fd(fds[0]), Pipe::from_raw_fd(fds[1])))
 diff --git a/std/src/sys/process/unix/unix.rs b/std/src/sys/process/unix/unix.rs
-index aa47fcb..af7c16f 100644
+index d1262ba..6e4b84e 100644
 --- a/std/src/sys/process/unix/unix.rs
 +++ b/std/src/sys/process/unix/unix.rs
 @@ -432,6 +432,7 @@ impl Command {
@@ -740,20 +740,20 @@ index aa47fcb..af7c16f 100644
              // Our minimum required musl supports this function, so we can just use it.
              Some(libc::posix_spawn_file_actions_addchdir_np)
 diff --git a/std/src/sys/random/mod.rs b/std/src/sys/random/mod.rs
-index bc3dd50..0ac26ff 100644
+index 23f6ce8..88c4339 100644
 --- a/std/src/sys/random/mod.rs
 +++ b/std/src/sys/random/mod.rs
-@@ -53,6 +53,10 @@ cfg_select! {
-         mod unix_legacy;
-         pub use unix_legacy::fill_bytes;
+@@ -61,6 +61,10 @@ cfg_select! {
+         mod sgx;
+         pub use sgx::fill_bytes;
      }
 +    target_os = "slopos" => {
 +        mod slopos;
 +        pub use slopos::fill_bytes;
 +    }
-     target_os = "redox" => {
-         mod redox;
-         pub use redox::fill_bytes;
+     target_os = "solid_asp3" => {
+         mod solid;
+         pub use solid::fill_bytes;
 diff --git a/std/src/sys/random/slopos.rs b/std/src/sys/random/slopos.rs
 new file mode 100644
 index 0000000..71a122e
@@ -777,10 +777,10 @@ index 0000000..71a122e
 +    }
 +}
 diff --git a/std/src/sys/thread/unix.rs b/std/src/sys/thread/unix.rs
-index b7908de..6cd2084 100644
+index 400ee36..e1b20a9 100644
 --- a/std/src/sys/thread/unix.rs
 +++ b/std/src/sys/thread/unix.rs
-@@ -165,6 +165,7 @@ pub fn available_parallelism() -> io::Result<NonZero<usize>> {
+@@ -166,6 +166,7 @@ pub fn available_parallelism() -> io::Result<NonZero<usize>> {
              target_vendor = "apple",
              target_os = "cygwin",
              target_os = "redox",
@@ -788,7 +788,7 @@ index b7908de..6cd2084 100644
              target_os = "wasi",
          ) => {
              #[allow(unused_assignments)]
-@@ -445,7 +446,8 @@ pub fn set_name(name: &CStr) {
+@@ -446,7 +447,8 @@ pub fn set_name(name: &CStr) {
      target_os = "freebsd",
      target_os = "dragonfly",
      target_os = "nuttx",

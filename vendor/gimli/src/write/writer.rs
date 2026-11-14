@@ -215,6 +215,18 @@ pub trait Writer {
                 }
                 self.write_u16(write_val)
             }
+            3 => {
+                if val > 0xff_ffff {
+                    return Err(Error::ValueTooLarge);
+                }
+                let mut bytes = [0; 4];
+                self.endian().write_u32(&mut bytes, val as u32);
+                if self.endian().is_big_endian() {
+                    self.write(&bytes[1..])
+                } else {
+                    self.write(&bytes[..3])
+                }
+            }
             4 => {
                 let write_val = val as u32;
                 if val != u64::from(write_val) {
@@ -278,6 +290,18 @@ pub trait Writer {
                     return Err(Error::ValueTooLarge);
                 }
                 self.write_u16_at(offset, write_val)
+            }
+            3 => {
+                if val > 0xff_ffff {
+                    return Err(Error::ValueTooLarge);
+                }
+                let mut bytes = [0; 4];
+                self.endian().write_u32(&mut bytes, val as u32);
+                if self.endian().is_big_endian() {
+                    self.write_at(offset, &bytes[1..])
+                } else {
+                    self.write_at(offset, &bytes[..3])
+                }
             }
             4 => {
                 let write_val = val as u32;
@@ -413,39 +437,43 @@ mod tests {
         let mut w = write::EndianVec::new(LittleEndian);
         w.write_udata(0x11, 1).unwrap();
         w.write_udata(0x2233, 2).unwrap();
+        w.write_udata(0x11_2233, 3).unwrap();
         w.write_udata(0x4455_6677, 4).unwrap();
         w.write_udata(0x8081_8283_8485_8687, 8).unwrap();
         #[rustfmt::skip]
         assert_eq!(w.slice(), &[
             0x11,
             0x33, 0x22,
+            0x33, 0x22, 0x11,
             0x77, 0x66, 0x55, 0x44,
             0x87, 0x86, 0x85, 0x84, 0x83, 0x82, 0x81, 0x80,
         ]);
         assert_eq!(w.write_udata(0x100, 1), Err(Error::ValueTooLarge));
         assert_eq!(w.write_udata(0x1_0000, 2), Err(Error::ValueTooLarge));
+        assert_eq!(w.write_udata(0x1_0000_0000, 3), Err(Error::ValueTooLarge));
         assert_eq!(w.write_udata(0x1_0000_0000, 4), Err(Error::ValueTooLarge));
-        assert_eq!(w.write_udata(0x00, 3), Err(Error::UnsupportedWordSize(3)));
-        w.write_udata_at(14, 0x11, 1).unwrap();
-        w.write_udata_at(12, 0x2233, 2).unwrap();
+        w.write_udata_at(17, 0x11, 1).unwrap();
+        w.write_udata_at(15, 0x2233, 2).unwrap();
+        w.write_udata_at(12, 0x11_2233, 3).unwrap();
         w.write_udata_at(8, 0x4455_6677, 4).unwrap();
         w.write_udata_at(0, 0x8081_8283_8485_8687, 8).unwrap();
         #[rustfmt::skip]
         assert_eq!(w.slice(), &[
             0x87, 0x86, 0x85, 0x84, 0x83, 0x82, 0x81, 0x80,
             0x77, 0x66, 0x55, 0x44,
+            0x33, 0x22, 0x11,
             0x33, 0x22,
             0x11,
         ]);
         assert_eq!(w.write_udata_at(0, 0x100, 1), Err(Error::ValueTooLarge));
         assert_eq!(w.write_udata_at(0, 0x1_0000, 2), Err(Error::ValueTooLarge));
         assert_eq!(
-            w.write_udata_at(0, 0x1_0000_0000, 4),
+            w.write_udata_at(0, 0x1_0000_0000, 3),
             Err(Error::ValueTooLarge)
         );
         assert_eq!(
-            w.write_udata_at(0, 0x00, 3),
-            Err(Error::UnsupportedWordSize(3))
+            w.write_udata_at(0, 0x1_0000_0000, 4),
+            Err(Error::ValueTooLarge)
         );
 
         let mut w = write::EndianVec::new(LittleEndian);

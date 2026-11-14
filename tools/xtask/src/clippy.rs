@@ -303,7 +303,6 @@ fn plan(target: Target, tree: &Tree) -> Vec<Invocation> {
                     "-Zbuild-std=core,alloc",
                     BUILTINS_MEM,
                     "-Zunstable-options",
-                    "-Ztrim-paths",
                     "--config",
                     "profile.dev.trim-paths=\"all\"",
                     "--config",
@@ -583,7 +582,7 @@ mod tests {
             "CLIPPY_CONF_DIR=kernel \
             RUSTFLAGS='-C force-frame-pointers=yes -Zunstable-options -Zemit-stack-sizes' \
             {} clippy --locked -Zbuild-std=core,alloc \
-            -Zbuild-std-features=compiler-builtins-mem -Zunstable-options -Ztrim-paths \
+            -Zbuild-std-features=compiler-builtins-mem -Zunstable-options \
             --config profile.dev.trim-paths=\"all\" --config profile.release.trim-paths=\"all\" \
             --config future-incompat-report.frequency=\"never\" \
             --target targets/x86_64-slos.json --package kernel --bin kernel",

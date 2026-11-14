@@ -5,8 +5,8 @@
 # fails if any line here stops describing what is on disk. The patches ARE the
 # forks: each is the diff an upstream PR wants, and upstreaming is what makes it
 # shrink to nothing.
-channel=nightly-2026-09-03
-libc_version=0.2.189
-libc_checksum=3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2
-patch_sha256=toolchain/rust/0001-slopos-std.patch:eb29f9d296f2a3a83ea0cff99b0f0f80f33b0174b79ec46daf6d08cf75e7d793
-patch_sha256=toolchain/libc/0001-slopos-libc.patch:14f5e26d50913724b644913c6d1abcecd406695fd9c12c0e8f4566f046e73a06
+channel=nightly-2026-11-14
+libc_version=0.2.191
+libc_checksum=65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a
+patch_sha256=toolchain/rust/0001-slopos-std.patch:d5b0f389cd0b6cc1e32529fa4afeef4a4d831b59ed3b8ef0f5feb0f02e084c8f
+patch_sha256=toolchain/libc/0001-slopos-libc.patch:fc749036535eac8d28fa2345e048f7bc842d2c77a19392460691c177143ebc18

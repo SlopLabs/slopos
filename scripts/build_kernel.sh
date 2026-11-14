@@ -101,7 +101,6 @@ build_kernel_once() {
         -Zbuild-std=core,alloc \
         -Zbuild-std-features=compiler-builtins-mem \
         -Zunstable-options \
-        -Ztrim-paths \
         --config 'profile.dev.trim-paths="all"' \
         --config 'profile.release.trim-paths="all"' \
         --config 'future-incompat-report.frequency="never"' \

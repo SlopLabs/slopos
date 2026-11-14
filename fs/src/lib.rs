@@ -1,8 +1,4 @@
 #![no_std]
-// `AllocError` is `KBox::try_init`'s error carrier: the block cache is built
-// field by field into its heap slot so no whole-struct rvalue lands on a
-// caller's frame.
-#![feature(allocator_api)]
 #![forbid(unsafe_code)]
 
 /// Longest path the VFS resolves, NUL excluded. Matches

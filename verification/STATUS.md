@@ -313,12 +313,12 @@ reports 0.52 % unsafe-line density over the kernel binary's dependency
 closure. Read it as a trend. It is **not** comparable to
 the TCB fractions other projects publish: Asterinas's ~14 % is LCS over
 post-LTO linked code including its dependency closure, while this
-denominator is raw first-party LoC — and 41 kLoC of it is the vendored DWARF
+denominator is raw first-party LoC — and 42 kLoC of it is the vendored DWARF
 reader, which contributes 20 unsafe lines.
 
 ## Vendored annexes
 
-`vendor/unwinding` (3 308 LoC, 177 unsafe) and `vendor/gimli` (41 494 LoC,
+`vendor/unwinding` (3 314 LoC, 177 unsafe) and `vendor/gimli` (42 310 LoC,
 20 unsafe) link into `kernel.elf` and are exempt from every source gate.
 They are trusted code that is neither verified nor audited here; their
 integrity rests on `check_vendor_pin.sh`, which pins each to an upstream

@@ -87,14 +87,12 @@ pub struct MountTable {
 }
 
 impl MountTable {
-    const fn new() -> Self {
-        Self {
-            mounts: [const { MountPoint::empty() }; MAX_MOUNTS],
-            count: 0,
-            next_id: 1,
-            pinned_dirs: [None; MAX_PINNED_DIRS],
-        }
-    }
+    const EMPTY: Self = Self {
+        mounts: [const { MountPoint::empty() }; MAX_MOUNTS],
+        count: 0,
+        next_id: 1,
+        pinned_dirs: [None; MAX_PINNED_DIRS],
+    };
 
     fn pins_dir(&self, fs: &'static dyn FileSystem, inode: InodeId) -> bool {
         self.pinned_dirs
@@ -172,7 +170,7 @@ impl MountTable {
 }
 
 static MOUNT_TABLE: IrqRwLock<MountTable> = IrqRwLock::new(
-    MountTable::new(),
+    MountTable::EMPTY,
     lock_class!("MOUNT_TABLE", LOCK_LEVEL_REGISTRY),
 );
 

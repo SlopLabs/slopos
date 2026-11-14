@@ -1,5 +1,4 @@
 #![no_std]
-#![feature(allocator_api)]
 #![forbid(unsafe_code)]
 
 pub mod apic;

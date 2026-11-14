@@ -40,12 +40,12 @@
 //!
 //! Full example programs:
 //!
-//!   * [A simple `.debug_info` parser](https://github.com/gimli-rs/gimli/blob/master/crates/examples/src/bin/simple.rs)
+//!   * [A simple `.debug_info` parser](https://github.com/gimli-rs/gimli/blob/main/crates/examples/src/bin/simple.rs)
 //!
-//!   * [A simple `.debug_line` parser](https://github.com/gimli-rs/gimli/blob/master/crates/examples/src/bin/simple_line.rs)
+//!   * [A simple `.debug_line` parser](https://github.com/gimli-rs/gimli/blob/main/crates/examples/src/bin/simple_line.rs)
 //!
 //!   * [A `dwarfdump`
-//!     clone](https://github.com/gimli-rs/gimli/blob/master/crates/examples/src/bin/dwarfdump.rs)
+//!     clone](https://github.com/gimli-rs/gimli/blob/main/crates/examples/src/bin/dwarfdump.rs)
 //!
 //!   * [An `addr2line` clone](https://github.com/gimli-rs/addr2line)
 //!
@@ -56,7 +56,7 @@
 //!     compilers used to create each compilation unit within a shared library or
 //!     executable (via `DW_AT_producer`)
 //!
-//!   * [`dwarf-validate`](https://github.com/gimli-rs/gimli/blob/master/crates/examples/src/bin/dwarf-validate.rs),
+//!   * [`dwarf-validate`](https://github.com/gimli-rs/gimli/blob/main/crates/examples/src/bin/dwarf-validate.rs),
 //!     a program to validate the integrity of some DWARF and its references
 //!     between sections and compilation units.
 //!
@@ -185,6 +185,8 @@ mod line;
 pub use self::line::*;
 
 mod lists;
+#[cfg(feature = "read")]
+pub use self::lists::ListsHeader;
 
 mod loclists;
 pub use self::loclists::*;
@@ -336,6 +338,8 @@ pub enum Error {
     InvalidShiftExpression,
     /// The size of a deref expression must not be larger than the size of an address.
     InvalidDerefSize(u8),
+    /// The byte size of a `DW_OP_piece` is too large to convert to a bit size.
+    InvalidPieceSize(u64),
     /// An unknown DW_CFA_* instruction.
     UnknownCallFrameInstruction(constants::DwCfa),
     /// A `DW_CFA_set_loc` instruction moved the address backward.
@@ -513,6 +517,9 @@ impl fmt::Display for Error {
             }
             Error::InvalidDerefSize(val) => {
                 write!(f, "invalid deref size: {val}")
+            }
+            Error::InvalidPieceSize(val) => {
+                write!(f, "invalid piece size: {val}")
             }
             Error::UnknownCallFrameInstruction(val) => {
                 write!(f, "unknown call frame instruction: 0x{:x}", val.0)

@@ -1,25 +1,27 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index 1e8347a..6d0df03 100644
+index 0d16494..a094b0c 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -285,4 +285,5 @@ check-cfg = [
+@@ -284,6 +284,7 @@ check-cfg = [
      "cfg(wasip2)",
      'cfg(target_arch, values("xtensa"))',
      'cfg(target_os, values("cygwin"))',
 +    'cfg(target_os, values("slopos"))',
  ]
+ 
+ [hints]
 diff --git a/Cargo.toml.orig b/Cargo.toml.orig
-index 18579fc..819e7fe 100644
+index 656b11c..322435b 100644
 --- a/Cargo.toml.orig
 +++ b/Cargo.toml.orig
-@@ -274,4 +274,5 @@ check-cfg = [
+@@ -273,4 +273,5 @@ check-cfg = [
      'cfg(wasip2)',
      'cfg(target_arch, values("xtensa"))',
      'cfg(target_os, values("cygwin"))',
 +    'cfg(target_os, values("slopos"))',
  ]
 diff --git a/src/ioctl/mod.rs b/src/ioctl/mod.rs
-index 4beed11..9dc4cd0 100644
+index 70c6905..0dd2d04 100644
 --- a/src/ioctl/mod.rs
 +++ b/src/ioctl/mod.rs
 @@ -313,13 +313,14 @@ type _Opcode = c::c_int;

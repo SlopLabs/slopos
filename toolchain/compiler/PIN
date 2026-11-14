@@ -6,7 +6,7 @@
 #
 # The channel is not repeated here: it lives in `toolchain/PIN`, held equal to
 # `rust-toolchain.toml`, and the source tarball's URL is derived from it. What
-# this file adds is the tarball's checksum and five patches.
+# this file adds is the tarball's checksum and four patches.
 #
 # 0001 makes `x86_64-unknown-slopos` a built-in target rather than a JSON
 # file — the one thing bootstrap's `--host` cannot resolve without.
@@ -22,16 +22,11 @@
 # and a SlopOS sysroot has `libc++.a` and no `libstdc++.a`. It names the
 # archive for `slopos` as bootstrap already does for `windows-gnullvm`.
 #
-# 0004 links a `rustc_private` tool (rustdoc, rustfmt, clippy) cross-built
-# for SlopOS against SlopOS's libLLVM: bootstrap hands such a tool the build
-# triple's `llvm-config --libdir`, which on a cross host names the Linux one,
-# and maps it to the target's directory as `rustc_llvm`'s build script does.
-#
-# The fifth patch is the SlopOS LLVM port a second time, because the port has
+# The fourth patch is the SlopOS LLVM port a second time, because the port has
 # to exist in two llvm-project trees and they are different versions.
 # `toolchain/llvm/` cuts it against the 18.1.8 release `toolchain/cxx/PIN`
 # names, the tree the C++ runtime is built from; rustc bundles its own LLVM at
-# `src/llvm-project`, currently 23.1.1, and that is the one a cross-hosted
+# `src/llvm-project`, currently 23.1.5, and that is the one a cross-hosted
 # compiler's backend is built from. Not one hunk of the 18.1.8 patch applies
 # there — `Triple`'s OS names have moved into a `TripleName.def` table, the
 # clang driver's headers have moved out of `clang/lib/Driver/`, and
@@ -40,9 +35,8 @@
 # it a `--host=x86_64-unknown-slopos` run reaches `llvm::Llvm` and stops in
 # `llvm/ADT/bit.h` looking for `machine/endian.h`, which is the port's first
 # hunk.
-rustc_src_sha256=83e1649371c2b85317974ead0c9786766c090dc1b79afe41c8e7091f009da478
-patch_sha256=toolchain/compiler/0001-slopos-target.patch:3b6baf7d1c5134ee437b88b24cd068e25248309186c1fdb5f912c348befeec03
+rustc_src_sha256=e19ef08c797abfc66a3aaac9e6ab80a98115996cf4b0b7521b1e51cbd1286d1c
+patch_sha256=toolchain/compiler/0001-slopos-target.patch:aeedca5b7c9182b42a88ace35b32301a4acf7ba470d309e7024f7555db62bc49
 patch_sha256=toolchain/compiler/0002-bootstrap-cmake-system-name.patch:16989f469122ffa26e9a88349756e6ce4dc93c6dec7bbe874e8319a9490971fc
 patch_sha256=toolchain/compiler/0003-bootstrap-static-libcxx.patch:1f11a25951d3d5c3800977bb731b7f1c2d439e444c0a685c11a41e84b6f6e591
-patch_sha256=toolchain/compiler/0004-bootstrap-cross-tool-llvm-libdir.patch:a215af8a67ee868d9198fef5932a3f34d0c6cb50dfa988a2bec10bc38f0c3744
 patch_sha256=toolchain/llvm-rustc/0001-slopos-support.patch:98965e5f5f80f7b08463558e42acec8e2d056652b98543065c9b368d32be6cf2

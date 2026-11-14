@@ -168,6 +168,7 @@ pub use self::unit::*;
 
 /// An error that occurred when writing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// The given offset is out of bounds.
     OffsetOutOfBounds,
@@ -205,6 +206,10 @@ pub enum Error {
     UnsupportedCfiExpressionReference,
     /// Unsupported forward reference in expression.
     UnsupportedExpressionForwardReference,
+    /// Range or location entry is an address pair, but base address is set.
+    UnexpectedBaseAddress,
+    /// Range or location entry is an offset pair, but base address is not set.
+    MissingBaseAddress,
 }
 
 impl fmt::Display for Error {
@@ -257,6 +262,18 @@ impl fmt::Display for Error {
             }
             Error::UnsupportedExpressionForwardReference => {
                 write!(f, "Unsupported forward reference in expression.")
+            }
+            Error::UnexpectedBaseAddress => {
+                write!(
+                    f,
+                    "Range or location entry is an address pair, but base address is set."
+                )
+            }
+            Error::MissingBaseAddress => {
+                write!(
+                    f,
+                    "Range or location entry is an offset pair, but base address is not set."
+                )
             }
         }
     }

@@ -4,7 +4,6 @@
 //! resource newtype.
 
 #![no_std]
-#![feature(allocator_api)]
 #![forbid(unsafe_code)]
 
 mod boot_ctx;

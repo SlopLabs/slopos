@@ -1311,6 +1311,7 @@ where
             comp_dir = None;
             directory_entry_format = FileEntryFormat::parse(rest)?;
             let count = rest.read_uleb128()?;
+            include_directories.reserve(count.min(rest.len().into_u64()) as usize);
             for _ in 0..count {
                 include_directories.push(parse_directory_v5(
                     rest,
@@ -1345,6 +1346,7 @@ where
             comp_file = None;
             file_name_entry_format = FileEntryFormat::parse(rest)?;
             let count = rest.read_uleb128()?;
+            file_names.reserve(count.min(rest.len().into_u64()) as usize);
             for _ in 0..count {
                 file_names.push(parse_file_v5(rest, encoding, &file_name_entry_format)?);
             }

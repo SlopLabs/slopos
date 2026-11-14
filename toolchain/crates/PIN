@@ -17,49 +17,48 @@
 # -e normal,no-proc-macro` over `rustc-main`, `rustdoc-tool`, `cargo` with its
 # default features and each recipe's lock:
 #
-#   getrandom 0.2.17, 0.4.3   cargo           libc `getrandom` backend
+#   getrandom 0.4.3           cargo           libc `getrandom` backend
 #   getrandom 0.3.3           rustc, rustdoc  libc `getrandom` backend
 #   libloading 0.9.0          rustc           RTLD_* values
 #   nix 0.30.1 (via ctrlc)    rustc           Linux errno table and signal set
 #   nix 0.31.3                just            the same, and the `passwd`
 #                                             fields Linux has
-#   rustix 1.1.2, 1.1.4       rustc / cargo   ioctl opcode type
+#   rustix 1.1.5, 1.1.4       rustc / cargo   ioctl opcode type
 #   errno 0.3.14              both            `__errno_location`
-#   stacker 0.1.21            rustdoc         `pthread_getattr_np` stack limit
+#   stacker 0.1.24            rustdoc         `pthread_getattr_np` stack limit
 #   socket2 0.6.4 (via curl)  cargo           IP_RECVTOS, IPV6_RECVTCLASS,
 #                                             source-specific multicast and
 #                                             SOCK_RDM, excluded as for
 #                                             Redox; `size_t` `msg_iovlen`
 #
-# getrandom 0.2.16 and 0.4.3 in rustc's lock and 0.3.4 in cargo's are locked
-# but never built for the SlopOS host, so they stay unpatched. A recipe's lock
+# getrandom 0.2.16 and 0.4.3, nix 0.31.3 and socket2 0.6.5 in rustc's lock and
+# getrandom 0.2.17 and 0.3.4 in cargo's are locked but never built for the
+# SlopOS host, so they stay unpatched. A recipe's lock
 # names a port by locking it with no source, which the recipe driver resolves
 # here; just's takes nix 0.31.3, rustix 1.1.4, getrandom 0.4.3 and errno 0.3.14.
 #
 # `wiring/` edits both workspaces' `[patch.crates-io]` and their lockfiles:
 # the ports and the libc fork resolve from `slopos-crates/`, and cargo's libc
-# moves from 0.2.186 to the fork's 0.2.189. Bootstrap builds tools against the
+# moves from 0.2.186 to the fork's 0.2.191. Bootstrap builds tools against the
 # tree's own locks, so the lock edits are pinned here rather than regenerated.
-crate=getrandom 0.2.17 ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0
 crate=getrandom 0.3.3 26145e563e54f2cadc477553f1ec5ee650b00862f0a58bcd12cbdc5f0ea2d2f4
 crate=getrandom 0.4.3 300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099
 crate=libloading 0.9.0 754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60
 crate=nix 0.30.1 74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6
-crate=rustix 1.1.2 cd15f8a2c5551a84d56efdc1cd049089e409ac19a3072d5037a17fd70719ff3e
+crate=rustix 1.1.5 891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d
 crate=rustix 1.1.4 b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190
 crate=errno 0.3.14 39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb
-crate=stacker 0.1.21 cddb07e32ddb770749da91081d8d0ac3a16f1a569a18b20348cd371f5dead06b
+crate=stacker 0.1.24 640c8cdd92b6b12f5bcb1803ca3bbf5ab96e5e6b6b96b9ab77dabe9e880b3190
 crate=socket2 0.6.4 52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51
 crate=nix 0.31.3 cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d
-patch_sha256=toolchain/crates/getrandom-0.2.17.patch:1b77f048eb8e72d74c8997984f7f0d4a90afcb25213bce766555debfc7416d0a
 patch_sha256=toolchain/crates/getrandom-0.3.3.patch:8e2fe753afc9a77ff2a1fc141624af9e2f936c755eea41a2486cd353564d611b
 patch_sha256=toolchain/crates/getrandom-0.4.3.patch:25bc6f562eb752d3ec5e0bbd36725b44be0d7cb0b94725761b85b1ed43d62730
 patch_sha256=toolchain/crates/libloading-0.9.0.patch:1487f2b25655d3dd8e832b40938f88841a69e96407ff245d39be0c72f3f76b1f
 patch_sha256=toolchain/crates/nix-0.30.1.patch:345373d4df1a16fa15df9c997acf4eb7b3ab683bc7c644d5d7077ba886bd4129
-patch_sha256=toolchain/crates/rustix-1.1.2.patch:1dc30164e6268be0272e4b1aa25a457fc55ba1b3eca75b39c572a2d3fea7fd71
+patch_sha256=toolchain/crates/rustix-1.1.5.patch:096f70399a553f5609b28ac1b3b0ba9480b2a06e9f269a18e356d0926f86a10a
 patch_sha256=toolchain/crates/rustix-1.1.4.patch:919197ac92acfc756c5a67cd1e8eea85412230caa473638d1a95eb1640d429ab
 patch_sha256=toolchain/crates/errno-0.3.14.patch:6517cc485f7f08f2aa8b30c6adb95e8ae90e74c5d1a3e5fb9f3677625fd44134
-patch_sha256=toolchain/crates/stacker-0.1.21.patch:cb75eea839e7a52ed2b9861d6ed73196eeb78d1d448bb2c7ac73fdc81cbdd956
+patch_sha256=toolchain/crates/stacker-0.1.24.patch:761fac8927e0aca08aca6b52cc9815f9ddcda492d98efd6515071027bfd99273
 patch_sha256=toolchain/crates/nix-0.31.3.patch:576a9953c4d68fbba233226459a5f9821376db44d12fe30665067205ddc23281
 patch_sha256=toolchain/crates/socket2-0.6.4.patch:05a578f90e50484a626d8d1d46d5f24a7a3c1f40e36a95d8266b708dcfb57886
-patch_sha256=toolchain/crates/wiring/0001-patch-crates-io.patch:ea3f91fe6f44dd1e05f98729d8f62e4a8e58bfa2cb1ff084bcf6863599f38222
+patch_sha256=toolchain/crates/wiring/0001-patch-crates-io.patch:b8173d950dd526c69265062275d3d27f6c4001a3ef8f2a151c765d13f279bfe3

@@ -655,8 +655,9 @@ where
             }
             constants::DW_OP_piece => {
                 let size = bytes.read_uleb128()?;
+                let size_in_bits = size.checked_mul(8).ok_or(Error::InvalidPieceSize(size))?;
                 Ok(Operation::Piece {
-                    size_in_bits: 8 * size,
+                    size_in_bits,
                     bit_offset: None,
                 })
             }
@@ -854,6 +855,7 @@ enum EvaluationWaiting<R: Reader> {
     TypedLiteral { value: R },
     Convert,
     Reinterpret,
+    WasmValue,
 }
 
 /// The state of an `Evaluation` after evaluating a DWARF expression.
@@ -885,6 +887,27 @@ pub enum EvaluationResult<R: Reader> {
         register: Register,
         /// The DIE of the base type or 0 to indicate the generic type
         base_type: UnitOffset<R::Offset>,
+    },
+    /// The `Evaluation` needs the value of a WebAssembly local. Once the caller
+    /// determines what value to provide it should resume the `Evaluation` by
+    /// calling `Evaluation::resume_with_wasm_value`.
+    RequiresWasmLocal {
+        /// The index of a local.
+        index: u32,
+    },
+    /// The `Evaluation` needs the value of a WebAssembly global. Once the caller
+    /// determines what value to provide it should resume the `Evaluation` by
+    /// calling `Evaluation::resume_with_wasm_value`.
+    RequiresWasmGlobal {
+        /// The index of a global.
+        index: u32,
+    },
+    /// The `Evaluation` needs the value of a WebAssembly operand-stack item.
+    /// Once the caller determines what value to provide it should resume the
+    /// `Evaluation` by calling `Evaluation::resume_with_wasm_value`.
+    RequiresWasmStack {
+        /// The index of the stack item. 0 is the bottom of the operand stack.
+        index: u32,
     },
     /// The `Evaluation` needs the frame base address to proceed further.  Once
     /// the caller determines what value to provide it should resume the
@@ -1621,11 +1644,25 @@ impl<R: Reader, S: EvaluationStorage<R>> Evaluation<R, S> {
                     EvaluationResult::RequiresBaseType(base_type),
                 ));
             }
-            Operation::VariableValue { .. }
-            | Operation::Uninitialized
-            | Operation::WasmLocal { .. }
-            | Operation::WasmGlobal { .. }
-            | Operation::WasmStack { .. } => {
+            Operation::WasmLocal { index } => {
+                return Ok(OperationEvaluationResult::Waiting(
+                    EvaluationWaiting::WasmValue,
+                    EvaluationResult::RequiresWasmLocal { index },
+                ));
+            }
+            Operation::WasmGlobal { index } => {
+                return Ok(OperationEvaluationResult::Waiting(
+                    EvaluationWaiting::WasmValue,
+                    EvaluationResult::RequiresWasmGlobal { index },
+                ));
+            }
+            Operation::WasmStack { index } => {
+                return Ok(OperationEvaluationResult::Waiting(
+                    EvaluationWaiting::WasmValue,
+                    EvaluationResult::RequiresWasmStack { index },
+                ));
+            }
+            Operation::VariableValue { .. } | Operation::Uninitialized => {
                 return Err(Error::UnsupportedEvaluation);
             }
         }
@@ -1732,6 +1769,29 @@ impl<R: Reader, S: EvaluationStorage<R>> Evaluation<R, S> {
             }
             _ => panic!(
                 "Called `Evaluation::resume_with_register` without a preceding `EvaluationResult::RequiresRegister`"
+            ),
+        };
+
+        self.evaluate_internal()
+    }
+
+    /// Resume the `Evaluation` with the provided WebAssembly `value`. This will
+    /// apply the value to the evaluation and continue evaluating opcodes until
+    /// the evaluation is completed, reaches an error, or needs more information
+    /// again.
+    ///
+    /// # Panics
+    /// Panics if this `Evaluation` did not previously stop with
+    /// `EvaluationResult::RequiresWasmLocal`, `RequiresWasmGlobal`, or
+    /// `RequiresWasmStack`.
+    pub fn resume_with_wasm_value(&mut self, value: Value) -> Result<EvaluationResult<R>> {
+        match self.state {
+            EvaluationState::Error(err) => return Err(err),
+            EvaluationState::Waiting(EvaluationWaiting::WasmValue) => {
+                self.push(value)?;
+            }
+            _ => panic!(
+                "Called `Evaluation::resume_with_wasm_value` without a preceding `EvaluationResult::RequiresWasmLocal`, `RequiresWasmGlobal`, or `RequiresWasmStack`"
             ),
         };
 
@@ -2558,12 +2618,11 @@ mod tests {
                 ]);
             }
 
-            // FIXME
-            if *value < !0u64 / 8 {
+            if let Some(size_in_bits) = value.checked_mul(8) {
                 inputs.push((
                     constants::DW_OP_piece,
                     Operation::Piece {
-                        size_in_bits: 8 * value,
+                        size_in_bits,
                         bit_offset: None,
                     },
                 ));
@@ -2579,6 +2638,27 @@ mod tests {
                 check_op_parse_simple(&input, expect, encoding);
             }
         }
+    }
+
+    #[test]
+    fn test_op_parse_piece_overflow() {
+        // Doesn't matter for this test.
+        let encoding = encoding4();
+
+        // A `DW_OP_piece` size is given in bytes and converted to bits.
+        // A byte size whose bit size does not fit in a `u64` must be rejected
+        // rather than overflowing the multiplication.
+        let size = !0u64 / 8 + 1;
+        let input = Section::with_endian(Endian::Little)
+            .D8(constants::DW_OP_piece.0)
+            .uleb(size)
+            .get_contents()
+            .unwrap();
+        let mut pc = EndianSlice::new(&input, LittleEndian);
+        assert_eq!(
+            Operation::parse(&mut pc, encoding),
+            Err(Error::InvalidPieceSize(size))
+        );
     }
 
     #[test]
@@ -4225,5 +4305,84 @@ mod tests {
                 },
             );
         }
+    }
+
+    #[test]
+    fn test_eval_wasm() {
+        use self::AssemblerEntry::*;
+        use crate::constants::*;
+
+        #[rustfmt::skip]
+        let tests = [
+            (
+                &[
+                    Op(DW_OP_WASM_location), U8(0), Uleb(0x11),
+                    Op(DW_OP_stack_value),
+                ][..],
+                Value::Generic(0x111),
+            ),
+            (
+                &[
+                    Op(DW_OP_WASM_location), U8(1), Uleb(0x22),
+                    Op(DW_OP_stack_value),
+                ][..],
+                Value::Generic(0x222),
+            ),
+            (
+                &[
+                    Op(DW_OP_WASM_location), U8(2), Uleb(0x33),
+                    Op(DW_OP_stack_value),
+                ][..],
+                Value::Generic(0x333),
+            ),
+            (
+                &[
+                    Op(DW_OP_WASM_location), U8(3), U32(0x44),
+                    Op(DW_OP_stack_value),
+                ][..],
+                Value::Generic(0x244),
+            ),
+        ];
+        for &(program, value) in &tests {
+            let result = [Piece {
+                size_in_bits: None,
+                bit_offset: None,
+                location: Location::Value { value },
+            }];
+
+            check_eval_with_args(
+                program,
+                Ok(&result),
+                encoding4(),
+                None,
+                None,
+                None,
+                |eval, mut result| {
+                    while result != EvaluationResult::Complete {
+                        result = match result {
+                            EvaluationResult::RequiresWasmLocal { index } => eval
+                                .resume_with_wasm_value(Value::Generic(0x100 + u64::from(index)))?,
+                            EvaluationResult::RequiresWasmGlobal { index } => eval
+                                .resume_with_wasm_value(Value::Generic(0x200 + u64::from(index)))?,
+                            EvaluationResult::RequiresWasmStack { index } => eval
+                                .resume_with_wasm_value(Value::Generic(0x300 + u64::from(index)))?,
+                            _ => panic!("Unexpected result {:?}", result),
+                        }
+                    }
+                    Ok(result)
+                },
+            );
+        }
+
+        check_eval(
+            &[
+                Op(DW_OP_WASM_location),
+                U8(4),
+                Uleb(0x11),
+                Op(DW_OP_stack_value),
+            ],
+            Err(Error::InvalidExpression(DW_OP_WASM_location)),
+            encoding4(),
+        );
     }
 }

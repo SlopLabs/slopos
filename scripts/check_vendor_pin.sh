@@ -13,8 +13,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # name|rel_dir|version|repository|upstream_sha1|file_count|tree_sha256
 ANNEX_PINS=(
-    "unwinding|vendor/unwinding|0.2.9|https://github.com/nbdd0121/unwinding/|72162ed9c5c9111efb912b9b7dc3007d5ef19105|38|f6dd8243426f53b1e6f6156cb1b2ee38086e93bff93c05278c839adea53b3118"
-    "gimli|vendor/gimli|0.33.0|https://github.com/gimli-rs/gimli|033ef8dd5748236aa5bcecc868207a40e4e3f597|57|409a6a5ebf41fc015589e9b64576cb465161b78595eaa83ef5da9cf04d7c75cc"
+    "unwinding|vendor/unwinding|0.2.11|https://github.com/nbdd0121/unwinding/|b302c258247226b906badfaebcea127d941a5494|38|858fbe275625cf6ba18570100ade2a3f0aa6687bdf7651654629dd7ee5445272"
+    "gimli|vendor/gimli|0.34.0|https://github.com/gimli-rs/gimli|86df12a630d43bc97b37eea4d2c7b218fa3ea2e3|57|d68347957daf07e657815546f2a19ba8faf33c83a51db72ac317725418a68713"
 )
 
 sha256_file() {

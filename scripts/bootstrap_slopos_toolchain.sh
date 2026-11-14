@@ -160,9 +160,14 @@ TARBALL="$REPO_ROOT/third_party/rustc-src-$CHANNEL.tar.xz"
 LIBRARY_STAMP="$SRC/library/$TP_STD_STAMP_NAME"
 STD_STAMP_WANT="$(tp_std_stamp "$REPO_ROOT")"
 LLVM_STAMP="$SRC/src/llvm-project/.slopos-port-stamp"
+# The tarball's checksum too: a channel bump moves rustc's bundled LLVM
+# whether or not the port's patch had to change with it.
 LLVM_STAMP_WANT="$(
-    cd "$REPO_ROOT" && find "$TP_LLVM_RUSTC_OVERLAY_REL" -type f -print |
-        tp_hash_lines "$REPO_ROOT" | tp_sha256_stream
+    {
+        tp_pin_value "$REPO_ROOT/$TP_COMPILER_PIN_REL" rustc_src_sha256
+        (cd "$REPO_ROOT" && find "$TP_LLVM_RUSTC_OVERLAY_REL" -type f -print) |
+            tp_hash_lines "$REPO_ROOT"
+    } | tp_sha256_stream
 )"
 
 if [ "$DRY_RUN" -eq 0 ]; then
@@ -301,7 +306,7 @@ target = ["$HOST_TRIPLE", "$TARGET"]
 extended = true
 # rustdoc for the base-interface gate, rustfmt and clippy for \`just fmt\` and
 # \`just clippy\`: what a build made on SlopOS is held to.
-tools = ["cargo", "src", "rustdoc", "rustfmt", "clippy"]
+tools = ["cargo", "rust-src", "rustdoc", "rustfmt", "clippy"]
 $(rbs_build_settings)
 
 [llvm]
@@ -411,7 +416,12 @@ CLANG_BIN="$(cd "$LLVM_DIR/bin" && ls clang-[0-9]*)" ||
     die "no clang in $LLVM_DIR/bin — was llvm.clang dropped from the config?"
 rm -rf "$PREFIX/lib/rustlib/$HOST_TRIPLE"
 cp -a "$LLVM_DIR/bin/$CLANG_BIN" "$PREFIX/bin/"
-cp -a "$LLVM_DIR"/lib/libclang-cpp.so* "$PREFIX/lib/"
+# By the link CMake keeps current, not by glob: the library's name carries the
+# compiler's version, and a build directory a channel bump carried over still
+# holds the previous one beside it.
+CLANG_CPP="$(readlink "$LLVM_DIR/lib/libclang-cpp.so")" ||
+    die "no libclang-cpp.so link in $LLVM_DIR/lib"
+cp -a "$LLVM_DIR/lib/libclang-cpp.so" "$LLVM_DIR/lib/$CLANG_CPP" "$PREFIX/lib/"
 cp -a "$LLVM_DIR/lib/clang" "$PREFIX/lib/"
 cp -a "$SYSROOT/lib/." "$PREFIX/lib/"
 cp -a "$SYSROOT/include" "$PREFIX/"

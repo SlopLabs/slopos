@@ -37,7 +37,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "gimli"
-version = "0.33.0"
+version = "0.34.0"
 
 [[package]]
 name = "hashbrown"
@@ -894,7 +894,7 @@ checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
 
 [[package]]
 name = "unwinding"
-version = "0.2.9"
+version = "0.2.11"
 dependencies = [
  "gimli",
 ]

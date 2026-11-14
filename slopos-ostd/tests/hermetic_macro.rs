@@ -1,5 +1,3 @@
-#![feature(allocator_api)]
-
 //! Host-side tests for the `hermetic_state!` function-like macro: the impl it
 //! emits, and that the `.hermetic_state_registry` static it also emits
 //! compiles. The linker section itself is not walkable under `cargo test`.

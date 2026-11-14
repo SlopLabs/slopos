@@ -1,8 +1,8 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index 598ea31..01b4b16 100644
+index 5a9da2a..d7f81f8 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -1383,11 +1383,9 @@ dependencies = [
+@@ -1387,8 +1387,6 @@ dependencies = [
  [[package]]
  name = "errno"
  version = "0.3.14"
@@ -10,12 +10,8 @@ index 598ea31..01b4b16 100644
 -checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
  dependencies = [
   "libc",
-- "windows-sys 0.61.2",
-+ "windows-sys 0.59.0",
- ]
- 
- [[package]]
-@@ -1596,8 +1594,6 @@ dependencies = [
+  "windows-sys",
+@@ -1600,8 +1598,6 @@ dependencies = [
  [[package]]
  name = "getrandom"
  version = "0.3.3"
@@ -24,16 +20,16 @@ index 598ea31..01b4b16 100644
  dependencies = [
   "cfg-if",
   "libc",
-@@ -2281,8 +2277,6 @@ checksum = "803ec87c9cfb29b9d2633f20cba1f488db3fd53f2158b1024cbefb47ba05d413"
+@@ -2288,8 +2284,6 @@ checksum = "803ec87c9cfb29b9d2633f20cba1f488db3fd53f2158b1024cbefb47ba05d413"
  [[package]]
  name = "libc"
- version = "0.2.189"
+ version = "0.2.191"
 -source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+-checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
  
  [[package]]
  name = "libffi"
-@@ -2319,8 +2313,6 @@ dependencies = [
+@@ -2326,8 +2320,6 @@ dependencies = [
  [[package]]
  name = "libloading"
  version = "0.9.0"
@@ -42,7 +38,7 @@ index 598ea31..01b4b16 100644
  dependencies = [
   "cfg-if",
   "windows-link 0.2.1",
-@@ -2602,8 +2594,6 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
+@@ -2611,8 +2603,6 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
  [[package]]
  name = "nix"
  version = "0.30.1"
@@ -51,36 +47,29 @@ index 598ea31..01b4b16 100644
  dependencies = [
   "bitflags",
   "cfg-if",
-@@ -5150,14 +5140,12 @@ dependencies = [
+@@ -5213,8 +5203,6 @@ dependencies = [
  [[package]]
  name = "rustix"
- version = "1.1.2"
+ version = "1.1.5"
 -source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "cd15f8a2c5551a84d56efdc1cd049089e409ac19a3072d5037a17fd70719ff3e"
+-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
  dependencies = [
   "bitflags",
   "errno",
-  "libc",
-  "linux-raw-sys",
-- "windows-sys 0.61.2",
-+ "windows-sys 0.59.0",
- ]
- 
- [[package]]
-@@ -5473,8 +5461,6 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+@@ -5536,8 +5524,6 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
  [[package]]
  name = "stacker"
- version = "0.1.21"
+ version = "0.1.24"
 -source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "cddb07e32ddb770749da91081d8d0ac3a16f1a569a18b20348cd371f5dead06b"
+-checksum = "640c8cdd92b6b12f5bcb1803ca3bbf5ab96e5e6b6b96b9ab77dabe9e880b3190"
  dependencies = [
   "cc",
   "cfg-if",
 diff --git a/Cargo.toml b/Cargo.toml
-index 63d96ff..7dafdf1 100644
+index b785c56..fb6f5e8 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -85,5 +85,13 @@ codegen-units = 1
+@@ -86,4 +86,12 @@ codegen-units = 1
  
  # If you want to use a crate with local modifications, you can set a path or git dependency here.
  # For git dependencies, also add your source to ALLOWED_SOURCES in src/tools/tidy/src/extdeps.rs.
@@ -92,14 +81,13 @@ index 63d96ff..7dafdf1 100644
 +libc = { path = "slopos-crates/libc" }
 +libloading = { path = "slopos-crates/libloading-0.9.0" }
 +nix = { path = "slopos-crates/nix-0.30.1" }
-+rustix = { path = "slopos-crates/rustix-1.1.2" }
-+stacker = { path = "slopos-crates/stacker-0.1.21" }
- 
++rustix = { path = "slopos-crates/rustix-1.1.5" }
++stacker = { path = "slopos-crates/stacker-0.1.24" }
 diff --git a/src/tools/cargo/Cargo.lock b/src/tools/cargo/Cargo.lock
-index 1fd6f0c..5b1e357 100644
+index 504d529..8496695 100644
 --- a/src/tools/cargo/Cargo.lock
 +++ b/src/tools/cargo/Cargo.lock
-@@ -1282,11 +1282,9 @@ dependencies = [
+@@ -1164,11 +1164,9 @@ dependencies = [
  [[package]]
  name = "errno"
  version = "0.3.14"
@@ -112,16 +100,7 @@ index 1fd6f0c..5b1e357 100644
  ]
  
  [[package]]
-@@ -1514,8 +1512,6 @@ dependencies = [
- [[package]]
- name = "getrandom"
- version = "0.2.17"
--source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
- dependencies = [
-  "cfg-if",
-  "libc",
-@@ -1537,8 +1533,6 @@ dependencies = [
+@@ -1404,8 +1402,6 @@ dependencies = [
  [[package]]
  name = "getrandom"
  version = "0.4.3"
@@ -129,19 +108,19 @@ index 1fd6f0c..5b1e357 100644
 -checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
  dependencies = [
   "cfg-if",
-  "js-sys",
-@@ -3005,9 +2999,7 @@ checksum = "c83bff1d572d6b9aeef67ddfc8448e4a3737909cb28e81f97c791b9018703e52"
+  "libc",
+@@ -2869,9 +2865,7 @@ checksum = "c83bff1d572d6b9aeef67ddfc8448e4a3737909cb28e81f97c791b9018703e52"
  
  [[package]]
  name = "libc"
 -version = "0.2.186"
 -source = "registry+https://github.com/rust-lang/crates.io-index"
 -checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
-+version = "0.2.189"
++version = "0.2.191"
  
  [[package]]
  name = "libgit2-sys"
-@@ -4198,14 +4190,12 @@ dependencies = [
+@@ -3909,14 +3903,12 @@ dependencies = [
  [[package]]
  name = "rustix"
  version = "1.1.4"
@@ -157,7 +136,7 @@ index 1fd6f0c..5b1e357 100644
  ]
  
  [[package]]
-@@ -4628,8 +4618,6 @@ dependencies = [
+@@ -4293,8 +4285,6 @@ dependencies = [
  [[package]]
  name = "socket2"
  version = "0.6.4"
@@ -167,10 +146,10 @@ index 1fd6f0c..5b1e357 100644
   "libc",
   "windows-sys 0.61.2",
 diff --git a/src/tools/cargo/Cargo.toml b/src/tools/cargo/Cargo.toml
-index b0f7315..e9d3720 100644
+index 2963b43..fdeb708 100644
 --- a/src/tools/cargo/Cargo.toml
 +++ b/src/tools/cargo/Cargo.toml
-@@ -298,3 +298,12 @@ http-transport-reqwest = ["gix/blocking-http-transport-reqwest"]
+@@ -300,3 +300,11 @@ http-transport-reqwest = ["gix/blocking-http-transport-reqwest"]
  
  [lints]
  workspace = true
@@ -178,8 +157,7 @@ index b0f7315..e9d3720 100644
 +# SlopOS: ports staged by scripts/make_rustc_src.sh; see toolchain/crates/PIN.
 +[patch.crates-io]
 +errno = { path = "../../../slopos-crates/errno-0.3.14" }
-+getrandom = { path = "../../../slopos-crates/getrandom-0.2.17" }
-+getrandom04 = { path = "../../../slopos-crates/getrandom-0.4.3", package = "getrandom" }
++getrandom = { path = "../../../slopos-crates/getrandom-0.4.3" }
 +libc = { path = "../../../slopos-crates/libc" }
 +rustix = { path = "../../../slopos-crates/rustix-1.1.4" }
 +socket2 = { path = "../../../slopos-crates/socket2-0.6.4" }
