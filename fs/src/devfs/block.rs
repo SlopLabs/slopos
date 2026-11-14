@@ -251,6 +251,21 @@ pub fn devfs_standalone_block_device(name: &[u8]) -> Option<KArc<dyn BlockDevice
     device
 }
 
+/// How many whole-disk nodes the block layer published with identity `id`,
+/// the first's name copied into `out`. Never an alias or a partition's name.
+#[cfg(feature = "tests")]
+pub(crate) fn devfs_disks_with_identity(id: &DiskId, out: &mut [u8; DEV_NAME_MAX]) -> usize {
+    let table = BLOCK_NODES.read();
+    let mut found = table
+        .iter()
+        .filter(|n| matches!(n.kind, BlockNodeKind::Disk { .. }) && n.id.as_deref() == Some(id));
+    let Some(first) = found.next() else {
+        return 0;
+    };
+    out[..first.name_len].copy_from_slice(first.name());
+    1 + found.count()
+}
+
 /// The first node whose inode is `from` or later.
 fn node_from(from: InodeId) -> Option<BlockNode> {
     let table = BLOCK_NODES.read();

@@ -4,6 +4,7 @@
 //! test's region.
 
 use slopos_fs::blockdev::BlockDevice;
+use slopos_fs::tests::suite_disks::{DiskNode, TestDisk, scratch_disk, suite_disk};
 use slopos_ostd::KVec;
 use slopos_testing::TestResult;
 use slopos_testing::{assert_eq_test, assert_ok, assert_test, fail, pass};
@@ -14,9 +15,17 @@ use crate::nvme;
 
 const PANIC_REGION: u64 = 7 << 20;
 
+fn node(disk: TestDisk) -> Result<DiskNode, TestResult> {
+    suite_disk(disk).map_err(|why| fail!("{}", why))
+}
+
 pub fn test_nvme_controller_identified() -> TestResult {
-    let Some((controller, nsid)) = nvme::controller_of(b"nvme0n2") else {
-        return fail!("nvme0n2 names no controller");
+    let scratch = match node(TestDisk::NvmeScratch) {
+        Ok(node) => node,
+        Err(verdict) => return verdict,
+    };
+    let Some((controller, nsid)) = nvme::controller_of(scratch.as_bytes()) else {
+        return fail!("{} names no controller", scratch);
     };
     assert_eq_test!(nsid, 2, "the name's namespace ID");
     assert_test!(
@@ -41,14 +50,18 @@ pub fn test_nvme_controller_identified() -> TestResult {
 
 pub fn test_nvme_namespace_formats() -> TestResult {
     let expect = [
-        (&b"nvme0n1"[..], 512),
-        (&b"nvme0n2"[..], 512),
-        (&b"nvme1n1"[..], 4096),
-        (&b"nvme1n2"[..], 4096),
+        (TestDisk::Root, 512),
+        (TestDisk::NvmeScratch, 512),
+        (TestDisk::Media, 4096),
+        (TestDisk::NvmeScratch4kn, 4096),
     ];
-    for (name, block) in expect {
-        let Some(disk) = block::disk(name) else {
-            return fail!("{:?} is not registered", core::str::from_utf8(name));
+    for (disk, block) in expect {
+        let name = match node(disk) {
+            Ok(node) => node,
+            Err(verdict) => return verdict,
+        };
+        let Some(disk) = block::disk(name.as_bytes()) else {
+            return fail!("{} is not registered", name);
         };
         assert_eq_test!(disk.logical_block_size(), block, "logical block size");
         assert_test!(
@@ -64,17 +77,21 @@ pub fn test_nvme_namespace_formats() -> TestResult {
 /// where the ordinary queue sees them; a second taker is turned away while
 /// the first holds it.
 pub fn test_nvme_panic_queue_round_trip() -> TestResult {
-    let Some((controller, _)) = nvme::controller_of(b"nvme0n2") else {
-        return fail!("nvme0n2 names no controller");
+    let scratch = match scratch_disk(TestDisk::NvmeScratch) {
+        Ok(node) => node,
+        Err(why) => return fail!("{}", why),
     };
-    let Some(disk) = block::disk(b"nvme0n2") else {
-        return fail!("nvme0n2 is not registered");
+    let Some((controller, _)) = nvme::controller_of(scratch.as_bytes()) else {
+        return fail!("{} names no controller", scratch);
+    };
+    let Some(disk) = block::disk(scratch.as_bytes()) else {
+        return fail!("{} is not registered", scratch);
     };
     let Some(queue) = controller.panic_queue() else {
         return fail!("no panic queue");
     };
     // The ordinary path's claim keeps anything else off the region.
-    let _claim = match block::claim(b"nvme0n2") {
+    let _claim = match block::claim(scratch.as_bytes()) {
         Ok(c) => c,
         Err(e) => return fail!("claiming the scratch failed: {:?}", e),
     };
@@ -133,11 +150,15 @@ pub fn test_nvme_panic_queue_round_trip() -> TestResult {
 pub fn test_nvme_shutdown_notification() -> TestResult {
     use crate::driver_core::shutdown::DeviceShutdown;
 
-    let Some((controller, _)) = nvme::controller_of(b"nvme2n1") else {
+    let spare = match scratch_disk(TestDisk::NvmeSpare) {
+        Ok(node) => node,
+        Err(why) => return fail!("{}", why),
+    };
+    let Some((controller, _)) = nvme::controller_of(spare.as_bytes()) else {
         return fail!("the spare controller is not attached");
     };
-    let Some(disk) = block::disk(b"nvme2n1") else {
-        return fail!("nvme2n1 is not registered");
+    let Some(disk) = block::disk(spare.as_bytes()) else {
+        return fail!("{} is not registered", spare);
     };
     let mut buf = [0u8; 512];
     assert_test!(disk.read_at(0, &mut buf).is_ok(), "a read before shutdown");

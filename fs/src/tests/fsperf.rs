@@ -40,6 +40,7 @@ use crate::vfs::{
 };
 
 use super::listing::list_dir_from;
+use super::suite_disks::{TestDisk, scratch_disk, suite_disk};
 
 /// Bytes each half of the report moves — the same count in both, or their
 /// quotient means nothing.
@@ -57,10 +58,10 @@ const RAW_OFFSET: u64 = 5 * 1024 * 1024;
 /// The ext4 image this boot came from: a real filesystem on a real device,
 /// which is what the report is about. The raw rate beside it is taken on the
 /// same controller.
-const PERF_DEVICE: &[u8] = b"nvme0n1";
+const PERF_DISK: TestDisk = TestDisk::Root;
 const PERF_MOUNT: &[u8] = b"/fsperfroot";
 const PERF_PATH: &[u8] = b"/fsperfroot/fsperf.dat";
-const RAW_DEVICE: &[u8] = b"nvme0n2";
+const RAW_DISK: TestDisk = TestDisk::NvmeScratch;
 
 /// Transactions per MiB this write is allowed. Staging 4 KiB per filesystem
 /// call would be 256 of them; one 256 KiB batch per transaction is 4.
@@ -154,7 +155,11 @@ fn write_through_vfs(table: FdTable, path: &[u8], bytes: usize, chunk: &[u8]) ->
 /// block device, with no filesystem anywhere in it. Answers the nanoseconds.
 #[inline(never)]
 fn raw_reference(chunk: &[u8]) -> Result<u64, &'static str> {
-    let device = match vfs_claim_block_device(RAW_DEVICE) {
+    let raw = scratch_disk(RAW_DISK).map_err(|why| {
+        klog_info!("FSPERF: {}", why);
+        "no scratch device for the reference write"
+    })?;
+    let device = match vfs_claim_block_device(raw.as_bytes()) {
         Ok(device) => device,
         Err(e) => {
             klog_info!(
@@ -284,14 +289,18 @@ impl BlockDevice for CountedDevice {
     }
 }
 
-/// What [`vfs_ext4_mount_named`] does for `PERF_DEVICE`, with the claimed
+/// What [`vfs_ext4_mount_named`] does for `PERF_DISK`, with the claimed
 /// handle wrapped in a [`CountedDevice`] before the instance takes it.
 #[inline(never)]
 fn perf_mount() -> VfsResult<()> {
+    let root = suite_disk(PERF_DISK).map_err(|why| {
+        klog_info!("FSPERF: {}", why);
+        VfsError::NotFound
+    })?;
     // The pool slot before the device: taking a slot is what sweeps a retired
     // instance, and a retired instance still holds the claim on its device.
     let fs = vfs_ext4_pool_claim().ok_or(VfsError::NoSpace)?;
-    let device = match vfs_claim_block_device(PERF_DEVICE) {
+    let device = match vfs_claim_block_device(root.as_bytes()) {
         Ok(device) => device,
         Err(e) => {
             vfs_ext4_pool_release(fs, false);

@@ -9,6 +9,7 @@ use slopos_boot_core::Guid;
 use slopos_boot_core::crash::{HEADER_BYTES, LOG_HEADING, SLOT_BYTES, Summary};
 use slopos_boot_core::layout::CRASH_TYPE;
 use slopos_fs::devfs::CrashRecord;
+use slopos_fs::tests::suite_disks::{TestDisk, scratch_disk};
 use slopos_fs::vfs::VfsError;
 use slopos_ostd::{KVec, klog_info};
 use slopos_testing::TestResult;
@@ -33,10 +34,19 @@ fn show(name: &[u8]) -> &str {
     core::str::from_utf8(name).unwrap_or("?")
 }
 
-/// Run `body` with an empty crash partition laid out on `disk`, under GPT
-/// disk GUID `guid`, and wipe the table after it.
+/// Run `body` with an empty crash partition laid out on the scratch disk
+/// `scratch`, under GPT disk GUID `guid`, and wipe the table after it.
 #[inline(never)]
-fn with_crash_partition(disk: &[u8], guid: Guid, body: impl FnOnce() -> TestResult) -> TestResult {
+fn with_crash_partition(
+    scratch: TestDisk,
+    guid: Guid,
+    body: impl FnOnce() -> TestResult,
+) -> TestResult {
+    let node = match scratch_disk(scratch) {
+        Ok(node) => node,
+        Err(why) => return fail!("{}", why),
+    };
+    let disk = node.as_bytes();
     let laid = block::claim(disk)
         .map_err(|_| "claim")
         .and_then(|whole| {
@@ -302,18 +312,18 @@ fn reads_back(guid: Guid, slot: usize, sequence: u64, text: &[u8]) -> TestResult
 
 pub fn test_crash_store_on_512_byte_blocks() -> TestResult {
     let guid = Guid([0xE5; 16]);
-    with_crash_partition(b"nvme0n2", guid, || records_persist(guid))
+    with_crash_partition(TestDisk::NvmeScratch, guid, || records_persist(guid))
 }
 
 pub fn test_crash_store_on_4096_byte_blocks() -> TestResult {
     let guid = Guid([0xE4; 16]);
-    with_crash_partition(b"nvme1n2", guid, || records_persist(guid))
+    with_crash_partition(TestDisk::NvmeScratch4kn, guid, || records_persist(guid))
 }
 
 /// A disk with no polled queue for the panic path keeps no store.
 pub fn test_crash_store_needs_a_panic_queue() -> TestResult {
     let guid = Guid([0xE3; 16]);
-    with_crash_partition(b"vdb", guid, || {
+    with_crash_partition(TestDisk::VirtioScratch, guid, || {
         assert_test!(
             matches!(Store::open(guid, &BOOTED), Err(OpenError::NotNvme)),
             "a virtio disk's crash partition must not be armed"
@@ -381,7 +391,9 @@ fn panic_record_reads_back(guid: Guid) -> TestResult {
 
 pub fn test_crash_panic_record() -> TestResult {
     let guid = Guid([0xE6; 16]);
-    with_crash_partition(b"nvme0n2", guid, || panic_record_reads_back(guid))
+    with_crash_partition(TestDisk::NvmeScratch, guid, || {
+        panic_record_reads_back(guid)
+    })
 }
 
 /// Two-byte characters, so a cut at a byte count would split one.
@@ -421,7 +433,7 @@ fn report_is_bounded(guid: Guid) -> TestResult {
 
 pub fn test_crash_panic_record_bounds_the_report() -> TestResult {
     let guid = Guid([0xE7; 16]);
-    with_crash_partition(b"nvme1n2", guid, || report_is_bounded(guid))
+    with_crash_partition(TestDisk::NvmeScratch4kn, guid, || report_is_bounded(guid))
 }
 
 slopos_testing::stest!(name = test_crash_store_on_512_byte_blocks, suite = crash);

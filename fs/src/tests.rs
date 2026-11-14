@@ -15,6 +15,7 @@ pub mod ramfs_devfs;
 pub mod resolve;
 pub mod rude_exit;
 pub mod statfs;
+pub mod suite_disks;
 pub mod verity_rw;
 pub mod volume_id;
 

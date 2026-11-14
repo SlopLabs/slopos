@@ -10,16 +10,13 @@
 use slopos_fs::blockdev::BlockDevice;
 use slopos_fs::ext4::cache::{BlockCache, CACHE_ENTRIES_MIN};
 use slopos_fs::ext4::{Ext4Error, Ext4Fs};
+use slopos_fs::tests::suite_disks::{Refusal, TestDisk, suite_disk};
 use slopos_fs::verity::{FsExtent, VerityStatus, build_verified};
 use slopos_ostd::KBox;
 use slopos_testing::TestResult;
 use slopos_testing::{fail, pass};
 
 use crate::block;
-
-/// `scripts/qemu_run.sh`'s test mode attaches the shipped verified image as
-/// the first virtio disk, `snapshot=on`.
-const VERIFIED: &[u8] = b"vda";
 
 fn extent_of(device: &dyn BlockDevice) -> Result<FsExtent, TestResult> {
     match Ext4Fs::mount_params(device) {
@@ -32,13 +29,15 @@ fn extent_of(device: &dyn BlockDevice) -> Result<FsExtent, TestResult> {
 }
 
 fn claim_verified() -> Result<KBox<dyn BlockDevice + Send + Sync>, TestResult> {
-    match block::claim(VERIFIED) {
-        Ok(device) => Ok(device),
-        Err(block::ClaimError::NoDevice) => Err(fail!(
-            "verified image not attached — is fs/assets/ext4.img built?"
-        )),
-        Err(e) => Err(fail!("could not claim the verified image: {:?}", e)),
-    }
+    let verified = match suite_disk(TestDisk::Verified) {
+        Ok(node) => node,
+        Err(why @ Refusal::Absent(_)) => {
+            return Err(fail!("{} — is fs/assets/ext4.img built?", why));
+        }
+        Err(why) => return Err(fail!("{}", why)),
+    };
+    block::claim(verified.as_bytes())
+        .map_err(|e| fail!("could not claim the verified image: {:?}", e))
 }
 
 /// The artifact's trailer must be *reachable* through a sector-granular

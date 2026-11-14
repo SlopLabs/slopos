@@ -24,6 +24,7 @@ use slopos_abi::syscall::{
 use slopos_abi::task::TaskPriority;
 use slopos_core::tests::helpers::{kill_task, mark_current_killed};
 use slopos_fs::blockdev::{BlockDevice, BlockDeviceError, stats};
+use slopos_fs::tests::suite_disks::{DiskNode, TestDisk, scratch_disk};
 use slopos_ostd::sync::wait_queue::current_task_is_killed;
 use slopos_ostd::{KArc, KBox, KVec};
 use slopos_testing::TestResult;
@@ -32,7 +33,12 @@ use slopos_testing::{assert_eq_test, assert_ok, assert_test, fail, pass};
 use crate::block::engine::hooks;
 use crate::block::{self, EngineDisk};
 
-const SCRATCH_DISKS: [&[u8]; 4] = [b"vdb", b"nvme0n2", b"nvme1n2", b"sda"];
+const SCRATCH_DISKS: [TestDisk; 4] = [
+    TestDisk::VirtioScratch,
+    TestDisk::NvmeScratch,
+    TestDisk::NvmeScratch4kn,
+    TestDisk::UsbScratch,
+];
 
 fn show(name: &[u8]) -> &str {
     core::str::from_utf8(name).unwrap_or("?")
@@ -46,19 +52,39 @@ fn claim(name: &[u8]) -> Result<KBox<dyn BlockDevice + Send + Sync>, TestResult>
     block::claim(name).map_err(|e| fail!("claiming {} failed: {:?}", show(name), e))
 }
 
+fn node_of(disk: TestDisk) -> Result<DiskNode, TestResult> {
+    scratch_disk(disk).map_err(|why| fail!("{}", why))
+}
+
+/// `body` on the node the scratch disk `SCRATCH_DISKS[index]` is published as.
+fn on_disk(index: usize, body: fn(&[u8]) -> TestResult) -> TestResult {
+    match node_of(SCRATCH_DISKS[index]) {
+        Ok(node) => body(node.as_bytes()),
+        Err(r) => r,
+    }
+}
+
+/// The place in [`SCRATCH_DISKS`] of the scratch disk published as `name`.
+fn index_of(name: &[u8]) -> usize {
+    SCRATCH_DISKS
+        .iter()
+        .position(|&disk| scratch_disk(disk).is_ok_and(|node| node.as_bytes() == name))
+        .unwrap_or(0)
+}
+
 macro_rules! on_scratch {
     ($body:ident => $virtio:ident, $nvme:ident, $nvme_4k:ident, $usb:ident) => {
         pub fn $virtio() -> TestResult {
-            $body(SCRATCH_DISKS[0])
+            on_disk(0, $body)
         }
         pub fn $nvme() -> TestResult {
-            $body(SCRATCH_DISKS[1])
+            on_disk(1, $body)
         }
         pub fn $nvme_4k() -> TestResult {
-            $body(SCRATCH_DISKS[2])
+            on_disk(2, $body)
         }
         pub fn $usb() -> TestResult {
-            $body(SCRATCH_DISKS[3])
+            on_disk(3, $body)
         }
         slopos_testing::stest!(name = $virtio, suite = block_engine);
         slopos_testing::stest!(name = $nvme, suite = block_engine);
@@ -104,11 +130,11 @@ pub fn test_block_registry_names() -> TestResult {
         block::first_fixed_disk().is_some_and(|n| n.as_bytes() == b"nvme0n1"),
         "a stick never becomes the disk root=auto takes"
     );
-    for name in SCRATCH_DISKS {
+    for disk in SCRATCH_DISKS {
         assert_test!(
-            block::disk(name).is_some(),
-            "{} must be registered",
-            show(name)
+            scratch_disk(disk).is_ok_and(|node| block::disk(node.as_bytes()).is_some()),
+            "the scratch disk {:?} must be registered",
+            disk
         );
     }
     assert_test!(block::disk(b"vdz").is_none(), "vdz must not exist");
@@ -121,7 +147,10 @@ pub fn test_block_registry_names() -> TestResult {
         "at least the root, four scratches and the media disk"
     );
     assert_eq_test!(
-        block::disk(b"nvme1n2").map(|d| d.logical_block_size()),
+        scratch_disk(TestDisk::NvmeScratch4kn)
+            .ok()
+            .and_then(|node| block::disk(node.as_bytes()))
+            .map(|d| d.logical_block_size()),
         Some(4096),
         "the 4K-native namespace must report 4096-byte blocks"
     );
@@ -130,7 +159,11 @@ pub fn test_block_registry_names() -> TestResult {
 
 /// A whole-disk claim is exclusive, and returns once dropped.
 pub fn test_block_whole_disk_claim_is_exclusive() -> TestResult {
-    let name = SCRATCH_DISKS[1];
+    let node = match node_of(SCRATCH_DISKS[1]) {
+        Ok(node) => node,
+        Err(r) => return r,
+    };
+    let name = node.as_bytes();
     let first = match claim(name) {
         Ok(c) => c,
         Err(r) => return r,
@@ -454,7 +487,7 @@ fn block_stats_of(name: &[u8]) -> Result<UserBlockStats, TestResult> {
 }
 
 fn block_stats_count_reads(name: &[u8]) -> TestResult {
-    let index = SCRATCH_DISKS.iter().position(|d| *d == name).unwrap_or(0);
+    let index = index_of(name);
     let transport = [
         BLOCK_TRANSPORT_VIRTIO,
         BLOCK_TRANSPORT_NVME,
@@ -529,8 +562,10 @@ fn killed_writer() {
 }
 
 fn killed_writes() -> u8 {
-    let name = SCRATCH_DISKS[THREAD_DISK.load(Ordering::Acquire)];
-    let Ok(device) = block::claim(name) else {
+    let Ok(node) = scratch_disk(SCRATCH_DISKS[THREAD_DISK.load(Ordering::Acquire)]) else {
+        return KILLED_FAILED;
+    };
+    let Ok(device) = block::claim(node.as_bytes()) else {
         return KILLED_FAILED;
     };
     if device.write_at(REFUSED_OFFSET, &REFUSED_OLDER).is_err() {
@@ -562,8 +597,7 @@ fn killed_writes() -> u8 {
 
 /// A requester killed with a write in the device waits it out, and one killed
 /// before a write reaches the device sends nothing.
-fn killed_write_is_waited_out(index: usize) -> TestResult {
-    let name = SCRATCH_DISKS[index];
+fn killed_write_is_waited_out(index: usize, name: &[u8]) -> TestResult {
     let disk = match scratch(name) {
         Ok(d) => d,
         Err(r) => return r,
@@ -604,8 +638,7 @@ fn killed_write_is_waited_out(index: usize) -> TestResult {
 }
 
 fn killed_write(name: &[u8]) -> TestResult {
-    let index = SCRATCH_DISKS.iter().position(|d| *d == name).unwrap_or(0);
-    killed_write_is_waited_out(index)
+    killed_write_is_waited_out(index_of(name), name)
 }
 on_scratch!(killed_write => test_block_killed_write_virtio, test_block_killed_write_nvme, test_block_killed_write_nvme_4k, test_block_killed_write_usb);
 
@@ -629,9 +662,9 @@ static FENCED_OUTCOME: AtomicU8 = AtomicU8::new(FENCED_PENDING);
 
 /// A kernel thread, so the write parks on the fence rather than polling it.
 fn fenced_writer() {
-    let name = SCRATCH_DISKS[THREAD_DISK.load(Ordering::Acquire)];
-    let outcome = match block::claim(name) {
-        Ok(device) => {
+    let node = scratch_disk(SCRATCH_DISKS[THREAD_DISK.load(Ordering::Acquire)]);
+    let outcome = match node.ok().map(|node| block::claim(node.as_bytes())) {
+        Some(Ok(device)) => {
             FENCED_STARTED.store(true, Ordering::Release);
             let offset = FENCED_OFFSET + FENCED_SPAN.start as u64;
             match device.write_at(offset, &FENCED_NEWER[FENCED_SPAN]) {
@@ -641,7 +674,7 @@ fn fenced_writer() {
                 Err(_) => FENCED_FAILED,
             }
         }
-        Err(_) => FENCED_FAILED,
+        _ => FENCED_FAILED,
     };
     FENCED_OUTCOME.store(outcome, Ordering::Release);
 }
@@ -687,7 +720,7 @@ fn fenced_write(disk: &EngineDisk, kill: bool) -> Result<u8, &'static str> {
 /// A write waits until an abandoned one is returned — a sub-block one before
 /// it reads its block — a killed one sends nothing, and a read never waits.
 fn waits_out_an_abandoned_write(name: &[u8]) -> TestResult {
-    let index = SCRATCH_DISKS.iter().position(|d| *d == name).unwrap_or(0);
+    let index = index_of(name);
     let disk = match scratch(name) {
         Ok(d) => d,
         Err(r) => return r,

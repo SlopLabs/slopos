@@ -9879,9 +9879,11 @@ pub fn test_umount2_of_ext4_is_busy_unless_detached() -> TestResult {
     if slopos_fs::vfs::vfs_init_builtin_filesystems().is_err() {
         return fail!("the VFS is unavailable");
     }
-    if !slopos_fs::tests::mount::write_scratch_ext2(b"vdb") {
+    let Some(scratch) = slopos_fs::tests::mount::write_scratch_ext2(
+        slopos_fs::tests::suite_disks::TestDisk::VirtioScratch,
+    ) else {
         return TestResult::Skipped;
-    }
+    };
 
     const MP: &[u8] = b"/tmp/ext4_busy_mp";
     let _ = slopos_fs::vfs::vfs_rmdir(MP);
@@ -9889,7 +9891,7 @@ pub fn test_umount2_of_ext4_is_busy_unless_detached() -> TestResult {
         return fail!("could not create the mount point");
     }
 
-    let outcome = ext4_umount_busy_body(MP);
+    let outcome = ext4_umount_busy_body(scratch.as_bytes(), MP);
 
     if umount_path_at(MP, b"/", 0, &slopos_fs::vfs::Subject::KERNEL).is_err() {
         let _ = umount_path_at(MP, b"/", MNT_DETACH, &slopos_fs::vfs::Subject::KERNEL);
@@ -9902,14 +9904,14 @@ pub fn test_umount2_of_ext4_is_busy_unless_detached() -> TestResult {
     }
 }
 
-fn ext4_umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
+fn ext4_umount_busy_body(scratch: &[u8], mp: &[u8]) -> Result<(), &'static str> {
     use crate::syscall::fs::mount_handlers::{mount_apply_at, umount_path_at};
     use slopos_abi::fs::MNT_DETACH;
     use slopos_fs::vfs::mount::mount_at;
     use slopos_fs::vfs::orphan::{close_ref, open_ref};
 
     mount_apply_at(
-        b"vdb",
+        scratch,
         mp,
         b"/",
         b"ext2",
@@ -9950,7 +9952,7 @@ fn ext4_umount_busy_body(mp: &[u8]) -> Result<(), &'static str> {
     // the exclusive claim back: a leaked one answers `Busy` for the rest of
     // the boot.
     mount_apply_at(
-        b"vdb",
+        scratch,
         mp,
         b"/",
         b"ext2",
@@ -10358,7 +10360,16 @@ fn block_ioctls_body(task_id: u32) -> TestResult {
     use slopos_abi::fs::block_ioctl;
     use slopos_fs::vfs::FileSystem;
 
-    const DISK: &[u8] = b"nvme1n2";
+    let disk = match slopos_fs::tests::suite_disks::scratch_disk(
+        slopos_fs::tests::suite_disks::TestDisk::NvmeScratch4kn,
+    ) {
+        Ok(disk) => disk,
+        Err(why) => return fail!("{}", why),
+    };
+    let mut path = [0u8; 5 + slopos_fs::devfs::DEV_NAME_MAX];
+    path[..5].copy_from_slice(b"/dev/");
+    path[5..5 + disk.as_bytes().len()].copy_from_slice(disk.as_bytes());
+    let path = &path[..5 + disk.as_bytes().len()];
     let task_guard = assert_some!(task_find_by_id(task_id), "task lookup failed");
     let Some(pid) = task_guard
         .process()
@@ -10369,20 +10380,15 @@ fn block_ioctls_body(task_id: u32) -> TestResult {
     };
     let devfs = slopos_fs::vfs::init::vfs_devfs_instance();
     let capacity = devfs
-        .lookup(devfs.root_inode(), DISK)
+        .lookup(devfs.root_inode(), disk.as_bytes())
         .and_then(|inode| devfs.stat(inode))
         .map(|stat| stat.size);
     let Ok(capacity) = capacity else {
-        return fail!("/dev/nvme1n2 is not attached");
+        return fail!("/dev/{} is missing", disk);
     };
     let page = assert_some!(map_user_rw_page(pid), "no user page");
     make_task_current(task_id);
-    let fd = file_open_for_process(
-        pid,
-        b"/dev/nvme1n2",
-        O_RDONLY,
-        &slopos_fs::vfs::Subject::KERNEL,
-    );
+    let fd = file_open_for_process(pid, path, O_RDONLY, &slopos_fs::vfs::Subject::KERNEL);
     park_bootstrap_on_current_cpu();
     if fd < 0 {
         return fail!("opening the block node failed: {}", fd);

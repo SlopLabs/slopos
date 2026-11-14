@@ -608,6 +608,7 @@ kernel	slopos_drivers::tests::block_layer_tests::test_block_disk_names
 kernel	slopos_drivers::tests::block_layer_tests::test_block_ioctls
 kernel	slopos_drivers::tests::block_layer_tests::test_block_partitions_on_4096_byte_blocks
 kernel	slopos_drivers::tests::block_layer_tests::test_block_partitions_on_512_byte_blocks
+kernel	slopos_drivers::tests::block_layer_tests::test_block_scratch_refuses_other_disks
 kernel	slopos_drivers::tests::block_layer_tests::test_block_usb_disks_come_and_go
 kernel	slopos_drivers::tests::block_layer_tests::test_block_volume_links
 kernel	slopos_drivers::tests::bus_generic::test_bus_deferred_then_bound

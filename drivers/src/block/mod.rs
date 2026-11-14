@@ -929,3 +929,11 @@ pub fn disk(name: &[u8]) -> Option<KArc<EngineDisk>> {
         .find(|d| d.name.as_bytes() == name)
         .map(|d| KArc::clone(&d.device))
 }
+
+/// Whether a claim holds the disk registered as `name` or a partition of it.
+#[cfg(feature = "test-hooks")]
+pub fn held(name: &[u8]) -> bool {
+    disks()
+        .iter()
+        .any(|d| d.name.as_bytes() == name && d.held())
+}

@@ -6,11 +6,10 @@
 
 use slopos_testing::TestResult;
 
+use super::suite_disks::{TestDisk, suite_disk};
 use crate::vfs::init::{vfs_claim_block_device, vfs_ext4_pool_claim};
 use crate::vfs::{mount, vfs_init_builtin_filesystems, vfs_mkdir, vfs_open};
 
-/// The disk `scripts/qemu_run.sh` attaches the tests image as.
-const ROOT_DISK: &[u8] = b"nvme0n1";
 const MOUNT_POINT: &[u8] = b"/tmp/rude-exit";
 const FILE: &[u8] = b"/tmp/rude-exit/rude-exit";
 /// What `just test-rude-exit` expects to read back at `/rude-exit`.
@@ -22,7 +21,11 @@ pub fn test_ext4_rude_exit() -> TestResult {
     if vfs_init_builtin_filesystems().is_err() {
         return slopos_testing::fail!("the VFS did not come up");
     }
-    let Ok(device) = vfs_claim_block_device(ROOT_DISK) else {
+    let root = match suite_disk(TestDisk::Root) {
+        Ok(root) => root,
+        Err(why) => return slopos_testing::fail!("{}", why),
+    };
+    let Ok(device) = vfs_claim_block_device(root.as_bytes()) else {
         return slopos_testing::fail!("no root disk to write to");
     };
     let Some(fs) = vfs_ext4_pool_claim() else {

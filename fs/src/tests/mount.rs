@@ -8,6 +8,7 @@ use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
 use slopos_ostd::{KArc, KBox, KVec};
 use slopos_testing::TestResult;
 
+use super::suite_disks::{DiskNode, TestDisk, scratch_disk};
 use super::{Ext2ImageSpec, FIX_FILE_BLOCK, build_ext2_image};
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
 use crate::devfs::{devfs_register_block_device, devfs_standalone_block_device};
@@ -374,9 +375,6 @@ fn refuses_at_every_failure(
 /// 1 KiB block size, a handful of device writes to copy onto a scratch device.
 const IMAGE_BLOCKS: u32 = 512;
 
-/// The disposable scratch device the harness attaches as disk1.
-const SCRATCH_DEVICE: &[u8] = b"vdb";
-
 fn fixture_image(blocks: u32) -> Option<MemoryBlockDevice> {
     build_ext2_image(Ext2ImageSpec {
         blocks,
@@ -398,20 +396,22 @@ pub fn fixture_image_device(blocks: u32) -> Option<KBox<dyn BlockDevice + Send +
     boxed_device(fixture_image(blocks)?)
 }
 
-/// Lay a clean ext2 fixture down on the named block device, through the same
-/// exclusive claim a writable mount takes. `false` when the device is absent
-/// or already claimed — a skip, not a failure.
-pub fn write_scratch_ext2(device: &[u8]) -> bool {
+/// Lay a clean ext2 fixture down on the scratch disk `disk`, through the same
+/// exclusive claim a writable mount takes; the node it is registered as.
+/// `None` when it is no attached scratch disk or is already claimed — a skip,
+/// not a failure.
+pub fn write_scratch_ext2(disk: TestDisk) -> Option<DiskNode> {
     const CHUNK: usize = 32 * 1024;
-    let Some(image) = fixture_image(IMAGE_BLOCKS) else {
-        return false;
+    let node = match scratch_disk(disk) {
+        Ok(node) => node,
+        Err(why) => {
+            slopos_ostd::klog_info!("SCRATCH: {}", why);
+            return None;
+        }
     };
-    let Ok(target) = vfs_claim_block_device(device) else {
-        return false;
-    };
-    let Ok(mut buf) = KVec::<u8>::zeroed(CHUNK) else {
-        return false;
-    };
+    let image = fixture_image(IMAGE_BLOCKS)?;
+    let target = vfs_claim_block_device(node.as_bytes()).ok()?;
+    let mut buf = KVec::<u8>::zeroed(CHUNK).ok()?;
     let total = u64::from(IMAGE_BLOCKS) * 1024;
     let mut at = 0u64;
     while at < total {
@@ -419,7 +419,7 @@ pub fn write_scratch_ext2(device: &[u8]) -> bool {
         if image.read_at(at, &mut buf.as_mut_slice()[..n]).is_err()
             || target.write_at(at, &buf.as_slice()[..n]).is_err()
         {
-            return false;
+            return None;
         }
         at += n as u64;
     }
@@ -427,9 +427,9 @@ pub fn write_scratch_ext2(device: &[u8]) -> bool {
     // offset would otherwise be read as this image's, and refuse the mount.
     buf.as_mut_slice().fill(0);
     if target.write_at(total, buf.as_slice()).is_err() {
-        return false;
+        return None;
     }
-    target.flush().is_ok()
+    target.flush().is_ok().then_some(node)
 }
 
 const PAIR_MP_A: &[u8] = b"/tmp/ext4_pair_a";
@@ -564,11 +564,11 @@ pub fn test_ext4_remount_of_the_same_device_succeeds() -> TestResult {
     if !ready() || !ensure_dir(REMOUNT_MP) {
         return slopos_testing::fail!("the /tmp fixture directory is unavailable");
     }
-    if !write_scratch_ext2(SCRATCH_DEVICE) {
+    let Some(scratch) = write_scratch_ext2(TestDisk::VirtioScratch) else {
         return TestResult::Skipped;
-    }
+    };
 
-    let outcome = remount_body();
+    let outcome = remount_body(scratch.as_bytes());
     let _ = vfs_ext4_unmount_named(REMOUNT_MP);
     let _ = vfs_rmdir(REMOUNT_MP);
     match outcome {
@@ -578,8 +578,8 @@ pub fn test_ext4_remount_of_the_same_device_succeeds() -> TestResult {
 }
 
 #[inline(never)]
-fn remount_body() -> Result<(), &'static str> {
-    let info = vfs_ext4_mount_named(SCRATCH_DEVICE, REMOUNT_MP, false)
+fn remount_body(scratch: &[u8]) -> Result<(), &'static str> {
+    let info = vfs_ext4_mount_named(scratch, REMOUNT_MP, false)
         .map_err(|_| "the first mount of the scratch device failed")?;
     if info.read_only {
         return Err("a writable claim came up read-only");
@@ -591,7 +591,7 @@ fn remount_body() -> Result<(), &'static str> {
         .map_err(|_| "write through the first mount failed")?;
     vfs_ext4_unmount_named(REMOUNT_MP).map_err(|_| "the first unmount failed")?;
 
-    vfs_ext4_mount_named(SCRATCH_DEVICE, REMOUNT_MP, false)
+    vfs_ext4_mount_named(scratch, REMOUNT_MP, false)
         .map_err(|_| "the re-mount failed — the first mount leaked the write claim")?;
     let again = vfs_open(REMOUNT_FILE, false).map_err(|_| "the re-mount lost the file")?;
     let mut buf = [0u8; 16];
@@ -608,15 +608,14 @@ fn remount_body() -> Result<(), &'static str> {
 /// write would be a read-modify-write of three neighbours, and a torn one
 /// damages blocks outside the transaction, so the mount is refused.
 pub fn test_ext4_refuses_blocks_smaller_than_the_device() -> TestResult {
-    const SCRATCH_4K: &[u8] = b"nvme1n2";
     const MP: &[u8] = b"/tmp/ext4_4kn";
     if !ready() || !ensure_dir(MP) {
         return slopos_testing::fail!("the /tmp fixture directory is unavailable");
     }
-    if !write_scratch_ext2(SCRATCH_4K) {
-        return slopos_testing::fail!("could not write the ext2 fixture to nvme1n2");
-    }
-    let mounted = vfs_ext4_mount_named(SCRATCH_4K, MP, false);
+    let Some(scratch) = write_scratch_ext2(TestDisk::NvmeScratch4kn) else {
+        return slopos_testing::fail!("could not write the ext2 fixture to the 4K scratch disk");
+    };
+    let mounted = vfs_ext4_mount_named(scratch.as_bytes(), MP, false);
     if mounted.is_ok() {
         let _ = vfs_ext4_unmount_named(MP);
     }

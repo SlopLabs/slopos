@@ -7,7 +7,7 @@ pub use block::{
     devfs_set_block_partitioned, devfs_standalone_block_device, devfs_unregister_block_node,
 };
 #[cfg(feature = "tests")]
-pub(crate) use block::{block_read_entitled, block_write_entitled};
+pub(crate) use block::{block_read_entitled, block_write_entitled, devfs_disks_with_identity};
 pub(crate) use block::{devfs_block_node_is, devfs_resolve_block_node};
 pub use crash::{CrashRecord, CrashStoreOps, devfs_register_crash_store};
 

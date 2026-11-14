@@ -3,12 +3,15 @@
 
 use slopos_abi::fs::block_ioctl;
 use slopos_boot_core::Guid;
-use slopos_boot_core::disk_id::DiskId;
+use slopos_boot_core::disk_id::{DISK_ID_MAX, DiskId};
 use slopos_fs::blockdev::BlockDevice;
 use slopos_fs::devfs::{
     BlockIoctlReply, DEV_NAME_MAX, devfs_block_ioctl, devfs_resolve_block_source,
 };
 use slopos_fs::partition::PARTUUID_TEXT_MAX;
+use slopos_fs::tests::suite_disks::{
+    DiskNode, Refusal, TestDisk, scratch_disk, scratch_disk_by_id, suite_disk,
+};
 use slopos_fs::vfs::{FileSystem, FileType, InodeId, VfsError};
 use slopos_ostd::KVec;
 use slopos_testing::TestResult;
@@ -52,8 +55,24 @@ fn node_capacity(name: &[u8]) -> Option<u64> {
     fs.stat(inode).ok().map(|s| s.size)
 }
 
+/// The registry's name for the disk published as `node`.
+fn registered(node: &[u8]) -> Option<DiskName> {
+    (0..block::disk_count())
+        .filter_map(block::disk_name)
+        .find(|name| name.as_bytes() == node)
+}
+
+fn scratch_node(scratch: TestDisk) -> Result<DiskNode, TestResult> {
+    scratch_disk(scratch).map_err(|why| fail!("{}", why))
+}
+
 #[inline(never)]
-fn partitioned_disk(disk: &[u8], disk_tag: u8, by_id: &[u8]) -> TestResult {
+fn partitioned_disk(scratch: TestDisk, disk_tag: u8) -> TestResult {
+    let node = match scratch_node(scratch) {
+        Ok(node) => node,
+        Err(verdict) => return verdict,
+    };
+    let disk = node.as_bytes();
     let Some(device) = block::disk(disk) else {
         return fail!("scratch disk {} not attached", show(disk));
     };
@@ -74,10 +93,9 @@ fn partitioned_disk(disk: &[u8], disk_tag: u8, by_id: &[u8]) -> TestResult {
         return fail!("re-reading {} failed: {:?}", show(disk), e);
     }
 
-    let base = DiskName::nvme(
-        u32::from(disk[4] - b'0'),
-        u32::from(disk[disk.len() - 1] - b'0'),
-    );
+    let Some(base) = registered(disk) else {
+        return fail!("{} left the registry", node);
+    };
     let (p1, p2) = (base.partition(1), base.partition(2));
     assert_eq_test!(
         node_capacity(p1.as_bytes()),
@@ -90,7 +108,9 @@ fn partitioned_disk(disk: &[u8], disk_tag: u8, by_id: &[u8]) -> TestResult {
         "partition 2's node must be its window"
     );
 
-    let verdict = check_links(&p2, disk_tag, by_id);
+    let mut by_id = [0u8; DISK_ID_MAX];
+    let len = scratch.by_id(&mut by_id);
+    let verdict = check_links(&p2, disk_tag, &by_id[..len]);
     if !matches!(verdict, TestResult::Pass) {
         return verdict;
     }
@@ -267,11 +287,11 @@ fn check_read_claims(disk: &[u8], p1: &DiskName) -> TestResult {
 }
 
 pub fn test_block_partitions_on_512_byte_blocks() -> TestResult {
-    partitioned_disk(b"nvme0n2", 0xA5, b"nvme-QEMU_NVMe_Ctrl_slopos-root_2")
+    partitioned_disk(TestDisk::NvmeScratch, 0xA5)
 }
 
 pub fn test_block_partitions_on_4096_byte_blocks() -> TestResult {
-    partitioned_disk(b"nvme1n2", 0x4C, b"nvme-QEMU_NVMe_Ctrl_slopos-4kn_2")
+    partitioned_disk(TestDisk::NvmeScratch4kn, 0x4C)
 }
 
 pub fn test_block_by_id_names() -> TestResult {
@@ -303,16 +323,15 @@ pub fn test_block_by_id_names() -> TestResult {
 }
 
 pub fn test_block_by_id_partition_names() -> TestResult {
-    let disks: [(&[u8], &[u8], &[u8]); 2] = [
-        (b"vdb", b"virtio-slopos-scratch-part1", b"vdb1"),
+    let disks: [(TestDisk, &[u8]); 2] = [
+        (TestDisk::VirtioScratch, b"virtio-slopos-scratch-part1"),
         (
-            b"sda",
+            TestDisk::UsbScratch,
             b"usb-QEMU_QEMU_HARDDISK_slopos-usb-0:0-part1",
-            b"sda1",
         ),
     ];
-    for (disk, link, node) in disks {
-        let verdict = by_id_partition(disk, link, node);
+    for (disk, link) in disks {
+        let verdict = by_id_partition(disk, link);
         if !matches!(verdict, TestResult::Pass) {
             return verdict;
         }
@@ -321,7 +340,15 @@ pub fn test_block_by_id_partition_names() -> TestResult {
 }
 
 #[inline(never)]
-fn by_id_partition(disk: &[u8], link: &[u8], node: &[u8]) -> TestResult {
+fn by_id_partition(scratch: TestDisk, link: &[u8]) -> TestResult {
+    let node = match scratch_node(scratch) {
+        Ok(node) => node,
+        Err(verdict) => return verdict,
+    };
+    let disk = node.as_bytes();
+    let Some(part) = registered(disk).map(|name| name.partition(1)) else {
+        return fail!("{} left the registry", node);
+    };
     let laid = block::claim(disk)
         .map_err(|_| "claim")
         .and_then(|whole| {
@@ -336,7 +363,7 @@ fn by_id_partition(disk: &[u8], link: &[u8], node: &[u8]) -> TestResult {
         .and_then(|()| block::reread(disk).map_err(|_| "re-read"));
     let fs = slopos_fs::vfs::init::vfs_devfs_instance();
     let verdict = match (laid, by_id_dir(fs)) {
-        (Ok(()), Some(by_id)) => by_id_link(fs, by_id, link, node),
+        (Ok(()), Some(by_id)) => by_id_link(fs, by_id, link, part.as_bytes()),
         (Ok(()), None) => fail!("/dev/disk/by-id is missing"),
         (Err(why), _) => fail!("partitioning {}: {}", show(disk), why),
     };
@@ -434,12 +461,16 @@ fn links_to(fs: &dyn FileSystem, by_id: InodeId, node: &[u8]) -> Option<usize> {
 /// The labelled volume the harness attaches resolves by label and by UUID,
 /// and `/dev/disk/by-label` lists it as a link to its node.
 pub fn test_block_volume_links() -> TestResult {
+    let node = match suite_disk(TestDisk::Media) {
+        Ok(node) => node,
+        Err(why) => return fail!("{}", why),
+    };
     let mut resolved = [0u8; DEV_NAME_MAX];
     match devfs_resolve_block_source(b"LABEL=slopos-media", &mut resolved) {
-        Ok(len) if resolved[..len] == *b"nvme1n1" => {}
+        Ok(len) if resolved[..len] == *node.as_bytes() => {}
         other => return fail!("LABEL=slopos-media resolved to {:?}", other),
     }
-    let Some(media) = block::disk(b"nvme1n1") else {
+    let Some(media) = block::disk(node.as_bytes()) else {
         return fail!("the media disk is not attached");
     };
     let mut sb = [0u8; 136];
@@ -459,7 +490,7 @@ pub fn test_block_volume_links() -> TestResult {
         at += 2;
     }
     match devfs_resolve_block_source(&uuid, &mut resolved) {
-        Ok(len) if resolved[..len] == *b"nvme1n1" => {}
+        Ok(len) if resolved[..len] == *node.as_bytes() => {}
         other => return fail!("an uppercase UUID= resolved to {:?}", other),
     }
 
@@ -488,7 +519,7 @@ pub fn test_block_volume_links() -> TestResult {
     );
     let mut target = [0u8; 32];
     match fs.readlink(inode, &mut target) {
-        Ok(len) if target[..len] == *b"../../nvme1n1" => pass!(),
+        Ok(len) if target[..len].strip_prefix(b"../../") == Some(node.as_bytes()) => pass!(),
         other => fail!("the link points at {:?}", other),
     }
 }
@@ -496,12 +527,16 @@ pub fn test_block_volume_links() -> TestResult {
 /// A block node answers its size, its block size and whether it refuses
 /// writes; an unknown request, or an inode that is no block node, gets none.
 pub fn test_block_ioctls() -> TestResult {
-    let fs = slopos_fs::vfs::init::vfs_devfs_instance();
-    let Ok(inode) = fs.lookup(fs.root_inode(), b"nvme1n2") else {
-        return fail!("/dev/nvme1n2 is missing");
+    let scratch = match scratch_node(TestDisk::NvmeScratch4kn) {
+        Ok(node) => node,
+        Err(verdict) => return verdict,
     };
-    let Some(disk) = block::disk(b"nvme1n2") else {
-        return fail!("nvme1n2 is not registered");
+    let fs = slopos_fs::vfs::init::vfs_devfs_instance();
+    let Ok(inode) = fs.lookup(fs.root_inode(), scratch.as_bytes()) else {
+        return fail!("/dev/{} is missing", scratch);
+    };
+    let Some(disk) = block::disk(scratch.as_bytes()) else {
+        return fail!("{} is not registered", scratch);
     };
     let ask = |request| devfs_block_ioctl(inode, request);
     assert_eq_test!(
@@ -565,8 +600,16 @@ pub fn test_block_disk_names() -> TestResult {
 /// write protection its device does, and is never the disk `root=auto` takes.
 pub fn test_block_usb_disks_come_and_go() -> TestResult {
     const LINK: &[u8] = b"usb-Test_Come_And_Go_comego-0:0";
-    let Some(scratch) = block::disk(b"nvme1n2") else {
-        return fail!("nvme1n2 is not registered");
+    let scratch = match scratch_node(TestDisk::NvmeScratch4kn) {
+        Ok(node) => node,
+        Err(verdict) => return verdict,
+    };
+    let root = match suite_disk(TestDisk::Root) {
+        Ok(node) => node,
+        Err(why) => return fail!("{}", why),
+    };
+    let Some(scratch) = block::disk(scratch.as_bytes()) else {
+        return fail!("{} is not registered", scratch);
     };
     let view = || {
         let ns = scratch.namespace();
@@ -592,8 +635,8 @@ pub fn test_block_usb_disks_come_and_go() -> TestResult {
     assert_test!(name.as_bytes().starts_with(b"sd"), "a USB disk is sd");
     assert_test!(named(name), "its by-id link names it");
     assert_test!(
-        block::first_fixed_disk().is_some_and(|d| d.as_bytes() == b"nvme0n1"),
-        "root=auto's disk stays nvme0n1"
+        block::first_fixed_disk().is_some_and(|d| d.as_bytes() == root.as_bytes()),
+        "root=auto's disk stays the root image"
     );
     let fs = slopos_fs::vfs::init::vfs_devfs_instance();
     let Ok(inode) = fs.lookup(fs.root_inode(), name.as_bytes()) else {
@@ -639,6 +682,88 @@ pub fn test_block_usb_disks_come_and_go() -> TestResult {
     pass!()
 }
 
+/// A test reaches a disk only by the identity the suite gave it: a disk the
+/// suite keeps asked for as scratch, a by-id name it never attaches and a
+/// scratch identity no registered disk carries are refused, and the asking
+/// claims nothing.
+pub fn test_block_scratch_refuses_other_disks() -> TestResult {
+    let verdict = refuses_kept_disks();
+    if !matches!(verdict, TestResult::Pass) {
+        return verdict;
+    }
+    refuses_an_absent_scratch()
+}
+
+#[inline(never)]
+fn refuses_kept_disks() -> TestResult {
+    for kept in [TestDisk::Root, TestDisk::Verified] {
+        let node = match suite_disk(kept) {
+            Ok(node) => node,
+            Err(why) => return fail!("{}", why),
+        };
+        let held = block::held(node.as_bytes());
+        let mut by_id = [0u8; DISK_ID_MAX];
+        let len = kept.by_id(&mut by_id);
+        assert_eq_test!(
+            scratch_disk_by_id(&by_id[..len]).err(),
+            Some(Refusal::NotScratch(kept)),
+            "a kept disk asked for as scratch by its by-id name"
+        );
+        assert_eq_test!(
+            scratch_disk(kept).err(),
+            Some(Refusal::NotScratch(kept)),
+            "a kept disk asked for as scratch"
+        );
+        assert_eq_test!(
+            block::held(node.as_bytes()),
+            held,
+            "a refusal claims nothing"
+        );
+    }
+    assert_eq_test!(
+        scratch_disk_by_id(b"nvme-Samsung_SSD_990_PRO_2TB_S7DNNJ0W000000_1").err(),
+        Some(Refusal::Unknown),
+        "a disk the suite never attaches"
+    );
+    assert_eq_test!(
+        scratch_disk_by_id(b"nvme-QEMU_NVMe_Ctrl_slopos-root").err(),
+        Some(Refusal::Unknown),
+        "an alias is no identity of the table"
+    );
+    pass!()
+}
+
+/// Out of the registry, the virtio scratch's identity names no disk; back
+/// in, it names it again.
+#[inline(never)]
+fn refuses_an_absent_scratch() -> TestResult {
+    let node = match scratch_node(TestDisk::VirtioScratch) {
+        Ok(node) => node,
+        Err(verdict) => return verdict,
+    };
+    let (Some(name), Some(device)) = (registered(node.as_bytes()), block::disk(node.as_bytes()))
+    else {
+        return fail!("{} left the registry", node);
+    };
+    if !block::unregister_disk(name) {
+        return fail!("{} would not leave the registry", node);
+    }
+    let absent = scratch_disk(TestDisk::VirtioScratch).err();
+    let back = block::register_disk(name, device);
+    assert_eq_test!(
+        absent,
+        Some(Refusal::Absent(TestDisk::VirtioScratch)),
+        "a scratch identity no registered disk carries"
+    );
+    assert_test!(back, "the virtio scratch must come back");
+    assert_test!(
+        scratch_disk(TestDisk::VirtioScratch)
+            .is_ok_and(|again| again.as_bytes() == node.as_bytes()),
+        "its identity names it again"
+    );
+    pass!()
+}
+
 slopos_testing::stest!(name = test_block_disk_names, suite = block_layer);
 slopos_testing::stest!(
     name = test_block_partitions_on_512_byte_blocks,
@@ -653,3 +778,7 @@ slopos_testing::stest!(name = test_block_by_id_names, suite = block_layer);
 slopos_testing::stest!(name = test_block_by_id_partition_names, suite = block_layer);
 slopos_testing::stest!(name = test_block_ioctls, suite = block_layer);
 slopos_testing::stest!(name = test_block_usb_disks_come_and_go, suite = block_layer);
+slopos_testing::stest!(
+    name = test_block_scratch_refuses_other_disks,
+    suite = block_layer
+);

@@ -4,6 +4,7 @@
 use slopos_ostd::{KArc, klog_info};
 use slopos_testing::{TestResult, fail};
 
+use super::suite_disks::{TestDisk, scratch_disk};
 use super::{Ext2ImageSpec, build_ext2_image};
 use crate::blockdev::{BlockDevice, BlockDeviceError, MemoryBlockDevice};
 use crate::devfs::{DevFs, block_read_entitled, block_write_entitled, devfs_register_block_device};
@@ -813,10 +814,13 @@ pub fn test_devfs_block_node_read_requires_entitlement() -> TestResult {
 /// time: refused without the entitlement, refused while anything else holds
 /// the claim, shortened at the end of the device, and read back as written.
 pub fn test_devfs_block_node_writes_through_the_claim() -> TestResult {
-    const SCRATCH: &[u8] = b"nvme0n2";
+    let scratch = match scratch_disk(TestDisk::NvmeScratch) {
+        Ok(node) => node,
+        Err(why) => return fail!("{}", why),
+    };
     let fs = DevFs::new();
-    let Ok(inode) = fs.lookup(fs.root_inode(), SCRATCH) else {
-        return fail!("the scratch disk nvme0n2 is not in /dev");
+    let Ok(inode) = fs.lookup(fs.root_inode(), scratch.as_bytes()) else {
+        return fail!("the scratch disk {} is not in /dev", scratch);
     };
     let capacity = match fs.stat(inode) {
         Ok(stat) => stat.size,
@@ -829,19 +833,19 @@ pub fn test_devfs_block_node_writes_through_the_claim() -> TestResult {
     if fs.read(inode, at, &mut saved) != Ok(4096) {
         return fail!("could not read the window back");
     }
-    let verdict = block_write_body(&fs, inode, at, capacity);
+    let verdict = block_write_body(&fs, scratch.as_bytes(), inode, at, capacity);
     let _ = fs.write(inode, at, &saved);
     verdict
 }
 
 #[inline(never)]
-fn block_write_body(fs: &DevFs, inode: u64, at: u64, capacity: u64) -> TestResult {
-    let pattern = [0xC3u8; 700];
-    match block_write_entitled(inode, at + 11, &pattern, false) {
+fn block_write_body(fs: &DevFs, node: &[u8], inode: u64, at: u64, capacity: u64) -> TestResult {
+    let pattern: &[u8; 700] = &[0xC3; 700];
+    match block_write_entitled(inode, at + 11, pattern, false) {
         Err(VfsError::PermissionDenied) => {}
         other => return fail!("an unentitled raw write was not refused: {:?}", other),
     }
-    match fs.write(inode, at + 11, &pattern) {
+    match fs.write(inode, at + 11, pattern) {
         Ok(700) => {}
         other => return fail!("the entitled write was not served: {:?}", other),
     }
@@ -849,13 +853,13 @@ fn block_write_body(fs: &DevFs, inode: u64, at: u64, capacity: u64) -> TestResul
         return fail!("fsync of the node failed");
     }
     let mut back = [0u8; 700];
-    if fs.read(inode, at + 11, &mut back) != Ok(700) || back != pattern {
+    if fs.read(inode, at + 11, &mut back) != Ok(700) || back != *pattern {
         return fail!("the write did not read back");
     }
 
-    match crate::vfs::vfs_claim_block_device(b"nvme0n2") {
+    match crate::vfs::vfs_claim_block_device(node) {
         Ok(held) => {
-            let busy = fs.write(inode, at, &pattern);
+            let busy = fs.write(inode, at, pattern);
             drop(held);
             if busy != Err(VfsError::Busy) {
                 return fail!("a write past a held claim gave {:?}", busy);
@@ -864,11 +868,11 @@ fn block_write_body(fs: &DevFs, inode: u64, at: u64, capacity: u64) -> TestResul
         Err(e) => return fail!("could not take the claim to hold: {:?}", e),
     }
 
-    match fs.write(inode, capacity - 100, &pattern) {
+    match fs.write(inode, capacity - 100, pattern) {
         Ok(100) => {}
         other => return fail!("a write across the end was not shortened: {:?}", other),
     }
-    match fs.write(inode, capacity, &pattern) {
+    match fs.write(inode, capacity, pattern) {
         Err(VfsError::NoSpace) => TestResult::Pass,
         other => fail!("a write at the end gave {:?}", other),
     }
