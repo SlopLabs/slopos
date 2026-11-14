@@ -16,19 +16,14 @@ The system is a kernel and a base, each replaced its own way:
 
 | Layer | Replaced by | Tried before kept | Way back |
 |-------|-------------|-------------------|----------|
-| Kernel, one per slot | `bootctl install` into the spare slot | Yes: `oneshot`, then `commit` | Any reset |
-| Base, shared by both slots | `bootctl base install`, live | No | `bootctl base rollback` |
+| Kernel, one per slot, with its stamped words | `bootctl install` into the spare slot | Yes: `oneshot`, then `bootctl commit` | Any reset |
+| Base, shared by both slots | `bootctl base try`, live | Yes: `bootctl base commit` | Any reset, `bootctl base rollback` |
+| Both, across an interface change | `bootctl base try --kernel` | Yes: the base rides the kernel's trial | Any reset |
 
 `BASE_INTERFACE` ties a kernel to a base, and `libc.so`'s exports tie a
 base to what runs outside it.
 
-A Linux machine is needed today for one thing this plan takes on: testing.
-The suite boots under QEMU, and the tests kernel starts the userland tests
-too, so a test of a program costs a kernel boot. A slot's kernel takes extra
-boot options only when it was compiled with `SLOPOS_BUILTIN_CMDLINE`; the
-rest are in `limine.conf` on the ESP, which nothing writes after install.
-
-Rules every phase keeps:
+Rules every change keeps:
 
 - Only a kernel change needs a reboot. A base, an app, an extension, the
   toolchain or a setting takes effect under the running kernel. A reset
@@ -41,61 +36,16 @@ Rules every phase keeps:
   kernel or the base is checked by `bootctl` or the kernel, never by a
   comparison in the justfile. A tree is nobody's to refuse.
 
-## Phase 1: one build interface (done)
+## What is left
 
-The justfile is the one build interface; `scripts/selfhost.sh` is gone.
-`just` 1.59.0 is a toolchain program (`toolchain/recipes/just/`, built by
-the `cargo` recipe template against a lock that resolves `libc`, `nix`,
-`rustix`, `getrandom` and `errno` to the fork and the `toolchain/crates/`
-ports), held by the `just_runs_a_justfile` rung. `cargo`, `host_cargo` and
-`ensure_toolchain` resolve by `os()`. A recipe that
-emulates or needs the host's tools depends on `_host`; `install [variant]`
-and `install-kernel [variant]` depend on `_slopos`; each refuses elsewhere in
-one line. `slopos_userland::selfhost` runs `just build`, `just install` and
-`just install-kernel`. Porting just grew slibc by `mkfifoat` and the libc
-fork by Linux's `sysconf`/`pathconf` names and five group and password
-declarations.
-
-## Phase 2: the gates where the build runs (done)
-
-The cross-built toolchain carries rustdoc, rustfmt and clippy (compiler
-patch 0004 links a cross-built `rustc_private` tool against SlopOS's
-libLLVM; std's `current_exe` reads `AT_EXECFN`), held by the
-`rustfmt_formats_a_crate` and `clippy_lints_a_crate` rungs. `xtask` builds
-natively, taking `cargo +<toolchain>` only where
-rustup is, so the justfile's `gate` is gone. The two contract gates are
-`xtask base-interface` and `xtask libc-exports`, their scripts and Python
-helpers gone: the first also digests the Linux calls `SYSCALL_TABLE`
-answers (interface 13), the second reads `.dynsym` with `object` and dumps
-layouts with the clang `cxx_host_tools.sh` finds on either system.
-`install` runs them before it writes. `check-gates` (both systems) holds
-the tree and the dev kernel; `check-framekernel-gates` adds the host's
-toolchain and image-tool gates. `just precommit` (`fmt`, `test-host`,
-`clippy`, `build dev`, `check-gates`, `libc-exports`) is the lane
-`AGENTS.md` names for SlopOS, and `test-selfhost`'s guest runs it over its
-own build before the host confirms the kernels.
-
-## Phase 3: a base tried, boot options with the kernel (done)
-
-`bootctl base try <img> [<sha256>]` runs a base from memory under
-`BaseUpdate` alone and writes nothing, so any reset ends the trial. The first
-try notes the base it replaced in `/run/bootctl/base-trial`, which `base
-commit` keeps as the one that last ran and `base rollback` runs again.
-Given `--kernel`, a base the running kernel does not serve goes to the disk
-beside the running one and the kernel into the spare slot, armed once; with
-no kernel serving it nothing is written. `just install`, `remote-install`
-and `remote.py install` hand both over; `install-kernel` stays for a kernel
-alone. A base write copies the default kernel over a slot it would strand.
-A kernel carries its words in a 512-byte `.slopos.cmdline` section, filled
-by `SLOPOS_BUILTIN_CMDLINE` and stamped by `bootctl install` and `clone` from
-uid 0's `/etc/kernel/cmdline` (`bootctl cmdline set`) and `--cmdline`; the
-installer writes that file, stamps both slots and leaves `limine.conf`
-`root=` alone. `bootctl status` prints each slot's interfaces and words, and
-`test-install` holds the trial, its end, the commit and the pair.
-
-## Order
-
-Phases 1, 2 and 3 are done.
+- A Linux machine is still needed to test: the suite boots under QEMU, and
+  the tests kernel starts the userland tests. `tests-without-a-host.md` is
+  the spike for that.
+- Three things in userland still wait for a boot, each an entry in
+  `KNOWN_ISSUES.md`: an activation refused for room names no holder, an
+  init that cannot read its predecessor's state loses consent until
+  reboot, and only `cpufreq.epp=` and `sched.hybrid=` change while the
+  kernel runs.
 
 ## What turns on at v1
 
@@ -135,6 +85,6 @@ Before v1 none of this is promised. At v1, in one change:
 - Drivers, and the kernel defects `KNOWN_ISSUES.md` lists.
 - QEMU on SlopOS.
 - Compatibility across versions before v1. A kernel and a base come from one
-  tree, a private call changes shape freely, and no phase adds a shim, a
+  tree, a private call changes shape freely, and no change adds a shim, a
   frozen format or a migration to keep an older install updatable. A change
   the installed system cannot take costs a reinstall from a medium.

@@ -16,7 +16,7 @@ editing.
 |----------|-------|
 | `KNOWN_ISSUES.md` | Working notes on open issues; verify before using as source of truth |
 | `ci-latency.md` | Where CI's wall clock goes, the lane rule that bounds it, and the cold-build work still open |
-| `self-hosting-on-hardware.md` | Developing the kernel and the base on an installed machine: one build interface (done), the gates in the guest (done), a base tried before it is kept, a kernel and a base installed as a pair, boot options that follow the kernel, userland that never waits for a boot |
+| `self-hosting-on-hardware.md` | Developing SlopOS on an installed machine: how a kernel and a base are replaced and tried there, the rules every change keeps, what is left (testing without a host, userland that still waits for a boot) and what turns on at v1 |
 | `self-build.md` | A spike: the research that decides how SlopOS builds its own compilers, toolchain programs and install medium, to be replaced by the plan it leads to |
 | `tests-without-a-host.md` | A spike: the research that decides how the kernel's tests run on hardware and the userland tests under a runner of their own, so `just test` needs no host, to be replaced by the plan it leads to |
 | `linux-interfaces.md` | A spike: the research that decides which of the 54 private calls move to an interface Linux defines, which move to userland and which stay, to be replaced by the plan it leads to |
