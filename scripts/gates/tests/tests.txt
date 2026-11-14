@@ -439,6 +439,7 @@ kernel	slopos_core::tests::event_bus_tests::test_event_idle_queue_has_no_waiters
 kernel	slopos_core::tests::event_bus_tests::test_event_publish_routes_in_range
 kernel	slopos_core::tests::event_bus_tests::test_event_socket_queues_do_not_alias
 kernel	slopos_core::tests::event_bus_tests::test_event_subscription_pre_check_paths
+kernel	slopos_core::tests::irq_tests::test_interrupt_handler_runs_with_direction_flag_clear
 kernel	slopos_core::tests::irq_tests::test_irq_enable_disable_invalid_line
 kernel	slopos_core::tests::irq_tests::test_irq_initialized_flag_true
 kernel	slopos_core::tests::irq_tests::test_irq_is_masked_boundary

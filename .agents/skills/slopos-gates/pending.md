@@ -16,3 +16,12 @@
   asserts the section is 512 bytes, and kernel code reads it only through
   `black_box`, since `bootctl` rewrites it after link. Page:
   `verification/tcb-discipline`.
+- Every IDT stub enters through the `INTERRUPT_ENTER` macro of
+  `slopos-ostd/src/irq/asm/handlers.s`, which clears the direction flag
+  before it calls `common_exception_handler`. A program may set the flag,
+  and the kernel's own backward `memmove` runs with it set; a handler
+  entered that way runs every forward `rep movs` and `rep stos` downwards,
+  and a context switched out there resumes the same way. `IRETQ` gives the
+  interrupted code its flag back. `SFMASK` is the same rule for `SYSCALL`.
+  Held by `test_interrupt_handler_runs_with_direction_flag_clear`. Page:
+  `architecture/privilege-separation` (For contributors, beside `SFMASK`).

@@ -2,22 +2,21 @@
 
 ---
 
-## The kernel faults in the VMA map's B-tree under a guest's `cargo test` build
+## A frame freed while an epoch closes leaves the TLB quarantine an epoch early
 
-**Status**: Open
-**Severity**: High (a kernel panic; seen once in four `just test-selfhost` runs)
-**Component**: `mm/src/process_vm.rs`, the `BTreeMap<u64, (u64, VmaRegion)>`
+**Status**: Open (read from the code, not run)
+**Severity**: Low (the closing CPU has to stall between two adjacent steps, as a preempted vCPU does)
+**Component**: `mm/src/mmu/quiesce.rs:158-181` (`try_close`),
+`mm/src/page_alloc/buddy.rs` (`free_locked`, `quarantine_rotate`)
 
-In a `just test-selfhost` run of the commit that ported the gates to xtask,
-the release tests kernel panicked while the guest's `just precommit` built
-the host crates' tests
-(`cargo test`, 10 of 156 units): a supervisor read of user address `0x401272`
-(error code `0x1`, page present) at `0xffffffff806b2630`, which
-`kernel-release-tests.elf` places in `BTreeMap::remove`'s `remove_leaf_kv` on
-the VMA map. The emergency reporter then faulted again, so there is no
-backtrace. A node pointer into user space means the map's memory was
-overwritten or freed while still linked. The three runs before it got past
-the same build.
+`try_close` advances `EPOCH` and only then takes the buddy lock to rotate the
+quarantine. A page unmapped after the advance and freed before the rotate is
+stamped with the new epoch but joins the old epoch's batch, so it is released
+when the new epoch closes, not the one after. A CPU that acked the new epoch
+before the unmap, which the module's header says proves nothing, still
+translates the page when its frame is handed out again.
+
+Fix: advance the epoch under the buddy lock, in the hold that rotates.
 
 ---
 

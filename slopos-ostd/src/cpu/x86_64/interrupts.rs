@@ -119,6 +119,9 @@ pub fn restore_flags(flags: u64) {
     }
 }
 
+/// The direction flag: `rep movs` and `rep stos` step downwards while it is set.
+pub const RFLAGS_DF: u64 = 1u64 << 10;
+
 /// Read RFLAGS without modifying interrupt state.
 #[inline(always)]
 pub fn read_rflags() -> u64 {
@@ -170,4 +173,28 @@ impl IrqDisabled<'_> {
         restore_flags(saved);
         r
     }
+}
+
+/// Take the interrupt pended under `_irq` with the direction flag set, and
+/// answer whether the flag was still set once its handler had returned.
+#[cfg(all(target_os = "none", feature = "test-helpers"))]
+pub fn take_pending_interrupt_with_df_set(_irq: &IrqDisabled<'_>) -> bool {
+    let flags: u64;
+    // SAFETY: `_irq` witnesses interrupts off on entry and `cli` leaves them
+    // off; the flag is cleared before compiled code runs again, and the one
+    // stack slot `pushfq` takes is popped.
+    unsafe {
+        asm!(
+            "std",
+            "sti",
+            // `sti` holds interrupts off for one more instruction.
+            "nop",
+            "cli",
+            "pushfq",
+            "pop {flags}",
+            "cld",
+            flags = out(reg) flags,
+        );
+    }
+    flags & RFLAGS_DF != 0
 }

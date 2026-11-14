@@ -1,7 +1,11 @@
 //! Kernel-side IRQ surface tests.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use slopos_ostd::cpu::x86_64::pcr::{apic_id_from_cpu_index, current_cpu_id, send_ipi_to_cpu};
+use slopos_ostd::cpu::x86_64::{
+    IrqDisabled, RFLAGS_DF, read_rflags, take_pending_interrupt_with_df_set,
+};
 use slopos_ostd::irq::{IRQ_BASE_VECTOR, IrqAllocator, IrqContext, IrqError, dispatch};
 use slopos_testing::TestResult;
 use slopos_testing::{assert_test, fail};
@@ -256,6 +260,50 @@ pub fn test_ostd_dispatch_to_unregistered_vector_is_noop() -> TestResult {
     TestResult::Pass
 }
 
+const RFLAGS_UNSEEN: u64 = u64::MAX;
+static HANDLER_RFLAGS: AtomicU64 = AtomicU64::new(RFLAGS_UNSEEN);
+
+/// The interrupted code may be user code that set the direction flag, or the
+/// kernel's own backward `memmove`: a handler entered with it set runs every
+/// forward `rep movs` and `rep stos` downwards.
+pub fn test_interrupt_handler_runs_with_direction_flag_clear() -> TestResult {
+    let line = IrqAllocator::alloc().expect("alloc");
+    let vector = line.vector();
+    HANDLER_RFLAGS.store(RFLAGS_UNSEEN, Ordering::SeqCst);
+    let handle = line
+        .register_callback(|_| HANDLER_RFLAGS.store(read_rflags(), Ordering::SeqCst))
+        .expect("register");
+
+    let interrupted_kept_df = IrqDisabled::with(|irq| {
+        let apic_id = apic_id_from_cpu_index(current_cpu_id())?;
+        send_ipi_to_cpu(apic_id, vector);
+        // A self-IPI need not be pending by the next instruction.
+        for _ in 0..1_000_000 {
+            let kept = take_pending_interrupt_with_df_set(irq);
+            if HANDLER_RFLAGS.load(Ordering::SeqCst) != RFLAGS_UNSEEN {
+                return Some(kept);
+            }
+            core::hint::spin_loop();
+        }
+        None
+    });
+    drop(handle);
+    drop(line);
+
+    let Some(interrupted_kept_df) = interrupted_kept_df else {
+        return fail!("the self-IPI was never taken");
+    };
+    assert_test!(
+        HANDLER_RFLAGS.load(Ordering::SeqCst) & RFLAGS_DF == 0,
+        "the handler ran with the interrupted code's direction flag set"
+    );
+    assert_test!(
+        interrupted_kept_df,
+        "the interrupted code lost its direction flag"
+    );
+    TestResult::Pass
+}
+
 slopos_testing::stest!(name = test_irq_route_set_get_round_trip, suite = irq);
 slopos_testing::stest!(name = test_irq_route_invalid_line, suite = irq);
 slopos_testing::stest!(name = test_irq_is_masked_boundary, suite = irq);
@@ -286,5 +334,9 @@ slopos_testing::stest!(
 slopos_testing::stest!(name = test_ostd_handle_drop_clears_dispatch, suite = irq);
 slopos_testing::stest!(
     name = test_ostd_dispatch_to_unregistered_vector_is_noop,
+    suite = irq
+);
+slopos_testing::stest!(
+    name = test_interrupt_handler_runs_with_direction_flag_clear,
     suite = irq
 );

@@ -20,9 +20,10 @@
 .extern common_exception_handler
 .extern isr_iret_frame_corrupt
 
-# GP registers are pushed in the order matching slopos_ostd::irq::InterruptFrame;
-# common_exception_handler is called with RDI = frame pointer.
-.macro INTERRUPT_HANDLER vector, has_error_code
+# The one way in from every vector: builds slopos_ostd::irq::InterruptFrame
+# (GP registers pushed in its order) and calls common_exception_handler with
+# RDI = frame pointer.
+.macro INTERRUPT_ENTER vector, has_error_code
     .if \has_error_code == 0
         pushq $0
     .endif
@@ -50,6 +51,11 @@
     pushq %r14
     pushq %r15
 
+    # The interrupted code may be user code that set DF, or a backward
+    # `rep movs` of the kernel's own; compiled code takes it to be clear, and
+    # IRETQ gives the interrupted code its own back.
+    cld
+
     # GS is managed by SWAPGS for per-CPU access; FS holds the user TLS
     # base via FS_BASE MSR and must not be clobbered.
     movw $SEL_KERNEL_DATA, %ax
@@ -58,6 +64,10 @@
 
     movq %rsp, %rdi
     call common_exception_handler
+.endm
+
+.macro INTERRUPT_HANDLER vector, has_error_code
+    INTERRUPT_ENTER \vector, \has_error_code
 
     popq %r15
     popq %r14
@@ -158,40 +168,10 @@ irq14: INTERRUPT_HANDLER 46, 0    # ATA Primary
 irq15: INTERRUPT_HANDLER 47, 0    # ATA Secondary
 
 # Reschedule IPI handler (vector 0xFC = 252).
-# Custom shape: identical to INTERRUPT_HANDLER except the post-handler
-# unwind validates CS before IRETQ.
+# Custom shape: the post-handler unwind validates CS before IRETQ.
 .global isr_reschedule_ipi
 isr_reschedule_ipi:
-    pushq $0
-    pushq $252
-
-    testb $3, 24(%rsp)
-    jz .Lresched_noswap_entry
-    swapgs
-.Lresched_noswap_entry:
-
-    pushq %rax
-    pushq %rbx
-    pushq %rcx
-    pushq %rdx
-    pushq %rsi
-    pushq %rdi
-    pushq %rbp
-    pushq %r8
-    pushq %r9
-    pushq %r10
-    pushq %r11
-    pushq %r12
-    pushq %r13
-    pushq %r14
-    pushq %r15
-
-    movw $SEL_KERNEL_DATA, %ax
-    movw %ax, %ds
-    movw %ax, %es
-
-    movq %rsp, %rdi
-    call common_exception_handler
+    INTERRUPT_ENTER 252, 0
 
     popq %r15
     popq %r14
@@ -236,36 +216,7 @@ isr_reschedule_ipi:
 # a corrupted IRETQ.
 .global isr_lapic_timer
 isr_lapic_timer:
-    pushq $0
-    pushq $236
-
-    testb $3, 24(%rsp)
-    jz .Ltimer_noswap_entry
-    swapgs
-.Ltimer_noswap_entry:
-
-    pushq %rax
-    pushq %rbx
-    pushq %rcx
-    pushq %rdx
-    pushq %rsi
-    pushq %rdi
-    pushq %rbp
-    pushq %r8
-    pushq %r9
-    pushq %r10
-    pushq %r11
-    pushq %r12
-    pushq %r13
-    pushq %r14
-    pushq %r15
-
-    movw $SEL_KERNEL_DATA, %ax
-    movw %ax, %ds
-    movw %ax, %es
-
-    movq %rsp, %rdi
-    call common_exception_handler
+    INTERRUPT_ENTER 236, 0
 
     popq %r15
     popq %r14
