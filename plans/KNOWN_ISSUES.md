@@ -307,41 +307,73 @@ privd reads the first.
 
 ---
 
-## A base install takes effect for every slot with no trial boot
+## A base activation refused for room names no holder
 
 **Status**: Open
-**Severity**: Medium (a base that fails in userland stays current)
-**Component**: `userland/src/apps/bootctl.rs:510` (`base_install`)
+**Severity**: Low (the base waits for a boot, or a trial is refused)
+**Component**: `fs/src/basefs/mod.rs:322-361` (`BaseFs::admit`),
+`fs/src/basefs/reap.rs`, `userland/src/apps/bootctl.rs` (`activate`, `try_live`)
 
-A base that passes `boot_core::base::check` and fails in userland stays
-current for every slot until a reinstall that keeps the root writes the
-medium's, or the medium's rescue shell rolls it back. A power cut between the
-two base writes leaves one image twice, which the default kernel still boots.
+`base_activate` answers `EBUSY` at 16 generations, or when the copies held
+and the new one pass a quarter of usable memory. A retired generation is
+freed after two quiet passes over the open-file, mapping and process
+tables, which back off to one a minute. Nothing tells userland which
+processes hold one: there is no `/proc`, `process_list` carries no program
+or generation, and no kconsole command lists them; only the `BASE:
+generation N … freed` lines in `/dev/kmsg` say anything. `bootctl` prints
+`it could not run now (Device or resource busy)`, and the base waits for
+the next boot (`base install`) or the trial is refused (`base try`).
+
+Fix: a query naming the processes, and the open files and mappings, that
+hold each generation, which `bootctl` prints on `EBUSY` so restarting them
+frees the room. It is a private call, so it takes the next
+`BASE_INTERFACE`.
 
 ---
 
-## A base write can leave the spare slot's kernel serving neither base
+## An init that cannot read its predecessor's state loses consent until reboot
 
-**Status**: Open (derived from the code, not reproduced)
-**Severity**: Low (needs a boot of the spare slot that nobody asked for)
-**Component**: `userland/src/apps/bootctl.rs:433` (`guarded_kernels`),
-`boot/src/base.rs:131`
+**Status**: Open
+**Severity**: Medium (every action that needs a person is refused until a boot)
+**Component**: `userland/src/apps/init/mod.rs:161-178` and `:237-275`
+(`Consent`), `userland/src/apps/init/reexec.rs:390-403`
 
-A base write holds three kernels to serving one of the two bases: the
-default slot's, the running one and one armed to boot once. The other slot's
-kernel is not among them. Once a kernel that no longer serves the old
-interface is committed, which before v1 is every change to the private
-call surface, the kernel it replaced serves `previous.img` alone, and the
-next base install replaces that image. A boot of that slot then
-stops at `BOOT: no base this kernel serves`, and `bootctl status` prints no
-slot's served range, so nothing says the slot is dead. Nothing boots it by
-default, but a deleted `LoaderEntryDefault` (below) makes Limine boot its
-first entry, slot `a`, and under `panic=reboot` every reset lands there
-again until someone picks the other entry in the menu.
+A base that changes `/sbin/init` re-executes it with its state on a pipe
+(`--resume`). When the new init cannot read the state, it prints `init:
+re-executed with no state it can read; starting the sessions again without
+consent`, closes what it kept and serves with no consent links. The
+socketpairs between privd and the compositors are made only in `boot()`, so
+privd answers every question that needs a person with `Refusal::NoAgent`
+until the next boot. The same branch never sets `init.login`, so nothing
+supervises the console login prompt either.
 
-Fix: hold every slot's kernel to a base, and before a base write that would
-strand the spare slot, copy the default kernel into it as `bootctl clone`
-does.
+Fix: let a running init make the consent links anew and hand them to the
+privd and the compositors it starts, and set up the login in `serving` as
+`boot()` does.
+
+---
+
+## Only `cpufreq.epp=` and `sched.hybrid=` change while the kernel runs
+
+**Status**: Open
+**Severity**: Low (changing a setting takes a kernel install and a reboot)
+**Component**: `boot/src/early_init.rs` (the parse sites),
+`slopos-ostd/src/kconsole/config.rs`, `mm/src/commit.rs`
+
+Of the boot options a running kernel could change, two have a switch:
+`cpufreq.epp=` and `sched.hybrid=`, through `cpu_perf_ctl` (`cpufreq set
+epp|placement`, privd's `org.slopos.cpufreq.set`), neither kept across
+boots. `boot.debug=`, `watchdog=`, `lockdep=`, `quota=`, `mem.commit=`,
+`kconsole.*` and `roulette=skip` are read once at boot (`klog_set_level`,
+`watchdog::set_enabled`, `set_lockdep_mode`, `set_quota_mode`,
+`commit::install`, `kconsole::config::install`, init's `boot()`), so a
+change goes through `bootctl cmdline set`, a kernel install and a reboot.
+
+Fix: a runtime switch for each, set at boot from a kept setting.
+`roulette=skip` needs none in the kernel, since only init reads it.
+`root=`, `mount=`, `verity=`, `usb=`, `xe.*`, `tp.*`, `tests=` and the
+`panic.*` smokes have to be known before userland runs and stay boot
+options.
 
 ---
 
