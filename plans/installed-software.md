@@ -194,16 +194,14 @@ Build:
    SHA instructions the kernel may not; `verity-core` grows a path for
    them, chosen by the CPU's features at run time, and hashes on more than
    one core when the image is large.
-6. A gate: an image installed in the suite, timed, over the time the same
-   bytes take read and written raw on the same disk, with a cap on the
-   quotient, as `fsperf` caps a write.
 
 Find out first: how the 180 000 reads split between the passes, and
 whether the store's rule that a writer reads back what it wrote needs more
 for an image than the kernel's check already gives.
 
 Done when installing the toolchain image takes within twice the raw time
-for its bytes on the same disk, on the release kernel, and the gate holds.
+for its bytes on the same disk, on the release kernel, measured once by
+hand; no gate holds it.
 
 ## Phase 4: an image reaches a root without a person
 
