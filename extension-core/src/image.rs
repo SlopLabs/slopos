@@ -20,16 +20,16 @@ use core::ops::Bound;
 use slopos_abi::extension::MAX_ENTRIES;
 use slopos_abi::fs::{S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
 use slopos_boot_core::base::{ManifestLine, manifest_lines};
-use slopos_verity_core::sha256::Sha256;
-use slopos_verity_core::{self as verity, BLOCK, Digest, Fault, Geometry};
+use slopos_verity_core::sha256::{Compress, Sha256, compress_blocks};
+use slopos_verity_core::{self as verity, BLOCK, DIGEST, Digest, Fault, Geometry};
 
 use crate::declare::{Declaration, mount_point};
 use crate::release::Release;
-use crate::sha256;
 use crate::volume::read::{Blocks, Found, Volume, VolumeError};
 use crate::volume::write::{self, Entry, What};
 use crate::volume::{Kind, LOST_FOUND_NAME};
 use crate::words::LineError;
+use crate::{sha256, symbols};
 
 pub const DIR: &str = "/.extension";
 pub const MANIFEST: &str = "/.extension/manifest";
@@ -42,11 +42,21 @@ const MANIFEST_MAX: u64 = 16 << 20;
 /// More symlinks than a library or a command is ever reached through.
 pub(crate) const LINK_HOPS: usize = 8;
 const TEXT_MAX: u64 = 64 << 10;
-/// Tree blocks a reader keeps verified, so a file's reads walk to the root
-/// once.
+/// Leaves a reader keeps verified, so a file's reads walk to the root once.
 const KEPT: usize = 64;
+/// The most of the levels above the leaves a reader holds from its open, as
+/// the kernel's device does.
+const UPPER_MAX: u64 = 256;
 /// What a reader takes of a file at once.
-const CHUNK: usize = 64 << 10;
+const CHUNK: usize = 1 << 20;
+/// What a copy reads of an image at once.
+const COPY_CHUNK: usize = 4 << 20;
+/// The fewest blocks one core hashes of a chunk, so a small image is hashed
+/// on one.
+const SHARE_MIN: usize = 128;
+/// A hashing thread's stack: a digest's room, not std's 2 MiB.
+#[cfg(any(test, feature = "std"))]
+const HASHER_STACK: usize = 64 << 10;
 
 /// Where an image's bytes come from.
 pub trait Source {
@@ -56,6 +66,24 @@ pub trait Source {
 
     /// Fill `out` from `offset`.
     fn read_at(&mut self, offset: u64, out: &mut [u8]) -> Result<(), Self::Error>;
+
+    /// What its blocks are hashed with.
+    fn compress(&self) -> Compress {
+        compress_blocks
+    }
+
+    /// The digest of each block of `data` into `out`.
+    fn hash_blocks(&self, data: &[u8], out: &mut [Digest]) {
+        hash_each(self.compress(), data, out);
+    }
+}
+
+fn hash_each(compress: Compress, data: &[u8], out: &mut [Digest]) {
+    for (block, digest) in data.chunks_exact(BLOCK).zip(out.iter_mut()) {
+        if let Ok(block) = block.try_into() {
+            *digest = verity::hash_using(compress, block);
+        }
+    }
 }
 
 impl Source for &[u8] {
@@ -84,6 +112,14 @@ impl<S: Source + ?Sized> Source for &mut S {
 
     fn read_at(&mut self, offset: u64, out: &mut [u8]) -> Result<(), S::Error> {
         (**self).read_at(offset, out)
+    }
+
+    fn compress(&self) -> Compress {
+        (**self).compress()
+    }
+
+    fn hash_blocks(&self, data: &[u8], out: &mut [Digest]) {
+        (**self).hash_blocks(data, out);
     }
 }
 
@@ -173,94 +209,245 @@ pub fn root_of<S: Source>(source: &mut S) -> Result<(Geometry, Digest), ImageErr
     Ok((geometry, verity::hash(&top)))
 }
 
-/// Hold every block of the image `source` holds to `digest`, a level of its
-/// tree at a time, in room that does not grow with the image. What a reader
-/// verifies a block at a time is then whole.
-pub fn verify_whole<S: Source>(source: &mut S, digest: &Digest) -> Result<(), ImageError> {
+fn damaged<E: fmt::Display>(e: E) -> ImageError {
+    ImageError::Damaged(e.to_string())
+}
+
+/// Room for `blocks` blocks of an image's tree, refused rather than
+/// aborting when this process cannot have it.
+fn room(blocks: u64) -> Result<Vec<u8>, ImageError> {
+    let refused = || ImageError::Format("a tree larger than this can hold".into());
+    let bytes = usize::try_from(blocks)
+        .ok()
+        .and_then(|blocks| blocks.checked_mul(BLOCK))
+        .ok_or_else(refused)?;
+    let mut room = Vec::new();
+    room.try_reserve_exact(bytes).map_err(|_| refused())?;
+    room.resize(bytes, 0);
+    Ok(room)
+}
+
+/// The image's blocks from its tree's top to the end of level `lowest`, read
+/// a chunk at a time: what [`verity::verify_tree`] holds to the root.
+fn tree_of<S: Source>(
+    source: &mut S,
+    geometry: &Geometry,
+    lowest: usize,
+) -> Result<Vec<u8>, ImageError> {
+    let end = geometry
+        .level(lowest)
+        .map_or(geometry.top() + 1, |(start, count)| start + count);
+    let mut tree = room(end - geometry.top())?;
+    let from = geometry.top() * BLOCK as u64;
+    for (k, room) in tree.chunks_mut(CHUNK).enumerate() {
+        source
+            .read_at(from + (k * CHUNK) as u64, room)
+            .map_err(damaged)?;
+    }
+    Ok(tree)
+}
+
+fn untrue(fault: Fault<()>) -> ImageError {
+    match fault {
+        Fault::Mismatch(block) => {
+            ImageError::Damaged(format!("tree block {block} is not what the root says"))
+        }
+        Fault::Read(()) | Fault::OutOfRange => ImageError::Damaged("its tree is cut short".into()),
+    }
+}
+
+/// Hold the tree of the image `source` holds to `digest`, its leaves and
+/// every level above them, in reads of a chunk. Its data is left to the
+/// readers, every one of which holds a block to the tree as it reads it: a
+/// sealed image a writer read this of once is whole for good.
+pub fn verify_tree<S: Source>(source: &mut S, digest: &Digest) -> Result<(), ImageError> {
     let (geometry, root) = root_of(source)?;
     if root != *digest {
         return Err(ImageError::Other);
     }
-    let mut ahead = Whole(Ahead::new(source, geometry.data_blocks()));
-    let (mut read, mut built) = (Box::new([0; BLOCK]), Box::new([0; BLOCK]));
-    verity::verify_all(&geometry, &root, &mut ahead, &mut read, &mut built).map_err(|fault| {
-        match fault {
-            Fault::Read(e) => ImageError::Damaged(e.to_string()),
-            Fault::Mismatch(_) | Fault::OutOfRange => {
-                ImageError::Damaged("its tree is not the one its data makes".into())
+    let tree = tree_of(source, &geometry, 0)?;
+    verity::verify_tree(&geometry, &root, source.compress(), &tree, 0).map_err(untrue)
+}
+
+/// The image `source` holds, read once in chunks and handed to `sink` as
+/// it goes, as `(offset, bytes)` runs of blocks that are not all zero; a
+/// run of zeros is a hole `sink` leaves. Each data block is hashed once, a
+/// chunk at a time, and its tree is built from those digests and handed
+/// over after, so what reaches `sink` is the image `digest` names once this
+/// answers `Ok`, whatever the source did meanwhile: the bytes handed over
+/// are the bytes hashed. Answers the image's length.
+pub fn copy<S: Source>(
+    source: &mut S,
+    digest: &Digest,
+    sink: &mut dyn FnMut(u64, &[u8]) -> Result<(), String>,
+) -> Result<u64, ImageError> {
+    let len = source.len().map_err(damaged)?;
+    let geometry = Geometry::of_image(len).ok_or_else(|| {
+        ImageError::Format("no extension image: its length fits no SHA-256 tree".into())
+    })?;
+    let mut tree = room(geometry.tree_blocks())?;
+    let mut builder =
+        verity::Builder::new(geometry, &mut tree).ok_or_else(|| untrue(Fault::OutOfRange))?;
+    let data = geometry.data_blocks() * BLOCK as u64;
+    let mut chunk = vec![0; COPY_CHUNK];
+    let mut digests = vec![[0; DIGEST]; COPY_CHUNK / BLOCK];
+    let mut at = 0;
+    while at < data {
+        let n = (data - at).min(COPY_CHUNK as u64) as usize;
+        source.read_at(at, &mut chunk[..n]).map_err(damaged)?;
+        let blocks = n / BLOCK;
+        source.hash_blocks(&chunk[..n], &mut digests[..blocks]);
+        for digest in &digests[..blocks] {
+            builder.push_digest(*digest);
+        }
+        written(&chunk[..n], at, sink)?;
+        at += n as u64;
+    }
+    if builder.finish() != Some(*digest) {
+        return Err(ImageError::Other);
+    }
+    written(&tree, data, sink)?;
+    Ok(len)
+}
+
+/// Hand `sink` the runs of `bytes`, which start at `offset`, that are not
+/// all zero blocks.
+fn written(
+    bytes: &[u8],
+    offset: u64,
+    sink: &mut dyn FnMut(u64, &[u8]) -> Result<(), String>,
+) -> Result<(), ImageError> {
+    let mut run: Option<usize> = None;
+    let blocks = bytes.len() / BLOCK;
+    for k in 0..=blocks {
+        let zero = bytes
+            .get(k * BLOCK..(k + 1) * BLOCK)
+            .is_none_or(|block| block.iter().all(|&b| b == 0));
+        match (run, zero) {
+            (None, false) => run = Some(k),
+            (Some(first), true) => {
+                sink(
+                    offset + (first * BLOCK) as u64,
+                    &bytes[first * BLOCK..k * BLOCK],
+                )
+                .map_err(ImageError::Damaged)?;
+                run = None;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// [`Source::hash_blocks`] on up to `threads` cores, each taking at least
+/// [`SHARE_MIN`] blocks; a share no thread could be started for is hashed
+/// here.
+#[cfg(any(test, feature = "std"))]
+pub fn hash_blocks(compress: Compress, data: &[u8], out: &mut [Digest], threads: usize) {
+    let each = |data: &[u8], out: &mut [Digest]| hash_each(compress, data, out);
+    let share = out.len().div_ceil(threads.max(1)).max(SHARE_MIN);
+    if share >= out.len() {
+        return each(data, out);
+    }
+    let refused = std::thread::scope(|scope| {
+        let mut parts = data.chunks(share * BLOCK).zip(out.chunks_mut(share));
+        let mine = parts.next();
+        let mut refused = Vec::new();
+        for (k, (data, out)) in parts.enumerate() {
+            let spawned = std::thread::Builder::new()
+                .stack_size(HASHER_STACK)
+                .spawn_scoped(scope, || each(data, out));
+            if spawned.is_err() {
+                refused.push(k + 1);
             }
         }
-    })
-}
-
-/// An image's data blocks read a chunk at a time, as a reader takes them in
-/// order; tree blocks bypass the chunk.
-struct Ahead<S> {
-    source: S,
-    data_blocks: u64,
-    chunk: Vec<u8>,
-    first: u64,
-    held: u64,
-}
-
-impl<S: Source> Ahead<S> {
-    fn new(source: S, data_blocks: u64) -> Self {
-        Self {
-            source,
-            data_blocks,
-            chunk: vec![0; CHUNK],
-            first: 0,
-            held: 0,
+        if let Some((data, out)) = mine {
+            each(data, out);
         }
+        refused
+    });
+    for k in refused {
+        let out = out.chunks_mut(share).nth(k).unwrap_or_default();
+        each(data.chunks(share * BLOCK).nth(k).unwrap_or_default(), out);
     }
-
-    fn read(&mut self, block: u64, out: &mut [u8; BLOCK]) -> Result<(), S::Error> {
-        if block >= self.data_blocks {
-            return self.source.read_at(block * BLOCK as u64, out);
-        }
-        if !(self.first..self.first + self.held).contains(&block) {
-            let held = (self.data_blocks - block).min((CHUNK / BLOCK) as u64);
-            self.source.read_at(
-                block * BLOCK as u64,
-                &mut self.chunk[..held as usize * BLOCK],
-            )?;
-            self.first = block;
-            self.held = held;
-        }
-        let at = (block - self.first) as usize * BLOCK;
-        out.copy_from_slice(&self.chunk[at..at + BLOCK]);
-        Ok(())
-    }
-}
-
-struct Whole<'s, S>(Ahead<&'s mut S>);
-
-impl<S: Source> verity::Source for Whole<'_, S> {
-    type Error = S::Error;
-
-    fn read(&mut self, block: u64, out: &mut [u8; BLOCK]) -> Result<(), S::Error> {
-        self.0.read(block, out)
-    }
-
-    fn verified(&mut self, _: u64, _: &mut [u8; BLOCK]) -> bool {
-        false
-    }
-
-    fn keep(&mut self, _: u64, _: &[u8; BLOCK]) {}
 }
 
 /// An image's data as its tree vouches for it.
 pub struct Verified<S> {
-    source: Ahead<S>,
+    source: S,
     geometry: Geometry,
     root: Digest,
+    /// The levels above the leaves, from the top, held to the root at open
+    /// when there are at most [`UPPER_MAX`] of them.
+    upper: Vec<u8>,
     /// Tree blocks verified, the most recent last.
     kept: Vec<(u64, Box<[u8; BLOCK]>)>,
     scratch: Box<[u8; BLOCK]>,
 }
 
+impl<S: Source> Verified<S> {
+    fn new(mut source: S, geometry: Geometry, root: Digest) -> Result<Self, ImageError> {
+        let upper_blocks = geometry
+            .level(1)
+            .map(|(start, count)| start + count - geometry.top());
+        let upper = match upper_blocks {
+            Some(blocks) if blocks <= UPPER_MAX => {
+                let upper = tree_of(&mut source, &geometry, 1)?;
+                verity::verify_tree(&geometry, &root, source.compress(), &upper, 1)
+                    .map_err(untrue)?;
+                upper
+            }
+            _ => Vec::new(),
+        };
+        Ok(Self {
+            source,
+            geometry,
+            root,
+            upper,
+            kept: Vec::new(),
+            scratch: Box::new([0; BLOCK]),
+        })
+    }
+
+    fn check(&mut self, first: u64, data: &[u8]) -> Result<(), String> {
+        let (geometry, root) = (self.geometry, self.root);
+        let mut tree = self.tree();
+        let checked = verity::check(&geometry, &root, &mut tree.0, first, data, tree.1);
+        refused(checked, first)
+    }
+
+    fn check_digests(&mut self, first: u64, digests: &[Digest]) -> Result<(), String> {
+        let (geometry, root) = (self.geometry, self.root);
+        let mut tree = self.tree();
+        let checked = verity::check_digests(&geometry, &root, &mut tree.0, first, digests, tree.1);
+        refused(checked, first)
+    }
+
+    fn tree(&mut self) -> (Tree<'_, S>, &mut [u8; BLOCK]) {
+        let tree = Tree {
+            source: &mut self.source,
+            top: self.geometry.top(),
+            upper: &self.upper,
+            kept: &mut self.kept,
+        };
+        (tree, &mut self.scratch)
+    }
+}
+
+fn refused<E: fmt::Display>(checked: Result<(), Fault<E>>, first: u64) -> Result<(), String> {
+    checked.map_err(|fault| match fault {
+        Fault::Read(e) => e.to_string(),
+        Fault::Mismatch(block) => {
+            format!("block {block} does not hold what the image's tree says")
+        }
+        Fault::OutOfRange => format!("block {first} is past the image's data"),
+    })
+}
+
 struct Tree<'a, S> {
-    source: &'a mut Ahead<S>,
+    source: &'a mut S,
+    top: u64,
+    upper: &'a [u8],
     kept: &'a mut Vec<(u64, Box<[u8; BLOCK]>)>,
 }
 
@@ -268,10 +455,18 @@ impl<S: Source> verity::Source for Tree<'_, S> {
     type Error = S::Error;
 
     fn read(&mut self, block: u64, out: &mut [u8; BLOCK]) -> Result<(), S::Error> {
-        self.source.read(block, out)
+        self.source.read_at(block * BLOCK as u64, out)
     }
 
     fn verified(&mut self, block: u64, out: &mut [u8; BLOCK]) -> bool {
+        let from = block.wrapping_sub(self.top) as usize;
+        if let Some(held) = from
+            .checked_mul(BLOCK)
+            .and_then(|at| self.upper.get(at..at + BLOCK))
+        {
+            out.copy_from_slice(held);
+            return true;
+        }
         let Some(at) = self.kept.iter().position(|(b, _)| *b == block) else {
             return false;
         };
@@ -290,31 +485,34 @@ impl<S: Source> verity::Source for Tree<'_, S> {
         copy.copy_from_slice(verified);
         self.kept.push((block, copy));
     }
+
+    fn compress(&self) -> Compress {
+        self.source.compress()
+    }
 }
 
 impl<S: Source> Blocks for Verified<S> {
     type Error = String;
 
     fn read(&mut self, block: u64, out: &mut [u8; BLOCK]) -> Result<(), String> {
-        let mut tree = Tree {
-            source: &mut self.source,
-            kept: &mut self.kept,
-        };
-        verity::read(
-            &self.geometry,
-            &self.root,
-            &mut tree,
-            block,
-            out,
-            &mut self.scratch,
-        )
-        .map_err(|fault| match fault {
-            verity::Fault::Read(e) => e.to_string(),
-            verity::Fault::Mismatch(block) => {
-                format!("block {block} does not hold what the image's tree says")
-            }
-            verity::Fault::OutOfRange => format!("block {block} is past the image's data"),
-        })
+        self.read_run(block, &mut out[..])
+    }
+
+    fn read_run(&mut self, first: u64, out: &mut [u8]) -> Result<(), String> {
+        let end = first.checked_add((out.len() / BLOCK) as u64);
+        if !end.is_some_and(|end| end <= self.geometry.data_blocks()) {
+            return Err(format!("block {first} is past the image's data"));
+        }
+        self.source
+            .read_at(first * BLOCK as u64, out)
+            .map_err(|e| e.to_string())?;
+        let blocks = out.len() / BLOCK;
+        if blocks < 2 * SHARE_MIN {
+            return self.check(first, out);
+        }
+        let mut digests = vec![[0; DIGEST]; blocks];
+        self.source.hash_blocks(out, &mut digests);
+        self.check_digests(first, &digests)
     }
 }
 
@@ -327,6 +525,9 @@ pub struct Image<S> {
     entries: BTreeMap<String, Found>,
     links: BTreeMap<String, String>,
     volume: Volume<Verified<S>>,
+    /// What [`Self::check_contents`] read of its ELF files, until the symbol
+    /// check takes it.
+    gathered: Option<symbols::Gathered>,
 }
 
 impl<S> fmt::Debug for Image<S> {
@@ -437,13 +638,7 @@ impl<S: Source> Image<S> {
         if digest.is_some_and(|want| want != root) {
             return Err(ImageError::Other);
         }
-        let verified = Verified {
-            source: Ahead::new(source, geometry.data_blocks()),
-            geometry,
-            root,
-            kept: Vec::new(),
-            scratch: Box::new([0; BLOCK]),
-        };
+        let verified = Verified::new(source, geometry, root)?;
         let mut volume = Volume::open(verified, geometry.data_blocks())?;
         let lost_found = format!("/{}", String::from_utf8_lossy(LOST_FOUND_NAME));
         let mut entries = BTreeMap::new();
@@ -481,18 +676,21 @@ impl<S: Source> Image<S> {
             entries,
             links,
             volume,
+            gathered: None,
         };
         image.delivers()?;
         Ok(image)
     }
 
     /// Hold every file's bytes and every symlink's target to the digest the
-    /// manifest records for it.
+    /// manifest records for it. What an ELF file binds and offers is read as
+    /// it is hashed, for the symbol check to take.
     pub fn check_contents(&mut self) -> Result<(), ImageError> {
         let text = String::from_utf8(self.manifest.clone()).unwrap_or_default();
+        let mut gathered = Ok(Vec::new());
         for line in manifest_lines(&text).flatten() {
             let digest = match self.entries.get(line.path).map(|f| (f.kind, f.ino)) {
-                Some((Kind::File, ino)) => self.hash(ino)?,
+                Some((Kind::File, ino)) => self.hash(line.path, ino, &mut gathered)?,
                 Some((Kind::Symlink, _)) => sha256(self.links[line.path].as_bytes()),
                 _ => sha256(b""),
             };
@@ -500,20 +698,52 @@ impl<S: Source> Image<S> {
                 return Err(ImageError::Sealed(line.path.into()));
             }
         }
+        self.gathered = Some(gathered);
         Ok(())
     }
 
-    fn hash(&mut self, ino: u32) -> Result<Digest, ImageError> {
+    /// The digest of the file at `path`, read in runs; an ELF file is read
+    /// whole and added to `gathered`.
+    fn hash(
+        &mut self,
+        path: &str,
+        ino: u32,
+        gathered: &mut symbols::Gathered,
+    ) -> Result<Digest, ImageError> {
         let inode = self.volume.inode(ino)?;
-        let mut hash = Sha256::new();
-        let mut chunk = vec![0; CHUNK];
-        let mut at = 0;
+        let mut hash = Sha256::using(self.volume.blocks().source.compress());
+        let first = inode.size.min(CHUNK as u64) as usize;
+        let mut chunk = vec![0; first];
+        self.volume.read(&inode, 0, &mut chunk)?;
+        if crate::elf::is_elf(&chunk) {
+            if inode.size > symbols::ELF_MAX {
+                *gathered = Err(symbols::SymbolError::Read(format!(
+                    "{path}: an ELF file larger than {} bytes",
+                    symbols::ELF_MAX
+                )));
+            } else {
+                chunk.resize(inode.size as usize, 0);
+                self.volume
+                    .read(&inode, first as u64, &mut chunk[first..])?;
+                hash.update(&chunk);
+                symbols::gather(gathered, path, &chunk);
+                return Ok(hash.finish());
+            }
+        }
+        hash.update(&chunk);
+        chunk.resize(CHUNK, 0);
+        let mut at = first as u64;
         while at < inode.size {
             let n = self.volume.read(&inode, at, &mut chunk)?;
             hash.update(&chunk[..n]);
             at += n as u64;
         }
         Ok(hash.finish())
+    }
+
+    /// What [`Self::check_contents`] read of its ELF files, once.
+    pub(crate) fn take_gathered(&mut self) -> Option<symbols::Gathered> {
+        self.gathered.take()
     }
 
     /// How long it is: its volume and its tree.
@@ -523,7 +753,7 @@ impl<S: Source> Image<S> {
 
     /// Where its bytes come from.
     pub fn source(&self) -> &S {
-        &self.volume.blocks().source.source
+        &self.volume.blocks().source
     }
 
     /// What is at `path`, a path below the mount point.

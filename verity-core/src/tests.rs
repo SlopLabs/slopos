@@ -232,6 +232,38 @@ fn a_run_checks_out_reading_each_leaf_once() {
 }
 
 #[test]
+fn a_run_hashed_already_checks_out_as_its_bytes_do() {
+    for (n, first, count) in [(1, 0, 1), (300, 100, 60), (16385, 16000, 385)] {
+        let (geometry, mut image, root) = built(n);
+        let bytes = data(n);
+        let run = &bytes[first as usize * BLOCK..(first + count) as usize * BLOCK];
+        let mut digests: Vec<Digest> = run
+            .chunks_exact(BLOCK)
+            .map(|block| hash(block.try_into().unwrap()))
+            .collect();
+        let mut scratch = [0; BLOCK];
+        assert_eq!(
+            check_digests(&geometry, &root, &mut image, first, &digests, &mut scratch),
+            Ok(()),
+            "{n} {first}"
+        );
+        let last = digests.len() - 1;
+        digests[last][3] ^= 1;
+        assert_eq!(
+            check_digests(&geometry, &root, &mut image, first, &digests, &mut scratch),
+            Err(Fault::Mismatch(first + count - 1)),
+            "{n} {first}"
+        );
+        if count > 1 {
+            assert_eq!(
+                check_digests(&geometry, &root, &mut image, n - 1, &digests, &mut scratch),
+                Err(Fault::OutOfRange)
+            );
+        }
+    }
+}
+
+#[test]
 fn a_run_fails_at_the_block_its_tree_refuses() {
     let (geometry, mut image, root) = built(300);
     let mut run = data(300)[..200 * BLOCK].to_vec();
@@ -294,32 +326,70 @@ fn a_tree_block_reads_back_verified() {
 }
 
 #[test]
-fn a_whole_image_checks_out_and_any_flipped_bit_fails_it() {
+fn a_tree_checks_out_to_its_root_and_any_flipped_bit_fails_it() {
     for n in [1, 2, 128, 129, 300, 16385] {
-        let (geometry, mut image, root) = built(n);
-        let (mut read, mut built_block) = ([0; BLOCK], [0; BLOCK]);
+        let (geometry, image, root) = built(n);
+        let from = geometry.top() as usize * BLOCK;
+        let tree = &image.blocks[from..];
+        let compress = sha256::compress_blocks;
         assert_eq!(
-            verify_all(&geometry, &root, &mut image, &mut read, &mut built_block),
+            verify_tree(&geometry, &root, compress, tree, 0),
             Ok(()),
             "{n}"
         );
+        for lowest in 1..geometry.levels() {
+            let (start, count) = geometry.level(lowest).unwrap();
+            let upper = &image.blocks[from..(start + count) as usize * BLOCK];
+            assert_eq!(
+                verify_tree(&geometry, &root, compress, upper, lowest),
+                Ok(()),
+                "{n} {lowest}"
+            );
+            assert_eq!(
+                verify_tree(&geometry, &root, compress, tree, lowest),
+                Err(Fault::OutOfRange)
+            );
+        }
+        assert_eq!(
+            verify_tree(&geometry, &root, compress, &tree[BLOCK..], 0),
+            Err(Fault::OutOfRange)
+        );
         let flips = if n < 1000 {
-            vec![0, n - 1, geometry.top(), geometry.image_blocks() - 1]
+            vec![geometry.top(), geometry.image_blocks() - 1]
         } else {
-            vec![]
+            vec![
+                geometry.top(),
+                geometry.top() + 1,
+                geometry.image_blocks() - 1,
+            ]
         };
         for block in flips {
-            let (_, mut bent, root) = built(n);
-            bent.blocks[block as usize * BLOCK + 9] ^= 2;
+            let mut bent = tree.to_vec();
+            bent[(block - geometry.top()) as usize * BLOCK + 9] ^= 2;
             assert!(
                 matches!(
-                    verify_all(&geometry, &root, &mut bent, &mut read, &mut built_block),
-                    Err(Fault::Mismatch(_))
+                    verify_tree(&geometry, &root, compress, &bent, 0),
+                    Err(Fault::Mismatch(at)) if at == block
                 ),
                 "{n} {block}"
             );
         }
     }
+}
+
+#[test]
+fn a_hash_takes_whatever_compresses_its_blocks() {
+    fn none(_: &mut [u32; 8], _: &[u8]) {}
+    let block = [7; BLOCK];
+    assert_eq!(hash_using(sha256::compress_blocks, &block), hash(&block));
+    assert_ne!(hash_using(none, &block), hash(&block));
+    assert_eq!(hash_using(none, &[0; BLOCK]), hash(&[0; BLOCK]));
+    let mut split = sha256::Sha256::using(sha256::compress_blocks);
+    for piece in [&[1u8; 3][..], &[2; 64], &[3; 129], &[4; 61]] {
+        split.update(piece);
+    }
+    let whole: Vec<u8> = [&[1u8; 3][..], &[2; 64], &[3; 129], &[4; 61]].concat();
+    assert_eq!(split.finish(), sha256::digest(&whole));
 }
 
 #[test]

@@ -1,5 +1,9 @@
 //! SHA-256 (FIPS 180-4).
 
+/// Fold whole message blocks, `blocks.len()` a multiple of [`BLOCK`], into a
+/// state.
+pub type Compress = fn(&mut [u32; 8], &[u8]);
+
 pub const OUTPUT: usize = 32;
 pub const BLOCK: usize = 64;
 
@@ -59,8 +63,18 @@ pub fn compress(state: &mut [u32; 8], block: &[u8; BLOCK]) {
     }
 }
 
+/// [`Compress`] on any CPU.
+pub fn compress_blocks(state: &mut [u32; 8], blocks: &[u8]) {
+    for block in blocks.chunks_exact(BLOCK) {
+        if let Ok(block) = block.try_into() {
+            compress(state, block);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Sha256 {
+    compress: Compress,
     state: [u32; 8],
     buf: [u8; BLOCK],
     fill: usize,
@@ -75,7 +89,12 @@ impl Default for Sha256 {
 
 impl Sha256 {
     pub const fn new() -> Self {
+        Self::using(compress_blocks)
+    }
+
+    pub const fn using(compress: Compress) -> Self {
         Self {
+            compress,
             state: IV,
             buf: [0; BLOCK],
             fill: 0,
@@ -93,16 +112,12 @@ impl Sha256 {
             if self.fill < BLOCK {
                 return;
             }
-            compress(&mut self.state, &self.buf);
+            (self.compress)(&mut self.state, &self.buf);
             self.fill = 0;
         }
-        let mut blocks = data.chunks_exact(BLOCK);
-        for block in &mut blocks {
-            if let Ok(block) = block.try_into() {
-                compress(&mut self.state, block);
-            }
-        }
-        let rest = blocks.remainder();
+        let whole = data.len() - data.len() % BLOCK;
+        (self.compress)(&mut self.state, &data[..whole]);
+        let rest = &data[whole..];
         self.buf[..rest.len()].copy_from_slice(rest);
         self.fill = rest.len();
     }
@@ -113,12 +128,12 @@ impl Sha256 {
         self.fill += 1;
         if self.fill > BLOCK - 8 {
             self.buf[self.fill..].fill(0);
-            compress(&mut self.state, &self.buf);
+            (self.compress)(&mut self.state, &self.buf);
             self.fill = 0;
         }
         self.buf[self.fill..BLOCK - 8].fill(0);
         self.buf[BLOCK - 8..].copy_from_slice(&bits.to_be_bytes());
-        compress(&mut self.state, &self.buf);
+        (self.compress)(&mut self.state, &self.buf);
         let mut out = [0; OUTPUT];
         for (chunk, word) in out.chunks_exact_mut(4).zip(self.state) {
             chunk.copy_from_slice(&word.to_be_bytes());
@@ -128,7 +143,96 @@ impl Sha256 {
 }
 
 pub fn digest(data: &[u8]) -> [u8; OUTPUT] {
-    let mut hash = Sha256::new();
+    digest_using(compress_blocks, data)
+}
+
+pub fn digest_using(compress: Compress, data: &[u8]) -> [u8; OUTPUT] {
+    let mut hash = Sha256::using(compress);
     hash.update(data);
     hash.finish()
+}
+
+/// The SHA instructions, for userland: the kernel is soft-float, so it is
+/// built without them. Calling [`ni::compress_blocks`] needs [`ni::present`]
+/// first, which only a caller allowed `unsafe` can act on.
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+pub mod ni {
+    use core::arch::x86_64::{
+        __cpuid, __cpuid_count, __m128i, _mm_add_epi32, _mm_alignr_epi8, _mm_blend_epi16,
+        _mm_extract_epi32, _mm_set_epi32, _mm_sha256msg1_epu32, _mm_sha256msg2_epu32,
+        _mm_sha256rnds2_epu32, _mm_shuffle_epi32,
+    };
+
+    use super::{BLOCK, K};
+
+    /// Whether this CPU has the SHA, SSSE3 and SSE4.1 instructions.
+    pub fn present() -> bool {
+        let leaf1 = __cpuid(1);
+        let ssse3_sse41 = leaf1.ecx & (1 << 9) != 0 && leaf1.ecx & (1 << 19) != 0;
+        ssse3_sse41 && __cpuid(0).eax >= 7 && __cpuid_count(7, 0).ebx & (1 << 29) != 0
+    }
+
+    #[inline]
+    #[target_feature(enable = "sha,sse2,ssse3,sse4.1")]
+    fn words(bytes: &[u8], at: usize) -> __m128i {
+        let w = |k: usize| {
+            let i = at + 4 * k;
+            i32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]])
+        };
+        _mm_set_epi32(w(3), w(2), w(1), w(0))
+    }
+
+    #[inline]
+    #[target_feature(enable = "sha,sse2,ssse3,sse4.1")]
+    fn schedule(w0: __m128i, w1: __m128i, w2: __m128i, w3: __m128i) -> __m128i {
+        let t = _mm_add_epi32(_mm_sha256msg1_epu32(w0, w1), _mm_alignr_epi8::<4>(w3, w2));
+        _mm_sha256msg2_epu32(t, w3)
+    }
+
+    /// [`super::Compress`] in the SHA instructions, as Intel's reference
+    /// lays out the state: `abef` and `cdgh`.
+    #[target_feature(enable = "sha,sse2,ssse3,sse4.1")]
+    pub fn compress_blocks(state: &mut [u32; 8], blocks: &[u8]) {
+        let s = |i: usize| state[i] as i32;
+        let dcba = _mm_set_epi32(s(3), s(2), s(1), s(0));
+        let efgh = _mm_set_epi32(s(7), s(6), s(5), s(4));
+        let cdab = _mm_shuffle_epi32::<0xB1>(dcba);
+        let efgh = _mm_shuffle_epi32::<0x1B>(efgh);
+        let mut abef = _mm_alignr_epi8::<8>(cdab, efgh);
+        let mut cdgh = _mm_blend_epi16::<0xF0>(efgh, cdab);
+        for block in blocks.chunks_exact(BLOCK) {
+            let (abef_was, cdgh_was) = (abef, cdgh);
+            let mut w = [
+                words(block, 0),
+                words(block, 16),
+                words(block, 32),
+                words(block, 48),
+            ];
+            for i in 0..16 {
+                if i >= 4 {
+                    w[i % 4] = schedule(w[i % 4], w[(i + 1) % 4], w[(i + 2) % 4], w[(i + 3) % 4]);
+                }
+                let k = |j: usize| K[4 * i + j] as i32;
+                let t = _mm_add_epi32(w[i % 4], _mm_set_epi32(k(3), k(2), k(1), k(0)));
+                cdgh = _mm_sha256rnds2_epu32(cdgh, abef, t);
+                abef = _mm_sha256rnds2_epu32(abef, cdgh, _mm_shuffle_epi32::<0x0E>(t));
+            }
+            abef = _mm_add_epi32(abef, abef_was);
+            cdgh = _mm_add_epi32(cdgh, cdgh_was);
+        }
+        let feba = _mm_shuffle_epi32::<0x1B>(abef);
+        let dchg = _mm_shuffle_epi32::<0xB1>(cdgh);
+        let dcba = _mm_blend_epi16::<0xF0>(feba, dchg);
+        let hgef = _mm_alignr_epi8::<8>(dchg, feba);
+        *state = [
+            _mm_extract_epi32::<0>(dcba) as u32,
+            _mm_extract_epi32::<1>(dcba) as u32,
+            _mm_extract_epi32::<2>(dcba) as u32,
+            _mm_extract_epi32::<3>(dcba) as u32,
+            _mm_extract_epi32::<0>(hgef) as u32,
+            _mm_extract_epi32::<1>(hgef) as u32,
+            _mm_extract_epi32::<2>(hgef) as u32,
+            _mm_extract_epi32::<3>(hgef) as u32,
+        ];
+    }
 }

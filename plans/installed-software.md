@@ -152,56 +152,28 @@ configure 2554 and 2704, `cargo clippy` 2158 and 2303, `bash` 2005 and 1944.
 spread of 697 to 970. `fsperf` holds `FSIMG`: one file faulted in cold from
 an image and from the root it is a file of.
 
-## Phase 3: an image installs at the speed of its disk
+## Phase 3: an image installs at the speed of its disk — done
 
-**For:** `extctl install` to take what moving the image's bytes takes on
-the disk under it, so that the hardware and not the software is what an
-install waits on.
+`extctl install` had read the 950 MB toolchain image over and over, 180 000
+`pread`s of a millisecond each and a `pwrite` per block: 270 s. Measured on
+the host over a 950 MB image of the Rust nightly's 5018 files, the passes
+took 2 145 reads to open it, 24 475 to hold its files to the manifest,
+20 992 to read its ELF files again for the symbol check, 14 500 to copy it
+and 19 112 to read the copy back: 83 000 reads of 5.8 GB.
 
-Measured on the dev tests kernel by profiling `toolchain_test --install`:
-the 950 MB toolchain image takes 270 s to install. 180 000 `pread`s cost
-182 s, 1 ms each; 233 000 `pwrite`s, one per non-zero 4 KiB block of the
-copy, cost 55 s; `extctl`'s own work 36 s. Nothing waits on the disk: each
-call is a trip through the root's ext4 under its lock, and the install
-reads the image several times:
+The copy is now one pass (`image::copy`): 4 MiB reads, each block hashed
+once, runs written by a thread of their own, the tree the one those digests
+build. The kernel holds every block it reads to the tree, so the sealed copy
+is read back only as far as its tree (`image::verify_tree`). The reader
+takes a file's extent as one run, held with `verity::check` to the levels
+kept from open, and the contents check reads each ELF file whole as it
+hashes it, so the symbol check reads nothing. Hashing takes the SHA
+instructions where the CPU has them (`sha256::ni`, userland only) and a long
+run every core.
 
-1. `verify_whole` holds every block of the offered file to its tree, the
-   data in 64 KiB reads, each tree block read alone and twice.
-2. Opening the image walks its volume, `check_contents` holds every file
-   to the manifest and the symbol check reads each ELF whole, all through
-   a reader that verifies one 4 KiB block per `pread`.
-3. `copy_sealed_image` writes the store's copy, 64 KiB read and one
-   `pwrite` per non-zero block, to keep the holes.
-4. The copy is read back whole (`verify_whole`) and opened again to be
-   activated.
-
-Build:
-
-1. One pass over the offered file. Large sequential reads, each block
-   hashed once as it passes, written to the store in the same pass, and
-   the tree held to the hashes that pass computed, so the data is never
-   read a second time to check it.
-2. Writes in runs. A run of non-zero blocks is one `pwrite`; a hole is a
-   gap the next write skips.
-3. Reads inside the image in runs. The contents and symbol checks read
-   through a reader that takes a run of blocks in one call and checks it
-   with `verity::check`, as the kernel's device does since phase 2, with
-   the tree's upper levels kept.
-4. The copy read back only as far as the store's rule needs. The bytes
-   written are the bytes hashed, and from then on the kernel holds every
-   block it reads to the tree and the tree's top at activation.
-5. Hashing at the hardware's speed. `extctl` is userland and may use the
-   SHA instructions the kernel may not; `verity-core` grows a path for
-   them, chosen by the CPU's features at run time, and hashes on more than
-   one core when the image is large.
-
-Find out first: how the 180 000 reads split between the passes, and
-whether the store's rule that a writer reads back what it wrote needs more
-for an image than the kernel's check already gives.
-
-Done when installing the toolchain image takes within twice the raw time
-for its bytes on the same disk, on the release kernel, measured once by
-hand; no gate holds it.
+The same image now takes 14 500 reads of 2.0 GB; the contents check 1.8 s
+in place of 7.4, hashing four times as fast. The release kernel's time
+against the raw time for the bytes is still to be taken by hand.
 
 ## Phase 4: an image reaches a root without a person
 
@@ -417,9 +389,8 @@ an installed image.
 
 ## Order
 
-Phase 3 comes next: every install waits on it, and phases 4 and 5 put the
-toolchain and the apps through an install on every root. Phase 4 needs
-phase 5's image, and phase 5 can come before it. Phase 6 removes what
+Phases 4 and 5 put the toolchain and the apps through an install on every
+root. Phase 4 needs phase 5's image, and phase 5 can come before it. Phase 6 removes what
 phases 1, 4 and 5 stopped using. Phase 7 depends on none of them and is
 small; it can come early. Phase 8 is needed before software from elsewhere
 arrives one image at a time, not before. Phase 9 comes last, so that no

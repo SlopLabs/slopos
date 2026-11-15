@@ -808,6 +808,7 @@ dependencies = [
  "slopos-theme-core",
  "slopos-tls-core",
  "slopos-tree-core",
+ "slopos-verity-core",
  "slopos-vt",
  "slopos-windowing",
 ]

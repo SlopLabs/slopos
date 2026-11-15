@@ -28,3 +28,21 @@
 - `verity-core` is built at `opt-level = 3` in dev builds too
   (`[profile.dev.package.slopos-verity-core]`): every block an image serves
   is hashed, and the unoptimized hash cost forty times the read.
+- `docs/architecture/extensions` (install, step 4): `extctl` copies an image
+  into the store in one pass (`image::copy`): 4 MiB reads, each block hashed
+  once, written in runs of non-zero blocks, and the tree written is the one
+  those digests build, refused unless its root is the one named. Once sealed
+  the copy is read back only as far as its tree (`image::verify_tree`), as is
+  a copy the store holds already; its data is held to the tree by every
+  reader. `verity::verify_all` and `image::verify_whole` are gone.
+- `extension-core`'s reader takes a file's extent as one run
+  (`Blocks::read_run`) and checks it with `verity::check`, hashing a run of
+  256 blocks or more on every core (`Source::hash_blocks`); it keeps the levels
+  above the leaves from its open, up to 256 blocks, and 64 leaves.
+  `Image::check_contents` reads each ELF file whole as it hashes it and keeps
+  what it binds and offers for the symbol check, which then reads nothing.
+- `verity-core` hashes through a `sha256::Compress` a source chooses
+  (`verity::Source::compress`). `sha256::ni` is the SHA instructions, built
+  only where SSE2 is (userland: the kernel is soft-float); `extctl` takes it
+  when `ni::present()` says the CPU has them (`extctl/disk.rs`, the one
+  `unsafe`).

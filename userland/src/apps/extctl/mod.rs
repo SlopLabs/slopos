@@ -9,9 +9,10 @@
 mod accounts;
 mod commands;
 mod configure;
+pub mod disk;
 pub(crate) mod store;
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -28,6 +29,7 @@ use slopos_extension_core::{CEILING, LIBC, ceiling, hex, parse_digest, valid_nam
 use slopos_tls_core::sshsig::{KEY_TYPE, PublicKey};
 
 use self::accounts::give_uids;
+use self::disk::Disk;
 use self::store::Store;
 use crate::app_entry::read_bounded;
 use crate::init_control::{self, Command};
@@ -68,7 +70,7 @@ pub(super) fn read_file(path: &str, max: u64) -> Result<Vec<u8>, String> {
 /// The image at `path`, held to the root `named` names when there is one:
 /// what was put there for this request may have been replaced since. Its
 /// files' bytes are checked as they are read.
-fn open_image(path: &str, named: Option<([u8; 32], &str)>) -> Result<Image<File>, String> {
+fn open_image(path: &str, named: Option<([u8; 32], &str)>) -> Result<Image<Disk>, String> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags((O_NONBLOCK | O_NOCTTY) as i32 | O_NOFOLLOW as i32)
@@ -77,11 +79,11 @@ fn open_image(path: &str, named: Option<([u8; 32], &str)>) -> Result<Image<File>
     if !file.metadata().is_ok_and(|m| m.is_file()) {
         return Err(format!("{path}: not a regular file"));
     }
-    Image::open(file, named.map(|(root, _)| root)).map_err(|e| shown_image(path, named, e))
+    Image::open(Disk(file), named.map(|(root, _)| root)).map_err(|e| shown_image(path, named, e))
 }
 
 /// [`open_image`], every file held to the manifest.
-fn read_image(path: &str, named: Option<([u8; 32], &str)>) -> Result<Image<File>, String> {
+fn read_image(path: &str, named: Option<([u8; 32], &str)>) -> Result<Image<Disk>, String> {
     let mut image = open_image(path, named)?;
     image
         .check_contents()
@@ -586,7 +588,7 @@ enum Prepared {
         before: Option<Record>,
     },
     Install {
-        image: Image<File>,
+        image: Image<Disk>,
         name: String,
         voucher: Voucher,
         before: Option<Record>,
@@ -695,7 +697,7 @@ fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
     record.install(installed);
     give_uids(store, &mut record)?;
     store.edit(&name, |edit| {
-        edit.put_image(&digest, image.source(), image.bytes(), voucher.signed())?;
+        edit.put_image(&digest, &image.source().0, image.bytes(), voucher.signed())?;
         edit.put_record(&record)
     })?;
     if let Some(why) = idle(&record) {
@@ -726,7 +728,7 @@ fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
 
 /// Show `image`, a file of the store, at `/opt/<name>` in place of what is
 /// shown there, its `/etc/<name>` laid out first when it declares `config`.
-fn activate(name: &str, image: &Image<File>) -> Result<String, String> {
+fn activate(name: &str, image: &Image<Disk>) -> Result<String, String> {
     if image.declaration.config {
         configure::own_dir(name)?;
     }
@@ -735,13 +737,13 @@ fn activate(name: &str, image: &Image<File>) -> Result<String, String> {
             "extensions are off this boot, so it is not shown; `extctl enable {name}` shows it on a boot that allows them"
         ));
     }
-    crate::syscall::base::ext_activate(name.as_bytes(), image.source().as_raw_fd(), &image.digest)
+    crate::syscall::base::ext_activate(name.as_bytes(), image.source().0.as_raw_fd(), &image.digest)
         .map(|activation| format!("it runs as activation {activation}"))
         .map_err(|e| format!("it could not be activated: {e}"))
 }
 
 /// [`activate`], stopping the extension when it will not run.
-fn run_image(store: &Store, record: &mut Record, image: &Image<File>) -> Result<String, String> {
+fn run_image(store: &Store, record: &mut Record, image: &Image<Disk>) -> Result<String, String> {
     activate(&record.name, image).or_else(|why| {
         stop(store, record, &why)?;
         Err(format!("{}: {why}", record.name))
@@ -770,7 +772,7 @@ fn checked(
     record: &Record,
     keys: &Keys,
     base: &Base,
-) -> Result<Image<File>, String> {
+) -> Result<Image<Disk>, String> {
     let current = record
         .current
         .as_ref()
@@ -792,7 +794,7 @@ fn fitting(
     record: &mut Record,
     keys: &Keys,
     base: &Base,
-) -> Result<Image<File>, String> {
+) -> Result<Image<Disk>, String> {
     checked(store, record, keys, base).or_else(|why| {
         stop(store, record, &why)?;
         Err(format!("{} stopped: {why}", record.name))
@@ -857,7 +859,7 @@ fn floor_of(record: &Record) -> String {
 
 /// `name`'s record rolled back and its image, once that image fits and
 /// claims nothing another extension claims.
-fn rolled_back(store: &Store, name: &str) -> Result<(Record, Image<File>), String> {
+fn rolled_back(store: &Store, name: &str) -> Result<(Record, Image<Disk>), String> {
     let mut record = record_of(store, name)?;
     record.roll_back().map_err(|e| format!("{name}: {e}"))?;
     record.enabled = true;

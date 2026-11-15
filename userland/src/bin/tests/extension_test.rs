@@ -653,6 +653,27 @@ fn install_large(size: u64, zeros: &str, image: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// What `extctl` hashes with is SHA-256, on whichever path this CPU takes.
+fn its_hash_is_sha256_on_this_cpu() -> bool {
+    let fast = slopos_userland::apps::extctl::disk::compress();
+    note(&format!(
+        "the SHA instructions are {}",
+        if slopos_verity_core::sha256::ni::present() {
+            "present"
+        } else {
+            "absent"
+        }
+    ));
+    let data: Vec<u8> = (0..20_000u32).map(|i| (i * 31 + i / 64) as u8).collect();
+    for len in [0, 1, 55, 56, 63, 64, 65, 4096, 20_000] {
+        let portable = slopos_verity_core::sha256::digest(&data[..len]);
+        if slopos_verity_core::sha256::digest_using(fast, &data[..len]) != portable {
+            return fail(format!("{len} bytes hash otherwise"));
+        }
+    }
+    true
+}
+
 fn cleanup() -> bool {
     for name in ["ext-first", "ext-signed", "ext-large"] {
         let _ = extctl(ROOT, &["remove", name]);
@@ -728,6 +749,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "an_image_past_an_eighth_of_memory_goes_in",
         an_image_past_an_eighth_of_memory_goes_in,
+    ),
+    (
+        "its_hash_is_sha256_on_this_cpu",
+        its_hash_is_sha256_on_this_cpu,
     ),
     ("removing_keeps_the_record", cleanup),
 ];

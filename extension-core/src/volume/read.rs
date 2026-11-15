@@ -30,6 +30,16 @@ pub trait Blocks {
     type Error;
 
     fn read(&mut self, block: u64, out: &mut [u8; BLOCK]) -> Result<(), Self::Error>;
+
+    /// Blocks `first..` into `out`, a whole number of them.
+    fn read_run(&mut self, first: u64, out: &mut [u8]) -> Result<(), Self::Error> {
+        let mut block = Box::new([0u8; BLOCK]);
+        for (at, room) in (first..).zip(out.chunks_exact_mut(BLOCK)) {
+            self.read(at, &mut block)?;
+            room.copy_from_slice(&block[..]);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,6 +114,9 @@ pub struct Volume<B> {
     /// descriptor tables, as the kernel holds them.
     owned: core::ops::Range<u64>,
     block: Box<[u8; BLOCK]>,
+    /// The block `block` holds, read and checked; a walk reads an inode
+    /// table's block once for each inode in it.
+    held: Option<u64>,
 }
 
 type Got<T, E> = Result<T, VolumeError<E>>;
@@ -202,6 +215,7 @@ impl<B: Blocks> Volume<B> {
             bytes: blocks_count * BLOCK as u64,
             owned,
             block,
+            held: None,
         })
     }
 
@@ -211,9 +225,15 @@ impl<B: Blocks> Volume<B> {
     }
 
     fn read_block(&mut self, block: u64) -> Got<(), B::Error> {
+        if self.held == Some(block) {
+            return Ok(());
+        }
+        self.held = None;
         self.blocks
             .read(block, &mut self.block)
-            .map_err(VolumeError::Read)
+            .map_err(VolumeError::Read)?;
+        self.held = Some(block);
+        Ok(())
     }
 
     pub fn inode(&mut self, ino: u32) -> Got<Inode, B::Error> {
@@ -272,9 +292,10 @@ impl<B: Blocks> Volume<B> {
             && inode.size as usize <= FAST_SYMLINK_MAX
     }
 
-    /// The block holding logical block `lblk` of `inode`, `None` for a hole
-    /// or an unwritten extent, which read as zeros.
-    fn map(&mut self, inode: &Inode, lblk: u32) -> Got<Option<u64>, B::Error> {
+    /// The block holding logical block `lblk` of `inode` and how many follow
+    /// it in its extent, `None` for a hole or an unwritten extent, which read
+    /// as zeros.
+    fn map(&mut self, inode: &Inode, lblk: u32) -> Got<Option<(u64, u32)>, B::Error> {
         let mut store = Tree {
             volume: self,
             root: inode.i_block,
@@ -290,7 +311,7 @@ impl<B: Blocks> Volume<B> {
                 ));
             }
         }
-        Ok(found.filter(|m| !m.unwritten).map(|m| m.pblk))
+        Ok(found.filter(|m| !m.unwritten).map(|m| (m.pblk, m.len)))
     }
 
     /// Up to `buf.len()` bytes of `inode` from `offset`; answers how many.
@@ -311,17 +332,30 @@ impl<B: Blocks> Volume<B> {
             let lblk = u32::try_from(at / BLOCK as u64)
                 .map_err(|_| VolumeError::Damaged("a size past the extent tree", inode.ino))?;
             let within = (at % BLOCK as u64) as usize;
+            let whole = if within == 0 {
+                (end - at) / BLOCK as u64
+            } else {
+                0
+            };
             let n = ((end - at) as usize).min(BLOCK - within);
-            let out = &mut buf[(at - offset) as usize..][..n];
+            let out = &mut buf[(at - offset) as usize..];
             match self.map(inode, lblk)? {
-                Some(block) => {
+                Some((block, run)) if whole > 0 => {
+                    let blocks = whole.min(u64::from(run)) as usize;
+                    self.blocks
+                        .read_run(block, &mut out[..blocks * BLOCK])
+                        .map_err(VolumeError::Read)?;
+                    at += (blocks * BLOCK) as u64;
+                    continue;
+                }
+                Some((block, _)) => {
                     self.read_block(block)?;
-                    out.copy_from_slice(&self.block[within..within + n]);
+                    out[..n].copy_from_slice(&self.block[within..within + n]);
                 }
                 None if inode.kind() == Some(Kind::Symlink) => {
                     return Err(VolumeError::Damaged("a symlink with a hole", inode.ino));
                 }
-                None => out.fill(0),
+                None => out[..n].fill(0),
             }
             at += n as u64;
         }
@@ -358,7 +392,7 @@ impl<B: Blocks> Volume<B> {
         let mut names = BTreeSet::new();
         let mut seen = 0;
         for lblk in 0..dir.size / BLOCK as u64 {
-            let Some(block) = self.map(dir, lblk as u32)? else {
+            let Some((block, _)) = self.map(dir, lblk as u32)? else {
                 return damaged("a hole in a directory");
             };
             self.read_block(block)?;

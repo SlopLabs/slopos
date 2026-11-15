@@ -42,10 +42,15 @@ const ZERO: Digest = [
 
 /// A block's digest.
 pub fn hash(block: &[u8; BLOCK]) -> Digest {
+    hash_using(sha256::compress_blocks, block)
+}
+
+/// [`hash`] through `compress`.
+pub fn hash_using(compress: sha256::Compress, block: &[u8; BLOCK]) -> Digest {
     if block.iter().all(|&b| b == 0) {
         ZERO
     } else {
-        sha256::digest(block)
+        sha256::digest_using(compress, block)
     }
 }
 
@@ -169,6 +174,11 @@ pub trait Source {
 
     /// Keep tree block `block`, just verified.
     fn keep(&mut self, block: u64, verified: &[u8; BLOCK]);
+
+    /// What its blocks are hashed with.
+    fn compress(&self) -> sha256::Compress {
+        sha256::compress_blocks
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,15 +218,63 @@ pub fn check<S: Source>(
     data: &[u8],
     scratch: &mut [u8; BLOCK],
 ) -> Result<(), Fault<S::Error>> {
-    let count = (data.len() / BLOCK) as u64;
+    if !data.len().is_multiple_of(BLOCK) {
+        return Err(Fault::OutOfRange);
+    }
+    let compress = source.compress();
+    let digest = |k: usize| match data[k * BLOCK..(k + 1) * BLOCK].try_into() {
+        Ok(block) => hash_using(compress, block),
+        Err(_) => [0; DIGEST],
+    };
+    held(
+        geometry,
+        root,
+        source,
+        first,
+        data.len() / BLOCK,
+        digest,
+        scratch,
+    )
+}
+
+/// [`check`] of the data blocks `first..` whose digests, hashed already,
+/// are `digests`.
+pub fn check_digests<S: Source>(
+    geometry: &Geometry,
+    root: &Digest,
+    source: &mut S,
+    first: u64,
+    digests: &[Digest],
+    scratch: &mut [u8; BLOCK],
+) -> Result<(), Fault<S::Error>> {
+    held(
+        geometry,
+        root,
+        source,
+        first,
+        digests.len(),
+        |k| digests[k],
+        scratch,
+    )
+}
+
+fn held<S: Source>(
+    geometry: &Geometry,
+    root: &Digest,
+    source: &mut S,
+    first: u64,
+    count: usize,
+    digest: impl Fn(usize) -> Digest,
+    scratch: &mut [u8; BLOCK],
+) -> Result<(), Fault<S::Error>> {
     let in_range = first
-        .checked_add(count)
+        .checked_add(count as u64)
         .is_some_and(|end| end <= geometry.data_blocks);
-    if !data.len().is_multiple_of(BLOCK) || !in_range {
+    if !in_range {
         return Err(Fault::OutOfRange);
     }
     let mut leaf = None;
-    for (index, block) in (first..).zip(data.chunks_exact(BLOCK)) {
+    for (k, index) in (first..first + count as u64).enumerate() {
         let want = match geometry.digest_at(0, index) {
             None => *root,
             Some((at_leaf, at)) => {
@@ -229,8 +287,7 @@ pub fn check<S: Source>(
                 digest
             }
         };
-        let block: &[u8; BLOCK] = block.try_into().map_err(|_| Fault::OutOfRange)?;
-        if hash(block) != want {
+        if digest(k) != want {
             return Err(Fault::Mismatch(index));
         }
     }
@@ -275,7 +332,7 @@ fn expected<S: Source>(
             scratch,
         )?;
         source.read(block, scratch).map_err(Fault::Read)?;
-        if hash(scratch) != want {
+        if hash_using(source.compress(), scratch) != want {
             return Err(Fault::Mismatch(block));
         }
         source.keep(block, scratch);
@@ -285,45 +342,48 @@ fn expected<S: Source>(
     Ok(digest)
 }
 
-/// Hold every block of the image `source` holds to `root`, a level at a
-/// time from the data up: each group of 128 blocks of a level hashes to the
-/// block of the level above that holds their digests, and the top hashes to
-/// the root. `read` and `built` are the room it takes, whatever the image's
-/// size. A tree block is read twice, so `source` must not change meanwhile.
-pub fn verify_all<S: Source>(
+/// Hold `tree`, the image's blocks from its [top](Geometry::top) to the end
+/// of level `lowest`, to `root`: the top hashes to it, and each block below
+/// to the digest the level above holds of it, checked from the top down.
+/// With no levels `tree` is the one data block. A tree held to the root
+/// whole, `lowest` 0, is the one its data makes once each data block hashes
+/// to its leaf's digest.
+pub fn verify_tree(
     geometry: &Geometry,
     root: &Digest,
-    source: &mut S,
-    read: &mut [u8; BLOCK],
-    built: &mut [u8; BLOCK],
-) -> Result<(), Fault<S::Error>> {
-    for layer in 0..geometry.levels {
-        let (first, count) = match layer {
-            0 => (0, geometry.data_blocks),
-            _ => (
-                geometry.start[layer - 1],
-                blocks_at(geometry.data_blocks, layer - 1),
-            ),
-        };
-        let mut index = 0;
-        while index < count {
-            built.fill(0);
-            let group = (count - index).min(FANOUT);
-            for k in 0..group {
-                source.read(first + index + k, read).map_err(Fault::Read)?;
-                built[k as usize * DIGEST..][..DIGEST].copy_from_slice(&hash(read));
-            }
-            let (stored, _) = geometry.digest_at(layer, index).ok_or(Fault::OutOfRange)?;
-            source.read(stored, read).map_err(Fault::Read)?;
-            if read != built {
-                return Err(Fault::Mismatch(stored));
-            }
-            index += group;
-        }
+    compress: sha256::Compress,
+    tree: &[u8],
+    lowest: usize,
+) -> Result<(), Fault<()>> {
+    let top = geometry.top();
+    let end = match geometry.level(lowest) {
+        Some((start, count)) => start + count,
+        None if geometry.levels == 0 => 1,
+        None => return Err(Fault::OutOfRange),
+    };
+    if tree.len() as u64 != (end - top) * BLOCK as u64 {
+        return Err(Fault::OutOfRange);
     }
-    source.read(geometry.top(), read).map_err(Fault::Read)?;
-    if hash(read) != *root {
-        return Err(Fault::Mismatch(geometry.top()));
+    let block = |at: u64| -> Result<&[u8; BLOCK], Fault<()>> {
+        let from = (at - top) as usize * BLOCK;
+        tree[from..from + BLOCK]
+            .try_into()
+            .map_err(|_| Fault::OutOfRange)
+    };
+    if hash_using(compress, block(top)?) != *root {
+        return Err(Fault::Mismatch(top));
+    }
+    for level in (lowest..geometry.levels.saturating_sub(1)).rev() {
+        let (start, count) = geometry.level(level).ok_or(Fault::OutOfRange)?;
+        for index in 0..count {
+            let (holder, at) = geometry
+                .digest_at(level + 1, index)
+                .ok_or(Fault::OutOfRange)?;
+            let digest = hash_using(compress, block(start + index)?);
+            if block(holder)?[at..at + DIGEST] != digest {
+                return Err(Fault::Mismatch(start + index));
+            }
+        }
     }
     Ok(())
 }

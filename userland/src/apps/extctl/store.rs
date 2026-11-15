@@ -7,24 +7,23 @@ use std::fs::{self, File, OpenOptions};
 use std::io::ErrorKind;
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
 
 use slopos_abi::fs::O_NOFOLLOW;
 use slopos_abi::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use slopos_abi::syscall::posix::O_CLOEXEC;
-use slopos_extension_core::image::verify_whole;
+use slopos_extension_core::image::{ImageError, copy, verify_tree};
 use slopos_extension_core::keys::Keys;
 use slopos_extension_core::record::Record;
 use slopos_extension_core::{KEYS, RECORD, STORE, image_file, sidecar_file, signature_file};
 
+use super::disk::Disk;
 use crate::sealed::{
     SMALL_MAX, is_sealed, lock, newest, open_dir, open_entry, put_generation, put_sealed,
     read_sealed, remove_entry, set_sealed, shown, unsealed,
 };
 use crate::syscall::process;
-
-/// What a copy of an image moves at once.
-const COPY_CHUNK: usize = 64 * 1024;
-const BLOCK: usize = slopos_extension_core::volume::BLOCK;
 
 pub struct Store {
     root: PathBuf,
@@ -34,7 +33,7 @@ pub struct Store {
 /// Copy `source`, the image `len` long whose root is `digest`, to the sealed
 /// file `name` in `dir`, open for changes, its zero blocks left holes. A
 /// source of another length is refused before anything is written, and a
-/// copy that is not the image once sealed, held whole, is taken away.
+/// copy that is not the image is taken away.
 fn create_sealed_image(
     dir: &Path,
     name: &str,
@@ -51,6 +50,17 @@ fn create_sealed_image(
     copied
 }
 
+fn shown_image(path: &Path, e: ImageError) -> String {
+    match e {
+        ImageError::Other => shown(path, "changed since it was read"),
+        e => shown(path, e),
+    }
+}
+
+/// The image read once, each block hashed once and written as it passes,
+/// its tree the one those digests build. The bytes written are the bytes
+/// hashed, and every reader holds a block to the tree as it reads it, so
+/// the copy is read back only as far as its tree, once sealed.
 fn copy_sealed_image(
     path: &Path,
     source: &File,
@@ -60,7 +70,7 @@ fn copy_sealed_image(
     if source.metadata().map(|m| m.len()).ok() != Some(len) {
         return Err(shown(path, "the image changed since it was read"));
     }
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create_new(true)
@@ -68,21 +78,8 @@ fn copy_sealed_image(
         .custom_flags(O_NOFOLLOW as i32 | O_CLOEXEC as i32)
         .open(path)
         .map_err(|e| shown(path, e))?;
-    let mut chunk = vec![0u8; COPY_CHUNK];
-    let mut at = 0u64;
-    while at < len {
-        let n = (len - at).min(COPY_CHUNK as u64) as usize;
-        source
-            .read_exact_at(&mut chunk[..n], at)
-            .map_err(|e| shown(path, format!("reading the image: {e}")))?;
-        for (k, block) in chunk[..n].chunks(BLOCK).enumerate() {
-            if block.iter().any(|&b| b != 0) {
-                file.write_all_at(block, at + (k * BLOCK) as u64)
-                    .map_err(|e| shown(path, e))?;
-            }
-        }
-        at += n as u64;
-    }
+    written_behind(&file, |sink| copy(&mut Disk(source), digest, sink))
+        .map_err(|e| shown_image(path, e))?;
     file.set_len(len)
         .and_then(|()| file.sync_all())
         .map_err(|e| shown(path, e))?;
@@ -94,13 +91,48 @@ fn copy_sealed_image(
     if here.is_none() || here != ours {
         return Err(shown(path, "changed by another process as it was written"));
     }
-    verify_whole(&mut file, digest).map_err(|e| shown(path, format!("the copy: {e}")))
+    verify_tree(&mut Disk(&file), digest).map_err(|e| shown(path, format!("the copy: {e}")))
+}
+
+/// Runs of the image queued while a copy reads on.
+const BEHIND: usize = 4;
+/// The writer's stack: a run's write, not std's 2 MiB.
+const WRITER_STACK: usize = 64 << 10;
+
+/// `copy`, its runs written to `file` by a thread of their own while it
+/// reads and hashes the next, or here when no thread can be started.
+fn written_behind(
+    file: &File,
+    copy: impl FnOnce(&mut dyn FnMut(u64, &[u8]) -> Result<(), String>) -> Result<u64, ImageError>,
+) -> Result<u64, ImageError> {
+    let write = |at: u64, run: &[u8]| file.write_all_at(run, at).map_err(|e| e.to_string());
+    let (queue, runs) = mpsc::sync_channel::<(u64, Vec<u8>)>(BEHIND);
+    thread::scope(|scope| {
+        let writer = thread::Builder::new()
+            .stack_size(WRITER_STACK)
+            .spawn_scoped(scope, move || {
+                runs.iter().try_for_each(|(at, run)| write(at, &run))
+            });
+        let Ok(writer) = writer else {
+            return copy(&mut |at, run| write(at, run));
+        };
+        let copied = copy(&mut |at, run| {
+            queue
+                .send((at, run.to_vec()))
+                .map_err(|_| "the writer stopped".to_owned())
+        });
+        drop(queue);
+        let wrote = writer
+            .join()
+            .unwrap_or_else(|_| Err("the writer stopped".into()));
+        wrote.map_err(ImageError::Damaged).and(copied)
+    })
 }
 
 /// Whether `path` holds the image whose root is `digest`, sealed, `len`
-/// long and whole.
+/// long and its tree whole.
 fn holds_image(path: &Path, len: u64, digest: &[u8; 32]) -> bool {
-    let Ok(mut file) = open_entry(path) else {
+    let Ok(file) = open_entry(path) else {
         return false;
     };
     let held = file
@@ -108,7 +140,7 @@ fn holds_image(path: &Path, len: u64, digest: &[u8; 32]) -> bool {
         .ok()
         .filter(|m| m.is_file())
         .map(|m| m.len());
-    is_sealed(&file) && held == Some(len) && verify_whole(&mut file, digest).is_ok()
+    is_sealed(&file) && held == Some(len) && verify_tree(&mut Disk(&file), digest).is_ok()
 }
 
 fn text(path: &Path, bytes: Vec<u8>) -> Result<String, String> {
@@ -209,7 +241,7 @@ impl Store {
     }
 
     /// The sealed image `digest` names of `name`.
-    pub fn image(&self, name: &str, digest: &[u8; 32]) -> Result<File, String> {
+    pub fn image(&self, name: &str, digest: &[u8; 32]) -> Result<Disk, String> {
         let path = self.dir(name).join(image_file(digest));
         let file = match open_entry(&path) {
             Ok(file) => file,
@@ -222,7 +254,7 @@ impl Store {
                 "not a sealed regular file, so not the store's",
             ));
         }
-        Ok(file)
+        Ok(Disk(file))
     }
 
     /// The sidecar and signature a key installed `digest` with, if it was.

@@ -74,7 +74,7 @@ fn shown(bytes: &[u8]) -> String {
 }
 
 /// The largest ELF file of an image this reads whole.
-const ELF_MAX: u64 = 1 << 30;
+pub(crate) const ELF_MAX: u64 = 1 << 30;
 
 /// Libraries one file may name, and one program's closure reach, at most:
 /// more than any system links, few enough that checking an image stays
@@ -84,7 +84,7 @@ const CLOSURE_MAX: usize = 256;
 
 /// What a file binds and offers, its own copy of each name once, so a
 /// file's bytes go once it is read.
-struct Linked {
+pub(crate) struct Linked {
     kind: Kind,
     dynamic: bool,
     interpreter: Option<Vec<u8>>,
@@ -96,7 +96,7 @@ struct Linked {
 impl Linked {
     /// What `bytes` binds and offers; refused when its names, each once,
     /// come to more than the file holds.
-    fn read(path: &str, bytes: &[u8]) -> Result<Self, SymbolError> {
+    pub(crate) fn read(path: &str, bytes: &[u8]) -> Result<Self, SymbolError> {
         let linking = elf::read(bytes).map_err(|e| SymbolError::Elf(path.into(), e))?;
         let mut room = bytes.len();
         let mut owned = |names: &[&[u8]]| {
@@ -126,21 +126,39 @@ impl Linked {
     }
 }
 
-/// [`check`] over `image`'s files and symlinks, each file read alone.
+/// What an image's ELF files bind and offer, by path, those that link.
+pub(crate) type Gathered = Result<Vec<(String, Linked)>, SymbolError>;
+
+/// Add the ELF file at `path`, `bytes`, to `gathered`.
+pub(crate) fn gather(gathered: &mut Gathered, path: &str, bytes: &[u8]) {
+    if let Ok(read) = gathered {
+        match Linked::read(path, bytes) {
+            Ok(linked) if linked.kind == Kind::Other => {}
+            Ok(linked) => read.push((path.to_string(), linked)),
+            Err(e) => *gathered = Err(e),
+        }
+    }
+}
+
+/// [`check`] over `image`'s files and symlinks: those its contents check
+/// read, or each file read alone.
 pub fn check_image<S: Source>(image: &mut Image<S>, libc: &[u8]) -> Result<(), SymbolError> {
-    let mut read = Vec::new();
-    image
-        .each_elf(ELF_MAX, &mut |path, bytes| {
-            let linked = Linked::read(path, bytes)?;
-            if linked.kind != Kind::Other {
-                read.push((path.to_string(), linked));
-            }
-            Ok(())
-        })
-        .map_err(|e| match e {
-            Ok(e) => SymbolError::Read(e.to_string()),
-            Err(e) => e,
-        })?;
+    let read = match image.take_gathered() {
+        Some(gathered) => gathered?,
+        None => {
+            let mut gathered = Ok(Vec::new());
+            image
+                .each_elf(ELF_MAX, &mut |path, bytes| {
+                    gather(&mut gathered, path, bytes);
+                    gathered.as_ref().map(drop).map_err(SymbolError::clone)
+                })
+                .map_err(|e| match e {
+                    Ok(e) => SymbolError::Read(e.to_string()),
+                    Err(e) => e,
+                })?;
+            gathered?
+        }
+    };
     let links: Vec<(&str, &str)> = image.links().collect();
     bind(&read, &links, libc)
 }

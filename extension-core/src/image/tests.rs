@@ -240,20 +240,133 @@ fn a_symlink_naming_a_nul_is_refused() {
 }
 
 #[test]
-fn a_whole_image_is_held_to_its_root() {
+fn a_tree_is_held_to_its_root_and_its_data_left_to_the_readers() {
     let bytes = packer().finish(RELEASE_TEXT, DECLARE_TEXT).unwrap();
-    let (_, root) = root_of(&mut &bytes[..]).unwrap();
-    assert_eq!(verify_whole(&mut &bytes[..], &root), Ok(()));
+    let (geometry, root) = root_of(&mut &bytes[..]).unwrap();
+    assert_eq!(verify_tree(&mut &bytes[..], &root), Ok(()));
     let mut other = root;
     other[0] ^= 1;
-    assert_eq!(
-        verify_whole(&mut &bytes[..], &other),
-        Err(ImageError::Other)
-    );
-    let (geometry, _) = root_of(&mut &bytes[..]).unwrap();
-    for block in [0, geometry.data_blocks() as usize - 1] {
-        let mut flipped = bytes.clone();
-        flipped[block * BLOCK + 2000] ^= 1;
-        assert!(verify_whole(&mut &flipped[..], &root).is_err(), "{block}");
+    assert_eq!(verify_tree(&mut &bytes[..], &other), Err(ImageError::Other));
+    let leaf = geometry.image_blocks() as usize - 1;
+    let mut flipped = bytes.clone();
+    flipped[leaf * BLOCK + 20] ^= 1;
+    assert!(verify_tree(&mut &flipped[..], &root).is_err());
+    let mut flipped = bytes.clone();
+    flipped[BLOCK + 2000] ^= 1;
+    assert_eq!(verify_tree(&mut &flipped[..], &root), Ok(()));
+    assert!(Image::check(&flipped[..]).is_err());
+}
+
+/// Bytes hashed on `threads` cores.
+struct Cores<'a>(&'a [u8], usize);
+
+impl Source for Cores<'_> {
+    type Error = &'static str;
+
+    fn len(&mut self) -> Result<u64, &'static str> {
+        Ok(self.0.len() as u64)
     }
+
+    fn read_at(&mut self, offset: u64, out: &mut [u8]) -> Result<(), &'static str> {
+        (&mut &self.0[..]).read_at(offset, out)
+    }
+
+    fn hash_blocks(&self, data: &[u8], out: &mut [Digest]) {
+        hash_blocks(compress_blocks, data, out, self.1);
+    }
+}
+
+/// An image's bytes as `copy` hands them over, a hole where it hands none.
+fn copied(
+    source: &[u8],
+    digest: &Digest,
+    threads: usize,
+) -> (Result<u64, ImageError>, Vec<u8>, usize) {
+    let mut out = vec![0; source.len()];
+    let mut runs = 0;
+    let copied = copy(&mut Cores(source, threads), digest, &mut |at, run| {
+        runs += 1;
+        assert!(run.len() % BLOCK == 0 && run.chunks(BLOCK).all(|b| b.iter().any(|&x| x != 0)));
+        out[at as usize..][..run.len()].copy_from_slice(run);
+        Ok(())
+    });
+    (copied, out, runs)
+}
+
+#[test]
+fn a_copy_is_the_image_its_root_names_its_zeros_left_holes() {
+    let mut packer = packer();
+    let big: Vec<u8> = (0..COPY_CHUNK + 5000)
+        .map(|i| (i % 251) as u8 | 1)
+        .collect();
+    packer.add("/share/big", S_IFREG | 0o644, big);
+    let bytes = packer.finish(RELEASE_TEXT, DECLARE_TEXT).unwrap();
+    let (_, root) = root_of(&mut &bytes[..]).unwrap();
+    for threads in [1, 3] {
+        let (copied, out, runs) = copied(&bytes, &root, threads);
+        assert_eq!(copied, Ok(bytes.len() as u64));
+        assert!(out == bytes, "{threads}");
+        assert!(runs < 32, "{runs} runs");
+    }
+    let mut other = root;
+    other[5] ^= 1;
+    assert_eq!(copied(&bytes, &other, 2).0, Err(ImageError::Other));
+    let mut flipped = bytes.clone();
+    flipped[2 * BLOCK + 1] ^= 4;
+    assert_eq!(copied(&flipped, &root, 2).0, Err(ImageError::Other));
+    assert!(matches!(
+        copied(&bytes[..bytes.len() - 1], &root, 1).0,
+        Err(ImageError::Format(_))
+    ));
+}
+
+/// Bytes read through a counter of calls.
+struct Counted<'a> {
+    bytes: &'a [u8],
+    reads: usize,
+}
+
+impl Source for Counted<'_> {
+    type Error = &'static str;
+
+    fn len(&mut self) -> Result<u64, &'static str> {
+        Ok(self.bytes.len() as u64)
+    }
+
+    fn read_at(&mut self, offset: u64, out: &mut [u8]) -> Result<(), &'static str> {
+        self.reads += 1;
+        (&mut &self.bytes[..]).read_at(offset, out)
+    }
+}
+
+#[test]
+fn a_file_is_read_in_runs_and_its_symbols_with_its_digest() {
+    let mut packer = packer();
+    let big: Vec<u8> = (0..2 * CHUNK).map(|i| (i % 253) as u8).collect();
+    packer.add("/share/big", S_IFREG | 0o644, big.clone());
+    let bytes = packer.finish(RELEASE_TEXT, DECLARE_TEXT).unwrap();
+    let mut image = Image::open(
+        Counted {
+            bytes: &bytes,
+            reads: 0,
+        },
+        None,
+    )
+    .unwrap();
+    let opened = image.source().reads;
+    image.check_contents().unwrap();
+    let checked = image.source().reads - opened;
+    assert!(
+        checked < 40,
+        "{checked} reads hold {} blocks to the manifest",
+        bytes.len() / BLOCK
+    );
+    assert_eq!(image.read("/share/big", 4 * CHUNK as u64).unwrap(), big);
+    let read = image.source().reads;
+    assert!(image.take_gathered().is_some_and(|g| g.is_ok()));
+    assert!(
+        image.take_gathered().is_none(),
+        "the symbol check takes it once"
+    );
+    assert_eq!(image.source().reads, read);
 }
