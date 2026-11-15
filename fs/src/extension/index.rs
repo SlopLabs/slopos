@@ -9,7 +9,7 @@
 use slopos_abi::extension::MAX_ENTRIES;
 use slopos_ostd::KVec;
 
-use crate::vfs::{FileSystem, FileType, InodeId, VfsError, VfsResult};
+use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 
 const NODES: usize = 4096;
 /// The first inode no ext4 volume reserves, `lost+found` on one `mke2fs` or
@@ -68,6 +68,9 @@ fn sort(keys: &mut [u64], after: &dyn Fn(u64, u64) -> bool) {
 struct Node {
     ino: u32,
     parent: u32,
+    /// A directory's children: their places, and their keys in `by_name`.
+    first: u32,
+    children: u32,
     chunk: u16,
     at: u16,
     len: u8,
@@ -86,8 +89,13 @@ pub enum IndexError {
 pub(super) struct Index {
     nodes: KVec<KVec<Node>>,
     names: KVec<KVec<u8>>,
+    /// What the volume answered for each node's `stat`, at its place.
+    stats: KVec<KVec<FileStat>>,
     /// Every node's place keyed by its inode, in inode order.
     by_ino: KVec<u64>,
+    /// At each node's place, its place keyed by its name's hash: a
+    /// directory's children are sorted by hash and name.
+    by_name: KVec<u64>,
 }
 
 impl Index {
@@ -97,9 +105,16 @@ impl Index {
         let mut index = Self {
             nodes: KVec::new(),
             names: KVec::new(),
+            stats: KVec::new(),
             by_ino: KVec::new(),
+            by_name: KVec::new(),
         };
         index.push(root, root, b"", FileType::Directory)?;
+        index.keep_stat(fs, 0)?;
+        index
+            .by_name
+            .push(keyed(0, 0))
+            .map_err(|_| IndexError::NoMemory)?;
         let mut next = 0;
         let mut listed = 0u64;
         while next < index.len() {
@@ -108,12 +123,12 @@ impl Index {
             if dir.kind != FileType::Directory {
                 continue;
             }
-            let size = fs.stat(dir.ino.into()).map_err(IndexError::Read)?.size;
+            let size = index.stats[(next - 1) / NODES][(next - 1) % NODES].size;
             listed = listed.saturating_add(size);
             if listed > bytes {
                 return Err(IndexError::Shape("directories larger than the volume"));
             }
-            index.list(fs, dir)?;
+            index.list(fs, next - 1)?;
         }
         let mut order = KVec::with_capacity(index.len()).map_err(|_| IndexError::NoMemory)?;
         for place in 0..index.len() {
@@ -177,6 +192,8 @@ impl Index {
         let node = Node {
             ino,
             parent,
+            first: 0,
+            children: 0,
             chunk: chunk as u16,
             at: at as u16,
             len,
@@ -189,8 +206,9 @@ impl Index {
             .map_err(|_| IndexError::NoMemory)
     }
 
-    /// Index what `dir` holds.
-    fn list(&mut self, fs: &dyn FileSystem, dir: Node) -> Result<(), IndexError> {
+    /// Index what the directory at `at` holds.
+    fn list(&mut self, fs: &dyn FileSystem, at: usize) -> Result<(), IndexError> {
+        let dir = self.node(at);
         let first = self.len();
         let mut failed = None;
         let mut dots = (None, None);
@@ -224,20 +242,7 @@ impl Index {
             return Err(IndexError::Shape("a directory whose `.` or `..` lies"));
         }
         for place in first..self.len() {
-            let child = self.node(place);
-            let kind = fs
-                .stat(child.ino.into())
-                .map_err(IndexError::Read)?
-                .file_type;
-            let served = matches!(
-                kind,
-                FileType::Directory | FileType::Regular | FileType::Symlink
-            );
-            if !served || kind != child.kind {
-                return Err(IndexError::Shape(
-                    "an entry that is no directory, file or symlink, or names another type",
-                ));
-            }
+            self.keep_stat(fs, place)?;
         }
         let mut names =
             KVec::with_capacity(self.len() - first).map_err(|_| IndexError::NoMemory)?;
@@ -257,15 +262,81 @@ impl Index {
         if twice {
             return Err(IndexError::Shape("a directory that holds a name twice"));
         }
+        self.by_name
+            .extend_from_slice(&names)
+            .map_err(|_| IndexError::NoMemory)?;
+        let node = &mut self.nodes[at / NODES][at % NODES];
+        node.first = first as u32;
+        node.children = names.len() as u32;
         Ok(())
     }
 
-    fn find(&self, ino: u32) -> Option<Node> {
+    /// The inode `name` names in directory `parent`: `Some(None)` when it
+    /// names none, `None` for `.`, `..` and a parent that is no directory
+    /// here, which the volume answers.
+    pub(super) fn lookup(&self, parent: u32, name: &[u8]) -> Option<Option<u32>> {
+        if name == b"." || name == b".." {
+            return None;
+        }
+        let dir = self
+            .find(parent)
+            .filter(|d| d.kind == FileType::Directory)?;
+        let (first, count) = (dir.first as usize, dir.children as usize);
+        let keys = self.by_name.get(first..first + count)?;
+        let hash = fnv1a(name);
+        let from = keys.partition_point(|&k| key(k) < hash);
+        let found = keys[from..]
+            .iter()
+            .take_while(|&&k| key(k) == hash)
+            .map(|&k| self.node(place(k)))
+            .find(|&node| self.name(node) == name);
+        Some(found.map(|node| node.ino))
+    }
+
+    fn place_of(&self, ino: u32) -> Option<usize> {
         let at = self
             .by_ino
             .binary_search_by_key(&ino, |&keyed| key(keyed))
             .ok()?;
-        Some(self.node(place(self.by_ino[at])))
+        Some(place(self.by_ino[at]))
+    }
+
+    fn find(&self, ino: u32) -> Option<Node> {
+        self.place_of(ino).map(|at| self.node(at))
+    }
+
+    /// What the volume answers for `ino`'s `stat`, which nothing changes.
+    pub(super) fn stat(&self, ino: u32) -> Option<FileStat> {
+        let at = self.place_of(ino)?;
+        Some(self.stats[at / NODES][at % NODES].clone())
+    }
+
+    /// Keep the `stat` of the node at `at`, the next one without one, once
+    /// it names the type its entry does. Its own frame: a `FileStat` is
+    /// large beside the walk's.
+    #[inline(never)]
+    fn keep_stat(&mut self, fs: &dyn FileSystem, at: usize) -> Result<(), IndexError> {
+        let node = self.node(at);
+        let stat = fs.stat(node.ino.into()).map_err(IndexError::Read)?;
+        let served = matches!(
+            stat.file_type,
+            FileType::Directory | FileType::Regular | FileType::Symlink
+        );
+        if !served || stat.file_type != node.kind {
+            return Err(IndexError::Shape(
+                "an entry that is no directory, file or symlink, or names another type",
+            ));
+        }
+        if self.stats.last().is_none_or(|stats| stats.len() == NODES) {
+            self.stats
+                .push(KVec::new())
+                .map_err(|_| IndexError::NoMemory)?;
+        }
+        self.stats
+            .last_mut()
+            .ok_or(IndexError::NoMemory)?
+            .push(stat)
+            .map_err(|_| IndexError::NoMemory)
     }
 
     /// Write `ino`'s path from the volume's root into `buf` when it fits,

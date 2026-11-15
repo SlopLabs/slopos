@@ -1354,6 +1354,87 @@ impl<'a> Ext4Fs<'a> {
         )
     }
 
+    /// [`file::plan_read`] over file `ino`.
+    pub fn plan_read(
+        &mut self,
+        ino: u32,
+        offset: u64,
+        room: usize,
+        out: &mut [file::Piece],
+    ) -> Result<usize, Ext4Error> {
+        let inode = self.read_inode_num(InodeNum(ino))?;
+        file::plan_read(
+            &inode,
+            offset,
+            room,
+            &mut *self.cache,
+            self.device,
+            &self.geom,
+            self.block_size,
+            BlockOwner::File(ino),
+            out,
+        )
+    }
+
+    /// Where sealed regular file `ino`'s bytes lie on the device, back to
+    /// back from its start: `None` unless every block of it is mapped,
+    /// written, and at its home with nothing newer here or in the log.
+    #[inline(never)]
+    pub fn sealed_runs(
+        &mut self,
+        ino: u32,
+    ) -> Result<Option<slopos_ostd::KVec<crate::vfs::FileRun>>, Ext4Error> {
+        let inode = self.read_inode_num(InodeNum(ino))?;
+        if !inode.is_sealed() || !inode.is_regular_file() || !inode.uses_extents() {
+            return Ok(None);
+        }
+        let bs = u64::from(self.block_size);
+        let mut runs = slopos_ostd::KVec::<crate::vfs::FileRun>::new();
+        let mut whole = true;
+        let mut failed = false;
+        let cache = &mut *self.cache;
+        extents::for_each_run(
+            &inode,
+            cache,
+            self.device,
+            &self.geom,
+            BlockOwner::File(ino),
+            &mut |e| {
+                let at = u64::from(e.lblk) * bs;
+                if at >= inode.size {
+                    return false;
+                }
+                let next = runs.as_slice().last().map_or(0, |r| r.at + r.len);
+                if e.unwritten || e.len == 0 || at != next {
+                    whole = false;
+                    return false;
+                }
+                let (device_at, len) = (e.pblk * bs, u64::from(e.len) * bs);
+                match runs.as_mut_slice().last_mut() {
+                    Some(last) if last.device_at + last.len == device_at => last.len += len,
+                    _ => {
+                        failed = runs
+                            .push(crate::vfs::FileRun { at, device_at, len })
+                            .is_err()
+                    }
+                }
+                !failed
+            },
+        )?;
+        if failed {
+            return Err(Ext4Error::OutOfMemory);
+        }
+        let mapped = runs.as_slice().last().map_or(0, |r| r.at + r.len);
+        if !whole || mapped < inode.size {
+            return Ok(None);
+        }
+        let home = runs.as_slice().iter().all(|r| {
+            (r.device_at / bs..(r.device_at + r.len) / bs)
+                .all(|b| u32::try_from(b).is_ok_and(|b| self.cache.home_holds(BlockNum(b))))
+        });
+        Ok(home.then_some(runs))
+    }
+
     #[inline(never)]
     pub fn write_file(&mut self, ino: u32, offset: u64, buffer: &[u8]) -> Result<usize, Ext4Error> {
         self.check_writable()?;

@@ -76,8 +76,9 @@ impl ProcessVmGuard {
         let Some(plan) = planned else {
             return Ok(());
         };
-        let cached = crate::filemap_hook::filemap_fault_page(plan.map, plan.page_index)
-            .map_err(|_| MmError::MappingFailed)?;
+        let cached =
+            crate::filemap_hook::filemap_fault_page(plan.map, plan.page_index, plan.read_around)
+                .map_err(|_| MmError::MappingFailed)?;
         let installed = crate::process_vm::process_vm_handle(self.process)
             .ok_or(HandleError::NoEntry)
             .and_then(|handle| {

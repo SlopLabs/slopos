@@ -29,6 +29,13 @@ min-treebytes	capacity	800000000
 
 const fscapLine = "FSCAP[capacity]: blocks=4194304 blocksize=4096 groups=128 cacheentries=4096 mountreads=512 mountns=900000000 dirents=20000 lookupreads=3 bytes=8388608 ns=400000000 files=5447 treebytes=1105596389\n"
 
+const fsimgLine = "FSIMG[tests]: bytes=786432 coldroot=4000000 coldimage=4400000 warmroot=100000 warmimage=105000\n"
+
+const fsimgGate = `min-bytes	tests	1048576
+max-image-cold-pct	tests	150
+min-image-bytes	tests	524288
+`
+
 func TestFsperfSelfTestCases(t *testing.T) {
 	f := newFixture(t)
 	good := f.log("good.log", fsperfGood)
@@ -56,6 +63,10 @@ func TestFsperfSelfTestCases(t *testing.T) {
 		{"a volume holding 2 files", fsperfCapacityGate, f.log("cap-bare.log", fsperfGood+strings.Replace(fscapLine, "files=5447", "files=2", 1)), 1, []string{"--require-capacity"}},
 		{"a tree of 4 KiB", fsperfCapacityGate, f.log("cap-thin.log", fsperfGood+strings.Replace(fscapLine, "treebytes=1105596389", "treebytes=4096", 1)), 1, []string{"--require-capacity"}},
 		{"a gate file grading nothing", "max-mount-reads-per-gib\tcapacity\t64\n", good, 1, nil},
+		{"an image read inside its caps", fsimgGate, f.log("img.log", fsperfGood+fsimgLine), 0, nil},
+		{"an image read at five times the root's", fsimgGate, f.log("img-slow.log", fsperfGood+strings.Replace(fsimgLine, "coldimage=4400000", "coldimage=20000000", 1)), 1, nil},
+		{"an image row with no FSIMG line", fsimgGate, good, 1, nil},
+		{"an image read of 4 KiB", fsimgGate, f.log("img-thin.log", fsperfGood+strings.Replace(fsimgLine, "bytes=786432", "bytes=4096", 1)), 1, nil},
 	}
 	for _, c := range cases {
 		f.gateFile("fsperf", "tests", c.gate)
@@ -75,6 +86,14 @@ func TestFsperfSelfTestCases(t *testing.T) {
 		}
 	}
 	expect(t, "emitted allowlist accepts its own measurement", f.run("fsperf", []string{capLog}, "--require-capacity"), 0)
+	imgLog := f.log("img-rt.log", fsperfGood+fsimgLine)
+	imgOut := f.emitInto("fsperf", "tests", []string{imgLog})
+	for _, want := range []string{"max-image-cold-pct\ttests\t220\n", "min-image-bytes\ttests\t589824\n"} {
+		if !strings.Contains(imgOut, want) {
+			t.Errorf("emit missing %q:\n%s", want, imgOut)
+		}
+	}
+	expect(t, "an emitted image row accepts its own measurement", f.run("fsperf", []string{imgLog}), 0)
 
 	f.removeGateFile("fsperf", "tests")
 	expect(t, "no gate data", f.run("fsperf", []string{good}), 2, "no gate data")

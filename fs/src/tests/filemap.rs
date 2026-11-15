@@ -280,7 +280,7 @@ fn map_page(
     account: AccountId,
 ) -> Result<FileMapRef, FileMapError> {
     let map = filemap::reserve_range(test_fs(), inode, page, 1, writable, account)?;
-    let faulted = filemap::fault_page_in_set(map, page);
+    let faulted = filemap::fault_page_in_set(map, page, false);
     // The fault's own reference; the reservation's is the mapping's.
     filemap::release(map, 1);
     faulted.map(|_| map)
@@ -380,8 +380,8 @@ pub fn test_filemap_fault_serves_the_files_bytes() -> TestResult {
         Ok(m) => m,
         Err(e) => return slopos_testing::fail!("reserve_range refused: {:?}", e),
     };
-    let first = filemap::fault_page_in_set(map, 0);
-    let second = filemap::fault_page_in_set(map, 1);
+    let first = filemap::fault_page_in_set(map, 0, false);
+    let second = filemap::fault_page_in_set(map, 1, false);
     let served = read_path(inode, 0, 2 * PAGE);
     filemap::release(map, 4);
     filemap::drain_pending();
@@ -396,6 +396,57 @@ pub fn test_filemap_fault_serves_the_files_bytes() -> TestResult {
     match served {
         Some(got) if got.as_slice() == expected.as_slice() => TestResult::Pass,
         Some(_) => slopos_testing::fail!("the faulted pages do not hold the file's bytes"),
+        None => slopos_testing::fail!("reading through the page set failed"),
+    }
+}
+
+/// Pages of the file the read-around test faults into: past one window.
+const AROUND_PAGES: usize = 40;
+
+/// A fault on an executable mapping reads the aligned window around its page,
+/// the pages before it too, and every one holds its own bytes.
+pub fn test_filemap_exec_fault_reads_the_window_around_it() -> TestResult {
+    if !ensure_mount() {
+        return slopos_testing::fail!("could not build the fixture image");
+    }
+    let inode = match seed_file(b"text", AROUND_PAGES * PAGE, 5) {
+        Ok(i) => i,
+        Err(why) => return slopos_testing::fail!("could not seed the fixture file: {}", why),
+    };
+    let verdict = read_around_body(inode);
+    filemap::drain_pending();
+    drop_file(b"text");
+    verdict
+}
+
+#[inline(never)]
+fn read_around_body(inode: InodeId) -> TestResult {
+    let pages = AROUND_PAGES;
+    let Some(expected) = pattern(pages * PAGE, 5) else {
+        return slopos_testing::fail!("pattern alloc failed");
+    };
+    let map =
+        match filemap::reserve_range(test_fs(), inode, 0, pages as u32, false, AccountId::NONE) {
+            Ok(m) => m,
+            Err(e) => return slopos_testing::fail!("reserve_range refused: {:?}", e),
+        };
+    let faulted = filemap::fault_page_in_set(map, 5, true);
+    let mut held = [slopos_abi::addr::PhysAddr::NULL; AROUND_PAGES];
+    filemap::resident_in_set(map, 0, &mut held);
+    let served = read_path(inode, 0, pages * PAGE);
+    filemap::release(map, pages as u32 + 1);
+    if let Err(e) = faulted {
+        return slopos_testing::fail!("the fault failed: {:?}", e);
+    }
+    if let Some(page) = (0..32).find(|&p| held[p].is_null()) {
+        return slopos_testing::fail!("page {} of the fault's window was not read", page);
+    }
+    if let Some(page) = (32..pages).find(|&p| !held[p].is_null()) {
+        return slopos_testing::fail!("page {} past the fault's window was read", page);
+    }
+    match served {
+        Some(got) if got.as_slice() == expected.as_slice() => TestResult::Pass,
+        Some(_) => slopos_testing::fail!("the pages read around the fault hold other bytes"),
         None => slopos_testing::fail!("reading through the page set failed"),
     }
 }
@@ -460,8 +511,8 @@ pub fn test_filemap_fault_wholly_past_the_end_is_refused() -> TestResult {
             return slopos_testing::fail!("an extent reaching past the end was refused: {:?}", e);
         }
     };
-    let inside = filemap::fault_page_in_set(map, 0);
-    let outside = filemap::fault_page_in_set(map, 1);
+    let inside = filemap::fault_page_in_set(map, 0, false);
+    let outside = filemap::fault_page_in_set(map, 1, false);
     filemap::release(map, if inside.is_ok() { 3 } else { 2 });
     filemap::drain_pending();
     drop_file(b"shortfile");
@@ -509,7 +560,7 @@ pub fn test_filemap_reserve_range_populates_nothing() -> TestResult {
     let reserved_charge = pinned_pages(account);
     let covered = filemap::covers_offset(test_fs(), inode, 0);
 
-    let faulted = filemap::fault_page_in_set(map, 2);
+    let faulted = filemap::fault_page_in_set(map, 2, false);
     let after_pages = filemap::populated_page_count();
     let after_charge = pinned_pages(account);
     filemap::release(map, if faulted.is_ok() { 4 } else { 3 });
@@ -563,7 +614,7 @@ pub fn test_filemap_writeback_skips_unpopulated_pages() -> TestResult {
         Err(e) => return slopos_testing::fail!("reserve_range refused: {:?}", e),
     };
     // The *second* page only; the first stays a hole in the set.
-    if let Err(e) = filemap::fault_page_in_set(map, 1) {
+    if let Err(e) = filemap::fault_page_in_set(map, 1, false) {
         return slopos_testing::fail!("faulting the second page failed: {:?}", e);
     }
     filemap::release(map, 1);
@@ -700,7 +751,7 @@ pub fn test_filemap_forget_unkeys_the_inode() -> TestResult {
     let sets_queued = filemap::mapped_inode_count();
     filemap::detach_inode(test_fs(), inode);
     let covered = filemap::covers_offset(test_fs(), inode, 0);
-    let faulted = filemap::fault_page_in_set(map, 0);
+    let faulted = filemap::fault_page_in_set(map, 0, false);
     let queued_after = filemap::pending_count();
     let sets_after = filemap::mapped_inode_count();
     // The flush half ran while the blocks were still the inode's.
@@ -849,8 +900,8 @@ pub fn test_filemap_page_ceiling_refuses() -> TestResult {
 fn ceiling_probe(inode: InodeId) -> Result<(), &'static str> {
     let map = filemap::reserve_range(test_fs(), inode, 0, 2, true, AccountId::NONE)
         .map_err(|_| "reserve_range refused a two-page extent")?;
-    let first = filemap::fault_page_in_set(map, 0);
-    let second = filemap::fault_page_in_set(map, 1);
+    let first = filemap::fault_page_in_set(map, 0, false);
+    let second = filemap::fault_page_in_set(map, 1, false);
     filemap::release(
         map,
         2 + u32::from(first.is_ok()) + u32::from(second.is_ok()),
@@ -1070,7 +1121,7 @@ fn page_share_probe(inode: InodeId, account: AccountId) -> Result<(), &'static s
     let mut refs = 3u32;
     let mut outcome = Ok(());
     for page in 0..3u64 {
-        let faulted = filemap::fault_page_in_set(map, page);
+        let faulted = filemap::fault_page_in_set(map, page, false);
         if faulted.is_ok() {
             refs += 1;
         }
@@ -1492,6 +1543,10 @@ pub fn test_filemap_a_seal_holds_against_the_page_set() -> TestResult {
 
 slopos_testing::stest!(name = test_filemap_fault_serves_the_files_bytes, suite = fs);
 slopos_testing::stest!(
+    name = test_filemap_exec_fault_reads_the_window_around_it,
+    suite = fs
+);
+slopos_testing::stest!(
     name = test_filemap_a_seal_holds_against_the_page_set,
     suite = fs
 );
@@ -1579,7 +1634,7 @@ fn idle_set_body(inode: InodeId) -> TestResult {
         Err(e) => return slopos_testing::fail!("reserve_range refused: {:?}", e),
     };
     // One fault reads the rest of the extent ahead.
-    let faulted = filemap::fault_page_in_set(map, 0);
+    let faulted = filemap::fault_page_in_set(map, 0, false);
     let idle_before = filemap::idle_page_count();
     filemap::release(map, 4);
     filemap::drain_pending();
@@ -1642,7 +1697,7 @@ fn parked_fault_body(inode: InodeId) -> TestResult {
         Ok(m) => m,
         Err(e) => return slopos_testing::fail!("reserve_range refused: {:?}", e),
     };
-    let first = filemap::fault_page_in_set(map, 0);
+    let first = filemap::fault_page_in_set(map, 0, false);
     // The mapping goes: its two references and the fault's.
     filemap::release(map, 3);
     filemap::drain_pending();
@@ -1651,7 +1706,7 @@ fn parked_fault_body(inode: InodeId) -> TestResult {
     }
 
     // The in-flight fault reaches the parked set.
-    let late = match filemap::fault_page_in_set(map, 0) {
+    let late = match filemap::fault_page_in_set(map, 0, false) {
         Ok(pa) => pa,
         Err(e) => return slopos_testing::fail!("the late fault was refused: {:?}", e),
     };
@@ -1813,7 +1868,7 @@ fn dirty_fill_attempt(
         AccountId::NONE,
     )
     .map_err(|e| slopos_testing::fail!("reserve_range refused: {:?}", e))?;
-    let faulted = filemap::fault_page_in_set(map, 0);
+    let faulted = filemap::fault_page_in_set(map, 0, false);
     let mut held = [slopos_abi::addr::PhysAddr::NULL; SHORT_FS_PAGES];
     filemap::resident_in_set(map, 0, &mut held);
     let served = filemap::read_through(&SHORT_FS, inode, 0, seen);

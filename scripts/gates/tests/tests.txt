@@ -1592,6 +1592,7 @@ kernel	slopos_fs::tests::extensions::test_a_running_extension_program_holds_its_
 kernel	slopos_fs::tests::extensions::test_activations_stay_within_the_pool
 kernel	slopos_fs::tests::extensions::test_an_activation_is_shown_at_its_name_and_attests_its_files
 kernel	slopos_fs::tests::filemap::test_filemap_a_seal_holds_against_the_page_set
+kernel	slopos_fs::tests::filemap::test_filemap_exec_fault_reads_the_window_around_it
 kernel	slopos_fs::tests::filemap::test_filemap_fault_on_a_parked_set_holds_its_frames
 kernel	slopos_fs::tests::filemap::test_filemap_fault_serves_the_files_bytes
 kernel	slopos_fs::tests::filemap::test_filemap_fault_wholly_past_the_end_is_refused
@@ -1625,6 +1626,7 @@ kernel	slopos_fs::tests::generations::test_an_archive_the_kernel_cannot_serve_is
 kernel	slopos_fs::tests::generations::test_an_inode_names_its_generation_for_good
 kernel	slopos_fs::tests::generations::test_resident_copies_stay_within_the_budget
 kernel	slopos_fs::tests::generations::test_the_base_mounts_switch_together
+kernel	slopos_fs::tests::image_read::test_fsperf_image_read_cost
 kernel	slopos_fs::tests::journal::test_ext4_clean_stamp_thaws_before_the_next_write
 kernel	slopos_fs::tests::journal::test_ext4_create_and_link_fail_when_the_lookup_does
 kernel	slopos_fs::tests::journal::test_ext4_freed_blocks_are_kept_as_runs

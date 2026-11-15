@@ -2263,6 +2263,18 @@ impl BlockCache {
                 .is_none_or(|j| j.resident_slot(block.raw()).is_none())
     }
 
+    /// Whether `block`'s home holds what this cache would answer for it: no
+    /// copy here is dirty or on its way home, and the log holds none newer.
+    pub fn home_holds(&self, block: BlockNum) -> bool {
+        self.index.get(&block).is_none_or(|&slot| {
+            let entry = &self.entries[slot];
+            !entry.frame.dirty() && !entry.inflight
+        }) && self
+            .journal
+            .as_ref()
+            .is_none_or(|j| j.resident_slot(block.raw()).is_none())
+    }
+
     /// The log slot holding `block`'s newest committed content, if any.
     #[cfg(feature = "tests")]
     pub fn journal_newest_slot(&self, block: u32) -> Option<u32> {

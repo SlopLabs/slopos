@@ -64,7 +64,7 @@ impl FileMapOps for CountingOps {
         DRAINED.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn fault_page(&self, _map: FileMapRef, page_index: u64) -> Result<PhysAddr, i32> {
+    fn fault_page(&self, _map: FileMapRef, page_index: u64, _: bool) -> Result<PhysAddr, i32> {
         FAULTED.fetch_add(1, Ordering::Relaxed);
         match page_index {
             0 => Ok(PhysAddr::new(FAULT_PAGES[0].load(Ordering::Relaxed))),

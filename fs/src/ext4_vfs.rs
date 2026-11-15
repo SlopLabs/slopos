@@ -4,6 +4,7 @@ use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, LockClassKey};
 
 use crate::blockdev::{BlockDevice, BlockDeviceError, WriteTicket};
 use crate::ext4::cache::{BlockCache, DataBatch, cache_entries_for};
+use crate::ext4::file::{Piece, Scatter};
 use crate::ext4::geometry::Ext4Geometry;
 use crate::ext4::journal::AttachError;
 use crate::ext4::ondisk::BlockReserve;
@@ -12,7 +13,8 @@ use crate::ext4::{Ext4Error, Ext4Fs, NewInode, ReadOnlyReason, SyncPass};
 use crate::ext4_dcache::{Ext4Dcache, InodeAttr, NameKey};
 use crate::verity::{AttestTrust, FsExtent, VerityError, VerityStatus};
 use crate::vfs::{
-    FileStat, FileSystem, FileType, FsStats, InodeId, Owner, Timestamp, VfsError, VfsResult, orphan,
+    FileRuns, FileStat, FileSystem, FileType, FsStats, InodeId, Owner, Timestamp, VfsError,
+    VfsResult, orphan,
 };
 use slopos_kernel_services::driver_runtime::{current_task_account, current_task_cred};
 use slopos_ostd::KBox;
@@ -663,6 +665,104 @@ impl Ext4Mount {
             .as_mut()
             .map_or(0, |cached| cached.cache.shrink_clean(want))
     }
+
+    /// [`FileSystem::file_runs`], once the file's dirty blocks are written
+    /// home and whatever batch the flusher has in flight has landed: sealed,
+    /// the file gains no dirty block after either.
+    fn file_runs(&self, inode: InodeId) -> VfsResult<Option<FileRuns>> {
+        if !self.init.is_set() || self.checked_image {
+            return Ok(None);
+        }
+        let ino = u32::try_from(inode).map_err(|_| VfsError::InvalidArgument)?;
+        self.sync_one_inode(inode, true)?;
+        let gate = {
+            let guard = self.lock_cached().map_err(|_| VfsError::Interrupted)?;
+            match guard.as_ref() {
+                Some(cached) => cached.device.gate.clone(),
+                None => return Ok(None),
+            }
+        };
+        gate.wait_idle().map_err(|_| VfsError::Interrupted)?;
+        let mut guard = self.lock_cached().map_err(|_| VfsError::Interrupted)?;
+        let Some(cached) = guard.as_mut() else {
+            return Ok(None);
+        };
+        let device = cached.device.inner.clone();
+        let runs = self.with_cached_fs(cached, |fs| fs.sealed_runs(ino));
+        drop(guard);
+        Ok(runs?.map(|runs| FileRuns { device, runs }))
+    }
+
+    /// [`FileSystem::read_pages`] of a checked image: where the bytes lie is
+    /// found under the lock and they are read off it, so readers of one image
+    /// run in parallel, and nothing read is kept, the file map that asks for
+    /// pages being their one cache. The volume never changes, so what was
+    /// found under the lock stays true.
+    pub fn read_pages_unkept(
+        &self,
+        inode: InodeId,
+        offset: u64,
+        pages: &mut [&mut [u8]],
+    ) -> VfsResult<usize> {
+        if !self.checked_image {
+            return FileSystem::read_pages(self, inode, offset, pages);
+        }
+        if !self.init.is_set() {
+            return Err(VfsError::IoError);
+        }
+        let ino = u32::try_from(inode).map_err(|_| VfsError::InvalidArgument)?;
+        let room: usize = pages.iter().map(|p| p.len()).sum();
+        let mut out = Scatter::new(pages);
+        let mut pieces = [Piece::default(); PLANNED_PIECES];
+        let mut done = 0;
+        while done < room {
+            let (planned, device) = {
+                let mut guard = self.lock_cached().map_err(|_| VfsError::Interrupted)?;
+                let cached = guard.as_mut().ok_or(VfsError::IoError)?;
+                let device = cached.device.inner.clone();
+                let planned = self.with_cached_fs(cached, |fs| {
+                    fs.plan_read(ino, offset + done as u64, room - done, &mut pieces)
+                })?;
+                (planned, device)
+            };
+            if planned == 0 {
+                break;
+            }
+            for piece in &pieces[..planned] {
+                read_piece(&**device, piece, &mut out)
+                    .map_err(|e| ext4_error_to_vfs(Ext4Error::from(e)))?;
+                done += piece.len;
+            }
+        }
+        Ok(done)
+    }
+}
+
+/// Pieces one hold of a checked image's lock plans: a fault's window lies in
+/// one or a few.
+const PLANNED_PIECES: usize = 16;
+
+/// One planned piece into `out`, in one device request.
+fn read_piece(
+    device: &dyn BlockDevice,
+    piece: &Piece,
+    out: &mut Scatter<'_, '_>,
+) -> Result<(), BlockDeviceError> {
+    let Some(home) = piece.home else {
+        out.zero(piece.len);
+        return Ok(());
+    };
+    let span = out.contiguous();
+    if span.len() >= piece.len {
+        device.read_at(home, &mut span[..piece.len])?;
+        out.advance(piece.len);
+        return Ok(());
+    }
+    let mut staged =
+        slopos_ostd::KVec::<u8>::zeroed(piece.len).map_err(|_| BlockDeviceError::OutOfMemory)?;
+    device.read_at(home, staged.as_mut_slice())?;
+    out.put(staged.as_slice());
+    Ok(())
 }
 
 trait Ext4VfsBackend {
@@ -673,6 +773,7 @@ trait Ext4VfsBackend {
     fn ext4_sync(&self) -> VfsResult<()>;
     fn ext4_statfs(&self) -> VfsResult<FsStats>;
     fn ext4_sync_inode(&self, inode: InodeId, data_only: bool) -> VfsResult<()>;
+    fn ext4_file_runs(&self, inode: InodeId) -> VfsResult<Option<FileRuns>>;
     /// `None` while nothing is attached or the caches could not be built.
     fn ext4_dcache(&self) -> Option<&Ext4Dcache>;
 }
@@ -697,6 +798,10 @@ impl Ext4VfsBackend for Ext4Mount {
 
     fn ext4_sync_inode(&self, inode: InodeId, data_only: bool) -> VfsResult<()> {
         self.sync_one_inode(inode, data_only)
+    }
+
+    fn ext4_file_runs(&self, inode: InodeId) -> VfsResult<Option<FileRuns>> {
+        self.file_runs(inode)
     }
 
     fn ext4_dcache(&self) -> Option<&Ext4Dcache> {
@@ -959,6 +1064,10 @@ impl<T: Ext4VfsBackend + Send + Sync> FileSystem for T {
 
     fn sync_inode(&self, inode: InodeId, data_only: bool) -> VfsResult<()> {
         self.ext4_sync_inode(inode, data_only)
+    }
+
+    fn file_runs(&self, inode: InodeId) -> VfsResult<Option<FileRuns>> {
+        self.ext4_file_runs(inode)
     }
 }
 

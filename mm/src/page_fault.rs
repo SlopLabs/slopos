@@ -300,7 +300,8 @@ pub fn complete_file_fault(
         return FaultOutcome::Fatal(TaskFaultReason::UserPage);
     };
 
-    let cached = match filemap_hook::filemap_fault_page(plan.map, plan.page_index) {
+    let cached = match filemap_hook::filemap_fault_page(plan.map, plan.page_index, plan.read_around)
+    {
         Ok(phys) => phys,
         Err(errno) if errno == slopos_abi::Errno::EINTR.raw() => {
             return FaultOutcome::Interrupted;

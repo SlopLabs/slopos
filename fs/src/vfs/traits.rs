@@ -3,6 +3,9 @@
 
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
 use slopos_ostd::authority::{Cap, Seal};
+use slopos_ostd::{KArc, KBox, KVec};
+
+use crate::blockdev::BlockDevice;
 
 /// Each filesystem maintains its own inode number space.
 pub type InodeId = u64;
@@ -311,6 +314,24 @@ impl VfsError {
             Self::NoDevice => Errno::ENXIO,
         }
     }
+}
+
+/// A piece of a file that lies whole on its filesystem's device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileRun {
+    /// The file byte it starts at.
+    pub at: u64,
+    /// The device byte it starts at.
+    pub device_at: u64,
+    pub len: u64,
+}
+
+/// Where a file's bytes lie on its filesystem's device, for a reader that
+/// reads them there itself: [`FileSystem::file_runs`].
+pub struct FileRuns {
+    pub device: KArc<KBox<dyn BlockDevice + Send + Sync>>,
+    /// Back to back from the file's first byte to its last.
+    pub runs: KVec<FileRun>,
 }
 
 /// A filesystem implementation. Operations are inode-based; path resolution is
@@ -652,5 +673,15 @@ pub trait FileSystem: Send + Sync {
     fn sync_inode(&self, inode: InodeId, data_only: bool) -> VfsResult<()> {
         let _ = (inode, data_only);
         self.sync()
+    }
+
+    /// Where sealed `inode`'s bytes lie on this filesystem's device, every
+    /// one at its home there: `None` for a file that is not sealed, has a
+    /// hole, or has bytes not yet written home, and for a filesystem with no
+    /// device. A seal can be taken off, so a reader holds what it reads to
+    /// something of its own, as an activation holds it to its tree.
+    fn file_runs(&self, inode: InodeId) -> VfsResult<Option<FileRuns>> {
+        let _ = inode;
+        Ok(None)
     }
 }

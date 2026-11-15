@@ -10,9 +10,12 @@ package gates
 // accelerator-invariant quantity is the filesystem's write rate over the same
 // run's raw device write rate, so that carries a floor. Mount cost is graded
 // in device reads per GiB of volume, which are countable, not in seconds.
-// Every floor (min-bytes, min-volume-gib, min-dirents, min-files,
-// min-treebytes) exists because a measurement that stopped happening looks
-// exactly like one that got free.
+// A file read through an image is graded as a quotient too: its time over
+// the time of the same file read from the root in the same run, cold. Warm,
+// both are the page sets' hits and the same code, so that pair is only
+// reported. Every floor (min-bytes, min-volume-gib, min-dirents, min-files,
+// min-treebytes, min-image-bytes) exists because a measurement that stopped
+// happening looks exactly like one that got free.
 //
 // Several logs are several whole runs: each row is graded against the worst
 // value any log reported for its phase, and still fails when no log carries
@@ -28,7 +31,7 @@ import (
 func init() {
 	register(Gate{
 		Name:    "fsperf",
-		Summary: "filesystem per-MiB costs under caps, fs/raw write-rate ratio and volume floors met",
+		Summary: "filesystem per-MiB costs under caps, fs/raw write-rate and image/root read-time ratios and volume floors met",
 		Run:     runFsperf,
 	})
 }
@@ -36,9 +39,10 @@ func init() {
 const mib = 1 << 20
 
 var (
-	fsperfMarker = regexp.MustCompile(`FS(PERF|CAP)\[`)
+	fsperfMarker = regexp.MustCompile(`FS(PERF|CAP|IMG)\[`)
 	fsperfRE     = regexp.MustCompile(`^FSPERF\[([a-z0-9-]+)\]: bytes=(\d+) txns=(\d+) commits=(\d+) devwrites=(\d+) devblocks=(\d+) barriers=(\d+) ns=(\d+) rawbytes=(\d+) rawns=(\d+)`)
 	fscapRE      = regexp.MustCompile(`^FSCAP\[([a-z0-9-]+)\]: blocks=(\d+) blocksize=(\d+) groups=(\d+) cacheentries=(\d+) mountreads=(\d+) mountns=(\d+) dirents=(\d+) lookupreads=(\d+) bytes=(\d+) ns=(\d+) files=(\d+) treebytes=(\d+)`)
+	fsimgRE      = regexp.MustCompile(`^FSIMG\[([a-z0-9-]+)\]: bytes=(\d+) coldroot=(\d+) coldimage=(\d+) warmroot=(\d+) warmimage=(\d+)`)
 )
 
 type fsWrite struct {
@@ -49,6 +53,29 @@ type fsWrite struct {
 type fsCapacity struct {
 	log                                                                                    string
 	blocks, bsize, groups, entries, mreads, mns, dirents, lookupr, bytes, ns, files, treeb int64
+}
+
+// fsImage is one file's pages faulted in from an image and from the root it
+// is a file of, each timed cold and again warm, in nanoseconds.
+type fsImage struct {
+	log                                             string
+	bytes, coldRoot, coldImage, warmRoot, warmImage int64
+}
+
+// overPct is image time over root time in percent, rounded up; a root time
+// of nothing is no measurement and reads as unbounded.
+func overPct(image, root int64) int64 {
+	if root <= 0 {
+		return 1 << 62
+	}
+	return (image*100 + root - 1) / root
+}
+
+func (m fsImage) value(key string) int64 {
+	if key == "max-image-cold-pct" {
+		return overPct(m.coldImage, m.coldRoot)
+	}
+	return m.bytes
 }
 
 // gib is the volume size in whole GiB, never below 1 so a per-GiB cost of a
@@ -88,18 +115,20 @@ type fsLog struct {
 	path     string
 	write    map[string]fsWrite
 	capacity map[string]fsCapacity
+	image    map[string]fsImage
 }
 
 // fsRun is every log, each one whole run, with the phases in the order the
 // logs first reported them.
 type fsRun struct {
-	logs                 []fsLog
-	writeOrder, capOrder []string
+	logs                             []fsLog
+	writeOrder, capOrder, imageOrder []string
 }
 
 var (
 	fsWriteKeys = []string{"max-txns-per-mib", "max-commits-per-mib", "max-devwrites-per-mib", "max-devblocks-per-mib", "max-barriers-per-mib", "min-fs-over-raw-pct", "min-bytes"}
 	fsCapKeys   = []string{"max-mount-reads-per-gib", "max-lookup-reads", "min-volume-gib", "min-dirents", "min-files", "min-treebytes"}
+	fsImageKeys = []string{"max-image-cold-pct", "min-image-bytes"}
 )
 
 func (w fsWrite) value(key string) int64 {
@@ -146,9 +175,9 @@ func worse(key string, a, b int64) int64 {
 
 func parseFsperf(caps []capture) (*fsRun, error) {
 	r := &fsRun{}
-	seenWrite, seenCap := map[string]bool{}, map[string]bool{}
+	seenWrite, seenCap, seenImage := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, c := range caps {
-		l := fsLog{path: c.path, write: map[string]fsWrite{}, capacity: map[string]fsCapacity{}}
+		l := fsLog{path: c.path, write: map[string]fsWrite{}, capacity: map[string]fsCapacity{}, image: map[string]fsImage{}}
 		for _, line := range c.lines {
 			text, ok := reportAt(line, fsperfMarker)
 			if !ok {
@@ -166,6 +195,12 @@ func parseFsperf(caps []capture) (*fsRun, error) {
 					r.capOrder = append(r.capOrder, m[1])
 				}
 				l.capacity[m[1]] = fsCapacity{c.path, num(m[2]), num(m[3]), num(m[4]), num(m[5]), num(m[6]), num(m[7]), num(m[8]), num(m[9]), num(m[10]), num(m[11]), num(m[12]), num(m[13])}
+			} else if m := fsimgRE.FindStringSubmatch(text); m != nil {
+				if !seenImage[m[1]] {
+					seenImage[m[1]] = true
+					r.imageOrder = append(r.imageOrder, m[1])
+				}
+				l.image[m[1]] = fsImage{c.path, num(m[2]), num(m[3]), num(m[4]), num(m[5]), num(m[6])}
 			}
 		}
 		r.logs = append(r.logs, l)
@@ -184,13 +219,20 @@ func (r *fsRun) observed(key, phase string) (int64, bool) {
 	found := false
 	for _, l := range r.logs {
 		var v int64
-		if slices.Contains(fsWriteKeys, key) {
+		switch {
+		case slices.Contains(fsWriteKeys, key):
 			w, ok := l.write[phase]
 			if !ok {
 				continue
 			}
 			v = w.value(key)
-		} else {
+		case slices.Contains(fsImageKeys, key):
+			m, ok := l.image[phase]
+			if !ok {
+				continue
+			}
+			v = m.value(key)
+		default:
 			c, ok := l.capacity[phase]
 			if !ok {
 				continue
@@ -247,8 +289,8 @@ func runFsperf(cfg Config) error {
 			return gateFileErrorf("%s:%d: want '<key> <phase> <value>', got %d fields: %s", rel, l.no, len(f), l.text)
 		}
 		key, phase := f[0], f[1]
-		isWrite := slices.Contains(fsWriteKeys, key)
-		if !isWrite && !slices.Contains(fsCapKeys, key) {
+		isWrite, isImage := slices.Contains(fsWriteKeys, key), slices.Contains(fsImageKeys, key)
+		if !isWrite && !isImage && !slices.Contains(fsCapKeys, key) {
 			return gateFileErrorf("%s:%d: unknown gate key '%s'", rel, l.no, key)
 		}
 		got, ok := run.observed(key, phase)
@@ -256,6 +298,8 @@ func runFsperf(cfg Config) error {
 			switch {
 			case isWrite:
 				fail.add("%s names phase '%s', which reported no FSPERF line (dead entry)", key, phase)
+			case isImage:
+				fail.add("%s names phase '%s', which reported no FSIMG line (dead entry)", key, phase)
 			case cfg.RequireCapacity:
 				fail.add("%s names phase '%s', which reported no FSCAP line", key, phase)
 			case !skipped[phase]:
@@ -294,11 +338,16 @@ func runFsperf(cfg Config) error {
 }
 
 // fsPad is the emitted bound for an observation: padded away from it, except
-// the volume size, which is a property of the attached image.
+// the volume size, which is a property of the attached image. An image's
+// time over the root's is a quotient of two single timings, so its cap is
+// twice what was seen: it stops a return to several times the root's cost,
+// not drift.
 func fsPad(key string, v int64) int64 {
 	switch {
 	case key == "min-volume-gib":
 		return v
+	case strings.HasPrefix(key, "max-image-"):
+		return 2 * v
 	case strings.HasPrefix(key, "max-"):
 		return padUp(v)
 	}
@@ -351,6 +400,22 @@ func emitFsperf(cfg Config, run *fsRun) {
 			break
 		}
 		for _, key := range fsCapKeys {
+			v, _ := run.observed(key, phase)
+			fmt.Fprintf(out, "%s\t%s\t%d\n", key, phase, fsPad(key, v))
+		}
+	}
+	for _, phase := range run.imageOrder {
+		for _, l := range run.logs {
+			m, ok := l.image[phase]
+			if !ok {
+				continue
+			}
+			fmt.Fprintf(out, "\n# %s (%s): %dKiB faulted in from the root in\n", phase, l.path, m.bytes/1024)
+			fmt.Fprintf(out, "# %dns cold and %dns warm, from an image of it in\n", m.coldRoot, m.warmRoot)
+			fmt.Fprintf(out, "# %dns cold and %dns warm.\n", m.coldImage, m.warmImage)
+			break
+		}
+		for _, key := range fsImageKeys {
 			v, _ := run.observed(key, phase)
 			fmt.Fprintf(out, "%s\t%s\t%d\n", key, phase, fsPad(key, v))
 		}

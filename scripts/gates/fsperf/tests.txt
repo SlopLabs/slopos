@@ -54,3 +54,9 @@ min-dirents	post-kernel-tests	3000
 # being populated looks like a tree that got cheap to walk.
 min-files	post-kernel-tests	4083
 min-treebytes	post-kernel-tests	829039257
+
+# post-kernel-tests (builddir/ci-test.log): 768KiB faulted in from the root in
+# 8713259ns cold and 1102772ns warm, from an image of it in
+# 13136504ns cold and 1152543ns warm.
+max-image-cold-pct	post-kernel-tests	340
+min-image-bytes	post-kernel-tests	589824

@@ -38,13 +38,16 @@ pub trait FileMapOps: Sync {
 
     /// Populate one page of the set — `page_index` absolute within the file —
     /// and answer its frame with one extra page reference taken, which the
-    /// caller balances with [`release`](Self::release).
+    /// caller balances with [`release`](Self::release). `read_around` reads
+    /// the aligned window around the page rather than the pages after it, for
+    /// a mapping whose faults come in no order, as text's do.
     ///
     /// Blocks, so the caller must have dropped the per-process lock.
     fn fault_page(
         &self,
         map: FileMapRef,
         page_index: u64,
+        read_around: bool,
     ) -> Result<slopos_abi::addr::PhysAddr, i32>;
 
     /// The frames the set holds for `out.len()` pages from `first_page`, null
@@ -106,9 +109,10 @@ pub fn filemap_resident(map: FileMapRef, first_page: u64, out: &mut [slopos_abi:
 pub fn filemap_fault_page(
     map: FileMapRef,
     page_index: u64,
+    read_around: bool,
 ) -> Result<slopos_abi::addr::PhysAddr, i32> {
     match ops() {
-        Some(o) => o.fault_page(map, page_index),
+        Some(o) => o.fault_page(map, page_index, read_around),
         None => Err(slopos_abi::Errno::ENODEV.raw()),
     }
 }

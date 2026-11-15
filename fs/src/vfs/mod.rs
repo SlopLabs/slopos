@@ -34,5 +34,6 @@ pub use path::{
 pub use perm::{InodePerm, Perm, Subject};
 pub use statfs::{vfs_statfs, vfs_statfs_at};
 pub use traits::{
-    FileStat, FileSystem, FileType, FsStats, InodeId, Owner, Timestamp, VfsError, VfsResult,
+    FileRun, FileRuns, FileStat, FileSystem, FileType, FsStats, InodeId, Owner, Timestamp,
+    VfsError, VfsResult,
 };

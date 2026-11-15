@@ -196,3 +196,8 @@ proc-macro2 = "1"
 # editing the pinned unwinding manifest.
 [patch.crates-io]
 gimli = { path = "vendor/gimli" }
+
+# Every block an image serves is hashed on its way in, and an unoptimized
+# SHA-256 costs forty times the read it checks.
+[profile.dev.package.slopos-verity-core]
+opt-level = 3

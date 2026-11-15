@@ -285,6 +285,9 @@ pub struct FileFaultPlan {
     pub private: bool,
     pub aligned_addr: u64,
     pub error_code: u64,
+    /// The mapping was executable when planned: a hint for how the read is
+    /// shaped, never what the install grants.
+    pub read_around: bool,
 }
 
 /// Decide a file-backed fault under the per-process lock. `Ok(None)` means the
@@ -319,6 +322,7 @@ pub fn plan_file_fault(
         private,
         aligned_addr,
         error_code,
+        read_around: region.protection.exec,
     }))
 }
 

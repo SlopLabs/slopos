@@ -1,4 +1,4 @@
-//! The `FSPERF[<phase>]` / `FSCAP[<phase>]` report lines
+//! The `FSPERF[<phase>]` / `FSCAP[<phase>]` / `FSIMG[<phase>]` report lines
 //! `run_tests gate fsperf` parses.
 //!
 //! Emitted at a phase boundary rather than from inside the measuring test: at
@@ -43,13 +43,42 @@ pub struct CapacityCost {
     pub treebytes: u64,
 }
 
+/// One file's pages faulted in from the root and from an image of it, each
+/// timed cold and again warm, in nanoseconds.
+#[derive(Debug, Copy, Clone, Default)]
+pub struct ImageCost {
+    pub bytes: u64,
+    pub coldroot: u64,
+    pub coldimage: u64,
+    pub warmroot: u64,
+    pub warmimage: u64,
+}
+
 const WRITE_FIELDS: usize = 9;
 const CAP_FIELDS: usize = 12;
+const IMAGE_FIELDS: usize = 5;
 
 static WRITE_RECORDED: AtomicBool = AtomicBool::new(false);
 static WRITE_SLOTS: [AtomicU64; WRITE_FIELDS] = [const { AtomicU64::new(0) }; WRITE_FIELDS];
 static CAP_RECORDED: AtomicBool = AtomicBool::new(false);
 static CAP_SLOTS: [AtomicU64; CAP_FIELDS] = [const { AtomicU64::new(0) }; CAP_FIELDS];
+static IMAGE_RECORDED: AtomicBool = AtomicBool::new(false);
+static IMAGE_SLOTS: [AtomicU64; IMAGE_FIELDS] = [const { AtomicU64::new(0) }; IMAGE_FIELDS];
+
+#[cfg(feature = "tests")]
+pub fn record_image_cost(cost: &ImageCost) {
+    let values = [
+        cost.bytes,
+        cost.coldroot,
+        cost.coldimage,
+        cost.warmroot,
+        cost.warmimage,
+    ];
+    for (slot, value) in IMAGE_SLOTS.iter().zip(values) {
+        slot.store(value, Ordering::Relaxed);
+    }
+    IMAGE_RECORDED.store(true, Ordering::Release);
+}
 
 #[cfg(feature = "tests")]
 pub fn record_write_cost(cost: &WriteCost) {
@@ -128,6 +157,18 @@ pub fn fs_cost_report(phase: &str) {
             v(9),
             v(10),
             v(11)
+        );
+    }
+    if IMAGE_RECORDED.load(Ordering::Acquire) {
+        let v = |i: usize| IMAGE_SLOTS[i].load(Ordering::Relaxed);
+        slopos_ostd::klog_info!(
+            "FSIMG[{}]: bytes={} coldroot={} coldimage={} warmroot={} warmimage={}",
+            phase,
+            v(0),
+            v(1),
+            v(2),
+            v(3),
+            v(4)
         );
     }
 }

@@ -15,7 +15,8 @@
 //! [`PhysAddr::NULL`] is a page nobody has faulted yet, for which the
 //! filesystem is still the authority. Mapping a file therefore costs frames
 //! only for the pages a process touches — and, for a set no mapping can
-//! write, the [`READAHEAD_PAGES`] after each one it reads, in the same request.
+//! write, the [`READAHEAD_PAGES`] after each one it reads, or the aligned
+//! window around it for an executable mapping, in the same request.
 //! The fault maps whatever of its aligned window the set already holds
 //! ([`resident_in_set`]), and a `MAP_PRIVATE` mapping maps the set's frame
 //! copy-on-write rather than copying it, so the only private pages are the
@@ -758,7 +759,8 @@ fn revive(entry: &mut PageSet) {
 }
 
 /// Populate `page_index` of the set `map` names, for a fault on a mapping that
-/// has already reserved its extent.
+/// has already reserved its extent. `read_around` reads the aligned window of
+/// [`READAHEAD_PAGES`] around it rather than the pages after it.
 ///
 /// Blocks. Answers the frame with one page reference taken, which the caller
 /// gives back with `release(map, 1)`. A page another CPU populated first is
@@ -766,51 +768,65 @@ fn revive(entry: &mut PageSet) {
 ///
 /// [`FileMapError::Stale`] means the handle no longer names a live set, whose
 /// blocks may already belong to another file.
-pub fn fault_page_in_set(map: FileMapRef, page_index: u64) -> Result<PhysAddr, FileMapError> {
-    match read_into_set(map, page_index) {
+pub fn fault_page_in_set(
+    map: FileMapRef,
+    page_index: u64,
+    read_around: bool,
+) -> Result<PhysAddr, FileMapError> {
+    match read_into_set(map, page_index, read_around) {
         // A released set keeps its frames and its charge until its writeback
         // runs, and until then no eviction can take them; run it rather than
         // refuse a fault the queue is standing in the way of.
         Err(FileMapError::TooManyPages) if PENDING.load(Ordering::Relaxed) != 0 => {
             drain_pending();
-            read_into_set(map, page_index)
+            read_into_set(map, page_index, read_around)
         }
         other => other,
     }
 }
 
-fn read_into_set(map: FileMapRef, page_index: u64) -> Result<PhysAddr, FileMapError> {
+fn read_into_set(
+    map: FileMapRef,
+    page_index: u64,
+    read_around: bool,
+) -> Result<PhysAddr, FileMapError> {
     // A populated page needs no read, so it is answered without queueing
     // behind whichever fault or writeback holds the file's I/O stripe. Queued
     // writeback is the flusher's: a fault that drained it would wait there
     // for another process's teardown.
-    let inode = match probe_fault(map, page_index)? {
+    let inode = match probe_fault(map, page_index, read_around)? {
         FaultProbe::Present(pa) => return Ok(pa),
-        FaultProbe::Missing(_, inode, _) => inode,
+        FaultProbe::Missing(missing) => missing.inode,
     };
     let _io = io_lock(inode)?;
-    let (fs, inode, window) = match probe_fault(map, page_index)? {
+    let missing = match probe_fault(map, page_index, read_around)? {
         FaultProbe::Present(pa) => return Ok(pa),
-        FaultProbe::Missing(fs, inode, window) => (fs, inode, window),
+        FaultProbe::Missing(missing) => missing,
     };
 
-    let size = fs.stat(inode).map_err(|_| FileMapError::Io)?.size;
+    let size = missing
+        .fs
+        .stat(missing.inode)
+        .map_err(|_| FileMapError::Io)?
+        .size;
     if page_index.saturating_mul(PAGE_SIZE) >= size {
         return Err(FileMapError::PastEof);
     }
-    let wide = window.min(size.div_ceil(PAGE_SIZE) - page_index).max(1);
+    let wide = missing
+        .window
+        .min(size.div_ceil(PAGE_SIZE) - missing.first)
+        .max(1);
 
-    fill_window(map, page_index, fs, inode, wide as usize)
+    fill_window(map, page_index, &missing, wide as usize)
 }
 
-/// Read up to `wide` pages from `page_index` into fresh frames and publish
-/// them. Its own frame: the window's frame list lives here.
+/// Read up to `wide` pages from the window's first into fresh frames and
+/// publish them. Its own frame: the window's frame list lives here.
 #[inline(never)]
 fn fill_window(
     map: FileMapRef,
     page_index: u64,
-    fs: &'static dyn FileSystem,
-    inode: InodeId,
+    missing: &Missing,
     wide: usize,
 ) -> Result<PhysAddr, FileMapError> {
     // Readahead is best effort: frames the allocator cannot find cost it and
@@ -819,27 +835,40 @@ fn fill_window(
     // does every write, through `write_through` or `around_uncovered_write`.
     let mut fill = FillWindow::new();
     fill.claim(wide)?;
-    let filled = fill.read(fs, inode, page_index * PAGE_SIZE)?;
-    publish_read(map, page_index, fill.publish(filled)?)
+    let mut first = missing.first;
+    if fill.len as u64 <= page_index - first {
+        // Too few frames to reach the faulting page from the window's start.
+        fill.truncate(1);
+        first = page_index;
+    }
+    let filled = fill.read(missing.fs, missing.inode, first * PAGE_SIZE)?;
+    publish_read(map, first, page_index, fill.publish(filled)?)
 }
 
-/// Install the faulting page, then as many of the pages read ahead of it as
-/// find room.
+/// Install the faulting page, then as many of the pages read around it as
+/// find room: first, so pages read before it cannot spend the room it needs.
 fn publish_read(
     map: FileMapRef,
+    first: u64,
     page_index: u64,
     mut pages: FilledPages<'_>,
 ) -> Result<PhysAddr, FileMapError> {
-    let first = pages.next().ok_or(FileMapError::NoMemory)?;
-    let answer = install_page(map, page_index, first)?;
-    // Best effort: a readahead page that finds no room is left for its own
-    // fault, and the frames after it go back with `pages`.
-    for k in 1.. {
-        let Some(extra) = pages.next() else {
-            break;
-        };
-        if !install_readahead(map, page_index + k, extra) {
-            break;
+    let at = (page_index - first) as usize;
+    let fault = pages.take(at).ok_or(FileMapError::NoMemory)?;
+    let answer = install_page(map, page_index, fault)?;
+    // Best effort: a page read around the fault that finds no room is left
+    // for its own fault. After the fault the frames past the first refused go
+    // back with `pages`; before it a page another fault filled meanwhile is
+    // passed over.
+    for k in at + 1.. {
+        match pages.take(k) {
+            Some(frame) if install_readahead(map, first + k as u64, frame) => {}
+            _ => break,
+        }
+    }
+    for k in 0..at {
+        if let Some(frame) = pages.take(k) {
+            install_readahead(map, first + k as u64, frame);
         }
     }
     Ok(answer)
@@ -932,8 +961,7 @@ impl FillWindow {
         }
         let len = core::mem::replace(&mut self.len, 0);
         Ok(FilledPages {
-            frames: &self.frames[..len],
-            next: 0,
+            frames: &mut self.frames[..len],
         })
     }
 }
@@ -947,22 +975,24 @@ impl Drop for FillWindow {
 /// The frames [`FillWindow::publish`] made safe to map, in page order. Those
 /// not taken go back to the allocator.
 struct FilledPages<'a> {
-    frames: &'a [PhysAddr],
-    next: usize,
+    frames: &'a mut [PhysAddr],
 }
 
 impl FilledPages<'_> {
-    fn next(&mut self) -> Option<PhysAddr> {
-        let pa = *self.frames.get(self.next)?;
-        self.next += 1;
-        Some(pa)
+    /// The `k`-th frame, once.
+    fn take(&mut self, k: usize) -> Option<PhysAddr> {
+        let slot = self.frames.get_mut(k)?;
+        let pa = core::mem::replace(slot, PhysAddr::NULL);
+        (!pa.is_null()).then_some(pa)
     }
 }
 
 impl Drop for FilledPages<'_> {
     fn drop(&mut self) {
-        while let Some(pa) = self.next() {
-            release_owned_anon_page(pa);
+        for k in 0..self.frames.len() {
+            if let Some(pa) = self.take(k) {
+                release_owned_anon_page(pa);
+            }
         }
     }
 }
@@ -998,11 +1028,23 @@ pub fn resident_in_set(map: FileMapRef, first_page: u64, out: &mut [PhysAddr]) {
 enum FaultProbe {
     /// Populated; the reference is already taken.
     Present(PhysAddr),
-    /// Not populated, and neither are the pages after it up to the window.
-    Missing(&'static dyn FileSystem, InodeId, u64),
+    Missing(Missing),
 }
 
-fn probe_fault(map: FileMapRef, page_index: u64) -> Result<FaultProbe, FileMapError> {
+/// The pages from `first` on, `window` of them, none populated: the faulting
+/// page among them.
+struct Missing {
+    fs: &'static dyn FileSystem,
+    inode: InodeId,
+    first: u64,
+    window: u64,
+}
+
+fn probe_fault(
+    map: FileMapRef,
+    page_index: u64,
+    read_around: bool,
+) -> Result<FaultProbe, FileMapError> {
     let mut sets = FILEMAP.lock();
     let entry = resolve(sets.as_mut_slice(), map).ok_or(FileMapError::Stale)?;
     let fs = entry.fs.ok_or(FileMapError::Stale)?;
@@ -1017,18 +1059,30 @@ fn probe_fault(map: FileMapRef, page_index: u64) -> Result<FaultProbe, FileMapEr
     if entry.forgotten {
         return Err(FileMapError::Stale);
     }
+    let missing = |page: u64| entry.index_of(page).is_some() && entry.frame_at(page).is_none();
+    let end = if read_around {
+        (page_index & !(READAHEAD_PAGES - 1)) + READAHEAD_PAGES
+    } else {
+        page_index + READAHEAD_PAGES
+    };
+    let mut first = page_index;
+    while read_around && first > end - READAHEAD_PAGES && missing(first - 1) {
+        first -= 1;
+    }
     // A writable set is written back whole, so a page read ahead into one is
     // written back too, touched or not. Read ahead anyway: a linker writes
     // its output through a mapping, every page of it, and a window of one
     // is a fault and a fill per page of a 100 MiB kernel image.
-    let mut window = 1u64;
-    while window < READAHEAD_PAGES
-        && entry.index_of(page_index + window).is_some()
-        && entry.frame_at(page_index + window).is_none()
-    {
-        window += 1;
+    let mut last = page_index + 1;
+    while last < end && missing(last) {
+        last += 1;
     }
-    Ok(FaultProbe::Missing(fs, entry.inode, window))
+    Ok(FaultProbe::Missing(Missing {
+        fs,
+        inode: entry.inode,
+        first,
+        window: last - first,
+    }))
 }
 
 /// What [`install_page`] decided about the frame it was handed.
@@ -1918,8 +1972,13 @@ impl FileMapOps for FileMapHook {
         drain_pending();
     }
 
-    fn fault_page(&self, map: FileMapRef, page_index: u64) -> Result<PhysAddr, i32> {
-        fault_page_in_set(map, page_index).map_err(|e| e.to_errno().raw())
+    fn fault_page(
+        &self,
+        map: FileMapRef,
+        page_index: u64,
+        read_around: bool,
+    ) -> Result<PhysAddr, i32> {
+        fault_page_in_set(map, page_index, read_around).map_err(|e| e.to_errno().raw())
     }
 
     fn resident(&self, map: FileMapRef, first_page: u64, out: &mut [PhysAddr]) {

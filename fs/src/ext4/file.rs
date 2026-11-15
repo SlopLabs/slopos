@@ -38,11 +38,7 @@ pub fn read_file(
         return Ok(0);
     }
     let max_len = cmp::min(room as u64, file_size - offset) as usize;
-    let mut out = Scatter {
-        segs,
-        seg: 0,
-        at: 0,
-    };
+    let mut out = Scatter::new(segs);
     let mut read_total = 0usize;
     let mut file_offset = offset;
 
@@ -107,16 +103,98 @@ fn read_run_scattered(
     Ok(())
 }
 
+/// One stretch of a planned read: `len` bytes from device byte `home`, or a
+/// hole, which reads as zeros.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Piece {
+    pub len: usize,
+    pub home: Option<u64>,
+}
+
+/// The read [`read_file`] would make from `offset`, at most `room` bytes in
+/// at most `out.len()` pieces, each at most [`DIRECT_RUN_MAX`] blocks: for a
+/// volume nothing writes, which a plan made under the mount's lock still
+/// describes once it is given back. Answers the pieces planned, none at EOF.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_read(
+    inode: &Inode,
+    offset: u64,
+    room: usize,
+    cache: &mut BlockCache,
+    device: &dyn BlockDevice,
+    geom: &Ext4Geometry,
+    block_size: u32,
+    owner: BlockOwner,
+    out: &mut [Piece],
+) -> Result<usize, Ext4Error> {
+    if !inode.is_regular_file() {
+        return Err(Ext4Error::NotFile);
+    }
+    if offset >= inode.size || room == 0 {
+        return Ok(0);
+    }
+    let bs = u64::from(block_size);
+    let end = offset + cmp::min(room as u64, inode.size - offset);
+    let most = u64::from(DIRECT_RUN_MAX) * bs;
+    let mut at = offset;
+    let mut planned = 0;
+    while at < end {
+        let fb = FileBlock(file_block_index(at, block_size)?);
+        let (phys, blocks) = if inode.uses_extents() {
+            super::extents::map_run(inode, fb, geom, cache, device, owner)?
+        } else {
+            let phys = blockmap::map_block(inode, fb, geom, cache, device, owner)?;
+            (phys, 1)
+        };
+        let within = at % bs;
+        let reach = (u64::from(blocks.max(1)) * bs - within)
+            .min(most)
+            .min(end - at);
+        let home = phys
+            .is_valid()
+            .then(|| phys.to_disk_offset(block_size).raw() + within);
+        let grown = match out[..planned].last_mut() {
+            Some(last) if last.len as u64 + reach <= most => match (last.home, home) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a + last.len as u64 == b,
+                _ => false,
+            },
+            _ => false,
+        };
+        if grown {
+            out[planned - 1].len += reach as usize;
+        } else if planned < out.len() {
+            out[planned] = Piece {
+                len: reach as usize,
+                home,
+            };
+            planned += 1;
+        } else {
+            break;
+        }
+        at += reach;
+    }
+    Ok(planned)
+}
+
 /// The destination of a [`read_file`]: `segs` back to back, written in order.
-struct Scatter<'a, 'b> {
+pub(crate) struct Scatter<'a, 'b> {
     segs: &'a mut [&'b mut [u8]],
     seg: usize,
     at: usize,
 }
 
-impl Scatter<'_, '_> {
+impl<'a, 'b> Scatter<'a, 'b> {
+    pub(crate) fn new(segs: &'a mut [&'b mut [u8]]) -> Self {
+        Self {
+            segs,
+            seg: 0,
+            at: 0,
+        }
+    }
+
     /// What is left of the current piece, skipping any already full.
-    fn contiguous(&mut self) -> &mut [u8] {
+    pub(crate) fn contiguous(&mut self) -> &mut [u8] {
         while self.seg < self.segs.len() && self.at == self.segs[self.seg].len() {
             self.seg += 1;
             self.at = 0;
@@ -127,7 +205,7 @@ impl Scatter<'_, '_> {
         }
     }
 
-    fn advance(&mut self, mut n: usize) {
+    pub(crate) fn advance(&mut self, mut n: usize) {
         while n > 0 {
             let step = cmp::min(n, self.contiguous().len());
             if step == 0 {
@@ -138,7 +216,7 @@ impl Scatter<'_, '_> {
         }
     }
 
-    fn put(&mut self, mut src: &[u8]) {
+    pub(crate) fn put(&mut self, mut src: &[u8]) {
         while !src.is_empty() {
             let dst = self.contiguous();
             let step = cmp::min(src.len(), dst.len());
@@ -151,7 +229,7 @@ impl Scatter<'_, '_> {
         }
     }
 
-    fn zero(&mut self, mut n: usize) {
+    pub(crate) fn zero(&mut self, mut n: usize) {
         while n > 0 {
             let dst = self.contiguous();
             let step = cmp::min(n, dst.len());

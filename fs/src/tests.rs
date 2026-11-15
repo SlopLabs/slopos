@@ -7,6 +7,7 @@ pub mod extensions;
 pub mod filemap;
 pub mod fsperf;
 pub mod generations;
+pub mod image_read;
 pub mod journal;
 pub mod listing;
 pub mod mount;

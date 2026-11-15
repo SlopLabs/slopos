@@ -76,6 +76,7 @@ struct Image {
     blocks: Vec<u8>,
     verified: Vec<(u64, [u8; BLOCK])>,
     reads: usize,
+    lookups: usize,
 }
 
 impl Source for Image {
@@ -89,6 +90,7 @@ impl Source for Image {
     }
 
     fn verified(&mut self, block: u64, out: &mut [u8; BLOCK]) -> bool {
+        self.lookups += 1;
         self.verified
             .iter()
             .find(|(b, _)| *b == block)
@@ -125,6 +127,7 @@ fn built(n: u64) -> (Geometry, Image, Digest) {
         blocks: bytes,
         verified: Vec::new(),
         reads: 0,
+        lookups: 0,
     };
     (geometry, image, root)
 }
@@ -194,6 +197,99 @@ fn a_flipped_bit_fails_the_read_that_meets_it() {
     assert_eq!(
         read_back(&geometry, &mut image, &root, 0),
         Err(Fault::Mismatch(0))
+    );
+}
+
+#[test]
+fn a_run_checks_out_reading_each_leaf_once() {
+    for (n, first, count) in [
+        (1, 0, 1),
+        (300, 0, 300),
+        (300, 100, 60),
+        (16385, 16000, 385),
+    ] {
+        let (geometry, mut image, root) = built(n);
+        let bytes = data(n);
+        let run = &bytes[first as usize * BLOCK..(first + count) as usize * BLOCK];
+        let mut scratch = [0; BLOCK];
+        assert_eq!(
+            check(&geometry, &root, &mut image, first, run, &mut scratch),
+            Ok(()),
+            "{n} {first}"
+        );
+        let leaves = match geometry.level(0) {
+            Some(_) => (first + count - 1) / 128 - first / 128 + 1,
+            None => 0,
+        };
+        let levels = geometry.levels() as u64;
+        assert!(
+            image.lookups as u64 <= leaves * levels,
+            "{n} {first}: {} lookups",
+            image.lookups
+        );
+        assert!(image.reads as u64 <= leaves * levels, "{n} {first}");
+    }
+}
+
+#[test]
+fn a_run_fails_at_the_block_its_tree_refuses() {
+    let (geometry, mut image, root) = built(300);
+    let mut run = data(300)[..200 * BLOCK].to_vec();
+    run[150 * BLOCK + 9] ^= 0x80;
+    let mut scratch = [0; BLOCK];
+    assert_eq!(
+        check(&geometry, &root, &mut image, 0, &run, &mut scratch),
+        Err(Fault::Mismatch(150))
+    );
+    assert_eq!(
+        check(
+            &geometry,
+            &root,
+            &mut image,
+            250,
+            &run[..51 * BLOCK],
+            &mut scratch
+        ),
+        Err(Fault::OutOfRange)
+    );
+    assert_eq!(
+        check(
+            &geometry,
+            &root,
+            &mut image,
+            0,
+            &run[..BLOCK + 1],
+            &mut scratch
+        ),
+        Err(Fault::OutOfRange)
+    );
+}
+
+#[test]
+fn a_tree_block_reads_back_verified() {
+    let (geometry, mut image, root) = built(16385);
+    let mut out = [0; BLOCK];
+    for level in 0..geometry.levels() {
+        let (start, count) = geometry.level(level).unwrap();
+        for index in [0, count - 1] {
+            assert_eq!(
+                tree_block(&geometry, &root, &mut image, level, index, &mut out),
+                Ok(())
+            );
+            let at = (start + index) as usize * BLOCK;
+            assert_eq!(out[..], image.blocks[at..at + BLOCK]);
+        }
+        assert_eq!(
+            tree_block(&geometry, &root, &mut image, level, count, &mut out),
+            Err(Fault::OutOfRange)
+        );
+    }
+    let (start, _) = geometry.level(1).unwrap();
+    let (geometry, mut image, root) = built(16385);
+    image.blocks[start as usize * BLOCK + 3] ^= 1;
+    assert_eq!(
+        tree_block(&geometry, &root, &mut image, 0, 0, &mut out),
+        Err(Fault::Mismatch(start))
     );
 }
 

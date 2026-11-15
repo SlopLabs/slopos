@@ -136,6 +136,16 @@ impl Geometry {
         })
     }
 
+    /// How many levels the tree has, 0 the leaves; none over one data block.
+    pub fn levels(&self) -> usize {
+        self.levels
+    }
+
+    /// The image block level `level` starts at, and how many blocks it has.
+    pub fn level(&self, level: usize) -> Option<(u64, u64)> {
+        (level < self.levels).then(|| (self.start[level], blocks_at(self.data_blocks, level)))
+    }
+
     /// The image block holding the top of the tree, whose digest is the
     /// root: the one data block when there are no levels.
     pub fn top(&self) -> u64 {
@@ -184,10 +194,63 @@ pub fn read<S: Source>(
         return Err(Fault::OutOfRange);
     }
     source.read(index, out).map_err(Fault::Read)?;
-    if hash(out) != expected(geometry, root, source, 0, index, scratch)? {
-        return Err(Fault::Mismatch(index));
+    check(geometry, root, source, index, out, scratch)
+}
+
+/// Data blocks `first..`, already read whole into `data`, held to the tree;
+/// the leaf over each 128 of them is looked up once. `scratch` is a block of
+/// room the walk uses.
+pub fn check<S: Source>(
+    geometry: &Geometry,
+    root: &Digest,
+    source: &mut S,
+    first: u64,
+    data: &[u8],
+    scratch: &mut [u8; BLOCK],
+) -> Result<(), Fault<S::Error>> {
+    let count = (data.len() / BLOCK) as u64;
+    let in_range = first
+        .checked_add(count)
+        .is_some_and(|end| end <= geometry.data_blocks);
+    if !data.len().is_multiple_of(BLOCK) || !in_range {
+        return Err(Fault::OutOfRange);
+    }
+    let mut leaf = None;
+    for (index, block) in (first..).zip(data.chunks_exact(BLOCK)) {
+        let want = match geometry.digest_at(0, index) {
+            None => *root,
+            Some((at_leaf, at)) => {
+                if leaf != Some(at_leaf) {
+                    expected(geometry, root, source, 0, index, scratch)?;
+                    leaf = Some(at_leaf);
+                }
+                let mut digest = [0; DIGEST];
+                digest.copy_from_slice(&scratch[at..at + DIGEST]);
+                digest
+            }
+        };
+        let block: &[u8; BLOCK] = block.try_into().map_err(|_| Fault::OutOfRange)?;
+        if hash(block) != want {
+            return Err(Fault::Mismatch(index));
+        }
     }
     Ok(())
+}
+
+/// Block `index` of tree level `level`, 0 the leaves, into `out` once it and
+/// every tree block above it check out.
+pub fn tree_block<S: Source>(
+    geometry: &Geometry,
+    root: &Digest,
+    source: &mut S,
+    level: usize,
+    index: u64,
+    out: &mut [u8; BLOCK],
+) -> Result<(), Fault<S::Error>> {
+    if level >= geometry.levels || index >= blocks_at(geometry.data_blocks, level) {
+        return Err(Fault::OutOfRange);
+    }
+    expected(geometry, root, source, level, index << FANOUT_BITS, out).map(|_| ())
 }
 
 /// What block `index` of `layer` must hash to.

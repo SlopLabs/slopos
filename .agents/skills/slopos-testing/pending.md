@@ -16,3 +16,10 @@
   `qemu_run.sh` gets a `TestDisk` variant; `test_block_scratch_refuses_other_disks`
   holds the refusals. The qemu-options table could name each disk's by-id
   identity beside its node.
+- `docs/abi/ktap-test-output` (fsperf): `FSIMG[<phase>]: bytes= coldroot=
+  coldimage= warmroot= warmimage=` (ns), from
+  `slopos_fs::tests::image_read`: one 768 KiB file faulted in from the root
+  disk and from an image of it, cold after a remount, then warm. Graded as
+  `max-image-cold-pct` (image over root, capped at twice the emitted
+  observation) and `min-image-bytes`; warm both are page-set hits, reported
+  only.

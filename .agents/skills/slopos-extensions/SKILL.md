@@ -17,7 +17,7 @@ description: >
 - The kernel checks no signature. It serves only bytes the root its `ExtensionUpdate` caller vouched for covers; a block the tree refuses fails that read with `EIO`.
 - Hold a grant to its record, its key's ceilings and the base's ceiling at install and at every activation, and never grant what `ceiling::NEVER` lists.
 - `slopos_extension_core::volume`'s reader and the kernel's `extension::index` refuse the same shapes; loosen neither alone.
-- Locks nest activation, then its device (`EXT_VERITY`), then the filesystem holding the image file.
+- Locks nest activation, then the filesystem holding the image file; the device holds `EXT_VERITY_KEPT` across no read.
 - Every extension program starts `AT_SECURE` (`exec_image`), whoever starts it; do not make it conditional on the caller.
 - Keep `EXT: image block <n> fails its tree` rate-limited: any reader of an activation can provoke it.
 - Store writers never rename: lock `EXTENSION_STORE.lock`, write the next generation, seal it through the descriptor that wrote it, read it back, then remove older ones. Only a sealed file with uid 0's owner and mode is believed.

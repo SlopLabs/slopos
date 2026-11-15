@@ -79,6 +79,14 @@ fn volume(records: &[(&str, u32, &[u8])]) -> Option<MemoryBlockDevice> {
 /// The volume `bytes` holds with its tree after it.
 #[inline(never)]
 fn treed(mut bytes: KVec<u8>) -> Option<Built> {
+    let (tree, root) = tree_of(&bytes)?;
+    bytes.extend_from_slice(&tree).ok()?;
+    Some(Built { bytes, root })
+}
+
+/// The tree of the volume `bytes` holds, and its root.
+#[inline(never)]
+fn tree_of(bytes: &[u8]) -> Option<(KVec<u8>, [u8; DIGEST_LEN])> {
     let geometry = Geometry::new((bytes.len() / BLOCK) as u64)?;
     let mut tree = KVec::zeroed(geometry.tree_blocks() as usize * BLOCK).ok()?;
     let mut builder = Builder::new(geometry, &mut tree)?;
@@ -86,8 +94,17 @@ fn treed(mut bytes: KVec<u8>) -> Option<Built> {
         builder.push(block.try_into().ok()?);
     }
     let root = builder.finish()?;
-    bytes.extend_from_slice(&tree).ok()?;
-    Some(Built { bytes, root })
+    Some((tree, root))
+}
+
+/// An image of `records` larger than one allocation holds whole: its volume,
+/// then its tree and root, for a caller to write one after the other.
+pub fn image_parts(
+    records: &[(&str, u32, &[u8])],
+) -> Option<(MemoryBlockDevice, KVec<u8>, [u8; DIGEST_LEN])> {
+    let device = volume(records)?;
+    let (tree, root) = device.with_buffer_mut(|buf| tree_of(buf))?;
+    Some((device, tree, root))
 }
 
 fn mark_read_only(sb: &mut [u8]) {

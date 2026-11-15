@@ -339,6 +339,9 @@ fn attach(
     let device = VerityFile::open(fs, inode, root).map_err(ActivateError::Image)?;
     holds_volume(&device)?;
     let bytes = device.capacity();
+    if !device.reads_direct() {
+        klog_info!("EXT: image read through its filesystem, not off its disk");
+    }
     let device: KBox<dyn BlockDevice + Send + Sync> = device;
     let info = activation
         .volume
@@ -523,16 +526,30 @@ impl FileSystem for Activation {
         inode_of(self.number.load(Ordering::Acquire), ROOT)
     }
 
+    /// Answered from the index, without the volume's lock, but for what it
+    /// leaves to the volume.
     fn lookup(&self, parent: InodeId, name: &[u8]) -> VfsResult<InodeId> {
         let entered = self.enter(parent)?;
+        let index = self.state.lock().index.clone();
+        if let Some(found) = index.and_then(|index| index.lookup(inner(parent) as u32, name)) {
+            return found
+                .map(|ino| entered.outer(InodeId::from(ino)))
+                .ok_or(VfsError::NotFound);
+        }
         self.volume
             .lookup(inner(parent), name)
             .map(|found| entered.outer(found))
     }
 
+    /// Answered from the index, without the volume's lock, but for an inode
+    /// it does not hold.
     fn stat(&self, inode: InodeId) -> VfsResult<FileStat> {
         let _entered = self.enter(inode)?;
-        let mut stat = self.volume.stat(inner(inode))?;
+        let index = self.state.lock().index.clone();
+        let mut stat = match index.and_then(|index| index.stat(inner(inode) as u32)) {
+            Some(stat) => stat,
+            None => self.volume.stat(inner(inode))?,
+        };
         stat.inode = inode;
         stat.uid = 0;
         stat.gid = 0;
@@ -547,7 +564,7 @@ impl FileSystem for Activation {
 
     fn read_pages(&self, inode: InodeId, offset: u64, pages: &mut [&mut [u8]]) -> VfsResult<usize> {
         let _entered = self.enter(inode)?;
-        self.volume.read_pages(inner(inode), offset, pages)
+        self.volume.read_pages_unkept(inner(inode), offset, pages)
     }
 
     fn write(&self, _inode: InodeId, _offset: u64, _buf: &[u8]) -> VfsResult<usize> {
