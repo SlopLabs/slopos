@@ -28,7 +28,6 @@ static VIDEO_SERVICES: VideoServices = VideoServices {
     hw_cursor_available: video_hw_cursor_available,
     cursor_set_image: video_cursor_set_image,
     cursor_move: video_cursor_move,
-    set_display_mode: video_set_display_mode,
     display_stats: framebuffer::display_stats,
 };
 
@@ -39,7 +38,6 @@ struct GpuControl {
     available: fn() -> bool,
     set_image: fn(*const u8, usize, u32, u32) -> bool,
     move_cursor: fn(u32, u32) -> bool,
-    set_mode: fn(u32, u32) -> Option<FramebufferData>,
 }
 
 static GPU_CONTROL: SpinLock<Option<GpuControl>> =
@@ -50,13 +48,11 @@ pub fn register_gpu_control(
     available: fn() -> bool,
     set_image: fn(*const u8, usize, u32, u32) -> bool,
     move_cursor: fn(u32, u32) -> bool,
-    set_mode: fn(u32, u32) -> Option<FramebufferData>,
 ) {
     *GPU_CONTROL.lock() = Some(GpuControl {
         available,
         set_image,
         move_cursor,
-        set_mode,
     });
 }
 
@@ -82,25 +78,6 @@ fn video_cursor_move(x: u32, y: u32) -> bool {
         Some(g) => (g.move_cursor)(x, y),
         None => false,
     }
-}
-
-/// A runtime mode-set returns the old scanout pages to the buddy allocator,
-/// so every consumer holding the old base and pitch must be re-pointed at the
-/// new one. Adopting only the framebuffer left the vconsole writing into freed
-/// memory on its next blit — a crash-recovery restore or a panic screen, which
-/// is exactly when it is least tolerable.
-fn video_set_display_mode(width: u32, height: u32) -> bool {
-    let Some(g) = gpu_control() else {
-        return false;
-    };
-    let Some(fb) = (g.set_mode)(width, height) else {
-        return false;
-    };
-    install_scanout_provider(&InstallCtx {
-        fb,
-        flush: None,
-        gpu_control: None,
-    })
 }
 
 fn task_cleanup_callback(task_id: u32) {
@@ -214,7 +191,7 @@ fn install_scanout_provider(ctx: &InstallCtx) -> bool {
     }
 
     if let Some(g) = ctx.gpu_control {
-        register_gpu_control(g.available, g.set_image, g.move_cursor, g.set_mode);
+        register_gpu_control(g.available, g.set_image, g.move_cursor);
     }
 
     let width = ctx.fb.info.width as i32;

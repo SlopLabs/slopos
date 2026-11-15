@@ -340,16 +340,6 @@ pub fn load_layout_from_user(data_ptr: u64, len: usize) -> Result<(), Errno> {
     Ok(())
 }
 
-/// Into a kernel buffer, which the syscall copies out.
-pub fn layout_name(out: &mut [u8]) -> usize {
-    let state = STATE.lock();
-    let table = state.layout.as_deref().unwrap_or(&US_QWERTY);
-    let bytes = table.name_str().as_bytes();
-    let n = bytes.len().min(out.len());
-    out[..n].copy_from_slice(&bytes[..n]);
-    n
-}
-
 /// The `MODIFIER_*` bits.
 #[cfg(feature = "test-hooks")]
 pub fn get_modifier_state() -> u8 {

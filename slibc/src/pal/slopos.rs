@@ -1400,9 +1400,4 @@ impl Pal for Sys {
         to_result(ret)?;
         Ok(())
     }
-
-    fn klog_write(buf: &[u8]) -> Result<usize, Errno> {
-        let ret = unsafe { syscall2(SYSCALL_KLOG_WRITE, buf.as_ptr() as u64, buf.len() as u64) };
-        Ok(to_result(ret)? as usize)
-    }
 }

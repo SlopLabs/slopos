@@ -3,7 +3,7 @@
 
 use std::io;
 
-pub const PATH: &str = "/dev/kmsg";
+pub const PATH: &str = slopos_abi::fs::KMSG_PATH;
 /// How much of the log's tail locates the old end once the ring has wrapped.
 const ANCHOR_BYTES: usize = 4096;
 

@@ -676,7 +676,6 @@ kernel	slopos_drivers::tests::hpet_tests::test_hpet_nanoseconds_zero
 kernel	slopos_drivers::tests::hpet_tests::test_hpet_period_valid
 kernel	slopos_drivers::tests::i8042_tests::test_i8042_driver_registered
 kernel	slopos_drivers::tests::i8042_tests::test_i8042_fallback_synthesizes_when_8042_present
-kernel	slopos_drivers::tests::input_event_tests::test_each_session_keeps_its_own_clipboard
 kernel	slopos_drivers::tests::input_event_tests::test_each_sink_holder_is_told_where_the_cursor_is
 kernel	slopos_drivers::tests::input_event_tests::test_input_queue_serves_high_task_id
 kernel	slopos_drivers::tests::input_event_tests::test_input_registration_claims_the_slot_up_front
@@ -1689,6 +1688,9 @@ kernel	slopos_fs::tests::partition::test_partition_unreadable_backup_lba_still_p
 kernel	slopos_fs::tests::partition::test_partition_whole_device_image_is_unpartitioned
 kernel	slopos_fs::tests::partition::test_partition_windows_miss_the_table_and_each_other
 kernel	slopos_fs::tests::ramfs_devfs::test_devfs_block_device_lookup_by_name
+kernel	slopos_fs::tests::ramfs_devfs::test_devfs_kmsg_limiter_drops_past_burst
+kernel	slopos_fs::tests::ramfs_devfs::test_devfs_kmsg_refuses_long_and_unentitled
+kernel	slopos_fs::tests::ramfs_devfs::test_devfs_kmsg_write_lands_in_ring
 kernel	slopos_fs::tests::ramfs_devfs::test_devfs_listing_resumes_across_removal
 kernel	slopos_fs::tests::ramfs_devfs::test_ramfs_chunk_work_stays_off_the_lock
 kernel	slopos_fs::tests::ramfs_devfs::test_ramfs_file_spans_chunks

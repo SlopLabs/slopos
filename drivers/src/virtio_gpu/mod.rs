@@ -55,11 +55,8 @@ const NUM_GPU_SLOTS: usize = 2;
 const CURSOR_W: u32 = 64;
 const CURSOR_H: u32 = 64;
 
-/// The scanout ping-pongs between PRIMARY and ALT on mode-set so the new
-/// scanout is live before the old resource is unref'd.
 const RES_FB_PRIMARY: u32 = 1;
 const RES_CURSOR: u32 = 2;
-const RES_FB_ALT: u32 = 3;
 
 const PAGE_SIZE: usize = PAGE_SIZE_4KB as usize;
 
@@ -323,11 +320,9 @@ enum QSel {
 struct ScanoutGeom {
     ready: bool,
     resource_id: u32,
-    backing_phys: PhysAddr,
     width: u32,
     height: u32,
     pitch: u32,
-    sl_format: PixelFormat,
 }
 
 impl ScanoutGeom {
@@ -335,11 +330,9 @@ impl ScanoutGeom {
         Self {
             ready: false,
             resource_id: 0,
-            backing_phys: PhysAddr::NULL,
             width: 0,
             height: 0,
             pitch: 0,
-            sl_format: PixelFormat::Argb8888,
         }
     }
 }
@@ -382,9 +375,6 @@ struct VirtioGpuState {
     edid_supported: bool,
     geom: ScanoutGeom,
     cursor_state: CursorState,
-    /// Backing of the previous scanout, held until the mode after next so a
-    /// consumer that still points at it cannot write into freed memory.
-    retired_backing: PhysAddr,
 }
 
 impl VirtioGpuState {
@@ -400,7 +390,6 @@ impl VirtioGpuState {
                 write_field!(slot, edid_supported, false);
                 write_field!(slot, geom, ScanoutGeom::empty());
                 write_field!(slot, cursor_state, CursorState::empty());
-                write_field!(slot, retired_backing, PhysAddr::NULL);
                 Ok(slot.finish())
             },
         )
@@ -837,11 +826,9 @@ impl VirtioGpuInner {
             st.geom = ScanoutGeom {
                 ready: true,
                 resource_id: RES_FB_PRIMARY,
-                backing_phys: phys,
                 width: w,
                 height: h,
                 pitch,
-                sl_format,
             };
         }
 
@@ -943,79 +930,6 @@ impl VirtioGpuInner {
         } else {
             Present::Failed
         }
-    }
-
-    /// Park the previous scanout's backing instead of freeing it: consumers
-    /// (the vconsole, the mouse bounds, the scanout registry) still point at
-    /// it until the caller adopts the new one. Releasing here would leave a
-    /// later vconsole blit — a crash restore or a panic screen — writing into
-    /// memory the buddy allocator has handed to somebody else.
-    fn retire_previous_scanout(&self, old: ScanoutGeom) {
-        if old.resource_id == 0 {
-            return;
-        }
-        let _ = self.resource_unref(old.resource_id);
-        if old.backing_phys.is_null() {
-            return;
-        }
-        let stale = {
-            let mut st = self.state.lock();
-            core::mem::replace(&mut st.retired_backing, old.backing_phys)
-        };
-        if !stale.is_null() {
-            free_page_frame(stale);
-        }
-    }
-
-    fn set_mode(&self, w: u32, h: u32) -> Option<FramebufferData> {
-        let (w, h) = sanitize_mode(w, h)?;
-        let old = self.state.lock().geom;
-        let sl_format = old.sl_format;
-        let vfmt = format_from_pixel(sl_format);
-        let new_rid = if old.resource_id == RES_FB_PRIMARY {
-            RES_FB_ALT
-        } else {
-            RES_FB_PRIMARY
-        };
-
-        let (addr, phys, pitch, size) = self.alloc_backing(w, h)?;
-
-        if !self.resource_create_2d(new_rid, vfmt, w, h)
-            || !self.attach_backing(new_rid, phys.as_u64(), size as u32)
-            || !self.set_scanout(0, new_rid, w, h)
-        {
-            let _ = self.resource_unref(new_rid);
-            free_page_frame(phys);
-            return None;
-        }
-
-        let full = VirtioGpuRect {
-            x: 0,
-            y: 0,
-            width: w,
-            height: h,
-        };
-        let _ = self.transfer_to_host(new_rid, full, 0);
-        let _ = self.resource_flush(new_rid, full);
-
-        self.retire_previous_scanout(old);
-
-        {
-            let mut st = self.state.lock();
-            st.geom = ScanoutGeom {
-                ready: true,
-                resource_id: new_rid,
-                backing_phys: phys,
-                width: w,
-                height: h,
-                pitch,
-                sl_format,
-            };
-        }
-        Some(FramebufferData {
-            address: addr,
-            info: DisplayInfo::new(w, h, pitch, sl_format),
-        })
     }
 
     /// Uploads a 64×64 BGRA cursor image and shows it; lazily creates the
@@ -1290,10 +1204,6 @@ pub fn virtio_gpu_flush(damage: &[DamageRect]) -> Present {
     }
 }
 
-pub fn set_mode(width: u32, height: u32) -> Option<FramebufferData> {
-    current_device()?.set_mode(width, height)
-}
-
 pub fn hw_cursor_available() -> bool {
     is_present()
 }
@@ -1386,7 +1296,6 @@ fn virtio_gpu_probe(bound: &mut BoundDevice<'_>) -> Result<ProbeOutcome, PciProb
             available: hw_cursor_available,
             set_image: cursor_set_image_raw,
             move_cursor: cursor_move,
-            set_mode,
         }),
     };
     if !scanout::run_scanout_install(&ctx) {

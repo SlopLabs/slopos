@@ -20,6 +20,7 @@ slopos_service_core::define_service! {
         current_task_cred() -> Option<slopos_ostd::process::Cred>;
         current_task_holds(cap: slopos_ostd::authority::Capability) -> bool;
         current_task_account() -> slopos_ostd::process::AccountId;
+        current_task_process() -> Option<slopos_ostd::KArc<slopos_ostd::process::Process>>;
         current_task_controlling_tty() -> Option<slopos_abi::syscall::TtyIndex>;
         set_current_task_controlling_tty(tty: Option<slopos_abi::syscall::TtyIndex>) -> bool;
         clear_session_controlling_tty(session_id: u32, tty: slopos_abi::syscall::TtyIndex) -> usize;

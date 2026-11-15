@@ -10,8 +10,6 @@ use crate::{block, input_event, keyboard, tty};
 
 static INPUT_SERVICES: InputServices = InputServices {
     drain_batch: input_event::input_drain_batch,
-    clipboard_copy: input_event::clipboard_copy,
-    clipboard_paste: input_event::clipboard_paste,
     take_sink: input_event::input_take_sink,
     switch_compositor: input_event::input_switch_compositor,
     cleanup_task: input_event::input_cleanup_task,
@@ -125,7 +123,6 @@ static TTY_SERVICES: TtyServices = TtyServices {
 
 static KEYMAP_SERVICES: KeymapServices = KeymapServices {
     load: keyboard::load_layout_from_user,
-    current_name: keyboard::layout_name,
 };
 
 static BLOCK_SERVICES: BlockServices = BlockServices {

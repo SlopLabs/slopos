@@ -35,10 +35,11 @@ const MASTER_WRITE_BUDGET: usize = 4 * 1024;
 pub fn terminal_user_main() {
     use slopos_windowing::connection;
 
-    // Its stderr goes nowhere visible.
+    // Its stderr goes nowhere visible. The log is opened now so the hook
+    // never has to open a file.
+    let _ = tty::open_log();
     std::panic::set_hook(Box::new(|info| {
-        let _ = tty::write(b"terminal: PANIC: ");
-        let msg = std::format!("{info}\n");
+        let msg = std::format!("terminal: PANIC: {info}\n");
         let _ = tty::write(msg.as_bytes());
     }));
 
@@ -592,8 +593,6 @@ enum MasterDrain {
     Eof,
 }
 
-/// Mirrors every byte to the kernel console, so `just boot-log` shows the
-/// shell's output.
 fn drain_master(master_fd: i32, grid: &mut TerminalGrid) -> MasterDrain {
     let mut buf = [0u8; MASTER_READ_CHUNK];
     let mut got_any = false;
@@ -606,7 +605,6 @@ fn drain_master(master_fd: i32, grid: &mut TerminalGrid) -> MasterDrain {
             Ok(n) => {
                 got_any = true;
                 total += n;
-                let _ = tty::write(&buf[..n]);
                 for &b in &buf[..n] {
                     grid.process_byte(b);
                 }

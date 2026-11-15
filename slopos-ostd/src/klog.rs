@@ -275,6 +275,80 @@ pub fn log_forced(args: fmt::Arguments<'_>) {
     dispatch(args);
 }
 
+/// The level and text of one `/dev/kmsg` record in Linux's form: an optional
+/// decimal `<N>` prefix whose low three bits are the syslog level (the
+/// facility is ignored), then the text, less one trailing newline. A record
+/// without a well-formed prefix is all text at `Warn`, Linux's default
+/// message level.
+fn kmsg_parse_record(record: &[u8]) -> (KlogLevel, &[u8]) {
+    let (level, text) = match parse_prefix(record) {
+        Some((priority, text)) => (level_of_syslog(priority & 7), text),
+        None => (KlogLevel::Warn, record),
+    };
+    (level, text.strip_suffix(b"\n").unwrap_or(text))
+}
+
+fn parse_prefix(record: &[u8]) -> Option<(u32, &[u8])> {
+    let rest = record.strip_prefix(b"<")?;
+    let close = rest.iter().position(|&b| b == b'>')?;
+    let digits = &rest[..close];
+    if digits.is_empty() {
+        return None;
+    }
+    let mut priority = 0u32;
+    for &d in digits {
+        if !d.is_ascii_digit() {
+            return None;
+        }
+        priority = priority.checked_mul(10)?.checked_add(u32::from(d - b'0'))?;
+    }
+    Some((priority, &rest[close + 1..]))
+}
+
+fn level_of_syslog(level: u32) -> KlogLevel {
+    match level {
+        0..=3 => KlogLevel::Error,
+        4 => KlogLevel::Warn,
+        5 | 6 => KlogLevel::Info,
+        _ => KlogLevel::Debug,
+    }
+}
+
+/// A record as one line of text: bytes that are not UTF-8 become U+FFFD, and
+/// a backslash, a line separator or a control character but tab is written
+/// `\xNN` byte by byte, as Linux escapes them when the log is read, so a
+/// record cannot start a line that reads as the kernel's.
+struct Lossy<'a>(&'a [u8]);
+
+impl fmt::Display for Lossy<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for chunk in self.0.utf8_chunks() {
+            for c in chunk.valid().chars() {
+                let escaped =
+                    (c.is_control() && c != '\t') || matches!(c, '\\' | '\u{2028}' | '\u{2029}');
+                if !escaped {
+                    fmt::Write::write_char(f, c)?;
+                    continue;
+                }
+                for byte in c.encode_utf8(&mut [0; 4]).bytes() {
+                    write!(f, "\\x{byte:02x}")?;
+                }
+            }
+            if !chunk.invalid().is_empty() {
+                f.write_str("\u{FFFD}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Log one record a process wrote to `/dev/kmsg`: Linux's optional `<N>`
+/// prefix sets the level, and the text is one line as `Lossy` writes it.
+pub fn log_user_record(record: &[u8]) {
+    let (level, text) = kmsg_parse_record(record);
+    log_args(level, format_args!("{}", Lossy(text)));
+}
+
 #[macro_export]
 macro_rules! klog {
     ($level:expr, $($arg:tt)*) => {{
@@ -402,7 +476,7 @@ macro_rules! klog_warn_ratelimited {
 
 #[cfg(test)]
 mod tests {
-    use super::KlogRing;
+    use super::{KlogLevel, KlogRing, Lossy, kmsg_parse_record};
 
     fn ring_of(text: &[u8]) -> alloc::boxed::Box<KlogRing> {
         let mut ring = alloc::boxed::Box::new(KlogRing::EMPTY);
@@ -452,5 +526,68 @@ mod tests {
         ring.push(b'\n');
         let tail = tail_of(&ring, 2 * line.len() + 1);
         assert_eq!(tail, b"0123456789abcde\nx\n");
+    }
+
+    #[test]
+    fn a_prefix_sets_the_level_and_is_stripped() {
+        assert_eq!(
+            kmsg_parse_record(b"<3>disk gone\n"),
+            (KlogLevel::Error, &b"disk gone"[..])
+        );
+        assert_eq!(kmsg_parse_record(b"<4>low"), (KlogLevel::Warn, &b"low"[..]));
+        assert_eq!(kmsg_parse_record(b"<6>up"), (KlogLevel::Info, &b"up"[..]));
+        assert_eq!(
+            kmsg_parse_record(b"<7>noise"),
+            (KlogLevel::Debug, &b"noise"[..])
+        );
+    }
+
+    #[test]
+    fn the_facility_is_ignored() {
+        assert_eq!(
+            kmsg_parse_record(b"<30>daemon"),
+            (KlogLevel::Info, &b"daemon"[..])
+        );
+        assert_eq!(
+            kmsg_parse_record(b"<11>user"),
+            (KlogLevel::Error, &b"user"[..])
+        );
+    }
+
+    #[test]
+    fn no_prefix_is_a_warning() {
+        assert_eq!(
+            kmsg_parse_record(b"plain\n"),
+            (KlogLevel::Warn, &b"plain"[..])
+        );
+    }
+
+    #[test]
+    fn a_malformed_prefix_is_text() {
+        for record in [&b"<>x"[..], b"<x>y", b"<3", b"<99999999999>z", b"<-1>w"] {
+            assert_eq!(kmsg_parse_record(record), (KlogLevel::Warn, record));
+        }
+    }
+
+    #[test]
+    fn only_one_trailing_newline_goes() {
+        assert_eq!(
+            kmsg_parse_record(b"<5>two\n\n"),
+            (KlogLevel::Info, &b"two\n"[..])
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_is_replaced() {
+        let text = alloc::format!("{}", Lossy(b"a\xffb\xe2\x82"));
+        assert_eq!(text, "a\u{FFFD}b\u{FFFD}");
+    }
+
+    #[test]
+    fn a_record_stays_one_line() {
+        let text = alloc::format!("{}", Lossy(b"ok 1\nnot ok 2\r\x1b[2J\tdone\\ \xc3\xa9"));
+        assert_eq!(text, "ok 1\\x0anot ok 2\\x0d\\x1b[2J\tdone\\x5c \u{e9}");
+        let text = alloc::format!("{}", Lossy("a\u{85}b\u{2028}c".as_bytes()));
+        assert_eq!(text, "a\\xc2\\x85b\\xe2\\x80\\xa8c");
     }
 }

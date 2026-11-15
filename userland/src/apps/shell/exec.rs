@@ -1282,7 +1282,7 @@ fn child_setup(pgid: u32, foreground: bool) {
     }
 
     // The child claims the terminal for its own pgrp, racing the parent's
-    // `enter_foreground`; both set the same value.  Must precede the sigdefault
+    // `enter_foreground`; both set the same value.  Must precede the signal
     // reset below: SIGTTOU is still inherited-ignored there, so this tcsetpgrp
     // is not denied to a not-yet-foreground child.
     if foreground && job_control {

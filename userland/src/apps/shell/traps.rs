@@ -198,7 +198,7 @@ pub fn enter_subshell(also_default: SigSet) {
     drop(table);
     PENDING.store(0, Ordering::Release);
     if reset != 0 {
-        let _ = process::sigdefault(reset);
+        process::default_signals(reset);
     }
 }
 

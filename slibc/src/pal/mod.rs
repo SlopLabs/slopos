@@ -335,6 +335,4 @@ pub trait Pal {
     /// called once from `/sbin/init`. Blocks until every registered utest has
     /// completed. `Err` means the kernel was not booted with `tests=on`.
     fn run_userland_tests() -> Result<(), Errno>;
-
-    fn klog_write(buf: &[u8]) -> Result<usize, Errno>;
 }

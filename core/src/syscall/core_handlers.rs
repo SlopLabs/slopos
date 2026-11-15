@@ -13,7 +13,7 @@ use slopos_ostd::authority::BootEntry;
 use slopos_ostd::klog_debug;
 
 use crate::syscall::args::{UserBytes, UserPtr, UserSlice};
-use crate::syscall::common::{USER_IO_MAX_BYTES, syscall_bounded_from_user};
+use crate::syscall::common::syscall_bounded_from_user;
 use crate::syscall::result::SyscallResult;
 use slopos_kernel_services::platform;
 use slopos_ostd::platform::power;
@@ -338,29 +338,6 @@ define_syscall!(syscall_exit_group (ctx, code: u32) cap(NoneSelf)
     );
     schedule();
     SyscallResult::NoReturn
-});
-
-// `klog_write`, not `write(2)`: there is no descriptor, and the destination is
-// the kernel log rather than anything in the caller's fd table. It exists for
-// output that must survive a broken or absent fd 1. Deliberately
-// unprivileged, like Linux's `/dev/kmsg`, and it reaches the same serialised
-// writer klog uses, so a caller cannot interleave into a klog line or the
-// harness's KTAP framing.
-define_syscall!(syscall_klog_write (ctx, buf: UserBytes) cap(ConsoleIo)
-    -> Result<u64, Errno> {
-    if buf.is_empty() {
-        return Ok(0);
-    }
-    let mut tmp = [0u8; USER_IO_MAX_BYTES];
-    let write_len = syscall_bounded_from_user(
-        &mut tmp,
-        buf.base_u64(),
-        buf.len() as u64,
-        USER_IO_MAX_BYTES,
-    )
-    .map_err(|_| Errno::EFAULT)?;
-    platform::console_write_serialized(&tmp[..write_len]);
-    Ok(write_len as u64)
 });
 
 define_syscall!(syscall_sys_info (ctx, info_out: UserPtr<UserSysInfo>) cap(NoneSelf)

@@ -3,7 +3,8 @@
 use super::numbers::*;
 use super::raw::{syscall0, syscall1, syscall2, syscall3, syscall4, syscall5};
 use slopos_abi::signal::{
-    SIG_DFL, SIG_IGN, SIGKILL, SigSet, UserSigaction, WAIT_STATUS_CONTINUED, WNOHANG,
+    NSIG, SIG_BLOCK, SIG_DFL, SIG_IGN, SIG_SETMASK, SIGKILL, SigSet, UserSigaction,
+    WAIT_STATUS_CONTINUED, WNOHANG, sig_bit,
 };
 use slopos_abi::spawn::{
     SPAWN_SET_GID, SPAWN_SET_GROUPS, SPAWN_SET_LOGIN, SPAWN_SET_UID, SpawnAttrs, SpawnFdAction,
@@ -231,9 +232,34 @@ pub fn spawn_path_with_attrs(path: impl AsRef<[u8]>, priority: TaskPriority, fla
     spawn_path_with_actions(path.as_ref(), &[], priority, flags, &stdio, 0)
 }
 
-#[inline(always)]
-pub fn sigdefault(mask: SigSet) -> i64 {
-    unsafe { syscall1(SYSCALL_SIGDEFAULT, mask) as i64 }
+/// Every signal in `mask` to `SIG_DFL`, blocked while the loop runs so none
+/// is delivered under a mix of old and new actions.
+pub fn default_signals(mask: SigSet) {
+    let mut old: SigSet = 0;
+    let size = core::mem::size_of::<SigSet>() as u64;
+    // SAFETY: both sets are live `SigSet`s of the size passed.
+    unsafe {
+        syscall4(
+            SYSCALL_RT_SIGPROCMASK,
+            SIG_BLOCK as u64,
+            (&mask as *const SigSet) as u64,
+            (&mut old as *mut SigSet) as u64,
+            size,
+        );
+    }
+    for signum in (1..=NSIG as u8).filter(|&signum| mask & sig_bit(signum) != 0) {
+        default_signal(signum);
+    }
+    // SAFETY: as above.
+    unsafe {
+        syscall4(
+            SYSCALL_RT_SIGPROCMASK,
+            SIG_SETMASK as u64,
+            (&old as *const SigSet) as u64,
+            0,
+            size,
+        );
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

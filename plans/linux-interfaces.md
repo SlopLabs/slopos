@@ -12,14 +12,14 @@ unported.
 Of the 54 private calls (`abi/src/syscall/numbers.rs`, from
 `SYSCALL_PRIVATE_BASE`), 26 move to an interface Linux defines, 8 move to
 userland, 2 are deleted and 18 stay. The eight phases below take 34 of
-them. The two that start and report the userland tests leave with
-`tests-without-a-host.md`.
+them; phase 1 has taken 7, leaving 47. The two that start and report the
+userland tests leave with `tests-without-a-host.md`.
 
 ## The order
 
 | Phase | Interface | Calls removed | Private calls left | Needs first |
 |-------|-----------|---------------|--------------------|-------------|
-| 1 | None new; a write to `/dev/kmsg` | 7 | 47 | |
+| 1 | Done (interface 14): a write to `/dev/kmsg` | 7 | 47 | |
 | 2 | `/etc/resolv.conf`, a resolver in the C library | 2 | 45 | |
 | 3 | `/proc` | 5 | 40 | |
 | 4 | `/sys/block`, efivarfs | 3 | 37 | Phase 3's tree |
@@ -72,27 +72,22 @@ from it a kernel with no DHCP client in it.
   netlink message and an evdev key table are rendered and parsed in a
   `*-core` crate the kernel and the base's readers share, host-tested
   against bytes captured from a Linux machine.
-- **`libc.so` only grows.** Eleven POSIX exports sit on private calls:
-  `getlogin`, `getlogin_r`, `syslog`, `vsyslog`, `getaddrinfo`,
-  `gethostbyname`, `getifaddrs`, `if_nametoindex`, `if_indextoname`,
-  `posix_spawn` and `posix_spawnp`. Each keeps its name and gets a new
-  body in the phase that moves its call. No SlopOS-named export exists.
+- **`libc.so` only grows.** Nine POSIX exports sit on private calls:
+  `getlogin`, `getlogin_r`, `getaddrinfo`, `gethostbyname`, `getifaddrs`,
+  `if_nametoindex`, `if_indextoname`, `posix_spawn` and `posix_spawnp`.
+  Each keeps its name and gets a new body in the phase that moves its
+  call. No SlopOS-named export exists.
 
 ## The 54 calls
 
 Handlers are in `core/src/syscall/`; *Kernel* names the file there and what
 the handler reaches. *Callers* are outside the kernel, tests in italics.
 
-### Phase 1: nothing to build
+### Phase 1: done
 
-| Call | Kernel | Callers | Verdict |
-|------|--------|---------|---------|
-| `clipboard_copy`, `clipboard_paste` | `ui_handlers.rs` → `clipboard_copy`, `clipboard_paste` in `drivers/src/input_event.rs`: 4096 bytes per login tag in `SESSION_LOGINS` | *`sessions_test`* alone | Userland, where it already is: the compositor keeps the selection as a memfd (`compositor/protocol.rs`, `windowing/src/clipboard.rs`, `appkit/src/clipboard.rs`) and admits a copy by key serial and focus. `ClipboardGlobal` goes |
-| `set_display_mode` | `ui_handlers.rs` → `video_set_display_mode` | None | Deleted. `SETCRTC` is its Linux form if a caller appears |
-| `roulette_draw` | No handler; the slot answers `ENOSYS` | None | Deleted |
-| `keymap_get_name` | `keymap_handlers.rs` → `keyboard::layout_name` | `userland/src/keymap.rs` `current_name` (init's `follow`, `keymap`), *`keymap_test`, `settings_test`* | Userland. Linux keeps no layout name. Init loaded the layout (`follow_keymap`) and answers its name |
-| `sigdefault` | `process_handlers.rs` → `task_default_signals_in_mask` | The shell's `traps::enter_subshell` | Userland: `rt_sigaction(SIG_DFL)` per signal with the signals blocked around the loop, as slibc's `spawn_via_fork` does |
-| `klog_write` | `core_handlers.rs` → `console_write_serialized`: COM1 under the log's lock, past the ring `/dev/kmsg` reads | `tty::write` (compositor, terminal, shell, roulette), slibc's `syslog`, *`usb_disk_test`, `usb_shell_test`* | A write to `/dev/kmsg`, one record per write, in the `<prio>text` form `syslog` already builds |
+`klog_write` is a write to `/dev/kmsg`; `keymap_get_name` is init's
+`/run/keymap`; `sigdefault` is `rt_sigaction` in a loop; the clipboard is
+the compositor's alone; `set_display_mode` and `roulette_draw` are gone.
 
 ### Phase 2: the resolver
 
@@ -166,7 +161,7 @@ Both exist only because the tests kernel starts the userland tests.
 | Call | Why Linux has no form for it |
 |------|------------------------------|
 | `spawn_path` | It hands the child a subset of the spawner's mask, a login tag, the person's quota account and an empty descriptor table before the child can run. `execve` drops every gated capability by design (`drop_authority_for_exec`), so a child that forks and executes holds none. slibc's `posix_spawn` asks for no capability and keeps `spawn_via_fork` for what the call cannot express |
-| `caps_drop`, `caps_get` | One 64-bit mask per process, 22 bits, dropped for good with no privilege. `capset` and `capget` carry three sets per thread with Linux's bit meanings; SlopOS's mask at 125 and 126 is another operation at a Linux number, and a `CapEff:` line in `status` misleads the same way |
+| `caps_drop`, `caps_get` | One 64-bit mask per process, 21 bits, dropped for good with no privilege. `capset` and `capget` carry three sets per thread with Linux's bit meanings; SlopOS's mask at 125 and 126 is another operation at a Linux number, and a `CapEff:` line in `status` misleads the same way |
 | `base_activate` | The source is an archive in memory, every base mount moves in one step, the interface is checked and a generation comes back. `mount(2)` takes one target |
 | `base_monitor` | Linux's nearest, `poll` on `/proc/mounts`, wakes for every mount and keeps no mark per reader |
 | `ext_activate`, `ext_deactivate` | A descriptor and a digest, a pinned mount replaced in one step, and the label `SO_PEEREXTENSION` answers |
@@ -196,33 +191,11 @@ None of the eighteen is handed from one process to another, which is what
 a descriptor is for. The seats are, and phases 5 and 6 make them
 descriptors.
 
-## Phase 1: calls with nothing to build
+## Phase 1: done
 
-Builds:
-
-- `/dev/kmsg` takes a write (`fs/src/devfs/mod.rs` discards one today): one
-  record per write, the `<prio>` prefix parsed, into the log's ring and the
-  console, with a rate limit per writer as Linux's `printk.devkmsg` has.
-  `ConsoleIo` is checked at each write, so a process that dropped it stays
-  silent. `tty::write` and slibc's `syslog` open the node once and keep
-  the descriptor; the terminal and the compositor open it before they can
-  need it in a panic path.
-- Init answers the layout it loaded, on `init_control` or in a file under
-  `/run` beside the session table.
-- The shell's subshell resets its signals with `default_signal` in a loop.
-- `sessions_test`'s clipboard case moves to the compositor's clipboard.
-
-Removes from the kernel: `CLIPBOARD` and its two service slots, the
-`ClipboardGlobal` bit, `video_set_display_mode` with what it alone
-reaches, `keyboard::layout_name`.
-
-Lost: a program's line now enters the ring the kernel's own lines share,
-with the log's prefix. The log gates that match `usb_disk_test`'s and
-`usb_shell_test`'s markers match the prefixed line.
-
-Checked by: `just base-interface` after `--record`; `sessions_test`,
-`keymap_test`, `settings_test`, `shell_script_test`; `just test-usb`;
-`just check-framekernel-gates` for the capability that went.
+Interface 14. Lost: a program's line enters the ring the kernel's lines
+share, ten records per process each five seconds, and the terminal no
+longer mirrors its shell into the log.
 
 ## Phase 2: the resolver in the C library
 

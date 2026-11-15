@@ -264,8 +264,7 @@ pub fn task_reset_caught_handlers<K, U>(task: &TaskInner<K, U>) {
 }
 
 /// Force every signal named in `mask` to `SIG_DFL`, overriding a caught
-/// handler or `SIG_IGN`. Backs POSIX_SPAWN_SETSIGDEF and the `sigdefault`
-/// syscall.
+/// handler or `SIG_IGN`. Backs POSIX_SPAWN_SETSIGDEF.
 #[inline]
 pub fn task_default_signals_in_mask<K, U>(task: &TaskInner<K, U>, mask: SigSet) {
     let Some(table) = task.sighand() else {

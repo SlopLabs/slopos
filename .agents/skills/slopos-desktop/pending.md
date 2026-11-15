@@ -22,3 +22,8 @@
 - `docs/architecture/desktop`, components: `TableColumn::align` places a
   heading as its cells' text is; at the end its sort arrow leads, so sorting
   never moves the label off the digits' edge.
+- `docs/architecture/sessions`, `docs/architecture/desktop`: the clipboard is
+  the compositor's alone, one per session's compositor, reached by a window
+  holding the last key serial; the kernel keeps none. The terminal no longer
+  mirrors its shell's output into the kernel log; the terminal and the
+  compositor open `/dev/kmsg` at start and log through it.

@@ -33,7 +33,8 @@ pub struct Child {
     out: OwnedFd,
     stdin: OwnedFd,
     seen: Vec<u8>,
-    reaped: bool,
+    /// Its exit status, once reaped.
+    exit: Option<i32>,
 }
 
 impl Child {
@@ -96,7 +97,7 @@ impl Child {
             out,
             stdin: stdin_end,
             seen: Vec::new(),
-            reaped: false,
+            exit: None,
         })
     }
 
@@ -139,30 +140,25 @@ impl Child {
     }
 
     pub fn running(&mut self) -> bool {
-        if self.reaped {
-            return false;
+        if self.exit.is_none() {
+            self.exit = process::wait_exit_code_nohang(self.pid);
         }
-        self.reaped = process::wait_exit_code_nohang(self.pid).is_some();
-        !self.reaped
+        self.exit.is_none()
     }
 
     /// Its exit status once it exits within `within`; `None` past it.
     pub fn exited_within(mut self, within: Duration) -> Option<i32> {
         let deadline = Instant::now() + within;
-        while Instant::now() < deadline {
-            if let Some(code) = process::wait_exit_code_nohang(self.pid) {
-                self.reaped = true;
-                return Some(code);
-            }
+        while self.running() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
         }
-        None
+        self.exit
     }
 }
 
 impl Drop for Child {
     fn drop(&mut self) {
-        if !self.reaped {
+        if self.exit.is_none() {
             let _ = process::kill(self.pid, slopos_abi::signal::SIGKILL);
             let _ = process::wait_exit_code(self.pid);
         }

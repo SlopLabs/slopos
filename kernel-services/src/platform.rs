@@ -17,12 +17,8 @@ slopos_service_core::define_service! {
         timer_restore_periodic();
 
         /// Write to the console without taking any lock. For the fault and
-        /// panic paths, which may already hold the one below.
+        /// panic paths, which may already hold the serial driver's.
         @no_wrapper console_puts(s: &[u8]);
-        /// Write to the console atomically with respect to klog. Every other
-        /// writer must use this: bypassing it byte-interleaves into concurrent
-        /// klog output, which in a test boot is the KTAP wire format.
-        @no_wrapper console_write_serialized(s: &[u8]);
 
         rng_next() -> u64;
 
@@ -42,11 +38,6 @@ slopos_service_core::define_service! {
 #[inline(always)]
 pub fn console_puts(s: &[u8]) {
     (platform_services().console_puts)(s)
-}
-
-#[inline(always)]
-pub fn console_write_serialized(s: &[u8]) {
-    (platform_services().console_write_serialized)(s)
 }
 
 #[inline(always)]

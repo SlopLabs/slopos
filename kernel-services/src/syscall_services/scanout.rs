@@ -139,14 +139,12 @@ pub enum ScanoutId {
     IntelXe,
 }
 
-/// Hardware-cursor + runtime mode-set entry points a GPU provider exposes to
-/// the compositor.
+/// Hardware-cursor entry points a GPU provider exposes to the compositor.
 #[derive(Clone, Copy)]
 pub struct GpuControlFns {
     pub available: fn() -> bool,
     pub set_image: fn(*const u8, usize, u32, u32) -> bool,
     pub move_cursor: fn(u32, u32) -> bool,
-    pub set_mode: fn(u32, u32) -> Option<FramebufferData>,
 }
 
 /// Everything the `video`-side installer needs to adopt a scanout. Passed by

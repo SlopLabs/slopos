@@ -2,7 +2,8 @@
 //! and which layout is wanted. The computer's layout, in [`PERSIST_PATH`],
 //! serves the login screen, the console and everyone who chose none; a
 //! person's own, in their preferences, serves while their desktop is in
-//! front. Init loads whichever is wanted as that changes.
+//! front. Init loads whichever is wanted as that changes, and says which in
+//! [`LOADED`].
 //!
 //! Layout files are parsed in userland into a binary `LayoutTable` and uploaded
 //! via `SYSCALL_KEYMAP_LOAD`; the kernel never parses layout text.
@@ -13,7 +14,7 @@ use std::fs;
 use slopos_keymap_core::{LayoutTable, SERIALIZED_LEN, parse, serialize};
 use slopos_settings_core::prefs::layout_name;
 
-use crate::syscall::keymap::{keymap_get_name, keymap_load};
+use crate::syscall::keymap::keymap_load;
 
 /// Where the installed `*.layout` files live.
 pub const KEYMAP_DIR: &str = "/usr/share/keymaps";
@@ -24,14 +25,33 @@ pub const PERSIST_PATH: &str = "/etc/keymap";
 /// The kernel's own layout, which no file is needed for.
 pub const BUILT_IN: &str = "us";
 
+/// The layout init last loaded this boot, uid 0's and readable by everyone.
+/// Absent while the kernel holds [`BUILT_IN`] from boot.
+pub const LOADED: &str = "/run/keymap";
+
+const LOADED_SIBLING: &str = "/run/.keymap";
+
+/// The layout in use, as init answers it; `None` when [`LOADED`] is there
+/// but no answer of init's.
 pub fn current_name() -> Option<String> {
-    let mut buf = [0u8; 16];
-    let n = keymap_get_name(&mut buf);
-    if n < 0 {
-        return None;
+    let Some(bytes) = crate::regular_file::read(LOADED, 64, Some(0)) else {
+        let absent = matches!(
+            fs::symlink_metadata(LOADED),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+        );
+        return absent.then(|| BUILT_IN.to_string());
+    };
+    let name = std::str::from_utf8(&bytes).ok()?.trim();
+    layout_name(name).then(|| name.to_string())
+}
+
+fn note_loaded(name: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let written = fs::write(LOADED_SIBLING, format!("{name}\n"))
+        .and_then(|()| fs::set_permissions(LOADED_SIBLING, fs::Permissions::from_mode(0o644)));
+    if written.is_ok() {
+        let _ = fs::rename(LOADED_SIBLING, LOADED);
     }
-    let n = (n as usize).min(buf.len());
-    core::str::from_utf8(&buf[..n]).ok().map(String::from)
 }
 
 pub fn layout_path(name: &str) -> Option<String> {
@@ -147,11 +167,14 @@ pub fn wanted(person: Option<(&str, u32)>) -> String {
         .unwrap_or_else(|| BUILT_IN.to_string())
 }
 
-/// Load the layout `person` wants, unless it is the one in use.
+/// Load the layout `person` wants, unless it is the one in use, and answer
+/// it in [`LOADED`]. Init's alone.
 pub fn follow(person: Option<(&str, u32)>) -> Result<(), &'static str> {
     let wanted = wanted(person);
     if current_name().as_deref() == Some(wanted.as_str()) {
         return Ok(());
     }
-    load_layout_by_name(&wanted)
+    load_layout_by_name(&wanted)?;
+    note_loaded(&wanted);
+    Ok(())
 }

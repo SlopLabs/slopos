@@ -6,7 +6,6 @@ pub mod layout;
 pub const MAX_INPUT_TASKS: usize = 32;
 
 pub const MAX_EVENTS_PER_TASK: usize = 64;
-pub const CLIPBOARD_MAX_SIZE: usize = 4096;
 
 /// Keyboard modifier bitfield, snapshotted into every key event.
 /// Follows the Wayland `wlr_keyboard_modifier` convention.

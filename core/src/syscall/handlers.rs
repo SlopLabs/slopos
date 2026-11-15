@@ -9,7 +9,7 @@ pub use crate::syscall::core_handlers::{
     syscall_block_stats, syscall_caps_drop, syscall_caps_get, syscall_clock_gettime,
     syscall_clock_settime, syscall_cpu_info, syscall_cpu_perf, syscall_cpu_perf_ctl,
     syscall_display_stats, syscall_efivar_get, syscall_efivar_set, syscall_exit,
-    syscall_exit_group, syscall_kconsole, syscall_klog_write, syscall_login_tag, syscall_nanosleep,
+    syscall_exit_group, syscall_kconsole, syscall_login_tag, syscall_nanosleep,
     syscall_percpu_stats, syscall_process_list, syscall_process_memory, syscall_prof_ctl,
     syscall_reboot, syscall_sched_yield, syscall_sys_info, syscall_sysinfo, syscall_uname,
 };
@@ -34,7 +34,7 @@ use crate::syscall::fs::{
     syscall_symlinkat, syscall_sync, syscall_truncate, syscall_umount2, syscall_unlink,
     syscall_unlinkat, syscall_utimensat, syscall_write, syscall_writev,
 };
-use crate::syscall::keymap_handlers::{syscall_keymap_get_name, syscall_keymap_load};
+use crate::syscall::keymap_handlers::syscall_keymap_load;
 pub use crate::syscall::memory_handlers::{
     syscall_brk, syscall_ftruncate, syscall_memfd_create, syscall_mmap, syscall_mprotect,
     syscall_msync, syscall_munmap,
@@ -56,8 +56,8 @@ pub use crate::syscall::process_handlers::{
     syscall_arch_prctl, syscall_chdir, syscall_clone, syscall_execve, syscall_fchdir, syscall_fork,
     syscall_futex, syscall_getcpu, syscall_getcwd, syscall_getpgid, syscall_getpid,
     syscall_getppid, syscall_getsid, syscall_gettid, syscall_prlimit64, syscall_sched_getaffinity,
-    syscall_sched_setaffinity, syscall_setpgid, syscall_setsid, syscall_sigdefault,
-    syscall_spawn_path, syscall_umask, syscall_vhangup, syscall_wait4,
+    syscall_sched_setaffinity, syscall_setpgid, syscall_setsid, syscall_spawn_path, syscall_umask,
+    syscall_vhangup, syscall_wait4,
 };
 pub use crate::syscall::ring_handlers::{
     syscall_ring_enter, syscall_ring_register, syscall_ring_setup,
@@ -72,10 +72,9 @@ pub use crate::syscall::test_handlers::{
     syscall_run_userland_tests, syscall_test_key, syscall_test_panic, syscall_test_report,
 };
 pub use crate::syscall::ui_handlers::{
-    syscall_clipboard_copy, syscall_clipboard_paste, syscall_cursor_move, syscall_cursor_set_image,
-    syscall_fb_flip, syscall_fb_info, syscall_getrandom, syscall_input_poll_batch,
-    syscall_input_sink_acquire, syscall_roulette_result, syscall_roulette_spin,
-    syscall_screen_acquire, syscall_seat_switch, syscall_set_display_mode,
+    syscall_cursor_move, syscall_cursor_set_image, syscall_fb_flip, syscall_fb_info,
+    syscall_getrandom, syscall_input_poll_batch, syscall_input_sink_acquire,
+    syscall_roulette_result, syscall_roulette_spin, syscall_screen_acquire, syscall_seat_switch,
 };
 
 /// Build a dispatch table; unregistered slots stay `Unimplemented`.
@@ -264,13 +263,11 @@ static SYSCALL_PRIVATE_TABLE: [SyscallEntry; SYSCALL_PRIVATE_TABLE_SIZE] = sysca
     size: SYSCALL_PRIVATE_TABLE_SIZE;
     base: SYSCALL_PRIVATE_BASE;
 
-    [SYSCALL_KLOG_WRITE]         => syscall_klog_write,         "klog_write";
     [SYSCALL_SYS_INFO]           => syscall_sys_info,           "sys_info";
     [SYSCALL_PROCESS_LIST]       => syscall_process_list,       "process_list";
     [SYSCALL_CPU_INFO]           => syscall_cpu_info,           "cpu_info";
     [SYSCALL_PERCPU_STATS]       => syscall_percpu_stats,       "percpu_stats";
     [SYSCALL_SPAWN_PATH]         => syscall_spawn_path,         "spawn_path";
-    [SYSCALL_SIGDEFAULT]         => syscall_sigdefault,         "sigdefault";
     [SYSCALL_RESOLVE]            => syscall_resolve,            "resolve";
     [SYSCALL_NET_QUERY]          => syscall_net_query,          "net_query";
     [SYSCALL_NET_IFACE_CTL]      => syscall_net_iface_ctl,      "net_iface_ctl";
@@ -282,15 +279,11 @@ static SYSCALL_PRIVATE_TABLE: [SyscallEntry; SYSCALL_PRIVATE_TABLE_SIZE] = sysca
     [SYSCALL_FB_FLIP]            => syscall_fb_flip,            "fb_flip";
     [SYSCALL_CURSOR_SET_IMAGE]   => syscall_cursor_set_image,   "cursor_set_image";
     [SYSCALL_CURSOR_MOVE]        => syscall_cursor_move,        "cursor_move";
-    [SYSCALL_SET_DISPLAY_MODE]   => syscall_set_display_mode,   "set_display_mode";
     [SYSCALL_SCREEN_ACQUIRE]     => syscall_screen_acquire,     "screen_acquire";
     [SYSCALL_INPUT_SINK_ACQUIRE] => syscall_input_sink_acquire, "input_sink_acquire";
     [SYSCALL_INPUT_POLL_BATCH]   => syscall_input_poll_batch,   "input_poll_batch";
-    [SYSCALL_CLIPBOARD_COPY]     => syscall_clipboard_copy,     "clipboard_copy";
-    [SYSCALL_CLIPBOARD_PASTE]    => syscall_clipboard_paste,    "clipboard_paste";
     [SYSCALL_FONT_SET]           => syscall_font_set,           "font_set";
     [SYSCALL_KEYMAP_LOAD]        => syscall_keymap_load,        "keymap_load";
-    [SYSCALL_KEYMAP_GET_NAME]    => syscall_keymap_get_name,    "keymap_get_name";
     [SYSCALL_RING_SETUP]         => syscall_ring_setup,         "ring_setup";
     [SYSCALL_RING_ENTER]         => syscall_ring_enter,         "ring_enter";
     [SYSCALL_RING_REGISTER]      => syscall_ring_register,      "ring_register";
@@ -370,7 +363,7 @@ const fn count_of(cap: Capability) -> usize {
 }
 
 /// Registered entry points across both tables.
-pub const SYSCALL_ENTRY_COUNT: usize = 199;
+pub const SYSCALL_ENTRY_COUNT: usize = 193;
 
 /// The recorded shape of the classification.
 ///
@@ -380,8 +373,8 @@ pub const SYSCALL_ENTRY_COUNT: usize = 199;
 /// construction and the assert below holds it there.
 const CAP_COUNTS: [(Capability, usize); Capability::ALL.len()] = [
     (Capability::Unimplemented, 0),
-    (Capability::NoneSelf, 76),
-    (Capability::NoneFd, 80),
+    (Capability::NoneSelf, 74),
+    (Capability::NoneFd, 79),
     (Capability::NoneRelation, 13),
     (Capability::Power, 4),
     (Capability::ProcSignal, 0),
@@ -389,8 +382,7 @@ const CAP_COUNTS: [(Capability, usize); Capability::ALL.len()] = [
     (Capability::DisplaySeat, 1),
     (Capability::InputSeat, 1),
     (Capability::ConsoleConfig, 3),
-    (Capability::ConsoleIo, 1),
-    (Capability::ClipboardGlobal, 2),
+    (Capability::ConsoleIo, 0),
     (Capability::Fate, 2),
     (Capability::TestHarness, 3),
     (Capability::Mount, 2),

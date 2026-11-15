@@ -1,11 +1,16 @@
-//! `<syslog.h>` over the kernel log: one `klog_write` per message, laid out
+//! `<syslog.h>` over the kernel log: `/dev/kmsg`, opened once and kept until
+//! `closelog`, takes one write per message, laid out
 //! `<priority>ident[pid]: message` as RFC 3164 has it.
 
 use core::ffi::{VaList, c_char, c_int};
 use core::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
+use slopos_abi::fs::{KMSG_PATH, KMSG_RECORD_MAX};
+
 use crate::errno::errno_get;
+use crate::ffi::{O_CLOEXEC, O_WRONLY};
 use crate::pal::{Pal, Sys};
+use crate::stdio::lock::StreamLock;
 use crate::stdio::printf::vsnprintf_impl;
 
 pub const LOG_EMERG: c_int = 0;
@@ -47,12 +52,48 @@ pub const LOG_PERROR: c_int = 0x20;
 
 const PRIORITY_MASK: c_int = 0x07;
 const FACILITY_MASK: c_int = 0x03f8;
-const LINE_MAX: usize = 1024;
+/// A record and `vsnprintf`'s NUL: no message outgrows what one write to the
+/// log takes.
+const LINE_MAX: usize = KMSG_RECORD_MAX + 1;
+
+const KMSG_PATH_C: [u8; KMSG_PATH.len() + 1] = {
+    let path = KMSG_PATH.as_bytes();
+    let mut out = [0u8; KMSG_PATH.len() + 1];
+    let mut i = 0;
+    while i < path.len() {
+        out[i] = path[i];
+        i += 1;
+    }
+    out
+};
 
 static IDENT: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 static OPTIONS: AtomicI32 = AtomicI32::new(0);
 static FACILITY: AtomicI32 = AtomicI32::new(LOG_USER);
 static MASK: AtomicI32 = AtomicI32::new(0xff);
+
+/// The log's descriptor, `-1` while it is closed. Read and written only under
+/// [`LOG_LOCK`], so `closelog` never frees a number a message is writing to.
+static LOG_FD: AtomicI32 = AtomicI32::new(-1);
+static LOG_LOCK: LogLock = LogLock(StreamLock::new());
+
+struct LogLock(StreamLock);
+
+// SAFETY: a `StreamLock` is a futex word and atomics, shared by design; it is
+// the lock every thread of a `FILE` takes.
+unsafe impl Sync for LogLock {}
+
+/// The log's descriptor, opened now if it is not open. The caller holds
+/// [`LOG_LOCK`].
+fn log_fd() -> Option<c_int> {
+    let fd = LOG_FD.load(Ordering::Relaxed);
+    if fd >= 0 {
+        return Some(fd);
+    }
+    let fd = Sys::open(KMSG_PATH_C.as_ptr(), O_WRONLY | O_CLOEXEC, 0).ok()?;
+    LOG_FD.store(fd, Ordering::Relaxed);
+    Some(fd)
+}
 
 /// # Safety
 /// `ident` is null or a NUL-terminated string that stays valid.
@@ -63,16 +104,28 @@ pub unsafe extern "C" fn openlog(ident: *const c_char, option: c_int, facility: 
     if facility & !FACILITY_MASK == 0 && facility != 0 {
         FACILITY.store(facility, Ordering::Relaxed);
     }
+    if option & LOG_NDELAY != 0 {
+        LOG_LOCK.0.lock();
+        let _ = log_fd();
+        LOG_LOCK.0.unlock();
+    }
 }
 
 /// # Safety
 ///
-/// None: it only resets library state; it is `unsafe` only as a C ABI export.
+/// None: it resets library state and closes the log's descriptor; it is
+/// `unsafe` only as a C ABI export.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn closelog() {
     IDENT.store(core::ptr::null_mut(), Ordering::Relaxed);
     OPTIONS.store(0, Ordering::Relaxed);
     FACILITY.store(LOG_USER, Ordering::Relaxed);
+    LOG_LOCK.0.lock();
+    let fd = LOG_FD.swap(-1, Ordering::Relaxed);
+    if fd >= 0 {
+        let _ = Sys::close(fd);
+    }
+    LOG_LOCK.0.unlock();
 }
 
 #[unsafe(no_mangle)]
@@ -208,7 +261,9 @@ unsafe fn log(priority: c_int, format: *const u8, ap: &mut VaList<'_>) {
         line.push(b"\n");
     }
 
-    let logged = Sys::klog_write(&line.buf[..line.len]).is_ok();
+    LOG_LOCK.0.lock();
+    let logged = log_fd().is_some_and(|fd| Sys::write(fd, line.buf.as_ptr(), line.len).is_ok());
+    LOG_LOCK.0.unlock();
     if !logged && options & LOG_CONS != 0 {
         if let Ok(fd) = Sys::open(b"/dev/console\0".as_ptr(), crate::ffi::O_WRONLY, 0) {
             let _ = Sys::write(fd, line.buf[body..].as_ptr(), line.len - body);

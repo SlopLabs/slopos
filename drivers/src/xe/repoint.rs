@@ -240,7 +240,6 @@ pub fn run(
             available: cursor::available,
             set_image: cursor::set_image,
             move_cursor: cursor::move_cursor,
-            set_mode: xe_set_mode,
         })
     } else {
         klog_warn!("XE-CURSOR: cursor surface alloc failed; software cursor in use");
@@ -353,12 +352,6 @@ fn setup_present(
         scan1_ggtt as u32,
     );
     Some(scan0_ggtt as u32)
-}
-
-/// Runtime mode-set entry point exposed through [`GpuControlFns`]. The firmware
-/// modeset is inherited and fixed, so every request declines.
-fn xe_set_mode(_width: u32, _height: u32) -> Option<FramebufferData> {
-    None
 }
 
 /// Present hook for the single-buffer fallback path: the compositor draws

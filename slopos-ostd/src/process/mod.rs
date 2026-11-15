@@ -136,6 +136,9 @@ pub struct Process {
     /// spawner holding `SetId` before the process runs.
     login: AtomicU32,
 
+    /// Paces this process's records written to `/dev/kmsg`.
+    kmsg_limit: crate::klog::RateLimit,
+
     /// This process's own existence, charged to its **spawner**.
     ///
     /// Released at the reap rather than at the final `Drop`, because the
@@ -177,6 +180,7 @@ impl Process {
             write_field!(slot, program, AtomicU64::new(Program::Other.to_raw()));
             write_field!(slot, instance, AtomicU64::new(0));
             write_field!(slot, login, AtomicU32::new(0));
+            write_field!(slot, kmsg_limit, crate::klog::RateLimit::new());
             write_field!(slot, proc_charge, charge);
             Ok::<_, AllocError>(slot.finish())
         })
@@ -226,6 +230,12 @@ impl Process {
     #[inline]
     pub fn parent(&self) -> Option<Handle<Process>> {
         unpack_process_handle(self.parent.load(Ordering::Acquire))
+    }
+
+    /// The limiter `/dev/kmsg` paces this process's records with.
+    #[inline]
+    pub fn kmsg_limit(&self) -> &crate::klog::RateLimit {
+        &self.kmsg_limit
     }
 
     /// Re-home the wait edge. The accounting edge is untouched, by design.

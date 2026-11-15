@@ -319,8 +319,8 @@ pub fn test_io_syscall_lookup_valid() -> TestResult {
 
 /// The two ranges are two tables, and a private call is reachable only at its
 /// private number. Indexing one table with the other's offset is the mistake
-/// this catches: `SYSCALL_SYS_INFO` is `SYSCALL_PRIVATE_BASE + 2`, and 2 in
-/// Linux's space is `open`, which must not answer `sys_info`.
+/// this catches: `SYSCALL_SYS_INFO` is `SYSCALL_PRIVATE_BASE + 0`, and 0 in
+/// Linux's space is `read`, which must not answer `sys_info`.
 pub fn test_private_range_does_not_alias_linux() -> TestResult {
     let Some(private_entry) = syscall_lookup(SYSCALL_SYS_INFO) else {
         klog_info!("sys_info is not registered in the private range");

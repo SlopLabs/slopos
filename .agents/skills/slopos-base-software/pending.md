@@ -30,3 +30,13 @@
   `--record` steps become `just base-interface --record` / `just libc-exports
   --record`, and which gains the step that registering a Linux call in
   `SYSCALL_TABLE` takes the next `BASE_INTERFACE`.
+- `docs/abi/syscalls`, `docs/abi/interfaces`, `docs/architecture/syscalls`:
+  interface 14 removes seven private calls and renumbers the rest densely
+  from `SYSCALL_PRIVATE_BASE` (`sys_info` is 0, `display_stats` 46; 47 in
+  all): `klog_write` (a write to `/dev/kmsg`), `sigdefault` (`rt_sigaction`
+  per signal, the set blocked around the loop), `keymap_get_name` (init's
+  `/run/keymap`), `clipboard_copy`/`clipboard_paste` (the compositor's
+  clipboard alone), `set_display_mode` and `roulette_draw`. `/dev/kmsg`'s
+  write is in the surface as `slopos_abi::fs::KMSG_*` (path, the 1024-byte
+  record bound, 10 records per process each 5000 ms); `CLIPBOARD_MAX_SIZE`
+  and the `SESSION_LOGINS` root are gone. slibc's `syslog` writes the node.

@@ -34,7 +34,6 @@ static PLATFORM_SERVICES: PlatformServices = PlatformServices {
             serial::serial_putc_com1(c);
         }
     },
-    console_write_serialized: serial::serial_locked_write_bytes,
     rng_next: || random::random_next(),
     is_rsdp_available: limine_protocol::is_rsdp_available,
     get_rsdp_address: get_rsdp_address_fn,

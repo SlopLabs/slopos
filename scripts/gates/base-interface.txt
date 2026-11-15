@@ -21,15 +21,13 @@ root slopos_abi::caps::*
 # fb_flip clamps to the region bound and skips the rects DamageRect::is_valid
 # refuses.
 root slopos_abi::damage::*
-# clipboard_copy / clipboard_paste truncate at it.
-root slopos_abi::input::CLIPBOARD_MAX_SIZE
 # input_poll_batch's records and the packing their accessors define.
 root slopos_abi::input::InputEvent*
 root slopos_abi::input::KEY_FLAG_*
 root slopos_abi::input::MODIFIER_*
 root slopos_abi::input::POINTER_AXIS_*
 root slopos_abi::input::keycode::*
-# keymap_load's blob; keymap_get_name's LAYOUT_NAME_LEN.
+# keymap_load's blob.
 root slopos_abi::input::layout::*
 # net_query's selectors, records and flags; the ctl ops; net_monitor's events.
 root slopos_abi::net::IFF_*
@@ -55,6 +53,8 @@ root slopos_abi::fs::ACCOUNTS_STORE
 # and an extension's activation, which init and privd tell from a directory.
 root slopos_abi::fs::BASEFS_MAGIC
 root slopos_abi::fs::EXTENSION_MAGIC
+# A write to /dev/kmsg: the node, a record's bound, the rate limit.
+root slopos_abi::fs::KMSG_*
 # efivar_get / efivar_set.
 root slopos_abi::syscall::numbers::EFIVAR_DATA_MAX
 # The SlopOS-only socket options on Linux's getsockopt.
@@ -84,8 +84,6 @@ root slopos_abi::task::MAX_TASKS
 root slopos_abi::task::INVALID_PROCESS_ID
 # screen_acquire / input_sink_acquire's seat ranks.
 root slopos_abi::window::SEAT_*
-# The login tags clipboard_copy and clipboard_paste keep a clipboard for.
-root slopos_abi::task::SESSION_LOGINS
 
 # Ledger. Appended by --record only.
 interface 1 17d78169ae6cdcc6acf1b503af88072e94c186cc9f01f774384070f83137cd63
@@ -101,3 +99,4 @@ interface 10 b080ae677942152163ca6d5c2cb74bc2b92383489c10528d21e4a9207090865a
 interface 11 f657b7ccd820e252a47954fe434f375957ffb52adb153f2bcdb64da684369803
 interface 12 6e24dbac1b584a2a56930c0a37da392544ce594af3744e1a5e4ef79353678010
 interface 13 d1cef7c29028038296011a5951051aced415f16b0d190e9fcb85ca3b7cd02928
+interface 14 cc90e386fdc5bb8868f48da3f23da71814dc357c7f9d8a86f9df5617b6e5821a

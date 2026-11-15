@@ -78,9 +78,9 @@ verus! {
 /// the kernel's.
 pub type Caps = u64;
 
-/// `CAP_UNIVERSAL`: `ConsoleIo | ClipboardGlobal | Fate`, bits 6 to 8.
+/// `CAP_UNIVERSAL`: `ConsoleIo | Fate`, bits 6 and 7.
 pub open spec fn universal() -> Caps {
-    0x1C0
+    0xC0
 }
 
 /// Bit 0 in `slopos_ostd::authority::Capability::Power`, a gated capability
@@ -89,9 +89,9 @@ pub open spec fn power_bit() -> Caps {
     1
 }
 
-/// Bit 8 in `slopos_ostd::authority::Capability::Fate`, a universal one.
+/// Bit 7 in `slopos_ostd::authority::Capability::Fate`, a universal one.
 pub open spec fn fate_bit() -> Caps {
-    0x100
+    0x80
 }
 
 /// One task's authority state: `Task::caps`, the effective mask.
@@ -150,7 +150,7 @@ pub proof fn no_step_widens(s: Auth, e: Step, b: Caps)
             assert(((c & mask) & b) != 0 ==> (c & b) != 0) by (bit_vector);
         },
         Step::Exec => {
-            assert(((c & 0x1C0u64) & b) != 0 ==> (c & b) != 0) by (bit_vector);
+            assert(((c & 0xC0u64) & b) != 0 ==> (c & b) != 0) by (bit_vector);
         },
     }
 }
@@ -167,7 +167,7 @@ pub proof fn exec_keeps_nothing_gated(s: Auth, b: Caps)
         (step(s, Step::Exec).caps & b) == 0,
 {
     let c = s.caps;
-    assert((b & 0x1C0u64) == 0 ==> ((c & 0x1C0u64) & b) == 0) by (bit_vector);
+    assert((b & 0xC0u64) == 0 ==> ((c & 0xC0u64) & b) == 0) by (bit_vector);
 }
 
 /// A universal capability the task held survives its exec.
@@ -179,7 +179,7 @@ pub proof fn exec_keeps_the_universal_set_it_held(s: Auth, b: Caps)
         (step(s, Step::Exec).caps & b) == b,
 {
     let c = s.caps;
-    assert((b & !0x1C0u64) == 0 && (c & b) == b ==> ((c & 0x1C0u64) & b) == b) by (bit_vector);
+    assert((b & !0xC0u64) == 0 && (c & b) == b ==> ((c & 0xC0u64) & b) == b) by (bit_vector);
 }
 
 /// Nothing a task lacks comes back at its exec: a dropped universal
@@ -191,7 +191,7 @@ pub proof fn exec_cannot_raise(s: Auth, b: Caps)
         (step(s, Step::Exec).caps & b) == 0,
 {
     let c = s.caps;
-    assert((c & b) == 0 ==> ((c & 0x1C0u64) & b) == 0) by (bit_vector);
+    assert((c & b) == 0 ==> ((c & 0xC0u64) & b) == 0) by (bit_vector);
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +218,7 @@ pub proof fn spawn_is_within_the_spawner(parent: Auth, ask: Caps, b: Caps)
         (parent.caps & b) != 0,
 {
     let c = parent.caps;
-    assert((ask & !c) == 0 && (((c & 0x1C0u64) | ask) & b) != 0 ==> (c & b) != 0) by (bit_vector);
+    assert((ask & !c) == 0 && (((c & 0xC0u64) | ask) & b) != 0 ==> (c & b) != 0) by (bit_vector);
 }
 
 /// A child holds nothing gated that its spawner did not hand it.
@@ -230,7 +230,7 @@ pub proof fn spawn_hands_only_what_it_asks(parent: Auth, ask: Caps, b: Caps)
         (endow(parent, ask) & b) == 0,
 {
     let c = parent.caps;
-    assert((b & 0x1C0u64) == 0 && (ask & b) == 0 ==> (((c & 0x1C0u64) | ask) & b) == 0)
+    assert((b & 0xC0u64) == 0 && (ask & b) == 0 ==> (((c & 0xC0u64) | ask) & b) == 0)
         by (bit_vector);
 }
 
@@ -243,7 +243,7 @@ pub proof fn spawn_carries_the_ask(parent: Auth, ask: Caps)
         endow(parent, ask) & ask == ask,
 {
     let c = parent.caps;
-    assert(((c & 0x1C0u64) | ask) & ask == ask) by (bit_vector);
+    assert(((c & 0xC0u64) | ask) & ask == ask) by (bit_vector);
 }
 
 // ---------------------------------------------------------------------------
@@ -367,7 +367,7 @@ pub proof fn broken_exec_keeps_caps_inherits()
             (b & universal()) == 0 && (broken_exec_keeps_caps(s) & b) != 0,
 {
     let privileged = Auth { caps: power_bit() };
-    assert(1u64 & 0x1C0u64 == 0) by (bit_vector);
+    assert(1u64 & 0xC0u64 == 0) by (bit_vector);
     assert(1u64 & 1u64 != 0) by (bit_vector);
     assert(exists|s: Auth, b: Caps|
         #![trigger broken_exec_keeps_caps(s) & b]
@@ -390,9 +390,9 @@ pub proof fn broken_exec_clears_loses_fate()
             (b & !universal()) == 0 && (s.caps & b) == b && (broken_exec_clears(s) & b) != b,
 {
     let ordinary = Auth { caps: universal() };
-    assert(0x100u64 & !0x1C0u64 == 0) by (bit_vector);
-    assert(0x1C0u64 & 0x100u64 == 0x100u64) by (bit_vector);
-    assert(0u64 & 0x100u64 != 0x100u64) by (bit_vector);
+    assert(0x80u64 & !0xC0u64 == 0) by (bit_vector);
+    assert(0xC0u64 & 0x80u64 == 0x80u64) by (bit_vector);
+    assert(0u64 & 0x80u64 != 0x80u64) by (bit_vector);
     assert(exists|s: Auth, b: Caps|
         #![trigger broken_exec_clears(s) & b]
         (b & !universal()) == 0 && (s.caps & b) == b && (broken_exec_clears(s) & b) != b) by {
@@ -414,9 +414,9 @@ pub proof fn broken_exec_hands_universal_restores()
             #![trigger broken_exec_hands_universal(s) & b]
             (s.caps & b) == 0 && (broken_exec_hands_universal(s) & b) != 0,
 {
-    let dropped_fate = Auth { caps: 0xC0 };
-    assert(0xC0u64 & 0x100u64 == 0) by (bit_vector);
-    assert(0x1C0u64 & 0x100u64 != 0) by (bit_vector);
+    let dropped_fate = Auth { caps: 0x40 };
+    assert(0x40u64 & 0x80u64 == 0) by (bit_vector);
+    assert(0xC0u64 & 0x80u64 != 0) by (bit_vector);
     assert(exists|s: Auth, b: Caps|
         #![trigger broken_exec_hands_universal(s) & b]
         (s.caps & b) == 0 && (broken_exec_hands_universal(s) & b) != 0) by {
@@ -435,9 +435,9 @@ pub proof fn broken_endowment_unchecked_raises()
             (p.caps & b) == 0 && (endow(p, ask) & b) != 0,
 {
     let ordinary = Auth { caps: universal() };
-    assert(endow(ordinary, power_bit()) == (0x1C0u64 & 0x1C0u64) | 1u64);
-    assert(((0x1C0u64 & 0x1C0u64) | 1u64) & 1u64 != 0) by (bit_vector);
-    assert(0x1C0u64 & 1u64 == 0) by (bit_vector);
+    assert(endow(ordinary, power_bit()) == (0xC0u64 & 0xC0u64) | 1u64);
+    assert(((0xC0u64 & 0xC0u64) | 1u64) & 1u64 != 0) by (bit_vector);
+    assert(0xC0u64 & 1u64 == 0) by (bit_vector);
     assert(exists|p: Auth, ask: Caps, b: Caps|
         #![trigger endow(p, ask) & b]
         (p.caps & b) == 0 && (endow(p, ask) & b) != 0);
@@ -457,16 +457,16 @@ pub proof fn broken_spawn_hands_universal_restores()
             endow_permitted(p, ask) && (p.caps & b) == 0 && (broken_spawn_hands_universal(p, ask)
                 & b) != 0,
 {
-    let dropped_fate = Auth { caps: 0xC0 };
-    assert(0u64 & !0xC0u64 == 0) by (bit_vector);
+    let dropped_fate = Auth { caps: 0x40 };
+    assert(0u64 & !0x40u64 == 0) by (bit_vector);
     assert(endow_permitted(dropped_fate, 0));
-    assert(0xC0u64 & 0x100u64 == 0) by (bit_vector);
-    assert((0x1C0u64 | 0u64) & 0x100u64 != 0) by (bit_vector);
+    assert(0x40u64 & 0x80u64 == 0) by (bit_vector);
+    assert((0xC0u64 | 0u64) & 0x80u64 != 0) by (bit_vector);
     assert(exists|p: Auth, ask: Caps, b: Caps|
         #![trigger broken_spawn_hands_universal(p, ask) & b]
         endow_permitted(p, ask) && (p.caps & b) == 0 && (broken_spawn_hands_universal(p, ask) & b)
             != 0) by {
-        assert(broken_spawn_hands_universal(dropped_fate, 0) == 0x1C0u64 | 0u64);
+        assert(broken_spawn_hands_universal(dropped_fate, 0) == 0xC0u64 | 0u64);
     }
 }
 
@@ -486,7 +486,7 @@ pub proof fn broken_spawn_inherits_passes_power_on()
             (b & universal()) == 0 && (ask & b) == 0 && (broken_spawn_inherits(p, ask) & b) != 0,
 {
     let holder = Auth { caps: power_bit() };
-    assert(1u64 & 0x1C0u64 == 0) by (bit_vector);
+    assert(1u64 & 0xC0u64 == 0) by (bit_vector);
     assert(0u64 & 1u64 == 0) by (bit_vector);
     assert((1u64 | 0u64) & 1u64 != 0) by (bit_vector);
     assert(exists|p: Auth, ask: Caps, b: Caps|
@@ -516,15 +516,15 @@ pub proof fn broken_spawn_raises_a_grant_escalates()
             ) & b) != 0,
 {
     let ordinary = Auth { caps: universal() };
-    assert(0u64 & !0x1C0u64 == 0) by (bit_vector);
+    assert(0u64 & !0xC0u64 == 0) by (bit_vector);
     assert(endow_permitted(ordinary, 0));
-    assert(0x1C0u64 & 1u64 == 0) by (bit_vector);
-    assert((((0x1C0u64 & 0x1C0u64) | 0u64) | 1u64) & 1u64 != 0) by (bit_vector);
+    assert(0xC0u64 & 1u64 == 0) by (bit_vector);
+    assert((((0xC0u64 & 0xC0u64) | 0u64) | 1u64) & 1u64 != 0) by (bit_vector);
     assert(exists|p: Auth, ask: Caps, grant: Caps, b: Caps|
         #![trigger broken_spawn_raises_a_grant(p, ask, grant) & b]
         endow_permitted(p, ask) && (p.caps & b) == 0 && (broken_spawn_raises_a_grant(p, ask, grant)
             & b) != 0) by {
-        assert(broken_spawn_raises_a_grant(ordinary, 0, power_bit()) == ((0x1C0u64 & 0x1C0u64)
+        assert(broken_spawn_raises_a_grant(ordinary, 0, power_bit()) == ((0xC0u64 & 0xC0u64)
             | 0u64) | 1u64);
     }
 }

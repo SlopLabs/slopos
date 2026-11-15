@@ -9,9 +9,5 @@ slopos_service_core::define_service! {
         /// Install a serialised `LayoutTable` blob at `data_ptr`/`len` (read
         /// from the calling task's user memory). Returns `EINVAL` if malformed.
         load(data_ptr: u64, len: usize) -> Result<(), Errno>;
-        /// Write the active layout's short name into the kernel buffer `out`
-        /// (the syscall handler does the SMAP-safe copy out); returns the
-        /// number of bytes written.
-        current_name(out: &mut [u8]) -> usize;
     }
 }

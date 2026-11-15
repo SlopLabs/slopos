@@ -2113,6 +2113,11 @@ pub fn current_task_account() -> slopos_ostd::process::AccountId {
         .unwrap_or(AccountId::NONE)
 }
 
+/// The running task's process; `None` for a kernel thread or no task.
+pub fn current_task_process() -> Option<slopos_ostd::KArc<slopos_ostd::process::Process>> {
+    Current::get().and_then(|c| c.task().process())
+}
+
 pub fn current_task_controlling_tty() -> Option<slopos_abi::syscall::TtyIndex> {
     Current::get().and_then(|c| c.task().controlling_tty())
 }

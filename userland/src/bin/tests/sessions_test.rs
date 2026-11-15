@@ -1,7 +1,8 @@
 //! The sessions init keeps, driven as people at the machine drive them: the
 //! boot logs its one person straight into their desktop; a second person
-//! logs in at the login screen; the screen, the keyboard and the clipboard
-//! follow the desktop in front; a request from a session behind is refused
+//! logs in at the login screen; the screen and the keyboard follow the
+//! desktop in front, and only a window there that took a key reaches its
+//! compositor's clipboard; a request from a session behind is refused
 //! unasked; a locked desktop refuses a wrong password; a console login gets
 //! a shell of its own, whose requests are asked at its terminal; and one
 //! person's fork bomb leaves the other's session running.
@@ -20,16 +21,19 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use slopos_abi::fs::{GREETER_UID, SESSION_UID};
-use slopos_abi::input::keycode::{KEY_DELETE, KEY_ENTER, KEY_LEFTALT, KEY_LEFTCTRL, KEY_TAB};
+use slopos_abi::input::keycode::{
+    KEY_A, KEY_DELETE, KEY_ENTER, KEY_LEFTALT, KEY_LEFTCTRL, KEY_TAB,
+};
 use slopos_abi::syscall::{O_CLOEXEC, POLLIN, UserPollFd};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_priv_core::ENV_FD;
 use slopos_priv_core::consent;
+use slopos_protocol::{Client, Event, ProtocolError, SurfaceId};
 use slopos_userland::init_control::{self, Command as Init};
 use slopos_userland::sessions::{self as listed, Class};
 use slopos_userland::syscall::core::test_key;
 use slopos_userland::syscall::process::{self, Endowment};
-use slopos_userland::syscall::{OwnedFd, fs, input, net};
+use slopos_userland::syscall::{OwnedFd, ShmBuffer, fs, net};
 
 use asking::Asker;
 use sessions::{SESSION_DEADLINE, entry, in_front, until};
@@ -37,10 +41,24 @@ use sessions::{SESSION_DEADLINE, entry, in_front, until};
 const SELF: &str = "/bin/sessions_test";
 const CAROL: &str = "carol";
 const CAROL_PASSWORD: &str = "carol-pw";
-/// `argv[1]` of a child that copies `argv[2]` to its session's clipboard.
+/// `argv[1]` of a child that maps a window on its session's compositor,
+/// says `shown` once it is on screen, `keyed` once a key reached it, then,
+/// when no key has come for [`KEYS_SETTLE`], copies `argv[2]`, pastes it
+/// back and says what it pasted.
 const COPY: &str = "--copy";
-/// `argv[1]` of a child that prints its session's clipboard.
-const PASTE: &str = "--paste";
+/// `argv[1]` of a child that maps a window on its session's compositor,
+/// says `mapped`, counts the keys that reach it until told on standard
+/// input, then asks to paste and says what came: [`UNFOCUSED_SAYS`] when
+/// nothing did.
+const UNFOCUSED: &str = "--unfocused";
+const UNFOCUSED_SAYS: &str = "keys 0, selection 0";
+/// `argv[1]` of a child that exits 0 at once.
+const RUNS: &str = "--runs";
+/// How long a clipboard child may take over each step it says.
+const CLIPBOARD_DEADLINE: Duration = Duration::from_secs(30);
+/// How long the copying child waits for keys to stop: one typed after the
+/// last it saw moves the serial a copy must present.
+const KEYS_SETTLE: Duration = Duration::from_secs(1);
 /// `argv[1]` of a child that forks lingering copies of itself until it is
 /// refused, then copies that exit unreaped until it is refused again, says
 /// how many of each it made, and lingers.
@@ -263,7 +281,11 @@ fn a_second_person_logs_in_at_the_login_screen() -> bool {
     true
 }
 
+/// A window of the desktop in front that took a key copies and pastes back
+/// through its compositor; one of the desktop behind takes no key and is
+/// answered an empty selection, though the one in front has just copied.
 fn each_session_has_its_own_clipboard() -> bool {
+    const CAROLS: &str = "carol's";
     let (Some(carol), Some(theirs), Some(first)) = (
         carol(),
         carol().and_then(desktop_of),
@@ -271,20 +293,47 @@ fn each_session_has_its_own_clipboard() -> bool {
     ) else {
         return false;
     };
-    let copied = [
-        run_self(SESSION_UID, first, &[COPY, "the first person's"]),
-        run_self(carol, theirs, &[COPY, "carol's"]),
+    let start = |uid, login, args: &[&str]| asking::Child::start(SELF, uid, Some(login), "/", args);
+    let (Some(mut behind), Some(mut front)) = (
+        start(SESSION_UID, first, &[UNFOCUSED]),
+        start(carol, theirs, &[COPY, CAROLS]),
+    ) else {
+        note("a clipboard child did not start");
+        return false;
+    };
+    let shown = [
+        behind.line(CLIPBOARD_DEADLINE),
+        front.line(CLIPBOARD_DEADLINE),
     ];
-    let pasted = [
-        run_self(SESSION_UID, first, &[PASTE]),
-        run_self(carol, theirs, &[PASTE]),
+    if shown[0].as_deref() != Some("mapped") || shown[1].as_deref() != Some("shown") {
+        note(&format!("the clipboard windows did not come up: {shown:?}"));
+        return false;
+    }
+    // The desktop's terminal may show after the child's window and take the
+    // focus, and the child shows another: type until a key lands.
+    let typing = Instant::now() + CLIPBOARD_DEADLINE;
+    let mut keyed = None;
+    while keyed.is_none() && Instant::now() < typing && front.running() {
+        asking::key(KEY_A, 0);
+        keyed = front.line(Duration::from_millis(1500));
+    }
+    let pasted = front.line(CLIPBOARD_DEADLINE);
+    let told = behind.tell("paste");
+    let given = behind.line(CLIPBOARD_DEADLINE);
+    let exits = [
+        front.exited_within(CLIPBOARD_DEADLINE),
+        behind.exited_within(CLIPBOARD_DEADLINE),
     ];
-    let wanted = [
-        Some((0, "the first person's".to_owned())),
-        Some((0, "carol's".to_owned())),
-    ];
-    if pasted != wanted {
-        note(&format!("copied {copied:?}, pasted {pasted:?}"));
+    if keyed.as_deref() != Some("keyed")
+        || pasted.as_deref() != Some(CAROLS)
+        || !told
+        || given.as_deref() != Some(UNFOCUSED_SAYS)
+        || exits != [Some(0), Some(0)]
+    {
+        note(&format!(
+            "in front {keyed:?}, pasted {pasted:?}; behind, told {told}, said {given:?}; \
+             exits {exits:?}"
+        ));
         return false;
     }
     true
@@ -570,7 +619,7 @@ fn one_person_s_fork_bomb_leaves_the_other_s_session_running() -> bool {
     };
     drop(go);
     let first_runs = || {
-        run_self(SESSION_UID, first, &[PASTE]).is_some_and(|(code, _)| code == 0)
+        run_self(SESSION_UID, first, &[RUNS]).is_some_and(|(code, _)| code == 0)
             && entry(first).and_then(|s| s.leader).is_some_and(alive)
     };
     let unreaped = said_count(&out);
@@ -732,22 +781,210 @@ fn fork_until_refused(child: fn() -> !) -> u32 {
 /// once told on standard input, reap them, fill it with children that
 /// linger, say how many, and linger.
 fn bomb() -> i32 {
-    let say = |n: u32| {
-        println!("{n}");
-        let _ = std::io::stdout().flush();
-    };
-    say(fork_until_refused(|| {
-        slopos_userland::syscall::core::exit_with_code(0)
-    }));
+    let unreaped = fork_until_refused(|| slopos_userland::syscall::core::exit_with_code(0));
+    say(&unreaped.to_string());
     let _ = std::io::stdin().lock().read_line(&mut String::new());
     while process::wait_with(-1, 0).is_some() {}
-    say(fork_until_refused(|| {
+    let lingering = fork_until_refused(|| {
         loop {
             slopos_userland::syscall::core::sleep_ms(60_000);
         }
-    }));
+    });
+    say(&lingering.to_string());
     loop {
         std::thread::sleep(Duration::from_secs(60));
+    }
+}
+
+fn say(line: &str) {
+    println!("{line}");
+    let _ = std::io::stdout().flush();
+}
+
+fn failed(what: &'static str) -> impl FnOnce(ProtocolError) -> String {
+    move |err| format!("{what}: {err:?}")
+}
+
+/// The first event `wanted` picks out, or why none came by `deadline`.
+fn awaited<T>(
+    client: &mut Client,
+    deadline: Instant,
+    what: &'static str,
+    mut wanted: impl FnMut(Event) -> Option<T>,
+) -> Result<T, String> {
+    loop {
+        while let Some(event) = client.poll_event().map_err(failed(what))? {
+            if let Some(found) = wanted(event) {
+                return Ok(found);
+            }
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(format!("{what} in time"));
+        }
+        let mut fds = [UserPollFd {
+            fd: client.fd(),
+            events: POLLIN,
+            revents: 0,
+        }];
+        let _ = fs::poll(&mut fds, left.as_millis() as i64);
+    }
+}
+
+/// Maps `buffer` as a toplevel and asks for a frame once it is on screen.
+fn show(client: &mut Client, buffer: &ShmBuffer, side: u32) -> Result<SurfaceId, ProtocolError> {
+    let surface = client.create_surface()?;
+    let toplevel = client.get_toplevel(surface)?;
+    client.toplevel_set_title(toplevel, b"sessions_test")?;
+    client.surface_attach_buffer(surface, 0, 1, buffer.fd(), side, side)?;
+    client.surface_frame(surface)?;
+    client.surface_commit(surface)?;
+    Ok(surface)
+}
+
+const WINDOW_SIDE: u32 = 64;
+
+/// A window on this session's compositor, and the buffer it shows.
+fn mapped() -> Result<(Client, SurfaceId, ShmBuffer), String> {
+    let path = slopos_protocol::socket_path();
+    let mut client = Client::connect(&path).map_err(failed("connect"))?;
+    client.ensure_output_info().map_err(failed("no output"))?;
+    let buffer = ShmBuffer::create((WINDOW_SIDE * WINDOW_SIDE * 4) as usize)
+        .map_err(|_| "no memfd for the window".to_owned())?;
+    let surface = show(&mut client, &buffer, WINDOW_SIDE).map_err(failed("show"))?;
+    Ok((client, surface, buffer))
+}
+
+/// The child [`COPY`] names. The compositor focuses a window as it first
+/// shows it; the terminal init opens in a new desktop may show after this
+/// one and take the focus, so a window that took no key is shown anew.
+fn copy_and_paste(text: &str) -> Result<String, String> {
+    const REMAP_AFTER: Duration = Duration::from_secs(3);
+    let deadline = Instant::now() + CLIPBOARD_DEADLINE;
+    let (mut client, surface, shown) = mapped()?;
+    awaited(&mut client, deadline, "no frame", |event| match event {
+        Event::FrameDone { surface: done, .. } if done == surface => Some(()),
+        _ => None,
+    })?;
+    say("shown");
+    loop {
+        let attempt = (Instant::now() + REMAP_AFTER).min(deadline);
+        // The release's serial, the last of the key: an older one is refused.
+        match awaited(&mut client, attempt, "no key", |event| match event {
+            Event::Key { pressed: false, .. } => Some(()),
+            _ => None,
+        }) {
+            Ok(()) => break,
+            Err(why) if Instant::now() >= deadline => return Err(why),
+            Err(_) => {
+                show(&mut client, &shown, WINDOW_SIDE).map_err(failed("show again"))?;
+            }
+        }
+    }
+    say("keyed");
+    let mut settled = Instant::now() + KEYS_SETTLE;
+    loop {
+        while let Some(event) = client.poll_event().map_err(failed("events"))? {
+            if matches!(event, Event::Key { .. }) {
+                settled = Instant::now() + KEYS_SETTLE;
+            }
+        }
+        let left = settled.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let mut fds = [UserPollFd {
+            fd: client.fd(),
+            events: POLLIN,
+            revents: 0,
+        }];
+        let _ = fs::poll(&mut fds, left.as_millis() as i64);
+    }
+    let bytes = text.as_bytes();
+    let len = bytes.len() as u32;
+    let mut source = ShmBuffer::create(bytes.len()).map_err(|_| "no memfd to copy".to_owned())?;
+    source.as_mut_slice()[..bytes.len()].copy_from_slice(bytes);
+    let fd = source.fd();
+    client.clipboard_copy(fd, len).map_err(failed("copy"))?;
+    client.clipboard_paste().map_err(failed("paste"))?;
+    let len = awaited(
+        &mut client,
+        deadline,
+        "no PasteReady",
+        |event| match event {
+            Event::PasteReady { len } => Some(len),
+            _ => None,
+        },
+    )?;
+    if len == 0 {
+        return Err("the copy was refused: the paste found the selection empty".to_owned());
+    }
+    let dest = ShmBuffer::create(len as usize).map_err(|_| "no memfd to paste".to_owned())?;
+    let fd = dest.fd();
+    client.clipboard_read(fd, len).map_err(failed("read"))?;
+    let read = awaited(
+        &mut client,
+        deadline,
+        "no PasteResult",
+        |event| match event {
+            Event::PasteResult { len } => Some(len),
+            _ => None,
+        },
+    )?;
+    let read = (read as usize).min(dest.size());
+    Ok(String::from_utf8_lossy(&dest.as_slice()[..read]).into_owned())
+}
+
+/// The child [`UNFOCUSED`] names. It never took a key, so it holds no
+/// serial to present and its compositor answers the paste as an empty
+/// selection.
+fn paste_unfocused() -> Result<String, String> {
+    let deadline = Instant::now() + 2 * CLIPBOARD_DEADLINE;
+    let (mut client, _, _shown) = mapped()?;
+    say("mapped");
+    let mut keys = 0u32;
+    loop {
+        while let Some(event) = client.poll_event().map_err(failed("events"))? {
+            keys += u32::from(matches!(event, Event::Key { .. }));
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err("never told to paste".to_owned());
+        }
+        let mut fds = [0, client.fd()].map(|fd| UserPollFd {
+            fd,
+            events: POLLIN,
+            revents: 0,
+        });
+        let _ = fs::poll(&mut fds, left.as_millis() as i64);
+        if fds[0].revents != 0 {
+            break;
+        }
+    }
+    client.clipboard_paste().map_err(failed("paste"))?;
+    let len = awaited(
+        &mut client,
+        deadline,
+        "no PasteReady",
+        |event| match event {
+            Event::PasteReady { len } => Some(len),
+            _ => None,
+        },
+    )?;
+    Ok(format!("keys {keys}, selection {len}"))
+}
+
+/// Says what `outcome` came to and answers the exit status for it.
+fn exit_saying(outcome: Result<String, String>) -> i32 {
+    match outcome {
+        Ok(line) => {
+            say(&line);
+            0
+        }
+        Err(why) => {
+            note(&why);
+            1
+        }
     }
 }
 
@@ -756,14 +993,11 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some(asking::REQUEST) => std::process::exit(asking::request_child(&args[2..])),
         Some(COPY) => {
-            let text = args.get(2).map_or(&b""[..], |t| t.as_bytes());
-            std::process::exit(i32::from(input::clipboard_copy(text) != text.len()));
+            let text = args.get(2).map_or("", String::as_str);
+            std::process::exit(exit_saying(copy_and_paste(text)));
         }
-        Some(PASTE) => {
-            let mut buf = [0u8; 256];
-            let n = input::clipboard_paste(&mut buf);
-            print!("{}", String::from_utf8_lossy(&buf[..n]));
-        }
+        Some(UNFOCUSED) => std::process::exit(exit_saying(paste_unfocused())),
+        Some(RUNS) => std::process::exit(0),
         Some(BOMB) => std::process::exit(bomb()),
         _ => slopos_slibc::test_harness::run(CASES),
     }

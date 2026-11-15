@@ -107,7 +107,7 @@ pub const PRIVD_CAPS: u64 = DELEGABLE | caps::SET_ID;
 
 /// Every capability, by the name `slopos_ostd::authority::Capability` gives
 /// it.
-pub const CAPABILITIES: [(&str, u64); 22] = [
+pub const CAPABILITIES: [(&str, u64); 21] = [
     ("Power", caps::POWER),
     ("ProcSignal", caps::PROC_SIGNAL),
     ("SysInspect", caps::SYS_INSPECT),
@@ -115,7 +115,6 @@ pub const CAPABILITIES: [(&str, u64); 22] = [
     ("InputSeat", caps::INPUT_SEAT),
     ("ConsoleConfig", caps::CONSOLE_CONFIG),
     ("ConsoleIo", caps::CONSOLE_IO),
-    ("ClipboardGlobal", caps::CLIPBOARD_GLOBAL),
     ("Fate", caps::FATE),
     ("TestHarness", caps::TEST_HARNESS),
     ("Mount", caps::MOUNT),

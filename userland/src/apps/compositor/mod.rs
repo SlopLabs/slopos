@@ -1182,6 +1182,8 @@ pub fn compositor_user_main() {
             name: std::env::var("USER").unwrap_or_default(),
         },
     };
+    // Opened ahead of need, so no failure path has to open a file to say so.
+    let _ = crate::syscall::tty::open_log();
     log!("starting");
 
     // The seats are held for the process's life, released only by its exit;

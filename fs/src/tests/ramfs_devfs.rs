@@ -1,14 +1,16 @@
 //! The bounds ramfs derives from the machine, the chunked file body those
-//! bounds are honest about, and devfs's name lookup.
+//! bounds are honest about, devfs's name lookup, and `/dev/kmsg`'s writer.
 
+use slopos_abi::fs::{KMSG_BURST, KMSG_INTERVAL_MS, KMSG_RECORD_MAX};
+use slopos_ostd::klog::RateLimit;
 use slopos_ostd::sync::LOCK_LEVEL_RESOURCE;
-use slopos_ostd::{KArc, KVec, klog_info, lock_class};
+use slopos_ostd::{KArc, KBox, KVec, klog_info, lock_class};
 use slopos_testing::{TestResult, fail};
 
 use crate::blockdev::{BlockDevice, MemoryBlockDevice};
 use crate::devfs::{
     DEV_NAME_MAX, DevFs, devfs_register_block_device, devfs_resolve_block_source,
-    devfs_standalone_block_device, devfs_unregister_block_node,
+    devfs_standalone_block_device, devfs_unregister_block_node, kmsg_write_as,
 };
 use crate::ramfs::{
     RAMFS_BYTES_PER_INODE, RAMFS_CHUNK_BATCH, RAMFS_FILE_CHUNK, RAMFS_MAX_INODES_CEILING,
@@ -615,6 +617,126 @@ fn resume_across_removal(names: [&[u8]; 3]) -> TestResult {
     }
 }
 
+const KMSG_PREFIX: &[u8] = b"<3>kmsg-stest-";
+const KMSG_MARK_LEN: usize = KMSG_PREFIX.len() + 16;
+const KMSG_TAIL: usize = 4096;
+
+/// A record no earlier run of the suite wrote: `<3>`, so the level filter
+/// never hides it, then a random tag.
+fn kmsg_mark() -> [u8; KMSG_MARK_LEN] {
+    let mut mark = [0u8; KMSG_MARK_LEN];
+    mark[..KMSG_PREFIX.len()].copy_from_slice(KMSG_PREFIX);
+    let mut seed = slopos_kernel_services::platform::rng_next();
+    for digit in &mut mark[KMSG_PREFIX.len()..] {
+        *digit = b"0123456789abcdef"[(seed & 15) as usize];
+        seed >>= 4;
+    }
+    mark
+}
+
+/// Whether the newest lines of the log hold `text` as a whole line.
+fn kmsg_ring_holds_line(text: &[u8]) -> Option<bool> {
+    let mut buf = KBox::<[u8; KMSG_TAIL]>::zeroed().ok()?;
+    let read = loop {
+        if let Some(read) = slopos_ostd::klog::klog_tail(&mut buf[..]) {
+            break read;
+        }
+        core::hint::spin_loop();
+    };
+    let tail = &buf[..read];
+    Some(tail.windows(text.len()).enumerate().any(|(at, window)| {
+        window == text
+            && (at == 0 || tail[at - 1] == b'\n')
+            && tail.get(at + text.len()) == Some(&b'\n')
+    }))
+}
+
+/// A write to `/dev/kmsg` is one line of the log, its `<N>` prefix and its
+/// trailing newline gone.
+pub fn test_devfs_kmsg_write_lands_in_ring() -> TestResult {
+    let fs = DevFs::new();
+    let kmsg = match fs.lookup(fs.root_inode(), b"kmsg") {
+        Ok(inode) => inode,
+        Err(e) => return fail!("kmsg lookup: {:?}", e),
+    };
+    let mark = kmsg_mark();
+    let mut record = [b'\n'; KMSG_MARK_LEN + 1];
+    record[..KMSG_MARK_LEN].copy_from_slice(&mark);
+    match fs.write(kmsg, 0, &record) {
+        Ok(n) if n == record.len() => {}
+        other => return fail!("the write answered {:?}", other),
+    }
+    match kmsg_ring_holds_line(&mark[3..]) {
+        Some(true) => TestResult::Pass,
+        Some(false) => fail!("the record is not a line of the ring"),
+        None => fail!("could not allocate the read window"),
+    }
+}
+
+/// A record past the limit is `EINVAL`, and a writer without `ConsoleIo` is
+/// refused before anything is logged.
+pub fn test_devfs_kmsg_refuses_long_and_unentitled() -> TestResult {
+    let fs = DevFs::new();
+    let kmsg = match fs.lookup(fs.root_inode(), b"kmsg") {
+        Ok(inode) => inode,
+        Err(e) => return fail!("kmsg lookup: {:?}", e),
+    };
+    let Ok(long) = KVec::<u8>::zeroed(KMSG_RECORD_MAX + 1) else {
+        return TestResult::Skipped;
+    };
+    match fs.write(kmsg, 0, &long[..]) {
+        Err(VfsError::InvalidArgument) => {}
+        other => return fail!("an over-long record answered {:?}", other),
+    }
+    let mark = kmsg_mark();
+    match kmsg_write_as(&mark, false, None, 0) {
+        Err(VfsError::NotPermitted) => {}
+        other => return fail!("a writer without ConsoleIo answered {:?}", other),
+    }
+    match kmsg_ring_holds_line(&mark[3..]) {
+        Some(false) => TestResult::Pass,
+        Some(true) => fail!("the refused record reached the ring"),
+        None => fail!("could not allocate the read window"),
+    }
+}
+
+/// Past its burst a writer's records are dropped but still answer their
+/// length; the next window logs again and says how many went.
+pub fn test_devfs_kmsg_limiter_drops_past_burst() -> TestResult {
+    let limit = RateLimit::new();
+    let now = 1_000;
+    let filler = b"<7>kmsg-stest burst";
+    for _ in 0..KMSG_BURST {
+        match kmsg_write_as(filler, true, Some(&limit), now) {
+            Ok(n) if n == filler.len() => {}
+            other => return fail!("a record inside the burst answered {:?}", other),
+        }
+    }
+    let dropped = kmsg_mark();
+    match kmsg_write_as(&dropped, true, Some(&limit), now) {
+        Ok(n) if n == dropped.len() => {}
+        other => return fail!("the record past the burst answered {:?}", other),
+    }
+    match kmsg_ring_holds_line(&dropped[3..]) {
+        Some(false) => {}
+        Some(true) => return fail!("the record past the burst was logged"),
+        None => return fail!("could not allocate the read window"),
+    }
+    let resumed = kmsg_mark();
+    if let Err(e) = kmsg_write_as(&resumed, true, Some(&limit), now + KMSG_INTERVAL_MS) {
+        return fail!("the next window refused a record: {:?}", e);
+    }
+    const COUNT: &[u8] = b"[1 suppressed by rate limit]\n";
+    let mut lines = [0u8; COUNT.len() + KMSG_MARK_LEN - 3];
+    lines[..COUNT.len()].copy_from_slice(COUNT);
+    lines[COUNT.len()..].copy_from_slice(&resumed[3..]);
+    match kmsg_ring_holds_line(&lines) {
+        Some(true) => TestResult::Pass,
+        Some(false) => fail!("the next window did not log the count, then its record"),
+        None => fail!("could not allocate the read window"),
+    }
+}
+
 slopos_testing::stest!(name = test_ramfs_limits_track_usable_memory, suite = fs);
 slopos_testing::stest!(name = test_ramfs_file_spans_chunks, suite = fs);
 slopos_testing::stest!(name = test_ramfs_write_past_end_reads_zeros, suite = fs);
@@ -623,3 +745,9 @@ slopos_testing::stest!(name = test_ramfs_write_past_cap_refused, suite = fs);
 slopos_testing::stest!(name = test_ramfs_chunk_work_stays_off_the_lock, suite = fs);
 slopos_testing::stest!(name = test_devfs_block_device_lookup_by_name, suite = fs);
 slopos_testing::stest!(name = test_devfs_listing_resumes_across_removal, suite = fs);
+slopos_testing::stest!(name = test_devfs_kmsg_write_lands_in_ring, suite = fs);
+slopos_testing::stest!(
+    name = test_devfs_kmsg_refuses_long_and_unentitled,
+    suite = fs
+);
+slopos_testing::stest!(name = test_devfs_kmsg_limiter_drops_past_burst, suite = fs);

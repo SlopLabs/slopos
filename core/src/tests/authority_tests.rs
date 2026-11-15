@@ -113,15 +113,11 @@ slopos_testing::stest!(name = ungated_operations_need_nothing, suite = authority
 ///
 /// Each names a global the kernel has not yet given an object form. They are
 /// classified rather than left ungated so that the deletion conditions in
-/// `slopos_ostd::authority` have something to delete: when `write` routes
-/// through the controlling TTY and the clipboard becomes fd-passing only,
-/// these entries go, and this test is what fails to say so.
+/// `slopos_ostd::authority` have something to delete: when the log takes
+/// records only through descriptors init hands out and the wheel is a
+/// descriptor, these entries go, and this test is what fails to say so.
 fn the_universal_capabilities_are_the_recorded_set() -> TestResult {
-    let universal = [
-        Capability::ConsoleIo,
-        Capability::ClipboardGlobal,
-        Capability::Fate,
-    ];
+    let universal = [Capability::ConsoleIo, Capability::Fate];
     for &cap in Capability::ALL.iter().filter(|cap| cap.is_gated()) {
         if mask_permits(CAP_UNIVERSAL, cap) != universal.contains(&cap) {
             return fail!(

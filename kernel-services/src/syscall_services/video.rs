@@ -28,7 +28,6 @@ slopos_service_core::define_service! {
         hw_cursor_available() -> bool;
         @no_wrapper cursor_set_image(image: *const u8, len: usize, hot_x: u32, hot_y: u32) -> bool;
         cursor_move(x: u32, y: u32) -> bool;
-        set_display_mode(width: u32, height: u32) -> bool;
         display_stats() -> UserDisplayStats;
     }
 }

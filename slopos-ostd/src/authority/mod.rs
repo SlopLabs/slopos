@@ -69,12 +69,11 @@ pub enum Capability {
     /// global tables, and `vhangup`, which ends a whole session. Deletion
     /// condition: becomes an ioctl on the console descriptor.
     ConsoleConfig,
-    /// Writing the global kernel console with no descriptor. Deletion
-    /// condition: dies when it routes through the caller's controlling TTY.
+    /// Adding a record to the kernel log: a write to `/dev/kmsg`, checked at
+    /// each write, so a descriptor handed on carries nothing. Deletion
+    /// condition: dies when the log takes records only through descriptors
+    /// init hands out.
     ConsoleIo,
-    /// The global clipboard. Deletion condition: dies when the clipboard is
-    /// memfd-plus-fd-passing only.
-    ClipboardGlobal,
     /// The Wheel of Fate. Deletion condition: dies when the wheel is a
     /// descriptor init hands `/bin/roulette`.
     Fate,
@@ -170,7 +169,6 @@ impl Capability {
             Self::InputSeat => caps::INPUT_SEAT,
             Self::ConsoleConfig => caps::CONSOLE_CONFIG,
             Self::ConsoleIo => caps::CONSOLE_IO,
-            Self::ClipboardGlobal => caps::CLIPBOARD_GLOBAL,
             Self::Fate => caps::FATE,
             Self::TestHarness => caps::TEST_HARNESS,
             Self::Mount => caps::MOUNT,
@@ -209,7 +207,6 @@ impl Capability {
             Self::InputSeat => "InputSeat",
             Self::ConsoleConfig => "ConsoleConfig",
             Self::ConsoleIo => "ConsoleIo",
-            Self::ClipboardGlobal => "ClipboardGlobal",
             Self::Fate => "Fate",
             Self::TestHarness => "TestHarness",
             Self::Mount => "Mount",
@@ -241,7 +238,6 @@ impl Capability {
         Self::InputSeat,
         Self::ConsoleConfig,
         Self::ConsoleIo,
-        Self::ClipboardGlobal,
         Self::Fate,
         Self::TestHarness,
         Self::Mount,
@@ -324,7 +320,6 @@ cap_kinds!(
     InputSeat,
     ConsoleConfig,
     ConsoleIo,
-    ClipboardGlobal,
     Fate,
     TestHarness,
     Mount,

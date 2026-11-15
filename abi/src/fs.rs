@@ -254,6 +254,20 @@ pub const ACCOUNTS_STORE: &str = "/var/lib/slopos/accounts";
 /// database and `/var/lib/slopos` the system's records.
 pub const KEPT_DIRS: [&str; 4] = ["/etc", "/var/lib/slopos", EXTENSION_STORE, ACCOUNTS_STORE];
 
+/// The kernel log's node. A read streams the log; a write adds one record,
+/// `<prio>text` or bare text, as Linux's `/dev/kmsg` takes one.
+pub const KMSG_PATH: &str = "/dev/kmsg";
+
+/// The longest write to [`KMSG_PATH`], Linux's `PRINTKRB_RECORD_MAX`; a
+/// longer one is `EINVAL`.
+pub const KMSG_RECORD_MAX: usize = 1024;
+
+/// Records one process adds to the log per [`KMSG_INTERVAL_MS`]; the rest
+/// are dropped and the write still answers its length, as Linux's
+/// `printk.devkmsg=ratelimit` does.
+pub const KMSG_BURST: u32 = 10;
+pub const KMSG_INTERVAL_MS: u64 = 5000;
+
 pub const AT_FDCWD: i32 = -100;
 pub const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
 pub const AT_REMOVEDIR: u32 = 0x200;

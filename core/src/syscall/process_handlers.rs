@@ -28,8 +28,8 @@ use slopos_ostd::{KBox, KVec};
 use slopos_sched::futex::{self, FutexKey};
 use slopos_sched::scheduler::task_apply_affinity;
 use slopos_sched::task::{
-    task_consume_zombie, task_default_signals_in_mask, task_find_by_id, task_fork,
-    task_peek_exit_info, task_reset_caught_handlers,
+    task_consume_zombie, task_find_by_id, task_fork, task_peek_exit_info,
+    task_reset_caught_handlers,
 };
 use slopos_sched::task_struct::{Current, Task};
 
@@ -417,16 +417,6 @@ fn spawn_as_asked(
         cwd,
     )
 }
-
-define_syscall!(syscall_sigdefault
-    (ctx, mask: u64) cap(NoneSelf)
-    -> Result<u64, Errno>
-{
-    if let Some(task) = Some(ctx.task()) {
-        task_default_signals_in_mask(task, mask);
-    }
-    Ok(0)
-});
 
 /// What `finish_wait` owes the child once the status word has reached user
 /// memory. Every variant is idempotent, so a losing racer commits nothing.

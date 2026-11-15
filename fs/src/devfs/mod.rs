@@ -14,8 +14,16 @@ pub use crash::{CrashRecord, CrashStoreOps, devfs_register_crash_store};
 use crate::fileio::{PTY_SLAVE_MAJOR, PTY_SLAVE_MODE};
 use crate::vfs::{FileStat, FileSystem, FileType, InodeId, VfsError, VfsResult};
 use slopos_abi::event::MAX_TTYS;
+use slopos_abi::fs::{KMSG_BURST, KMSG_INTERVAL_MS, KMSG_RECORD_MAX};
 use slopos_abi::syscall::TtyIndex;
+use slopos_kernel_services::driver_runtime::{
+    current_task_holds, current_task_is_kernel, current_task_process,
+};
 use slopos_kernel_services::syscall_services::tty;
+use slopos_ostd::authority::Capability;
+use slopos_ostd::klog::{self, RateLimit};
+use slopos_ostd::klog_warn;
+use slopos_ostd::process::Process;
 
 const ROOT_INODE: InodeId = 1;
 const NULL_INODE: InodeId = 2;
@@ -87,6 +95,47 @@ fn pty_slave_live(index: u8) -> bool {
 fn pty_slave_of(inode: InodeId) -> Option<u8> {
     let index = u8::try_from(inode.checked_sub(PTY_SLAVE_INODE_BASE)?).ok()?;
     pty_slave_live(index).then_some(index)
+}
+
+fn kmsg_write(buf: &[u8]) -> VfsResult<usize> {
+    let entitled = current_task_is_kernel() || current_task_holds(Capability::ConsoleIo);
+    let process = current_task_process();
+    kmsg_write_as(
+        buf,
+        entitled,
+        process.as_deref().map(Process::kmsg_limit),
+        klog::ratelimit_now_ms(),
+    )
+}
+
+/// One record into the kernel log, as `/dev/kmsg` takes it. `entitled` and
+/// `limit` are the caller's on every production path; they are parameters so
+/// a test on a kernel thread can reach the refusal and the limiter.
+///
+/// A dropped record still answers its length, as Linux's
+/// `printk.devkmsg=ratelimit` does.
+pub(crate) fn kmsg_write_as(
+    buf: &[u8],
+    entitled: bool,
+    limit: Option<&RateLimit>,
+    now_ms: u64,
+) -> VfsResult<usize> {
+    if !entitled {
+        return Err(VfsError::NotPermitted);
+    }
+    if buf.len() > KMSG_RECORD_MAX {
+        return Err(VfsError::InvalidArgument);
+    }
+    if let Some(limit) = limit {
+        let Some(suppressed) = limit.allow(now_ms, KMSG_INTERVAL_MS, KMSG_BURST) else {
+            return Ok(buf.len());
+        };
+        if suppressed > 0 {
+            klog_warn!("[{suppressed} suppressed by rate limit]");
+        }
+    }
+    klog::log_user_record(buf);
+    Ok(buf.len())
 }
 
 /// What a directory walk hands each entry: the cookie that resumes after it,
@@ -317,9 +366,9 @@ impl FileSystem for DevFs {
             return Err(VfsError::ReadOnly);
         }
         match inode {
-            // kmsg is read-only; writes are discarded so a stray redirect does
-            // not error.
-            NULL_INODE | ZERO_INODE | KMSG_INODE => Ok(buf.len()),
+            KMSG_INODE => kmsg_write(buf),
+
+            NULL_INODE | ZERO_INODE => Ok(buf.len()),
 
             // Entropy injection is not meaningful with a seeded CSPRNG.
             RANDOM_INODE => Ok(buf.len()),

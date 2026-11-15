@@ -1,17 +1,16 @@
 //! Window and surface management syscalls.
 
 use super::numbers::*;
-use super::raw::{syscall1, syscall2, syscall3};
+use super::raw::{syscall1, syscall3};
 use slopos_abi::DisplayInfo;
 use slopos_abi::damage::DamageRect;
 pub use slopos_abi::window::{SEAT_COMPOSITOR_PRIMARY, SEAT_VIRTCON};
 
 /// Take the framebuffer seat, returning a non-duplicable descriptor naming it.
 ///
-/// Must be held before `fb_flip`, the cursor calls or `set_display_mode`
-/// will act. `-EBUSY` when a seat of equal or higher rank is
-/// held by a live task. The fd is neither inherited across `fork` nor kept
-/// across `exec`.
+/// Must be held before `fb_flip` or the cursor calls will act. `-EBUSY` when
+/// a seat of equal or higher rank is held by a live task. The fd is neither
+/// inherited across `fork` nor kept across `exec`.
 #[inline(always)]
 pub fn screen_acquire(seat: u32) -> i64 {
     unsafe { syscall1(SYSCALL_SCREEN_ACQUIRE, seat as u64) as i64 }
@@ -76,9 +75,4 @@ pub fn cursor_set_image(image: &[u8], hot_x: u32, hot_y: u32) -> i64 {
 pub fn cursor_move(x: u32, y: u32) -> i64 {
     let pos = ((x & 0xFFFF) << 16) | (y & 0xFFFF);
     unsafe { syscall1(SYSCALL_CURSOR_MOVE, pos as u64) as i64 }
-}
-
-#[inline(always)]
-pub fn set_display_mode(width: u32, height: u32) -> i64 {
-    unsafe { syscall2(SYSCALL_SET_DISPLAY_MODE, width as u64, height as u64) as i64 }
 }

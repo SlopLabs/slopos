@@ -15,7 +15,7 @@ use slopos_ostd::user::ptr::UserBytes as OstdUserBytes;
 use slopos_ostd::seat::{SeatId, SeatKind};
 
 use crate::seat_file_ops::{seat_acquire_fd, seat_held_by};
-use crate::syscall::args::{UserBytes, UserPtr};
+use crate::syscall::args::UserPtr;
 use crate::syscall::result::SyscallResult;
 
 define_syscall!(syscall_screen_acquire
@@ -200,51 +200,6 @@ define_syscall!(syscall_input_poll_batch
     Ok(total as u64)
 });
 
-/// The login tag whose clipboard the caller reaches, 0 for none.
-fn clipboard_login(ctx: &crate::syscall::context::SyscallContext<'_>) -> u32 {
-    ctx.task().process().map_or(0, |process| process.login())
-}
-
-define_syscall!(syscall_clipboard_copy
-    (ctx, src: UserBytes)
-    cap(ClipboardGlobal)
-    -> Result<u64, Errno>
-{
-    if src.base_u64() == 0 || src.len() == 0 {
-        return Ok(0);
-    }
-
-    let copy_len = src.len().min(slopos_abi::CLIPBOARD_MAX_SIZE);
-    let user_bytes = OstdUserBytes::try_new(src.base_u64(), copy_len).map_err(|_| Errno::EFAULT)?;
-    let mut buf = slopos_ostd::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE)
-        .map_err(|_| Errno::ENOMEM)?;
-    copy_bytes_from_user(user_bytes, &mut buf[..copy_len]).map_err(|_| Errno::EFAULT)?;
-    let stored = input::clipboard_copy(clipboard_login(ctx), &buf[..copy_len]);
-    Ok(stored as u64)
-});
-
-define_syscall!(syscall_clipboard_paste
-    (ctx, dst: UserBytes)
-    cap(ClipboardGlobal)
-    -> Result<u64, Errno>
-{
-    if dst.base_u64() == 0 || dst.len() == 0 {
-        return Ok(0);
-    }
-
-    let mut buf = slopos_ostd::KVec::<u8>::zeroed(slopos_abi::CLIPBOARD_MAX_SIZE)
-        .map_err(|_| Errno::ENOMEM)?;
-    let pasted = input::clipboard_paste(clipboard_login(ctx), &mut buf);
-    if pasted == 0 {
-        return Ok(0);
-    }
-
-    let write_len = pasted.min(dst.len());
-    let user_ptr = OstdUserBytes::try_new(dst.base_u64(), write_len).map_err(|_| Errno::EFAULT)?;
-    copy_bytes_to_user(user_ptr, &buf[..write_len]).map_err(|_| Errno::EFAULT)?;
-    Ok(write_len as u64)
-});
-
 define_syscall!(syscall_fb_flip
     (ctx, fd: i64, damage_ptr: u64, damage_count: u64)
     cap(NoneFd)
@@ -329,20 +284,6 @@ define_syscall!(syscall_cursor_move
     let x = (pos >> 16) & 0xFFFF;
     let y = pos & 0xFFFF;
     if !video::cursor_move(x, y) {
-        return Err(Errno::EINVAL);
-    }
-    Ok(())
-});
-
-define_syscall!(syscall_set_display_mode
-    (ctx, width: u32, height: u32)
-    cap(NoneFd)
-    -> Result<(), Errno>
-{
-    if !seat_held_by(SeatKind::Screen, ctx.task_id()) {
-        return Err(Errno::EPERM);
-    }
-    if !video::set_display_mode(width, height) {
         return Err(Errno::EINVAL);
     }
     Ok(())

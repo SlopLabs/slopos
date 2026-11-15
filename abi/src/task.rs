@@ -33,8 +33,8 @@ pub const INVALID_PROCESS_ID: u32 = 0xFFFF_FFFF;
 pub const MAX_PROCESSES: usize = 1024;
 
 /// The login tags init gives the sessions people log in to, one each and
-/// never twice in a boot; only a tag in this range has a clipboard. Every
-/// other tag, and 0, names something running for the system.
+/// never twice in a boot. Every other tag, and 0, names something running
+/// for the system.
 pub const SESSION_LOGINS: core::ops::Range<u32> = 0x10_0000..0x20_0000;
 
 #[repr(u8)]

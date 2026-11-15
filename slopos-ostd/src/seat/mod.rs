@@ -60,7 +60,7 @@ impl SeatId {
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum SeatKind {
-    /// The framebuffer: `fb_flip`, the cursor calls, `set_display_mode`.
+    /// The framebuffer: `fb_flip` and the cursor calls.
     Screen = 0,
     /// The raw input event stream: `input_poll_batch`.
     InputSink = 1,
