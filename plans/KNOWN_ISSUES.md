@@ -264,10 +264,9 @@ not: the frame loop wakes for one and shows it a frame early.
 `input_poll_batch` only copies out what is queued, and a compositor init
 starts is handed the sink by `seat_switch` and holds no descriptor for it,
 so nothing its ring can poll turns readable when an event is queued and the
-loop has nothing to wake on. Waking on input needs a readiness source for
-the sink — a descriptor that polls readable while events wait, or a ring
-operation that completes when one is queued — which is a new private call
-and so the next `BASE_INTERFACE` number.
+loop has nothing to wake on. `linux-interfaces.md`, phase 5, moves input
+to evdev descriptors init hands the compositor, which its ring's
+`OP_POLL_ADD` waits on, so no private call is added for it.
 
 ---
 

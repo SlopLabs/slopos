@@ -74,7 +74,8 @@ Before v1 none of this is promised. At v1, in one change:
   holds the research for that plan; until it lands, a new toolchain and a
   recovery medium come from a Linux machine.
 - Moving private calls to the interfaces Linux defines.
-  `linux-interfaces.md` holds the research for that plan.
+  `linux-interfaces.md` is that plan, each of its phases one paired
+  switch of a kernel and a base.
 - How the toolchain and the apps reach a machine and are replaced there.
   `installed-software.md` is that plan: every installed program an image,
   with `/usr/local`, `tree-install` and the hand-over of `/usr/local` to
