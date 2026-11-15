@@ -507,6 +507,22 @@ linked submissions, `READV`, `WRITEV`, `FSYNC` and `STATX`. A program
 outside the base reaches the calls through `syscall`, which `libc.so`
 exports.
 
+After this phase io_uring is the ring's one interface. No opcode, flag or
+register number of SlopOS's own is added to it, and the subset widens
+toward what a Linux program sees, the default mode first; a request the
+kernel does not serve fails as Linux says an unsupported one fails. The
+ring's descriptor follows Linux as programs need it to: it polls, a fork
+inherits it and a socket passes it, a second task's submission refused as
+`IORING_SETUP_SINGLE_ISSUER` refuses one.
+
+The engine under the interface stays SlopOS's. `ring/` stays synchronous
+(`xtask lint no-kernel-async`), no opcode reaches a gated capability
+(`opcode_capability`'s assert), the kernel trusts its own copy of each
+index, and an operation that makes a descriptor or takes data runs only
+while the completion queue has room. Linux's worker threads and
+`IORING_SETUP_SQPOLL` are how Linux serves the interface and a flag a
+kernel may refuse; neither is taken for its own sake.
+
 ## Phase 8: network settings on rtnetlink
 
 Serves, on phase 5's family:
