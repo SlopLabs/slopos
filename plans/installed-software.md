@@ -52,7 +52,7 @@ the staged copy behind `org.slopos.software.install`.
 - **Installing stays an administrator's.** The first person is one, and a
   trusted key's image goes in unasked. An install by someone who is not is
   outside this plan (below).
-- **An image is its name and its signer** (phase 5), as the systems that
+- **An image is its name and its signer** (phase 6), as the systems that
   grew large settled it (below).
 - **The word extension goes** (phase 8), since nothing installed is an
   extension of anything once an editor and a compiler are images.
@@ -115,209 +115,19 @@ and no registry has to hand it out; Snap's is the exception and needs its
 store.
 
 So an image's identity is its name and the key that signed it, and an
-image nobody signed belongs to the machine. Phase 5 builds that. A short
+image nobody signed belongs to the machine. Phase 6 builds that. A short
 id derived from the key, a successor key vouched for by the old one, and
 name prefixes bound to keys are left for later (below); none of them
-changes what phase 5 stores.
+changes what phase 6 stores.
 
 ## Phase 1: the toolchain is built as an image — done
 
 `just toolchain` ends in `slopos-toolchain.ext`, held to every check an
-install makes. Until phase 2 a root carries it as a file at
+install makes. Until phase 3 a root carries it as a file at
 `/var/lib/slopos/toolchain` that a test or a person installs with
 `extctl`, and the install medium's payload lays its tree at `/usr/local`.
 
-## Phase 2: an image reaches a root without a person
-
-**For:** the host's image builder, the installer and the install medium to
-put the toolchain and the apps on a root through the store, as `extctl`
-does, with nobody there to approve.
-
-No host script writes a store, the installer has no path into one
-(`extctl --root` offers `status`, `enable` and `disable`), and init
-installs the medium's apps as a tree. A test installs the toolchain the
-host put on a root (`selfhost::toolchain`); a person does it by hand.
-
-Build:
-
-1. A directory on the root that only uid 0 writes, holding images offered
-   to the machine. Before `activate-all`, init runs `extctl` holding
-   `ExtensionUpdate` and `Seal`, as it runs `activate-all`
-   (`userland/src/apps/init/mod.rs`), to install each offered image above
-   its record's floor. This path installs only an image that asks for
-   nothing but commands and apps, so it can never hand out a capability.
-2. `scripts/build_fs_image.sh` offering the `slopos-toolchain` and
-   `slopos-essentials` images there, in place of the image file at
-   `/var/lib/slopos/toolchain` and the `apps` tree. A host build that
-   changed offers a higher version; one the guest installed since stays,
-   by its floor.
-3. The installer copying the medium's images into the new root's offered
-   directory (`installer/root.rs`, `fill`), and
-   `scripts/build_install_medium.sh` carrying image files in place of the
-   `apps` tree and the payload's `usr/local`.
-4. The live boot. A store needs a seal taken off to add a generation, and
-   a root in memory keeps a seal for good (`fs/src/ramfs/mod.rs`); the
-   accounts store refuses such a root outright. Either ramfs lets a `Seal`
-   holder clear one as ext4 does, or the live boot shows the apps' image
-   straight from the medium, which the kernel accepts (`ext_activate`
-   takes any readable file) and userland does not yet, since the dock
-   reads the store's names.
-5. A cheap boot. Every `activate-all` reads each ELF of each image whole
-   to hold it to `libc.so`, 7.9 s for the toolchain. The record keeps the
-   digest of the `libc.so` an image was last held to, and the check runs
-   again only when the base's differs.
-
-Find out first: which of the two live-boot answers is smaller, and whether
-`priv` accepts a command reached through `/opt/bin` (`trusted_within`,
-`userland/src/apps/priv.rs`).
-
-Done when `just test-installer` installs a disk whose toolchain and apps
-are images, and `just boot-live` shows the apps.
-
-## Phase 3: the apps SlopOS ships are one image
-
-**For:** the five apps under `apps/` to be installed, replaced and rolled
-back as the image `slopos-essentials`.
-
-They are built the way an image needs: `bin/` and `share/` alone, dynamic,
-`libc.so` their one library, no `syscall` instruction.
-
-Build:
-
-1. `scripts/build_userland.sh` staging `builddir/apps` with a release and a
-   declaration (four apps, five commands), its entries naming
-   `/opt/slopos-essentials/bin/…`, and packing it.
-2. The editor finding its manual in its own image; it looks in
-   `~/.local/share`, `/usr/local/share` and `/usr/share`
-   (`apps/src/editor/files.rs`).
-3. `just install` installing the image with `extctl install`. Changed
-   bytes need a higher version, so the build stamps one; an administrator
-   is asked each time, as for a base.
-4. The tests that name `/usr/local/bin/<app>`: `apps_test`, `dock_test`,
-   `privd_test`, `extension_action_test`.
-
-What changes for a person: the apps start `AT_SECURE`, and privd names one
-that asks as the image `slopos-essentials` where it names none today.
-
-Done when `apps_test` and `dock_test` pass with no `apps` tree on the root.
-
-## Phase 4: `/usr/local` goes
-
-**For:** no shared directory a person can write to be left on anyone's
-search path.
-
-Goes, with nothing in its place:
-
-- `tree-install`, `tree-core`, `userland/src/tree.rs` (its four file
-  helpers move to the installer, which imports them), the privd action
-  `org.slopos.software.install` and its staging directories.
-- In `root_layout.rs`: `LOCAL`, `settled` and its mark, the hand-over mark,
-  `take_local` and the checks under it. In init: `hand_over`, `settle`,
-  `install_live_apps`. In `users add`: the hand-over and the restart
-  advice. In `priv`: the clause on `settled`.
-- `/usr/local/bin` from `DEFAULT_PATH` and `search_path`, `/usr/local` from
-  `ROOT_LAYOUT` and `PERSON_TREES` (`abi/src/fs.rs`) and their mirrors
-  (`scripts/lib/root_layout.sh`, `tools/initramfs`), `LOCAL_DIR` from the
-  loader, `/usr/local/share` from the dock's shares.
-- The tests of all of it: `tree_install_test`, `apps_test --trees`, the
-  hand-over cases of `dac_test`, the `/usr/local/lib` cases of `dl_test`,
-  `tree-core`'s host tests, the action's cases in `priv-core`.
-- In `KNOWN_ISSUES.md`, *Installing for everyone through privd is bounded*;
-  in `CVSS.md`, the findings that rest on the hand-over and the staged
-  copy, each re-read before it is deleted.
-
-Needs something in its place:
-
-- **One person or several.** "The owners record holds `/usr/local`" also
-  means "the machine has one person", which decides whether the first home
-  is open to others (`root_layout.rs`, `scripts/build_fs_image.sh`).
-  Closing the first home at the second `users add` stays, on a fact of its
-  own.
-- **Shell completions.** The shell reads
-  `/usr/local/share/shell/completions` and the base's. An image's
-  `share/shell/completions` takes the first one's place.
-- **`scripts/fs_tree.py`** stays for the host trees that are not
-  `/usr/local`: the ladder fixtures, a planted pairing.
-
-What a person loses is `tree-install` into `~/.local`, which remembered
-what it copied. `cp` is what remains, and `extctl build` packs a directory
-for everyone with no tool and no capability. `~/.cargo/bin` is on no
-search path today; decide whether it joins.
-
-Neither `DEFAULT_PATH` nor `ROOT_LAYOUT` is in the base-interface gate's
-roots, so none of this takes an interface number.
-
-Done when nothing in the tree, its tests or `plans/` names `/usr/local`,
-and a note for each of the 25 docs pages that do is in the skills'
-`pending.md`.
-
-## Phase 5: an image is its name and its signer
-
-**For:** nothing to take over what an image owns by using its name.
-
-Build:
-
-1. `admit::install` holding every install to the record's signer, a
-   person's too. An image under another key, or a signed one over one
-   nobody signed, or the reverse, is refused as an update and named as
-   what it is: another publisher's image of that name.
-2. A removal that gives up everything the name owned: the record with its
-   floor, the uid, `/var/lib/<name>`, `/etc/<name>` and `/var/log/<name>`.
-   `extctl remove` today keeps the record, the floor and the uid. Only
-   after it does another signer's image go in, as a first install.
-3. The question privd shows naming who signed the image, by the key's
-   fingerprint, or saying that nobody did.
-4. The cases in `extension_test`: a key's image over a person's, a
-   person's over a key's, a second key's over a first's, each refused
-   until the removal, and each then starting with no state.
-
-What stays as it is: an image nobody signed replaces another nobody
-signed, by an administrator's approval, which is how `just install`
-replaces the apps the install medium offered.
-
-Done when those cases pass and *An administrator's approval replaces an
-image with another publisher's* is gone from `KNOWN_ISSUES.md`.
-
-## Phase 6: as many images as a machine holds
-
-**For:** one image per piece of software to be possible, which a pool of
-32 is not.
-
-The numbers were sized for a few system add-ons:
-
-- `MAX_ACTIVATIONS = 32` (`abi/src/extension.rs`) sizes a static pool
-  (`fs/src/extension/mod.rs`, `POOL`), searched from the front on every
-  exec and every executable mapping (`is_activation`). A replaced image
-  holds its slot until nothing uses it, so with 32 in use none can be
-  updated.
-- `MAX_MOUNTS = 32 + MAX_ACTIVATIONS` sizes the mount table and two arrays
-  on the kernel stack (`fs/src/vfs/mount.rs`, `fs/src/vfs/ops.rs`), which
-  the 2 KiB frame rule bounds.
-- Every image name ever installed takes one of 900 uids for good, whether
-  or not it declares a user (`extension-core/src/accounts.rs`).
-- Each activation walks its whole volume into a kernel index at
-  `ext_activate`.
-
-Build:
-
-1. The pool and the mount table grown from the kernel heap as images are
-   shown, with no array of either on a stack, and an activation found from
-   the number its inodes carry, not by a search.
-2. An image that declares no user taking no uid, and a uid given back when
-   an image's record is removed for good.
-3. A bound that is a budget of memory, as base generations have one, in
-   place of a count.
-4. A measurement of what one more image costs at boot and at rest, with a
-   hundred small ones shown, and a cap on it in the suite.
-
-Find out first: whether an image is better shown at its first use than at
-boot. Showing all at boot is what a hundred images pay for; showing on
-demand moves the cost to the first program started.
-
-Done when a test shows more images than 32, updates one of them, and the
-measured cost of each is in the plan's place in the docs.
-
-## Phase 7: an image reads as fast as the root
+## Phase 2: an image reads as fast as the root
 
 **For:** a program to start from an image as fast as from the root's own
 files, cold or warm.
@@ -386,6 +196,196 @@ needs per-file verity in ext4 and changes the store's format.
 Done when `toolchain_test`'s rungs take within 10% of a `/usr/local`
 tree's times on the same kernel, cold and warm, and the gate holds.
 
+## Phase 3: an image reaches a root without a person
+
+**For:** the host's image builder, the installer and the install medium to
+put the toolchain and the apps on a root through the store, as `extctl`
+does, with nobody there to approve.
+
+No host script writes a store, the installer has no path into one
+(`extctl --root` offers `status`, `enable` and `disable`), and init
+installs the medium's apps as a tree. A test installs the toolchain the
+host put on a root (`selfhost::toolchain`); a person does it by hand.
+
+Build:
+
+1. A directory on the root that only uid 0 writes, holding images offered
+   to the machine. Before `activate-all`, init runs `extctl` holding
+   `ExtensionUpdate` and `Seal`, as it runs `activate-all`
+   (`userland/src/apps/init/mod.rs`), to install each offered image above
+   its record's floor. This path installs only an image that asks for
+   nothing but commands and apps, so it can never hand out a capability.
+2. `scripts/build_fs_image.sh` offering the `slopos-toolchain` and
+   `slopos-essentials` images there, in place of the image file at
+   `/var/lib/slopos/toolchain` and the `apps` tree. A host build that
+   changed offers a higher version; one the guest installed since stays,
+   by its floor.
+3. The installer copying the medium's images into the new root's offered
+   directory (`installer/root.rs`, `fill`), and
+   `scripts/build_install_medium.sh` carrying image files in place of the
+   `apps` tree and the payload's `usr/local`.
+4. The live boot. A store needs a seal taken off to add a generation, and
+   a root in memory keeps a seal for good (`fs/src/ramfs/mod.rs`); the
+   accounts store refuses such a root outright. Either ramfs lets a `Seal`
+   holder clear one as ext4 does, or the live boot shows the apps' image
+   straight from the medium, which the kernel accepts (`ext_activate`
+   takes any readable file) and userland does not yet, since the dock
+   reads the store's names.
+5. A cheap boot. Every `activate-all` reads each ELF of each image whole
+   to hold it to `libc.so`, 7.9 s for the toolchain. The record keeps the
+   digest of the `libc.so` an image was last held to, and the check runs
+   again only when the base's differs.
+
+Find out first: which of the two live-boot answers is smaller, and whether
+`priv` accepts a command reached through `/opt/bin` (`trusted_within`,
+`userland/src/apps/priv.rs`).
+
+Done when `just test-installer` installs a disk whose toolchain and apps
+are images, and `just boot-live` shows the apps.
+
+## Phase 4: the apps SlopOS ships are one image
+
+**For:** the five apps under `apps/` to be installed, replaced and rolled
+back as the image `slopos-essentials`.
+
+They are built the way an image needs: `bin/` and `share/` alone, dynamic,
+`libc.so` their one library, no `syscall` instruction.
+
+Build:
+
+1. `scripts/build_userland.sh` staging `builddir/apps` with a release and a
+   declaration (four apps, five commands), its entries naming
+   `/opt/slopos-essentials/bin/…`, and packing it.
+2. The editor finding its manual in its own image; it looks in
+   `~/.local/share`, `/usr/local/share` and `/usr/share`
+   (`apps/src/editor/files.rs`).
+3. `just install` installing the image with `extctl install`. Changed
+   bytes need a higher version, so the build stamps one; an administrator
+   is asked each time, as for a base.
+4. The tests that name `/usr/local/bin/<app>`: `apps_test`, `dock_test`,
+   `privd_test`, `extension_action_test`.
+
+What changes for a person: the apps start `AT_SECURE`, and privd names one
+that asks as the image `slopos-essentials` where it names none today.
+
+Done when `apps_test` and `dock_test` pass with no `apps` tree on the root.
+
+## Phase 5: `/usr/local` goes
+
+**For:** no shared directory a person can write to be left on anyone's
+search path.
+
+Goes, with nothing in its place:
+
+- `tree-install`, `tree-core`, `userland/src/tree.rs` (its four file
+  helpers move to the installer, which imports them), the privd action
+  `org.slopos.software.install` and its staging directories.
+- In `root_layout.rs`: `LOCAL`, `settled` and its mark, the hand-over mark,
+  `take_local` and the checks under it. In init: `hand_over`, `settle`,
+  `install_live_apps`. In `users add`: the hand-over and the restart
+  advice. In `priv`: the clause on `settled`.
+- `/usr/local/bin` from `DEFAULT_PATH` and `search_path`, `/usr/local` from
+  `ROOT_LAYOUT` and `PERSON_TREES` (`abi/src/fs.rs`) and their mirrors
+  (`scripts/lib/root_layout.sh`, `tools/initramfs`), `LOCAL_DIR` from the
+  loader, `/usr/local/share` from the dock's shares.
+- The tests of all of it: `tree_install_test`, `apps_test --trees`, the
+  hand-over cases of `dac_test`, the `/usr/local/lib` cases of `dl_test`,
+  `tree-core`'s host tests, the action's cases in `priv-core`.
+- In `KNOWN_ISSUES.md`, *Installing for everyone through privd is bounded*;
+  in `CVSS.md`, the findings that rest on the hand-over and the staged
+  copy, each re-read before it is deleted.
+
+Needs something in its place:
+
+- **One person or several.** "The owners record holds `/usr/local`" also
+  means "the machine has one person", which decides whether the first home
+  is open to others (`root_layout.rs`, `scripts/build_fs_image.sh`).
+  Closing the first home at the second `users add` stays, on a fact of its
+  own.
+- **Shell completions.** The shell reads
+  `/usr/local/share/shell/completions` and the base's. An image's
+  `share/shell/completions` takes the first one's place.
+- **`scripts/fs_tree.py`** stays for the host trees that are not
+  `/usr/local`: the ladder fixtures, a planted pairing.
+
+What a person loses is `tree-install` into `~/.local`, which remembered
+what it copied. `cp` is what remains, and `extctl build` packs a directory
+for everyone with no tool and no capability. `~/.cargo/bin` is on no
+search path today; decide whether it joins.
+
+Neither `DEFAULT_PATH` nor `ROOT_LAYOUT` is in the base-interface gate's
+roots, so none of this takes an interface number.
+
+Done when nothing in the tree, its tests or `plans/` names `/usr/local`,
+and a note for each of the 25 docs pages that do is in the skills'
+`pending.md`.
+
+## Phase 6: an image is its name and its signer
+
+**For:** nothing to take over what an image owns by using its name.
+
+Build:
+
+1. `admit::install` holding every install to the record's signer, a
+   person's too. An image under another key, or a signed one over one
+   nobody signed, or the reverse, is refused as an update and named as
+   what it is: another publisher's image of that name.
+2. A removal that gives up everything the name owned: the record with its
+   floor, the uid, `/var/lib/<name>`, `/etc/<name>` and `/var/log/<name>`.
+   `extctl remove` today keeps the record, the floor and the uid. Only
+   after it does another signer's image go in, as a first install.
+3. The question privd shows naming who signed the image, by the key's
+   fingerprint, or saying that nobody did.
+4. The cases in `extension_test`: a key's image over a person's, a
+   person's over a key's, a second key's over a first's, each refused
+   until the removal, and each then starting with no state.
+
+What stays as it is: an image nobody signed replaces another nobody
+signed, by an administrator's approval, which is how `just install`
+replaces the apps the install medium offered.
+
+Done when those cases pass and *An administrator's approval replaces an
+image with another publisher's* is gone from `KNOWN_ISSUES.md`.
+
+## Phase 7: as many images as a machine holds
+
+**For:** one image per piece of software to be possible, which a pool of
+32 is not.
+
+The numbers were sized for a few system add-ons:
+
+- `MAX_ACTIVATIONS = 32` (`abi/src/extension.rs`) sizes a static pool
+  (`fs/src/extension/mod.rs`, `POOL`), searched from the front on every
+  exec and every executable mapping (`is_activation`). A replaced image
+  holds its slot until nothing uses it, so with 32 in use none can be
+  updated.
+- `MAX_MOUNTS = 32 + MAX_ACTIVATIONS` sizes the mount table and two arrays
+  on the kernel stack (`fs/src/vfs/mount.rs`, `fs/src/vfs/ops.rs`), which
+  the 2 KiB frame rule bounds.
+- Every image name ever installed takes one of 900 uids for good, whether
+  or not it declares a user (`extension-core/src/accounts.rs`).
+- Each activation walks its whole volume into a kernel index at
+  `ext_activate`.
+
+Build:
+
+1. The pool and the mount table grown from the kernel heap as images are
+   shown, with no array of either on a stack, and an activation found from
+   the number its inodes carry, not by a search.
+2. An image that declares no user taking no uid, and a uid given back when
+   an image's record is removed for good.
+3. A bound that is a budget of memory, as base generations have one, in
+   place of a count.
+4. A measurement of what one more image costs at boot and at rest, with a
+   hundred small ones shown, and a cap on it in the suite.
+
+Find out first: whether an image is better shown at its first use than at
+boot. Showing all at boot is what a hundred images pay for; showing on
+demand moves the cost to the first program started.
+
+Done when a test shows more images than 32, updates one of them, and the
+measured cost of each is in the plan's place in the docs.
+
 ## Phase 8: the word extension goes
 
 **For:** the names to say what the thing is.
@@ -410,13 +410,13 @@ an installed image.
 
 ## Order
 
-Phase 7 comes next: the toolchain already pays for every fault, and phase
-3 would make every app pay. Phase 2 needs phase 3's image, and phase 3 can
-come first. Phase 4 removes what the first three stopped using. Phase 5
-depends on none of them and is small; it can come first. Phase 6 is needed
-before software from elsewhere arrives one image at a time, not before.
-Phase 8 comes last, so that no other phase is written against names that
-move under it.
+Phase 2 comes next: the toolchain already pays for every fault, and phase
+4 would make every app pay. Phase 3 needs phase 4's image, and phase 4 can
+come before it. Phase 5 removes what phases 1, 3 and 4 stopped using.
+Phase 6 depends on none of them and is small; it can come early. Phase 7
+is needed before software from elsewhere arrives one image at a time, not
+before. Phase 8 comes last, so that no other phase is written against
+names that move under it.
 
 ## Later
 
