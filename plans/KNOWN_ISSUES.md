@@ -111,6 +111,26 @@ should also stop failing a whole mount.
 
 ---
 
+## rustc in the guest runs out of address space building the kernel
+
+**Status**: Open (the refusal is seen; what fills the address space is not measured)
+**Severity**: High (`just test-selfhost` fails, so the guest builds no system)
+**Component**: the per-process `Pages` quota (`abi/src/quota.rs:226`,
+4 GiB of virtual pages), `mm/src/vma_region.rs:646` (`VmaMap::insert`),
+`mm/src/process_vm.rs:2589`
+
+`just build dev` in the guest stops at `slopos-ostd` and `slopos-mm`: rustc's
+codegen coordinator cannot spawn its worker threads (`failed to spawn work
+thread: Out of memory`, an ICE), each refusal logged as `process_vm_mmap:
+Failed to insert VMA`. The thread stack's `mmap` is refused by `insert`'s page
+reservation: the commit ceiling is not what refuses it, since a run at 8 GiB,
+with room left under the ceiling and no denial, fails identically. A run with
+the toolchain as a tree at `/usr/local` fails identically too, so neither
+`AT_SECURE` nor the image is the cause. Find what one rustc maps (incremental
+caches, rlibs, stacker segments, arenas) before raising the share.
+
+---
+
 ## Boot turns the scheduler off globally while APs already run user tasks
 
 **Status**: Open
