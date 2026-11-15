@@ -215,7 +215,7 @@ signer.
 ## Extension activations cost more than their images
 
 **Status**: Open
-**Severity**: Low (memory and boot time; only an `ExtensionUpdate` holder makes an activation)
+**Severity**: Medium (memory, boot time, and every program of an image starts several times slower)
 **Component**: `fs/src/extension/index.rs:153`, `fs/src/extension/device.rs`,
 `extension-core/src/admit.rs:186-225`, `userland/src/apps/extctl/mod.rs:962-978`
 
@@ -226,6 +226,14 @@ signer.
 - Every boot's `extctl activate-all` runs `admit::activation`, whose symbol
   check reads each extension's ELF files whole through the tree, before privd
   starts.
+- A page fault on an image's file costs 4.6 times one on the root's: 1.5 ms
+  against 0.33 ms over the same ~37 000 faults of `toolchain_test` on the dev
+  tests kernel, so `rustc --version` takes 10 s from `/opt/slopos-toolchain`
+  and 1.1 s from `/usr/local`. The activation's `read_pages` holds its mount
+  lock while the verifying device takes the run a 4 KiB block at a time: one
+  `read` of the root's filesystem per block, under one mutex per image
+  (`VerityFile::state`) that serializes every reader. SHA-256 is not among
+  the hot functions; the round trips and the locks are.
 
 ---
 

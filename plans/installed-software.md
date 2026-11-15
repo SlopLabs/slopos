@@ -312,10 +312,10 @@ Build:
 
 Find out first: whether an image is better shown at its first use than at
 boot. Showing all at boot is what a hundred images pay for; showing on
-demand moves the cost to the first program started. And why a program
-starts slower from an image: on the dev tests kernel, `rustc --version`
-takes 9 s from `/opt/slopos-toolchain` and took 1.5 s from `/usr/local`,
-`rustc hello.rs` 24 s and 4 s, on both boots of `test-toolchain`.
+demand moves the cost to the first program started. And an image's file
+faults: each costs 4.6 times one on the root's (*Extension activations cost
+more than their images*, `KNOWN_ISSUES.md`), so `rustc --version` takes
+10 s from `/opt/slopos-toolchain` and took 1.1 s from `/usr/local`.
 
 Done when a test shows more images than 32, updates one of them, and the
 measured cost of each is in the plan's place in the docs.
