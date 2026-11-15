@@ -54,7 +54,7 @@ the staged copy behind `org.slopos.software.install`.
   outside this plan (below).
 - **An image is its name and its signer** (phase 5), as the systems that
   grew large settled it (below).
-- **The word extension goes** (phase 7), since nothing installed is an
+- **The word extension goes** (phase 8), since nothing installed is an
   extension of anything once an editor and a compiler are images.
 
 ## What later security rests on
@@ -296,7 +296,7 @@ The numbers were sized for a few system add-ons:
 - Every image name ever installed takes one of 900 uids for good, whether
   or not it declares a user (`extension-core/src/accounts.rs`).
 - Each activation walks its whole volume into a kernel index at
-  `ext_activate`, and holds a block cache of its own.
+  `ext_activate`.
 
 Build:
 
@@ -312,15 +312,81 @@ Build:
 
 Find out first: whether an image is better shown at its first use than at
 boot. Showing all at boot is what a hundred images pay for; showing on
-demand moves the cost to the first program started. And an image's file
-faults: each costs 4.6 times one on the root's (*Extension activations cost
-more than their images*, `KNOWN_ISSUES.md`), so `rustc --version` takes
-10 s from `/opt/slopos-toolchain` and took 1.1 s from `/usr/local`.
+demand moves the cost to the first program started.
 
 Done when a test shows more images than 32, updates one of them, and the
 measured cost of each is in the plan's place in the docs.
 
-## Phase 7: the word extension goes
+## Phase 7: an image reads as fast as the root
+
+**For:** a program to start from an image as fast as from the root's own
+files, cold or warm.
+
+Measured on the dev tests kernel by profiling `toolchain_test` both ways:
+the same ~37 000 file faults cost 1.5 ms each from `/opt/slopos-toolchain`
+and 0.33 ms from a tree at `/usr/local`, so `rustc --version` takes 10 s
+and 1.1 s. A fault reaches an image through four layers, each with its own
+lock and two with their own cache:
+
+1. The file map, which reads 32 pages ahead and caches what it read.
+2. The activation's `Ext4Mount`, a block cache under one lock for the whole
+   volume.
+3. The verifying device (`fs/src/extension/device.rs`), one 4 KiB block at
+   a time under one mutex per image, keeping 16 tree blocks.
+4. The root's ext4, one `read` of the store file per block, under its lock
+   and through its cache.
+
+SHA-256 is not among the hot functions; the round trips and the locks are.
+
+How systems that made verified images fast settled it:
+
+| System | What it does |
+|--------|--------------|
+| fs-verity | Verifies a page on its way into the page cache, before it is readable; a cached page costs nothing. Hash pages are cached, and a walk stops at the first one already verified |
+| dm-verity | Verifies a block on first read; hash blocks in a buffer cache; reads in clusters (`prefetch_cluster`); verifies in softirq context when the hashes are cached |
+| Android APEX | An ext4 image on dm-verity on a loop device; `apexd` opens the image `O_DIRECT` and sets the loop block size to 4096, so the image file is not cached a second time |
+| composefs | A metadata-only EROFS image; each file's bytes stay in the root's filesystem with its own fs-verity digest, so a read is the root's read and its page cache is shared |
+| macOS | Checks a page's hash lazily at page-in and keeps the result on the page; never hashes a whole binary |
+| Fuchsia blobfs | Its pager verifies at page-in, with page requests in parallel under a shared lock |
+| Linux, 2025-2026 | Two SHA-256s interleaved, 70-98% more throughput and about 35% faster cold verity reads; targeted readahead for executable faults, about half the cold fault time |
+
+What they share: one cache, the page cache; verification only on its miss
+path; a miss read in runs at the device; no lock across an image; cheap
+hashing.
+
+Build:
+
+1. One cache. The file map alone caches an image's file bytes; the
+   activation's mount keeps metadata. The device reads the store file's
+   blocks from the root's block device by its extents, mapped once at
+   activation, as a loop device's direct I/O does: the store file is
+   sealed and held open, so its extents do not move.
+2. Runs. The device takes the file map's readahead window as one read of
+   contiguous blocks, verifies each, and reads the leaf hash block once
+   per 128 data blocks.
+3. Hash blocks kept. The levels above the leaves stay resident (about
+   1/16 000 of the data), the leaves in a bounded cache, so a fault reads
+   at most one hash block.
+4. No lock across an image. A block's check needs only its tree path;
+   readers of one image run in parallel, and the mount's lookups take a
+   shared lock. The lock order activation, device, root filesystem stays.
+5. Readahead for an executable mapping's faults, for every filesystem.
+6. Hashing, measured after 1-5: if SHA-256 is then hot, two blocks
+   interleaved, or the SHA instructions under saved vector state, which
+   the soft-float kernel does not allow today.
+7. A gate: cold and warm faults over one file from an image and the same
+   file on the root, timed in the suite, with a cap on their ratio, as
+   `fsperf` caps the filesystem.
+
+Find out first: whether composefs's shape is the smaller change. An image
+of metadata whose files' bytes stay in the root's filesystem, each
+verified by its own digest, reads as the root does by construction, but
+needs per-file verity in ext4 and changes the store's format.
+
+Done when `toolchain_test`'s rungs take within 10% of a `/usr/local`
+tree's times on the same kernel, cold and warm, and the gate holds.
+
+## Phase 8: the word extension goes
 
 **For:** the names to say what the thing is.
 
@@ -344,11 +410,13 @@ an installed image.
 
 ## Order
 
-Phase 2 needs phase 3's image, and phase 3 can come first. Phase 4
-removes what the first three stopped using. Phase 5 depends on none of
-them and is small; it can come first. Phase 6 is needed before software
-from elsewhere arrives one image at a time, not before. Phase 7 comes
-last, so that no other phase is written against names that move under it.
+Phase 7 comes next: the toolchain already pays for every fault, and phase
+3 would make every app pay. Phase 2 needs phase 3's image, and phase 3 can
+come first. Phase 4 removes what the first three stopped using. Phase 5
+depends on none of them and is small; it can come first. Phase 6 is needed
+before software from elsewhere arrives one image at a time, not before.
+Phase 8 comes last, so that no other phase is written against names that
+move under it.
 
 ## Later
 
