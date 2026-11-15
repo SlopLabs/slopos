@@ -207,7 +207,7 @@ that a trusted key installed, once its version is above the floor: the
 record's signer is cleared, and the newcomer keeps the name's uid,
 `/var/lib/<name>` and `/etc/<name>`. The question shows the name and the
 grant, not that another publisher's image is being replaced.
-`plans/installed-software.md`, phase 6, holds an install to the record's
+`plans/installed-software.md`, phase 7, holds an install to the record's
 signer.
 
 ---

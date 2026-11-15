@@ -52,9 +52,9 @@ the staged copy behind `org.slopos.software.install`.
 - **Installing stays an administrator's.** The first person is one, and a
   trusted key's image goes in unasked. An install by someone who is not is
   outside this plan (below).
-- **An image is its name and its signer** (phase 6), as the systems that
+- **An image is its name and its signer** (phase 7), as the systems that
   grew large settled it (below).
-- **The word extension goes** (phase 8), since nothing installed is an
+- **The word extension goes** (phase 9), since nothing installed is an
   extension of anything once an editor and a compiler are images.
 
 ## What later security rests on
@@ -115,15 +115,15 @@ and no registry has to hand it out; Snap's is the exception and needs its
 store.
 
 So an image's identity is its name and the key that signed it, and an
-image nobody signed belongs to the machine. Phase 6 builds that. A short
+image nobody signed belongs to the machine. Phase 7 builds that. A short
 id derived from the key, a successor key vouched for by the old one, and
 name prefixes bound to keys are left for later (below); none of them
-changes what phase 6 stores.
+changes what phase 7 stores.
 
 ## Phase 1: the toolchain is built as an image — done
 
 `just toolchain` ends in `slopos-toolchain.ext`, held to every check an
-install makes. Until phase 3 a root carries it as a file at
+install makes. Until phase 4 a root carries it as a file at
 `/var/lib/slopos/toolchain` that a test or a person installs with
 `extctl`, and the install medium's payload lays its tree at `/usr/local`.
 
@@ -152,7 +152,60 @@ configure 2554 and 2704, `cargo clippy` 2158 and 2303, `bash` 2005 and 1944.
 spread of 697 to 970. `fsperf` holds `FSIMG`: one file faulted in cold from
 an image and from the root it is a file of.
 
-## Phase 3: an image reaches a root without a person
+## Phase 3: an image installs at the speed of its disk
+
+**For:** `extctl install` to take what moving the image's bytes takes on
+the disk under it, so that the hardware and not the software is what an
+install waits on.
+
+Measured on the dev tests kernel by profiling `toolchain_test --install`:
+the 950 MB toolchain image takes 270 s to install. 180 000 `pread`s cost
+182 s, 1 ms each; 233 000 `pwrite`s, one per non-zero 4 KiB block of the
+copy, cost 55 s; `extctl`'s own work 36 s. Nothing waits on the disk: each
+call is a trip through the root's ext4 under its lock, and the install
+reads the image several times:
+
+1. `verify_whole` holds every block of the offered file to its tree, the
+   data in 64 KiB reads, each tree block read alone and twice.
+2. Opening the image walks its volume, `check_contents` holds every file
+   to the manifest and the symbol check reads each ELF whole, all through
+   a reader that verifies one 4 KiB block per `pread`.
+3. `copy_sealed_image` writes the store's copy, 64 KiB read and one
+   `pwrite` per non-zero block, to keep the holes.
+4. The copy is read back whole (`verify_whole`) and opened again to be
+   activated.
+
+Build:
+
+1. One pass over the offered file. Large sequential reads, each block
+   hashed once as it passes, written to the store in the same pass, and
+   the tree held to the hashes that pass computed, so the data is never
+   read a second time to check it.
+2. Writes in runs. A run of non-zero blocks is one `pwrite`; a hole is a
+   gap the next write skips.
+3. Reads inside the image in runs. The contents and symbol checks read
+   through a reader that takes a run of blocks in one call and checks it
+   with `verity::check`, as the kernel's device does since phase 2, with
+   the tree's upper levels kept.
+4. The copy read back only as far as the store's rule needs. The bytes
+   written are the bytes hashed, and from then on the kernel holds every
+   block it reads to the tree and the tree's top at activation.
+5. Hashing at the hardware's speed. `extctl` is userland and may use the
+   SHA instructions the kernel may not; `verity-core` grows a path for
+   them, chosen by the CPU's features at run time, and hashes on more than
+   one core when the image is large.
+6. A gate: an image installed in the suite, timed, over the time the same
+   bytes take read and written raw on the same disk, with a cap on the
+   quotient, as `fsperf` caps a write.
+
+Find out first: how the 180 000 reads split between the passes, and
+whether the store's rule that a writer reads back what it wrote needs more
+for an image than the kernel's check already gives.
+
+Done when installing the toolchain image takes within twice the raw time
+for its bytes on the same disk, on the release kernel, and the gate holds.
+
+## Phase 4: an image reaches a root without a person
 
 **For:** the host's image builder, the installer and the install medium to
 put the toolchain and the apps on a root through the store, as `extctl`
@@ -199,7 +252,7 @@ Find out first: which of the two live-boot answers is smaller, and whether
 Done when `just test-installer` installs a disk whose toolchain and apps
 are images, and `just boot-live` shows the apps.
 
-## Phase 4: the apps SlopOS ships are one image
+## Phase 5: the apps SlopOS ships are one image
 
 **For:** the five apps under `apps/` to be installed, replaced and rolled
 back as the image `slopos-essentials`.
@@ -226,7 +279,7 @@ that asks as the image `slopos-essentials` where it names none today.
 
 Done when `apps_test` and `dock_test` pass with no `apps` tree on the root.
 
-## Phase 5: `/usr/local` goes
+## Phase 6: `/usr/local` goes
 
 **For:** no shared directory a person can write to be left on anyone's
 search path.
@@ -276,7 +329,7 @@ Done when nothing in the tree, its tests or `plans/` names `/usr/local`,
 and a note for each of the 25 docs pages that do is in the skills'
 `pending.md`.
 
-## Phase 6: an image is its name and its signer
+## Phase 7: an image is its name and its signer
 
 **For:** nothing to take over what an image owns by using its name.
 
@@ -303,7 +356,7 @@ replaces the apps the install medium offered.
 Done when those cases pass and *An administrator's approval replaces an
 image with another publisher's* is gone from `KNOWN_ISSUES.md`.
 
-## Phase 7: as many images as a machine holds
+## Phase 8: as many images as a machine holds
 
 **For:** one image per piece of software to be possible, which a pool of
 32 is not.
@@ -342,7 +395,7 @@ demand moves the cost to the first program started.
 Done when a test shows more images than 32, updates one of them, and the
 measured cost of each is in the plan's place in the docs.
 
-## Phase 8: the word extension goes
+## Phase 9: the word extension goes
 
 **For:** the names to say what the thing is.
 
@@ -366,11 +419,13 @@ an installed image.
 
 ## Order
 
-Phase 3 needs phase 4's image, and phase 4 can come before it. Phase 5
-removes what phases 1, 3 and 4 stopped using. Phase 6 depends on none of
-them and is small; it can come early. Phase 7 is needed before software
-from elsewhere arrives one image at a time, not before. Phase 8 comes last,
-so that no other phase is written against names that move under it.
+Phase 3 comes next: every install waits on it, and phases 4 and 5 put the
+toolchain and the apps through an install on every root. Phase 4 needs
+phase 5's image, and phase 5 can come before it. Phase 6 removes what
+phases 1, 4 and 5 stopped using. Phase 7 depends on none of them and is
+small; it can come early. Phase 8 is needed before software from elsewhere
+arrives one image at a time, not before. Phase 9 comes last, so that no
+other phase is written against names that move under it.
 
 ## Later
 
