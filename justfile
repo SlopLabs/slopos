@@ -49,9 +49,13 @@ capacity_qemu_mem     := env("CAPACITY_QEMU_MEM", "2G")
 # and so `git clean` reclaims it.
 capacity_stage        := build_dir / "capacity-stage"
 
-# The toolchain a root carries at /usr/local: the one `just toolchain` built,
-# unless TOOLCHAIN_STAGE names another. A root without one builds all the same.
-toolchain_install     := env("TOOLCHAIN_STAGE", build_dir / "slopos-toolchain/install")
+# The toolchain `just toolchain` built: the image a root carries at
+# /var/lib/slopos/toolchain, for a test or a person to install with extctl,
+# unless TOOLCHAIN_STAGE names another image's directory; and the tree it packs,
+# which an install medium's payload lays out at /usr/local. A root without one
+# builds all the same.
+toolchain_image       := env("TOOLCHAIN_STAGE", build_dir / "slopos-toolchain/image")
+toolchain_install     := build_dir / "slopos-toolchain/install"
 # Free space a root keeps for a checkout's builds: a clean dev and tests system
 # build, kernels, userlands, bases and the C++ runtime, holds 4.8G of it, and
 # `just precommit` over them (the host crates' tests, clippy's three targets)
@@ -163,15 +167,27 @@ test_userland_bins  := `. scripts/lib/base.sh && printf %s "$BASE_TEST_PROGRAMS"
 test_shared_objects := `. scripts/lib/base.sh && printf %s "$BASE_TEST_SHARED_OBJECTS"`
 base_recipe_programs := `. scripts/lib/base.sh && printf %s "$BASE_RECIPE_PROGRAMS"`
 base_recipes        := `. scripts/lib/base.sh && printf %s "$BASE_RECIPES"`
-recipes_prefix      := if os() == "slopos" { "/usr/local" } else { build_dir / "slopos-recipes/prefix" }
+# On SlopOS the toolchain image, or the tree an install medium's payload laid
+# out at /usr/local on a root it installed.
+recipes_prefix      := if os() == "slopos" { if path_exists("/opt/slopos-toolchain/libexec") == "true" { "/opt/slopos-toolchain" } else { "/usr/local" } } else { build_dir / "slopos-recipes/prefix" }
 apps_tree           := build_dir / "apps:/usr/local:apps"
-base_recipe_env     := "RECIPE_PREFIX=" + recipes_prefix + " RECIPE_PROGRAMS=\"" + base_recipe_programs + "\" RECIPE_LICENSES=\"" + base_recipes + "\""
+base_recipe_env     := "RECIPE_PROGRAM_DIR=" + recipes_prefix / "libexec" + " RECIPE_PROGRAMS=\"" + base_recipe_programs + "\" RECIPE_LICENSE_DIR=" + recipes_prefix / "share/licenses" + " RECIPE_LICENSES=\"" + base_recipes + "\""
 # A machine the host drives through remoted stays paired: on SlopOS the base it
 # builds carries the pairing the running base does.
 base_pairing        := if os() == "slopos" { if path_exists("/usr/share/slopos/remote/remote.conf") == "true" { "/usr/share/slopos/remote" } else { "" } } else { "" }
 
-[doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace")]
-setup: (_host "setup")
+[doc("Install Rust + Go toolchains, materialize the owned `slopos` sysroot, and verify workspace; on SlopOS, hold the toolchain image to the one this tree needs")]
+setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "{{os()}}" = slopos ]; then
+        . scripts/lib/toolchain_pin.sh
+        . scripts/lib/toolchain_identity.sh
+        sysroot="$(rustc --print sysroot)"
+        why="$(tp_hold_toolchain . "$sysroot" 2>&1)" || { echo "just setup: $why" >&2; exit 1; }
+        echo "just setup: the toolchain at $sysroot is $(tp_toolchain_identity .), the one this tree needs"
+        exit 0
+    fi
     scripts/ensure_toolchain.sh
     scripts/ensure_go.sh
     mkdir -p {{build_dir}}
@@ -223,9 +239,9 @@ _fs-image-tests: (_host "_fs-image-tests") _build-userland-tests
 
 # `VERITY=rw`: writable, and attested wherever no boot rewrote a block. The
 # system is the booted base, mounted over the root's base directories; the
-# toolchain at /usr/local is the host's, replaced when it changes; the clone at
-# /src/slopos is the guest's once seeded, so it is staged only for a root
-# without one.
+# toolchain image at /var/lib/slopos/toolchain is the host's, replaced when it
+# changes, which `extctl install` installs; the clone at /src/slopos is the
+# guest's once seeded, so it is staged only for a root without one.
 _fs-image-persist: (_host "_fs-image-persist") _build-userland
     #!/usr/bin/env bash
     set -euo pipefail
@@ -235,13 +251,14 @@ _fs-image-persist: (_host "_fs-image-persist") _build-userland
         seed="{{build_dir}}/workspace:/src"
     fi
     FS_IMAGE_SIZE={{persist_image_size}} FS_JOURNAL_SIZE={{root_journal_size}} VERITY=rw PRESERVE_FS_IMAGE=1 FS_BASE=boot \
-        FS_HOST_TREES="{{toolchain_install}}:/usr/local {{apps_tree}}" FS_SEED_TREES="$seed" FS_FREE_FLOOR={{root_free_floor}} \
+        FS_HOST_TREES="{{toolchain_image}}:/var/lib/slopos/toolchain {{apps_tree}}" FS_SEED_TREES="$seed" FS_FREE_FLOOR={{root_free_floor}} \
         scripts/build_fs_image.sh "{{fs_image_persist}}" "{{build_dir}}"
     rm -rf "{{build_dir}}/workspace"
 
 # The persistent root's shape, with the clone seeded `--vendored`, so a build
 # in the guest reads no network, and the fixtures the toolchain ladder fetches
-# from. The tests base comes from the boot module.
+# from. The tests base comes from the boot module; a test installs the
+# toolchain image.
 _fs-image-selfhost: (_host "_fs-image-selfhost") _build-userland
     #!/usr/bin/env bash
     set -euo pipefail
@@ -249,7 +266,7 @@ _fs-image-selfhost: (_host "_fs-image-selfhost") _build-userland
     scripts/stage_workspace.sh "{{selfhost_stage}}/src" --vendored
     scripts/stage_ladder_fixtures.sh "{{selfhost_stage}}/ladder" "{{ladder_sshd}}"
     FS_IMAGE_SIZE=1G FS_JOURNAL_SIZE={{root_journal_size}} VERITY=rw PRESERVE_FS_IMAGE=0 FS_BASE=boot \
-        FS_HOST_TREES="{{toolchain_install}}:/usr/local {{apps_tree}} {{selfhost_stage}}/ladder:/home/user/ladder" \
+        FS_HOST_TREES="{{toolchain_image}}:/var/lib/slopos/toolchain {{apps_tree}} {{selfhost_stage}}/ladder:/home/user/ladder" \
         FS_SEED_TREES="{{selfhost_stage}}/src:/src" FS_FREE_FLOOR={{root_free_floor}} \
         scripts/build_fs_image.sh "{{fs_image_selfhost}}" "{{build_dir}}"
     rm -rf "{{selfhost_stage}}"
@@ -331,8 +348,8 @@ export-file +ARGS: (_host "export-file")
     scripts/export_fs_file.sh "$file" "$image" "$out"
 
 # The recipes whose programs every base carries: cross-built on the host, where
-# their build needs the tests userland's libraries; on SlopOS the toolchain at
-# /usr/local carries them.
+# their build needs the tests userland's libraries; on SlopOS the toolchain
+# image carries them.
 _base-recipes: _build-userland (_userland if os() == "slopos" { "" } else { "--test" })
     {{ if os() == "slopos" { "" } else { "BUILD_DIR=" + build_dir + " scripts/build_recipes.sh " + base_recipes } }}
 
@@ -607,7 +624,7 @@ test-install: (_host "test-install")
 test-install-guest: (_host "test-install-guest")
     #!/usr/bin/env bash
     set -euo pipefail
-    [ -d "{{toolchain_install}}" ] || { echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain" >&2; exit 1; }
+    [ -d "{{toolchain_image}}" ] || { echo "FAIL: no toolchain image at {{toolchain_image}} — run just toolchain" >&2; exit 1; }
     git diff --quiet HEAD || { echo "FAIL: slot a is built from the working tree and the guest builds HEAD; commit or stash first" >&2; exit 1; }
     head="$(git rev-parse HEAD)"
     just _fs-image-selfhost
@@ -1160,7 +1177,7 @@ test-capacity: (_host "test-capacity") _build-run-tests _fs-image-capacity
 # leaves a clone on /, the second reads it back and climbs the ladder again.
 # Separate from `just test`, which runs the same utests on a root with no
 # toolchain and no clone, and they pass by saying so.
-[doc("Toolchain check at 6G on the self-hosting root: hold the toolchain to its manifest and the clone to its vendored crates, climb the ladder (rustc, rustc+cc, cargo with a build script and a proc macro, cargo fetching a git dependency through libgit2 and a crate over HTTPS from a loopback sparse registry, clang, git reading the clone and reaching the host, ssh and git over ssh to the host's sshd, git cloning GitHub, cargo resolving the lockfiles from crates.io over HTTPS, a bash script, a Ninja graph, a CMake project, just running a justfile and refusing `just boot` in the clone, cargo fmt formatting a crate and cargo clippy linting one), and find a clone made on / intact after a power-off")]
+[doc("Toolchain check at 6G on the self-hosting root: install the toolchain image the host built and hold it to its root, hold the clone to its vendored crates, climb the ladder (rustc, rustc+cc, cargo with a build script and a proc macro, cargo fetching a git dependency through libgit2 and a crate over HTTPS from a loopback sparse registry, clang, git reading the clone and reaching the host, ssh and git over ssh to the host's sshd, git cloning GitHub, cargo resolving the lockfiles from crates.io over HTTPS, a bash script, a Ninja graph, a CMake project, the toolchain's identity against the clone's pins, just running a justfile and refusing `just boot` in the clone, cargo fmt formatting a crate and cargo clippy linting one), and find a clone made on / intact after a power-off")]
 test-toolchain: (_host "test-toolchain") _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1172,7 +1189,7 @@ test-toolchain: (_host "test-toolchain") _build-run-tests
     push="$PWD/{{build_dir}}/toolchain-push.git"
     # Only the toolchain's ssh dials the peer, so only then is sshd needed.
     ssh_peer=""
-    [ -d "{{toolchain_install}}" ] && ssh_peer="$PWD/{{ladder_sshd}}"
+    [ -d "{{toolchain_image}}" ] && ssh_peer="$PWD/{{ladder_sshd}}"
     for boot in 1 2; do
         echo "── boot $boot ──"
         log="{{build_dir}}/toolchain-boot$boot.log"
@@ -1189,7 +1206,7 @@ test-toolchain: (_host "test-toolchain") _build-run-tests
         [ "$rc" -eq 0 ] || { echo "FAIL: boot $boot exited $rc — full log in $log" >&2; exit 1; }
         scripts/check_fs_image.sh --map "{{fs_image_selfhost}}"
         # git rides the toolchain: without one there is no clone to grade.
-        [ -d "{{toolchain_install}}" ] || exit 0
+        [ -d "{{toolchain_image}}" ] || exit 0
         grep -aq 'git_reads_the_clone_and_reaches_the_host # git status: clean' "$log" ||
             { echo "FAIL: the seeded clone is not clean in the guest — see $log" >&2; exit 1; }
         pushed="$(grep -aoE 'ssh_carries_git_to_the_host # SSH-PUSHED [0-9a-f]{40}' "$log" | awk '{print $NF}' || true)"
@@ -1210,13 +1227,13 @@ test-toolchain: (_host "test-toolchain") _build-run-tests
 test-selfhost: (_host "test-selfhost") _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
-    [ -d "{{toolchain_install}}" ] || { echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain" >&2; exit 1; }
+    [ -d "{{toolchain_image}}" ] || { echo "FAIL: no toolchain image at {{toolchain_image}} — run just toolchain" >&2; exit 1; }
     git diff --quiet HEAD || { echo "FAIL: the guest builds HEAD and the host grades it with the working tree's gates and tests; commit or stash first" >&2; exit 1; }
     head="$(git rev-parse HEAD)"
     just _fs-image-selfhost
     # The machine running the build boots the optimized tests kernel: a
     # dev-profile one spends ten times as long in every syscall and fault.
-    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*selfhost*" just _iso-tests
+    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} {{test_cmdline_extra}} tests.run=*install_toolchain*,*selfhost*" just _iso-tests
     rc=0
     push="$PWD/{{build_dir}}/selfhost-push.git"
     rm -rf "$push"
@@ -1246,9 +1263,9 @@ test-selfhost: (_host "test-selfhost") _build-run-tests
 bench-selfhost: (_host "bench-selfhost") _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
-    [ -d "{{toolchain_install}}" ] || { echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain" >&2; exit 1; }
+    [ -d "{{toolchain_image}}" ] || { echo "FAIL: no toolchain image at {{toolchain_image}} — run just toolchain" >&2; exit 1; }
     just _fs-image-selfhost
-    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} ${BENCH_PROF-prof=on} {{test_cmdline_extra}} tests.run=*selfhost*" just _iso-tests
+    KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} ${BENCH_PROF-prof=on} {{test_cmdline_extra}} tests.run=*install_toolchain*,*selfhost*" just _iso-tests
     cp {{build_dir}}/libc.so {{build_dir}}/bench-libc.so
     rc=0
     push="$PWD/{{build_dir}}/bench-push.git"

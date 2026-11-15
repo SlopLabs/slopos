@@ -254,7 +254,7 @@ impl Declaration {
             "command" => {
                 let word = single(rest)
                     .filter(|w| valid_command(w))
-                    .ok_or("a command is one word of letters, digits, -, _ and .")?;
+                    .ok_or("a command is one word of letters, digits, -, _, . and +")?;
                 if self.commands.iter().any(|c| c == word) {
                     return Err("the command is declared already");
                 }
@@ -262,7 +262,7 @@ impl Declaration {
             }
             "app" => {
                 let word = single(rest)
-                    .filter(|w| valid_command(w))
+                    .filter(|w| valid_entry(w))
                     .ok_or("an app is one word of letters, digits, -, _ and .")?;
                 if self.apps.iter().any(|a| a == word) {
                     return Err("the app is declared already");
@@ -408,11 +408,11 @@ impl Declaration {
             .fold(0, |all, a| all | a.caps)
     }
 
-    /// Every program of the image it names: each service's and action's, a
-    /// `program` principal's naming one, and each command's.
+    /// Every program of the image it names as a path: each service's and
+    /// action's, and a `program` principal's naming one. A command is named
+    /// by [`Self::commands`].
     pub fn programs<'a>(&'a self, name: &'a str) -> impl Iterator<Item = String> + 'a {
-        let own = self
-            .services
+        self.services
             .iter()
             .map(|s| s.program.clone())
             .chain(self.actions.iter().map(|a| a.program.clone()))
@@ -421,13 +421,8 @@ impl Declaration {
                     Principal::Program(path) => Some(path.clone()),
                     _ => None,
                 })
-            }));
-        own.filter(move |path| path.starts_with(&mount_point(name)))
-            .chain(
-                self.commands
-                    .iter()
-                    .map(move |c| format!("{}/bin/{c}", mount_point(name))),
-            )
+            }))
+            .filter(move |path| path.starts_with(&mount_point(name)))
     }
 }
 
@@ -459,6 +454,12 @@ pub fn valid_user(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// An app's or a unix socket's name.
+fn valid_entry(word: &str) -> bool {
+    valid_command(word) && !word.contains('+')
+}
+
+/// A command's name, which may carry `+` as `c++` and `clang++` do.
 fn valid_command(word: &str) -> bool {
     word.len() <= NAME_MAX
         && word
@@ -467,7 +468,7 @@ fn valid_command(word: &str) -> bool {
             .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
         && word
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.".contains(&b))
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_.+".contains(&b))
 }
 
 fn canonical(path: &str, dir: bool) -> bool {
@@ -655,7 +656,7 @@ fn port_of(text: &str) -> Result<u16, &'static str> {
 }
 
 fn valid_socket(name: &str) -> bool {
-    name.len() <= LISTEN_NAME_MAX && valid_command(name)
+    name.len() <= LISTEN_NAME_MAX && valid_entry(name)
 }
 
 struct ActionDraft {

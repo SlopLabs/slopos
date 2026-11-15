@@ -40,3 +40,9 @@
   write is in the surface as `slopos_abi::fs::KMSG_*` (path, the 1024-byte
   record bound, 10 records per process each 5000 ms); `CLIPBOARD_MAX_SIZE`
   and the `SESSION_LOGINS` root are gone. slibc's `syslog` writes the node.
+- `tools/initramfs` takes the base's recipe programs by their base path
+  (`RECIPE_PROGRAMS`, `sbin/<name>` or `bin/<name>`), each read by name from
+  `RECIPE_PROGRAM_DIR`, and their licence texts from
+  `RECIPE_LICENSE_DIR/<recipe>`; `RECIPE_PREFIX` is gone. The justfile names
+  the recipes' prefix's `libexec` and `share/licenses` on the host and
+  `/opt/slopos-toolchain`'s on SlopOS.

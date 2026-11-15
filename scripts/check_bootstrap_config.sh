@@ -75,6 +75,8 @@ GATE="$BUILD_DIR/gates/bootstrap-config"
 WRAPPER="$GATE/bin/$TARGET-clang"
 WRAPPER_CXX="$GATE/bin/$TARGET-clang++"
 INSTALL="${SLOPOS_TOOLCHAIN_INSTALL:-$BUILD_DIR/slopos-toolchain/install}"
+# The base's `libc.so`, which the toolchain image carries no copy of.
+BASE_LIBC="$BUILD_DIR/libc.so"
 # Every library an installed object may need. Anything else is a host library
 # the cross link reached, which the guest does not have.
 RECIPE_SONAMES="$(sed -n 's/^soname=//p' "$REPO_ROOT"/toolchain/recipes/*/recipe | LC_ALL=C sort -u)"
@@ -256,11 +258,12 @@ dynsyms() {
 
 # Where the loader finds `$2` for the object at `$1`: its DT_RUNPATH or
 # DT_RPATH with `$ORIGIN` expanded, as the guest has no LD_LIBRARY_PATH and
-# no toolchain library in /lib. `libc.so` is the interpreter, already mapped.
+# no toolchain library in /lib. `libc.so` is the base's interpreter, already
+# mapped.
 resolve_needed() {
     local object="$1" name="$2" origin entry
     if [ "$name" = libc.so ]; then
-        printf '%s\n' "$INSTALL_ROOT/lib/libc.so"
+        printf '%s\n' "$BASE_LIBC"
         return 0
     fi
     origin="$(dirname "$object")"
@@ -558,16 +561,17 @@ self_test() {
     eval "$("$SCRIPT_DIR/cxx_host_tools.sh")"
     local so="$CLANG --target=x86_64-unknown-linux-gnu -fuse-ld=lld -shared -fPIC -nostdlib"
     local lib="$scratch/install/lib"
-    mkdir -p "$scratch/stub" "$lib"
+    BASE_LIBC="$scratch/base/libc.so"
+    mkdir -p "$scratch/stub" "$scratch/base" "$lib"
     printf 'int f(void) { return 0; }\n' >"$scratch/f.c"
     printf 'extern int f(void);\nint k(void) { return f(); }\n' >"$scratch/calls-f.c"
     printf 'extern int h(void);\nint k(void) { return h(); }\n' >"$scratch/calls-h.c"
     # Assembly, because clang takes `-mtls-dialect=gnu2` for x86-64 only from 19.
     printf '%s\n' '.globl g' 'g:' 'leaq v@tlsdesc(%rip), %rax' 'call *v@tlscall(%rax)' 'ret' \
         >"$scratch/tls.s"
-    if $so -Wl,-soname,libc.so "$scratch/f.c" -o "$lib/libc.so" &&
+    if $so -Wl,-soname,libc.so "$scratch/f.c" -o "$BASE_LIBC" &&
         $so -Wl,-soname,libstdc++.so.6 "$scratch/f.c" -o "$scratch/stub/libstdc++.so.6" &&
-        $so "$scratch/calls-f.c" -L"$lib" -l:libc.so -o "$lib/ok.so" &&
+        $so "$scratch/calls-f.c" -L"$scratch/base" -l:libc.so -o "$lib/ok.so" &&
         grade_install "$scratch/install" 2>/dev/null; then
         echo "  case clean-install: accepted an object whose names libc.so defines"
     else
@@ -594,7 +598,7 @@ self_test() {
     install_case host-library 'needs libstdc++.so.6' host.so \
         "$scratch/f.c" -L"$scratch/stub" -l:libstdc++.so.6
     install_case unbound 'nothing it needs defines: h' unbound.so \
-        "$scratch/calls-h.c" -L"$lib" -l:libc.so
+        "$scratch/calls-h.c" -L"$scratch/base" -l:libc.so
     install_case tlsdesc 'R_X86_64_TLSDESC' tls.so "$scratch/tls.s"
 
     # Recipe libraries and a cargo built from the recipes' data; each case
@@ -636,7 +640,6 @@ self_test() {
     recipe_install() {
         local pending="$RECIPE_SONAMES" rest s ready owner deps dep progress
         mkdir -p "$scratch/case/lib" "$scratch/case/bin"
-        cp "$lib/libc.so" "$scratch/case/lib/"
         while [ -n "$pending" ]; do
             rest=""
             progress=0

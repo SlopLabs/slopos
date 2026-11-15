@@ -59,6 +59,10 @@ set -euo pipefail
 #              `toolchain/crates/` port of that name and version, unpacked
 #              and patched beside the build and patched in for crates.io.
 #
+# The guest path is the toolchain image's, `/opt/slopos-toolchain`, which
+# holds no `etc/` or `sbin/`: every template puts configuration in
+# `share/etc` and system programs in `libexec/`.
+#
 # Everything builds shared into `<recipes dir>/prefix` with `-z defs`, so a
 # libc function slibc lacks fails here rather than at `dlopen` on SlopOS. A
 # library's run path is `$ORIGIN`; a program's reaches `lib/` from `bin/` or
@@ -231,7 +235,7 @@ fi
 CXX_TOOLS="$("$SCRIPT_DIR/cxx_host_tools.sh")"
 eval "$CXX_TOOLS"
 . "$SCRIPT_DIR/lib/rustc_build_settings.sh"
-GUEST_PREFIX=/usr/local
+GUEST_PREFIX=/opt/slopos-toolchain
 BUILD_TRIPLE=x86_64-pc-linux-gnu
 eval "$(rbs_llvm_archivers "$LLVM_AR")" || die "no llvm-ranlib beside $LLVM_AR"
 LLVM_AR="$RBS_AR"
@@ -401,6 +405,8 @@ template_cmake() {
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$PREFIX" \
         -DCMAKE_INSTALL_LIBDIR=lib \
+        -DCMAKE_INSTALL_SYSCONFDIR=share/etc \
+        -DCMAKE_INSTALL_SBINDIR=libexec \
         -DBUILD_SHARED_LIBS=ON \
         "${args[@]}" >"$work/configure.log" 2>&1 ||
         { tail -n 40 "$work/configure.log" >&2; die "$name: configure failed; see $work/configure.log"; }
@@ -414,8 +420,8 @@ template_meson() {
     local name="$1" work="$2" args=() stray
     mapfile -t args < <(recipe_values "$name" arg)
     meson setup "$work/build" "$work/src" --cross-file "$CROSS/meson.ini" \
-        --prefix="$GUEST_PREFIX" --libdir=lib --buildtype=release \
-        --default-library=shared --wrap-mode=nofallback \
+        --prefix="$GUEST_PREFIX" --libdir=lib --sysconfdir=share/etc --sbindir=libexec \
+        --buildtype=release --default-library=shared --wrap-mode=nofallback \
         "${args[@]}" >"$work/configure.log" 2>&1 ||
         { tail -n 40 "$work/configure.log" >&2; die "$name: configure failed; see $work/configure.log"; }
     ninja -C "$work/build" -j "$JOBS" >"$work/build.log" 2>&1 ||
@@ -434,6 +440,7 @@ template_autotools() {
     (cd "$work/build" &&
         "$work/src/configure" --build="$BUILD_TRIPLE" --host="$TARGET" ac_cv_host="$TARGET" \
             --prefix="$GUEST_PREFIX" --libdir="$GUEST_PREFIX/lib" \
+            --sysconfdir="$GUEST_PREFIX/share/etc" --sbindir="$GUEST_PREFIX/libexec" \
             CC="$CC_WRAPPER" CXX="$CXX_WRAPPER" AR="$LLVM_AR" RANLIB="$LLVM_RANLIB" \
             CFLAGS=-O2 CXXFLAGS=-O2 CC_FOR_BUILD="$CLANG" \
             CPPFLAGS="-I$PREFIX/include" LDFLAGS="-L$PREFIX/lib @$CROSS/autotools-link.rsp" \

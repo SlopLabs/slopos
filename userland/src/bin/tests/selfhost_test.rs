@@ -1,7 +1,7 @@
 use slopos_userland as _;
 
 use slopos_slibc::test_harness::note;
-use slopos_userland::selfhost::{HostHead, check_out, just, take_host_head, workspace};
+use slopos_userland::selfhost::{HostHead, check_out, just, take_host_head, toolchain, workspace};
 use std::fs;
 use std::sync::{LazyLock, OnceLock};
 use std::time::Instant;
@@ -14,8 +14,10 @@ fn root_free_bytes() -> u64 {
 }
 
 /// The workspace with the host's `HEAD` checked out, taken once for every
-/// build. A root with no workspace passes.
+/// build. A root with no workspace passes; a toolchain image the root carries
+/// and cannot install fails.
 static TREE: LazyLock<Result<(&str, HostHead), (bool, String)>> = LazyLock::new(|| {
+    toolchain().map_err(|why| (false, why))?;
     let root = workspace().map_err(|why| (true, why.to_owned()))?;
     let head = take_host_head(root).map_err(|why| (false, why))?;
     Ok((root, head))

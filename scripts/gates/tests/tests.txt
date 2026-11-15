@@ -3085,6 +3085,7 @@ userland	slopos_core::utests::utest_heap_allocator
 userland	slopos_core::utests::utest_https_transfer
 userland	slopos_core::utests::utest_image
 userland	slopos_core::utests::utest_install
+userland	slopos_core::utests::utest_install_toolchain
 userland	slopos_core::utests::utest_installer
 userland	slopos_core::utests::utest_io_capture
 userland	slopos_core::utests::utest_ip_e2e

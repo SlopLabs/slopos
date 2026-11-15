@@ -5,7 +5,7 @@
 use slopos_userland as _;
 
 use slopos_slibc::test_harness::note;
-use slopos_userland::selfhost::{SOURCE, git, stdout_of, workspace};
+use slopos_userland::selfhost::{SOURCE, git, stdout_of, toolchain, workspace};
 use slopos_userland::syscall::fs::sync;
 use std::fs;
 use std::io::ErrorKind;
@@ -14,6 +14,10 @@ const CLONE: &str = "/home/user/clone";
 const WITNESS: &str = "SURVIVES";
 
 fn a_clone_survives_a_reboot() -> bool {
+    if let Err(why) = toolchain() {
+        note(&why);
+        return false;
+    }
     if let Err(why) = workspace() {
         note(why);
         return true;

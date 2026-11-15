@@ -60,7 +60,7 @@ use slopos_userland::boot_disk::{
     register_firmware_entry,
 };
 use slopos_userland::selfhost::{
-    SCRATCH, check_out, git, just_install, stdout_of, take_host_head, workspace,
+    SCRATCH, check_out, git, just_install, stdout_of, take_host_head, toolchain, workspace,
 };
 use slopos_userland::syscall::UserUtsname;
 use slopos_userland::syscall::core::{clock_gettime_ns, uname};
@@ -153,6 +153,10 @@ fn running_version() -> String {
 /// into slot b and check the tree's own checkout out again; `None` when the
 /// root carries no workspace.
 fn install_guest_build() -> Option<bool> {
+    if let Err(why) = toolchain() {
+        note(&why);
+        return Some(false);
+    }
     let root = match workspace() {
         Ok(root) => root,
         Err(why) => {

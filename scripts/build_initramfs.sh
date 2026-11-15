@@ -12,8 +12,8 @@
 # Environment:
 #   CARGO             - cargo command, split on blanks (default: cargo)
 #   CARGO_TARGET_DIR  - where the tool is built (default: <build_dir>/target)
-#   COREUTILS_LINKS, EXTRA_SHARED_OBJECTS, SLOPOS_BUILD_TAG, RECIPE_PREFIX,
-#   RECIPE_PROGRAMS, RECIPE_LICENSES, REMOTE_PAIRING_DIR
+#   COREUTILS_LINKS, EXTRA_SHARED_OBJECTS, SLOPOS_BUILD_TAG, RECIPE_PROGRAM_DIR,
+#   RECIPE_PROGRAMS, RECIPE_LICENSE_DIR, RECIPE_LICENSES, REMOTE_PAIRING_DIR
 #                     - read by tools/initramfs; see its documentation
 set -eu
 

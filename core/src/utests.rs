@@ -117,11 +117,20 @@ crate::utest!(
     uid = 1000
 );
 crate::utest!(name = utest_mount, bin = "/bin/mount_test", caps = MOUNT);
+// The toolchain image the host put on a root, installed as uid 0; the
+// session's tests that use it (`utest_reboot_clone`, `utest_selfhost`,
+// `utest_toolchain`) are `rank = 1`, so they follow it.
+crate::utest!(
+    name = utest_install_toolchain,
+    bin = "/bin/toolchain_test",
+    argv = &["toolchain_test", "--install"]
+);
 crate::utest!(
     name = utest_toolchain,
     bin = "/bin/toolchain_test",
     caps = none,
-    uid = 1000
+    uid = 1000,
+    rank = 1
 );
 crate::utest!(name = utest_install, bin = "/bin/install_test");
 crate::utest!(name = utest_installer, bin = "/bin/installer_test");
@@ -136,7 +145,8 @@ crate::utest!(
     bin = "/bin/selfhost_test",
     uncaptured,
     caps = none,
-    uid = 1000
+    uid = 1000,
+    rank = 1
 );
 crate::utest!(name = utest_stdio_stream, bin = "/bin/stdio_stream_test");
 crate::utest!(name = utest_ip_e2e, bin = "/bin/ip_e2e_test");
@@ -183,7 +193,8 @@ crate::utest!(
     name = utest_reboot_clone,
     bin = "/bin/reboot_clone_test",
     caps = none,
-    uid = 1000
+    uid = 1000,
+    rank = 1
 );
 crate::utest!(name = utest_cpufreq, bin = "/bin/cpufreq_test");
 crate::utest!(name = utest_usb_disk, bin = "/bin/usb_disk_test", explicit);
@@ -203,8 +214,8 @@ crate::utest!(
 // `libc_abi` opens AF_UNIX endpoints, and the kernel phase has a known bug
 // where exercising unix sockets leaves UDP dead for the rest of the run (see
 // `dns_resolve_test`'s header), so it has to follow every network case:
-// `rank = 1` runs it after every other utest, whatever they are named.
-crate::utest!(name = utest_libc_abi, bin = "/bin/libc_abi_test", rank = 1);
+// `rank = 2` runs it after every other utest, whatever they are named.
+crate::utest!(name = utest_libc_abi, bin = "/bin/libc_abi_test", rank = 2);
 
 // Not last, and deliberately not renamed to be: `utest_s…` sorts ahead of
 // `utest_terminal_grid` and `utest_tls_independence`. This one spawns eight

@@ -43,3 +43,34 @@
   ports to the versions `cargo tree` resolves for a SlopOS host; and
   `third_party/vendor` and the built recipes, which the gates ask to be
   remade. Page: `verification/toolchain-gates` (Re-record).
+- `just toolchain` ends in the image `slopos-toolchain`:
+  `builddir/slopos-toolchain/install` is laid out as `/opt/slopos-toolchain`
+  shows it and `scripts/build_extension.sh` packs it into
+  `builddir/slopos-toolchain/image/slopos-toolchain.{ext,meta}`; a toolchain
+  the image checks refuse leaves no image. `--stage <dir>` copies the image
+  directory.
+- The recipes are configured for `GUEST_PREFIX=/opt/slopos-toolchain`; every
+  template puts configuration in `share/etc` and system programs in `libexec/`
+  (e2fsprogs, `sshd`), since an image holds only `bin`, `libexec`, `lib` and
+  `share`. x.py's `sysconfdir` is `share/etc`.
+- The image carries no `libc.so` or `libc.a`: a program links the running
+  base's `libc.so`. Headers are `share/include`. The clang config makes
+  `share` the sysroot, so the driver's own `<sysroot>/include` and
+  `<sysroot>/include/c++/v1` name them and `-nostdinc++`/`-nostdlibinc` still
+  drop them; `-B<CFGDIR>/../lib` finds `crt0.o` and `libbuiltins.a`, and
+  `-L/lib -L<CFGDIR>/../lib` search the base's `/lib` first.
+- No link in the image climbs: `bin/ld.lld` and `bin/llvm-ar` are copies, and
+  a recipe's climbing link becomes a copy of what it reaches or a link to a
+  sibling holding that copy (git's names in `bin/`).
+- The image ships the empty SafeStack archive at
+  `lib/rustlib/x86_64-slos/lib/librustc-nightly_rt.safestack.a`;
+  `build_kernel.sh` writes one only where none is.
+- The toolchain's identity (`tp_toolchain_identity`,
+  `scripts/lib/toolchain_identity.sh`) hashes `toolchain/PIN`, the std and
+  libc forks, `compiler/`, `crates/`, `llvm/`, `llvm-rustc/`, `cxx/`,
+  `recipes/` and `rustc_build_settings.sh`; it is the image's release
+  `display`, and its
+  `version` the build time. `build_userland.sh` and, on SlopOS, `just setup`
+  hold an image sysroot to it and name the one the tree needs.
+- `check_bootstrap_config.sh` resolves `libc.so` to `builddir/libc.so`, the
+  base's, not the install's.

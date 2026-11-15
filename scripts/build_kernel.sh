@@ -57,17 +57,15 @@ fi
 # `__safestack_pointer_address` and `_start` primes it before any instrumented
 # code runs, so the runtime archive rustc links into every safestack binary
 # only has to exist. rustup ships none for a custom target; an empty archive is
-# the 8-byte magic.
+# the 8-byte magic. A toolchain image carries one in a sysroot nobody writes.
 if [ "${KERNEL_SAFESTACK:-1}" = 1 ]; then
     KERNEL_RUSTFLAGS="$KERNEL_RUSTFLAGS -Z sanitizer=safestack -C llvm-args=-safestack-use-pointer-address"
     libdir="$($CARGO rustc --locked -Zunstable-options --print target-libdir \
         --target "$RUST_TARGET" -p kernel --bin kernel)"
     stub="$libdir/librustc-nightly_rt.safestack.a"
-    mkdir -p "$libdir"
-    printf '!<arch>\n' >"$stub.$$"
-    if cmp -s "$stub.$$" "$stub" 2>/dev/null; then
-        rm -f "$stub.$$"
-    else
+    if [ ! -f "$stub" ]; then
+        mkdir -p "$libdir"
+        printf '!<arch>\n' >"$stub.$$"
         mv -f "$stub.$$" "$stub"
     fi
 fi

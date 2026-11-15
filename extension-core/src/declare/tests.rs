@@ -108,9 +108,10 @@ fn everything_the_grammar_states_reads_as_written() {
             "/opt/hello/bin/tray",
             "/opt/hello/libexec/greet",
             "/opt/hello/libexec/reset",
-            "/opt/hello/bin/hello",
         ]
     );
+    let compilers = Declaration::parse("hello", "command c++\ncommand clang++\n").unwrap();
+    assert_eq!(compilers.commands, ["c++", "clang++"]);
     assert_eq!(Declaration::parse("hello", ""), Ok(Declaration::default()));
 }
 
@@ -140,6 +141,8 @@ fn every_rule_of_the_grammar_refuses_with_its_line() {
         ("command\n", 1),
         ("command a\ncommand a\n", 2),
         ("command a/b\n", 1),
+        ("app c++\n", 1),
+        ("command +\n", 1),
         ("frobnicate\n", 1),
         ("  program /opt/hello/bin/x\n", 1),
         ("service S\n", 1),

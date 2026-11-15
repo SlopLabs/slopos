@@ -11,9 +11,10 @@
 //! `REMOTE_PAIRING_DIR`, when set, names a directory holding the broker
 //! `remoted` dials ([`REMOTE_PAIRING`]), packed at `/usr/share/slopos/remote`,
 //! where no process can rewrite it.
-//! `RECIPE_PROGRAMS` names programs a recipe built, by their path below
-//! `RECIPE_PREFIX`, which they keep below `/`, and `RECIPE_LICENSES` the
-//! recipes whose licence texts go with them.
+//! `RECIPE_PROGRAMS` names programs a recipe built by the path each takes
+//! below `/`, in `bin/` or `sbin/`, each read by its file name from
+//! `RECIPE_PROGRAM_DIR`, and `RECIPE_LICENSES` the recipes whose licence
+//! texts go with them, each a directory of `RECIPE_LICENSE_DIR`.
 //!
 //! `initramfs tree <out.cpio> <dir>=<path>...` packs whole directory trees
 //! instead, each below its path in the archive, streamed rather than held:
@@ -93,8 +94,9 @@ struct Extras {
     coreutils_links: String,
     shared_objects: String,
     build_tag: String,
-    recipe_prefix: String,
+    recipe_program_dir: String,
     recipe_programs: String,
+    recipe_license_dir: String,
     recipe_licenses: String,
     remote_pairing: String,
 }
@@ -106,8 +108,9 @@ impl Extras {
             coreutils_links: var("COREUTILS_LINKS"),
             shared_objects: var("EXTRA_SHARED_OBJECTS"),
             build_tag: var("SLOPOS_BUILD_TAG"),
-            recipe_prefix: var("RECIPE_PREFIX"),
+            recipe_program_dir: var("RECIPE_PROGRAM_DIR"),
             recipe_programs: var("RECIPE_PROGRAMS"),
+            recipe_license_dir: var("RECIPE_LICENSE_DIR"),
             recipe_licenses: var("RECIPE_LICENSES"),
             remote_pairing: var("REMOTE_PAIRING_DIR"),
         }
@@ -283,19 +286,20 @@ fn layout(
         );
     }
 
-    let recipes = Path::new(&extras.recipe_prefix);
     for program in extras.recipe_programs.split_whitespace() {
-        if !program.starts_with("sbin/") && !program.starts_with("bin/") {
-            return Err(format!("{program}: a recipe program goes in bin/ or sbin/"));
-        }
+        let name = program
+            .strip_prefix("sbin/")
+            .or_else(|| program.strip_prefix("bin/"))
+            .filter(|name| !name.is_empty() && !name.contains('/'))
+            .ok_or_else(|| format!("{program}: a recipe program goes in bin/ or sbin/"))?;
         add(
             format!("/{program}"),
             MODE_EXEC,
-            read(&recipes.join(program))?,
+            read(&Path::new(&extras.recipe_program_dir).join(name))?,
         );
     }
     for recipe in extras.recipe_licenses.split_whitespace() {
-        let texts = recipes.join("share/licenses").join(recipe);
+        let texts = Path::new(&extras.recipe_license_dir).join(recipe);
         for (rel, path) in files_below(&texts)? {
             add(
                 format!("/usr/share/licenses/{recipe}/{rel}"),
@@ -888,17 +892,19 @@ mod tests {
     }
 
     #[test]
-    fn recipe_programs_keep_their_path_and_bring_their_licences() {
+    fn recipe_programs_take_their_base_path_and_bring_their_licences() {
         let dir = scratch("recipes");
-        let prefix = dir.join("prefix");
-        fs::create_dir_all(prefix.join("sbin")).unwrap();
-        fs::create_dir_all(prefix.join("share/licenses/tools/lib")).unwrap();
-        fs::write(prefix.join("sbin/mkfs"), b"\x7fELF mkfs").unwrap();
-        fs::write(prefix.join("share/licenses/tools/NOTICE"), b"notice").unwrap();
-        fs::write(prefix.join("share/licenses/tools/lib/COPYING"), b"copying").unwrap();
+        let programs = dir.join("image/libexec");
+        let licenses = dir.join("image/share/licenses");
+        fs::create_dir_all(&programs).unwrap();
+        fs::create_dir_all(licenses.join("tools/lib")).unwrap();
+        fs::write(programs.join("mkfs"), b"\x7fELF mkfs").unwrap();
+        fs::write(licenses.join("tools/NOTICE"), b"notice").unwrap();
+        fs::write(licenses.join("tools/lib/COPYING"), b"copying").unwrap();
         let extras = Extras {
-            recipe_prefix: prefix.to_string_lossy().into_owned(),
+            recipe_program_dir: programs.to_string_lossy().into_owned(),
             recipe_programs: "sbin/mkfs".into(),
+            recipe_license_dir: licenses.to_string_lossy().into_owned(),
             recipe_licenses: "tools".into(),
             ..Extras::default()
         };
@@ -912,11 +918,17 @@ mod tests {
             Some(&b"copying"[..])
         );
         assert!(find("/usr/share/licenses/tools/NOTICE").is_some());
-        let missing = Extras {
-            recipe_programs: "sbin/gone".into(),
-            ..extras
-        };
-        assert!(run(&dir.join("root"), &out, &dir.join("build"), &[], &missing).is_err());
+        for refused in ["sbin/gone", "libexec/mkfs", "sbin/sub/mkfs"] {
+            let extras = Extras {
+                recipe_programs: refused.into(),
+                recipe_program_dir: extras.recipe_program_dir.clone(),
+                ..Extras::default()
+            };
+            assert!(
+                run(&dir.join("root"), &out, &dir.join("build"), &[], &extras).is_err(),
+                "{refused}"
+            );
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 

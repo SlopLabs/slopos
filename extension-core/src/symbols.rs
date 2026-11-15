@@ -13,12 +13,10 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::elf::{self, ElfError, Kind};
-use crate::image::{Image, Source};
+use crate::image::{Image, LINK_HOPS, Source};
 use crate::{INTERPRETER, LIBC_SONAME};
 
 const LIB: &str = "/lib/";
-/// More symlinks than a library's soname is ever reached through.
-const LINK_HOPS: usize = 8;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SymbolError {

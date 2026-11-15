@@ -5,7 +5,8 @@
 //! beneath its root but `lost+found`, its paths those they have below
 //! `/opt/<name>`, under [`TOP`] alone, and holding [`RELEASE`] and
 //! [`DECLARE`]. Every program the declaration names is an executable file of
-//! it, and every symlink stays inside it.
+//! it, a command's perhaps through its links, and every symlink stays inside
+//! it.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -38,6 +39,8 @@ pub const DECLARE: &str = "/.extension/declare";
 pub const TOP: [&str; 5] = ["/bin", "/libexec", "/lib", "/share", DIR];
 const APPS: &str = "/share/slopos/apps";
 const MANIFEST_MAX: u64 = 16 << 20;
+/// More symlinks than a library or a command is ever reached through.
+pub(crate) const LINK_HOPS: usize = 8;
 const TEXT_MAX: u64 = 64 << 10;
 /// Tree blocks a reader keeps verified, so a file's reads walk to the root
 /// once.
@@ -584,15 +587,52 @@ impl<S: Source> Image<S> {
             .filter(|rest| rest.starts_with('/'))
     }
 
+    /// What `path` reaches once each symlink on the way is followed as the
+    /// kernel follows it, through at most [`LINK_HOPS`] of them. A target
+    /// never climbs (`inside_image`), so a link's target continues from the
+    /// directory holding it.
+    fn resolved(&self, path: &str) -> Option<&Found> {
+        let mut left: Vec<String> = path.split('/').rev().map(String::from).collect();
+        let mut at = String::new();
+        let mut hops = 0;
+        while let Some(part) = left.pop() {
+            if part.is_empty() || part == "." {
+                continue;
+            }
+            let next = format!("{at}/{part}");
+            if let Some(target) = self.links.get(&next) {
+                hops += 1;
+                if hops >= LINK_HOPS {
+                    return None;
+                }
+                left.extend(target.split('/').rev().map(String::from));
+                continue;
+            }
+            self.entries.get(&next)?;
+            at = next;
+        }
+        self.entries.get(&at)
+    }
+
     fn delivers(&self) -> Result<(), ImageError> {
         let undelivered = |what: &str| ImageError::Undelivered(what.to_string());
         let declaration = &self.declaration;
+        let executable = |e: &Found| e.kind == Kind::File && e.mode & 0o111 != 0;
         for program in declaration.programs(&self.release.name) {
-            let executable = self
+            if !self
                 .inside(&program)
                 .and_then(|path| self.entry(path))
-                .is_some_and(|e| e.kind == Kind::File && e.mode & 0o111 != 0);
-            if !executable {
+                .is_some_and(executable)
+            {
+                return Err(undelivered(&program));
+            }
+        }
+        for command in &declaration.commands {
+            if !self
+                .resolved(&format!("/bin/{command}"))
+                .is_some_and(executable)
+            {
+                let program = format!("{}/bin/{command}", mount_point(&self.release.name));
                 return Err(undelivered(&program));
             }
         }

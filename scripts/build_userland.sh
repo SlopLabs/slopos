@@ -41,10 +41,16 @@ BUILD_STD="${BUILD_STD:-core,alloc,std,panic_abort}"
 # Cargo fingerprints `-Zbuild-std` units by compiler version, not by the
 # sysroot sources, so a fork edit restaged into the sysroot would leave the
 # previous std in place. Both the owned sysroot and an installed SlopOS
-# toolchain stamp the std fork their library carries.
+# toolchain stamp the std fork their library carries, and a toolchain image
+# names every pin it was built from as well.
 SYSROOT="$(CARGO_TARGET_DIR="$CARGO_TARGET_DIR" $CARGO rustc --locked -Zunstable-options \
     -Zjson-target-spec --target "$USERLAND_TARGET" --package slopos-crt0 --release --print sysroot)"
 . "$SCRIPT_DIR/lib/toolchain_pin.sh"
+. "$SCRIPT_DIR/lib/toolchain_identity.sh"
+why="$(tp_hold_toolchain "$REPO_ROOT" "$SYSROOT" 2>&1)" || {
+    echo "build_userland: $why" >&2
+    exit 1
+}
 SYSROOT_STAMP="$(cat "$SYSROOT/$TP_LIBRARY_REL/$TP_STD_STAMP_NAME" 2>/dev/null)" || {
     echo "build_userland: $SYSROOT carries no SlopOS std (no $TP_LIBRARY_REL/$TP_STD_STAMP_NAME)" >&2
     exit 1

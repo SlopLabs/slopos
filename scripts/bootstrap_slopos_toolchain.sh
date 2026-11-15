@@ -28,6 +28,14 @@ set -euo pipefail
 # install too. `scripts/check_bootstrap_config.sh` holds the installed cargo to
 # the recipes.
 #
+# The result is the image `slopos-toolchain`, laid out in `<out>/install` as
+# `/opt/slopos-toolchain` shows it and packed by `scripts/build_extension.sh`
+# into `<out>/image/slopos-toolchain.ext` and its sidecar, so a toolchain an
+# install would refuse never leaves the host. Its release's `display` is the
+# identity of the pins it was built from (`tp_toolchain_identity`), which a
+# userland build holds it to, and its `version` the time of the build; its
+# declaration names each program of `bin/` a command.
+#
 # `--dry-run` runs bootstrap's own dry run: it validates the config, resolves
 # `--host` through the compiler's built-in target list, and walks the step
 # graph without compiling anything. That is the half of this a gate can
@@ -66,6 +74,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 . "$SCRIPT_DIR/lib/toolchain_pin.sh"
+. "$SCRIPT_DIR/lib/toolchain_identity.sh"
 . "$SCRIPT_DIR/lib/tree_sync.sh"
 . "$SCRIPT_DIR/lib/rustc_build_settings.sh"
 
@@ -214,6 +223,8 @@ if [ "$SOURCES_ONLY" -eq 1 ]; then
     [ "$DRY_RUN" -eq 0 ] || die "--sources-only stages sources, which a dry run never does"
     exit 0
 fi
+# The pins this build is made from, read before it reads any of them.
+IDENTITY="$(tp_toolchain_identity "$REPO_ROOT")"
 
 WRAPPER_DIR="$OUT/bin"
 mkdir -p "$OUT/find-root"
@@ -337,9 +348,9 @@ rustflags = ["-Clink-arg=-Wl,-Bsymbolic-functions", "-Clink-arg=-Wl,-z,pack-rela
 [install]
 # Both, and both under the build directory: bootstrap asserts it can write
 # sysconfdir as well as prefix, and that one defaults to an absolute /etc no
-# ordinary user owns.
+# ordinary user owns. An image has no `etc/`.
 prefix = "$OUT/install.partial"
-sysconfdir = "etc"
+sysconfdir = "share/etc"
 CONFIG_END
 
 # With `--pgo`, every rustc bootstrap runs names its crate without the target
@@ -409,8 +420,11 @@ rm -rf "$PREFIX"
     python3 x.py install --config "$CONFIG" --jobs "$JOBS" "${XPY_ARGS[@]}")
 
 # `x.py install` ships no clang, and a Linux std a SlopOS-hosted compiler has
-# no use for. The target sysroot goes into the same prefix, so the clang
-# config can name `<CFGDIR>/..` and the tree carries one sysroot, not two.
+# no use for. The target sysroot goes into the same prefix, so the tree
+# carries one sysroot, not two, but for the C library: a program links the
+# running base's `/lib/libc.so`, which only grows, so what a machine builds
+# runs on its base and every later one. An image has no top-level
+# `include/`; the headers are `share/include`.
 LLVM_DIR="$RUSTC_BUILD/$TARGET/llvm"
 CLANG_BIN="$(cd "$LLVM_DIR/bin" && ls clang-[0-9]*)" ||
     die "no clang in $LLVM_DIR/bin — was llvm.clang dropped from the config?"
@@ -424,7 +438,9 @@ CLANG_CPP="$(readlink "$LLVM_DIR/lib/libclang-cpp.so")" ||
 cp -a "$LLVM_DIR/lib/libclang-cpp.so" "$LLVM_DIR/lib/$CLANG_CPP" "$PREFIX/lib/"
 cp -a "$LLVM_DIR/lib/clang" "$PREFIX/lib/"
 cp -a "$SYSROOT/lib/." "$PREFIX/lib/"
-cp -a "$SYSROOT/include" "$PREFIX/"
+rm -f "$PREFIX/lib/libc.so" "$PREFIX/lib/libc.a"
+mkdir -p "$PREFIX/share"
+cp -a "$SYSROOT/include" "$PREFIX/share/"
 BUILD_DIR="$BUILD_DIR" SLOPOS_RECIPES_DIR="$RECIPES_DIR" "$SCRIPT_DIR/build_recipes.sh" \
     --install-programs "$PREFIX" || die "could not install the recipes' programs"
 # Each project's licence text beside what it covers; rustc's and cargo's are
@@ -441,25 +457,70 @@ ln -sfn "$CLANG_BIN" "$PREFIX/bin/clang"
 ln -sfn clang "$PREFIX/bin/clang++"
 ln -sfn clang "$PREFIX/bin/cc"
 ln -sfn clang++ "$PREFIX/bin/c++"
-ln -sfn "../lib/rustlib/$TARGET/bin/rust-lld" "$PREFIX/bin/ld.lld"
-# The archiver next to the compiler, where CMake and the C++ runtime's build
-# look for it; llvm-ar answers as ranlib by its name.
+# The linker and the archiver beside the compiler, where clang, CMake and the
+# C++ runtime's build look for them, as copies: no link of an image leads out
+# of the directory holding it. llvm-ar answers as ranlib by its name.
+cp "$PREFIX/lib/rustlib/$TARGET/bin/rust-lld" "$PREFIX/bin/ld.lld"
 [ -x "$PREFIX/lib/rustlib/$TARGET/bin/llvm-ar" ] || die "no llvm-ar among the installed llvm-tools"
-ln -sfn "../lib/rustlib/$TARGET/bin/llvm-ar" "$PREFIX/bin/llvm-ar"
+cp "$PREFIX/lib/rustlib/$TARGET/bin/llvm-ar" "$PREFIX/bin/llvm-ar"
 ln -sfn llvm-ar "$PREFIX/bin/llvm-ranlib"
-printf '%s\n' '--sysroot=<CFGDIR>/..' >"$PREFIX/bin/$TARGET.cfg"
+# A recipe's link that climbs becomes a copy of the file it reaches, or a link
+# to the sibling already holding that copy: git's names in `bin/` are one
+# program, which tells them apart by the name it runs as.
+PREFIX_REAL="$(realpath -e "$PREFIX")"
+declare -A HELD=()
+while IFS= read -r -d '' link; do
+    case "/$(readlink "$link")/" in */../*) ;; *) continue ;; esac
+    real="$(realpath -e "$link")" && [ -f "$real" ] && [ "${real#"$PREFIX_REAL"/}" != "$real" ] ||
+        die "${link#"$PREFIX"/} climbs to no file of the toolchain"
+    key="$(dirname "$link") $real"
+    if [ -n "${HELD[$key]:-}" ]; then
+        ln -sfn "${HELD[$key]}" "$link"
+    else
+        cp --remove-destination --preserve=mode "$real" "$link"
+        HELD[$key]="${link##*/}"
+    fi
+done < <(find "$PREFIX" -type l -print0 | LC_ALL=C sort -z)
+# `share` is the sysroot clang's driver takes headers from (`include/`,
+# `include/c++/v1`), so `-nostdinc++` and `-nostdlibinc` still drop them;
+# `-B` finds `crt0.o` and `libbuiltins.a` in `lib/`, and a link searches the
+# base's `/lib`, which holds `libc.so`, before it.
+printf '%s\n' '--sysroot=<CFGDIR>/../share' '-B<CFGDIR>/../lib' '-L/lib' '-L<CFGDIR>/../lib' \
+    >"$PREFIX/bin/$TARGET.cfg"
 printf '%s\n' "@$TARGET.cfg" >"$PREFIX/bin/$TARGET-clang.cfg"
 printf '%s\n' "@$TARGET.cfg" $CXX_ABI_FLAGS >"$PREFIX/bin/$TARGET-clang++.cfg"
+# The SafeStack runtime the kernel's target links, which `build_kernel.sh`
+# cannot write into an image: empty, as it writes one on the host.
+SAFESTACK="$PREFIX/lib/rustlib/x86_64-slos/lib/librustc-nightly_rt.safestack.a"
+mkdir -p "$(dirname "$SAFESTACK")"
+printf '!<arch>\n' >"$SAFESTACK"
 
-rm -rf "$OUT/install"
+mkdir -p "$PREFIX/.extension"
+{
+    printf 'name slopos-toolchain\n'
+    printf 'version %s\n' "$(date -u +%Y%m%d%H%M%S)"
+    printf 'display %s\n' "$IDENTITY"
+    printf 'summary The compilers and tools that build SlopOS on SlopOS\n'
+} >"$PREFIX/.extension/release"
+for program in "$PREFIX"/bin/*; do
+    if [ -f "$program" ] && [ -x "$program" ]; then
+        printf 'command %s\n' "${program##*/}"
+    fi
+done >"$PREFIX/.extension/declare"
+
+rm -rf "$OUT/image.partial"
+env -u RUSTC_WRAPPER "$SCRIPT_DIR/build_extension.sh" "$PREFIX" "$OUT/image.partial" "$BUILD_DIR/libc.so" ||
+    die "the toolchain does not check out as an image — see above"
+rm -rf "$OUT/install" "$OUT/image"
 mv "$PREFIX" "$OUT/install"
+mv "$OUT/image.partial" "$OUT/image"
 PREFIX="$OUT/install"
 
 if [ -n "$STAGE" ]; then
     rm -rf "$STAGE"
     mkdir -p "$STAGE"
-    cp -a "$PREFIX/." "$STAGE/"
-    echo "$SELF: staged the toolchain at $STAGE — TOOLCHAIN_STAGE=$STAGE installs it on a root"
+    cp -a "$OUT/image/." "$STAGE/"
+    echo "$SELF: staged the toolchain image at $STAGE — TOOLCHAIN_STAGE=$STAGE carries it on a root"
 fi
 
-echo "$SELF: built the $TARGET toolchain into $PREFIX"
+echo "$SELF: built the $TARGET toolchain into $PREFIX and packed it into $OUT/image"

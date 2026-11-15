@@ -109,6 +109,58 @@ fn an_image_out_of_shape_is_refused_saying_why() {
     assert!(refusal(plain, RELEASE_TEXT, "command plain\n").contains("/opt/hello/bin/plain"));
 }
 
+#[test]
+fn a_command_may_be_a_link_to_an_executable_file_of_the_image() {
+    let mut linked = packer();
+    linked.add("/bin/hi", S_IFLNK | 0o777, b"./hello".to_vec());
+    linked.add("/bin/hi++", S_IFLNK | 0o777, b"hi".to_vec());
+    linked.add("/bin/tool/run", S_IFREG | 0o755, b"run".to_vec());
+    linked.add("/bin/tools", S_IFLNK | 0o777, b"tool".to_vec());
+    linked.add("/bin/run", S_IFLNK | 0o777, b"tools//run".to_vec());
+    let bytes = linked
+        .finish(RELEASE_TEXT, "command hi\ncommand hi++\ncommand run\n")
+        .unwrap();
+    let image = Image::check(&bytes[..]).unwrap();
+    assert_eq!(image.declaration.commands, ["hi", "hi++", "run"]);
+
+    for (links, why) in [
+        (&[("/bin/plain", "hellox")][..], "a link to nothing"),
+        (
+            &[("/bin/plain", "tool/data")][..],
+            "a link to a file no one runs",
+        ),
+        (&[("/bin/plain", "tool")][..], "a link to a directory"),
+        (
+            &[("/bin/plain", "a"), ("/bin/a", "b"), ("/bin/b", "plain")][..],
+            "a loop",
+        ),
+    ] {
+        let mut refused = packer();
+        refused.add("/bin/tool/data", S_IFREG | 0o644, b"x".to_vec());
+        for (at, target) in links {
+            refused.add(at, S_IFLNK | 0o777, target.as_bytes().to_vec());
+        }
+        let said = refusal(refused, RELEASE_TEXT, "command plain\n");
+        assert!(
+            said.contains("/opt/hello/bin/plain"),
+            "{why} is refused as a command: {said}"
+        );
+    }
+
+    let chain = |links: usize| {
+        let mut chained = packer();
+        let mut prev = String::from("hello");
+        for hop in 0..links {
+            chained.add(&format!("/bin/h{hop}"), S_IFLNK | 0o777, prev.into_bytes());
+            prev = format!("h{hop}");
+        }
+        chained.finish(RELEASE_TEXT, &format!("command {prev}\n"))
+    };
+    assert!(chain(LINK_HOPS - 1).is_ok());
+    let said = chain(LINK_HOPS).unwrap_err();
+    assert!(said.contains(&format!("/bin/h{}", LINK_HOPS - 1)), "{said}");
+}
+
 /// `bytes` with its data's block holding `from` holding `to` instead, its
 /// tree built again so it vouches for the change.
 fn rebuilt(bytes: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {

@@ -15,10 +15,10 @@ APPS="breach editor file_manager image_viewer widget_gallery"
 # table is the implemented set, and `coreutils_test` fails if they disagree.
 COREUTILS_TOOLS="ls cat cp mv rm mkdir rmdir ln touch stat install mktemp basename dirname which grep sed find xargs sort uniq tr cut head tail wc tee cmp diff patch printf echo test [ true false yes seq sleep env nproc uname whoami pwd date hexdump ps tar gzip gunzip zcat sha256sum stty less mount umount"
 
-# The programs a recipe builds that the base carries, by their path below the
-# recipe prefix, which they keep below `/`: e2fsprogs's, which format, check and
-# repair the volumes SlopOS mounts. A host build takes them from the recipes'
-# prefix, a guest build from /usr/local, where the toolchain carries them.
+# The programs a recipe builds that the base carries, by their path in the
+# base: e2fsprogs's, which format, check and repair the volumes SlopOS mounts.
+# Each is read by its name from the recipes' `libexec/`: a host build's in the
+# recipes' prefix, a guest build's in the toolchain image.
 BASE_RECIPE_PROGRAMS="sbin/mke2fs sbin/e2fsck sbin/resize2fs sbin/tune2fs sbin/debugfs sbin/dumpe2fs"
 # The recipes they come from, whose licence texts the base carries beside them.
 BASE_RECIPES="e2fsprogs"

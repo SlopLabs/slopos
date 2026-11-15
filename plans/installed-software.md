@@ -19,9 +19,11 @@ An extension is already this image. The work is to make it the only form.
 ## What stands today
 
 Software outside the base has two forms. An extension is one ext4 image
-with a verity tree, installed by `extctl`. A tree is files copied into
-`/usr/local` or `~/.local` by `tree-install`, with a manifest of what was
-copied; two exist on every root, `usr_local` (the toolchain) and `apps`.
+with a verity tree, installed by `extctl`; the toolchain is one,
+`slopos-toolchain`. A tree is files copied into `/usr/local` or `~/.local`
+by `tree-install`, with a manifest of what was copied: `apps` on every
+root, and `usr_local`, the toolchain image's tree, on a root the install
+medium's payload filled.
 
 `/usr/local` is a directory the first person owns that is on everyone's
 search path, and the tree guards it in five places: the hand-over to uid 0
@@ -31,65 +33,12 @@ loader leaving `/usr/local/lib` out for a process that is `AT_SECURE` or
 uid 0's (`slibc/src/ld_so/mod.rs`), privd naming no app from there, and
 the staged copy behind `org.slopos.software.install`.
 
-## Measured
-
-At `de13e59f`, 2026-11-12, with the toolchain `just toolchain` built on
-2026-10-03, whose std stamp is the one this tree pins. QEMU with KVM, 4
-CPUs, 8 GiB, the release kernel, the toolchain packed as an image named
-`devtools` and installed by `extctl install` through the paired agent.
-
-| Step | Result |
-|------|--------|
-| Packing `builddir/slopos-toolchain/install` as it is built | Refused, four ways (below) |
-| Packing it after those four are met | 936 MB, 11 292 entries, 30 s on the host. All 64 programs pass `xtask programs` and the image's symbol check |
-| `extctl install` | 55 s; 3 min 38 s on the debug kernel. No capability, no user, one activation |
-| `extctl enable` of the installed image, which is what every boot's `activate-all` does | 7.9 s |
-| `rustc`, `cargo`, `clang`, `git`, `cmake`, `ninja`, `bash`, `ssh`, `ld.lld`, `mke2fs` started from `/opt/devtools` | All start, each `AT_SECURE` |
-| `rustc hello.rs`, `cc hello.c` | Build and run, once the linker is given `/lib` for `libc.so` and clang the moved headers |
-| `cargo build` of a workspace with a build script and a procedural macro | 8 s; the program runs |
-| The tree at `HEAD`: `build_kernel.sh` (dev, `KERNEL_SAFESTACK=0`), then `build_userland.sh` | 70 s and 225 s, both exit 0, with `-Zbuild-std` reading std's sources from the image |
-| `build_kernel.sh` with SafeStack | Stops: it writes into the read-only sysroot |
-| `build_initramfs.sh` | Stops: no one directory holds both `sbin/mke2fs` and `share/licenses/e2fsprogs` |
-| `git --exec-path` | `/usr/local/libexec/git-core`, which does not exist |
-
-Not run: the tests variant (the C++ runtime under CMake and Ninja), a C++
-compile, git or ssh against a server, and a boot with a cold cache.
-
-## What an image refuses of today's toolchain
-
-1. **Top-level directories.** An image holds `bin`, `libexec`, `lib` and
-   `share` (`extension-core/src/image.rs`, `TOP`). The install has `etc`
-   (ssh's and e2fsprogs' configuration), `include` (the C and C++ headers,
-   1 454 files) and `sbin` (e2fsprogs, `sshd`).
-2. **Links that climb.** A link's target has no `..` component. Nine do:
-   `bin/ld.lld` and `bin/llvm-ar` into `lib/rustlib`, and git's five names
-   and `scalar` in `bin/` into `libexec/git-core`.
-3. **Commands.** A declared command is a regular file in `bin/` named in
-   lowercase letters, digits and `-_.`. `cc`, `clang`, `ld.lld` and `git`
-   are links, and `c++` and `clang++` are not such names.
-4. **The link-time C library.** `lib/libc.so` is judged as a library of the
-   image and refused: it binds `main`, which nothing it needs exports.
-5. **A sysroot nobody writes.** `scripts/build_kernel.sh` makes
-   `lib/rustlib/x86_64-slos/lib` and writes the empty SafeStack archive
-   there on every run.
-6. **The prefix compiled in.** `GUEST_PREFIX=/usr/local`
-   (`scripts/build_recipes.sh`) is configured into git, OpenSSH, bash and
-   e2fsprogs. The base's own `/sbin/mke2fs` carries
-   `/usr/local/etc/mke2fs.conf` for the same reason; the installer points
-   it elsewhere (`E2FSPROGS_PROFILE`).
-
-Everything else passed: every library a program needs is in the top level
-of `lib/`, which the loader searches as `/opt/<name>/lib` once the kernel
-says the program is that image's; a procedural macro is opened by its path
-and needs `libc.so` alone; a build script is a file of the target
-directory, so it is not `AT_SECURE` and keeps cargo's library path.
-
 ## Decided here
 
 - **Every program of an image stays `AT_SECURE`.** It is what makes an
   image's identity mean something (below). The toolchain builds the tree
-  under it. What it costs: `LD_DEBUG` is ignored (`toolchain_test`'s first
-  rung reads it), and the programs start not dumpable.
+  under it. What it costs: `LD_DEBUG` is ignored, and the programs start
+  not dumpable.
 - **One image per piece of software.** Its publisher puts programs that
   ship together into one image, which already holds any number of programs
   and app entries; a bundle is a word for such an image, not a kind of
@@ -171,51 +120,12 @@ id derived from the key, a successor key vouched for by the old one, and
 name prefixes bound to keys are left for later (below); none of them
 changes what phase 5 stores.
 
-## Phase 1: the toolchain is built as an image
+## Phase 1: the toolchain is built as an image — done
 
-**For:** `just toolchain` to end in one file a machine installs, in place
-of a tree only an image builder can lay down.
-
-Build, in `scripts/bootstrap_slopos_toolchain.sh` and
-`scripts/build_recipes.sh`:
-
-1. The image's layout. Headers go to `share/include`, named by the clang
-   configuration files beside `--sysroot` (`-isystem
-   <CFGDIR>/../share/include`), configuration to `share/etc` through each
-   recipe's `sysconfdir`, and e2fsprogs and `sshd` to `libexec/`.
-2. No link climbs. Either the nine become copies, or the rule admits a
-   `..` that resolves inside the image, which changes `extension-core` and
-   the kernel's index together.
-3. How 40 names in `bin/` reach the search path. Either each is a declared
-   command, which needs `+` in a command word and a link accepted as a
-   command, or one declaration takes all of an image's `bin/`.
-4. No `libc.so` and no `libc.a` in the image, and `-L/lib` in the clang
-   configuration. `crt0.o` and the headers stay.
-5. The SafeStack archive shipped in the image, and `build_kernel.sh`
-   writing it only where it is missing.
-6. `GUEST_PREFIX=/opt/slopos-toolchain`.
-7. One identity over every pin (`toolchain/PIN`, `compiler/PIN`,
-   `cxx/PIN`, `crates/PIN`, the recipes, `rustc_build_settings.sh`), kept
-   in the image and shown as its release's `display`. Only std carries a
-   stamp today, covering `toolchain/PIN`, `toolchain/rust/` and
-   `toolchain/libc/`. `build_userland.sh` and `just setup` hold the tree
-   to it and name the one the tree needs. The release's `version`, which
-   only rises, is the time of the build.
-8. `tools/extension` run as the last step, so a toolchain the checks refuse
-   never leaves the host.
-9. `build_initramfs.sh` taking the base's recipe programs and their
-   licence texts from two directories, since the image has no one prefix
-   that holds both.
-10. `toolchain_test` holding the installed image by its root, in place of
-    the manifest at `/var/lib/slopos/trees/usr_local`.
-
-Find out first: a C++ compile with libc++'s headers under `share/include`;
-the tests variant in the guest; a SafeStack kernel; `git clone` over HTTPS
-and `ssh` with the new prefix; a CMake project, since `cmake --version`
-shows only that it starts.
-
-Done when `just test-toolchain` and `just test-selfhost` pass on a root
-whose toolchain is the image.
+`just toolchain` ends in `slopos-toolchain.ext`, held to every check an
+install makes. Until phase 2 a root carries it as a file at
+`/var/lib/slopos/toolchain` that a test or a person installs with
+`extctl`, and the install medium's payload lays its tree at `/usr/local`.
 
 ## Phase 2: an image reaches a root without a person
 
@@ -225,7 +135,8 @@ does, with nobody there to approve.
 
 No host script writes a store, the installer has no path into one
 (`extctl --root` offers `status`, `enable` and `disable`), and init
-installs the medium's apps as a tree.
+installs the medium's apps as a tree. A test installs the toolchain the
+host put on a root (`selfhost::toolchain`); a person does it by hand.
 
 Build:
 
@@ -236,9 +147,10 @@ Build:
    its record's floor. This path installs only an image that asks for
    nothing but commands and apps, so it can never hand out a capability.
 2. `scripts/build_fs_image.sh` offering the `slopos-toolchain` and
-   `slopos-essentials` images there, in place of the two host trees. A
-   host build that changed offers a higher version; one the guest
-   installed since stays, by its floor.
+   `slopos-essentials` images there, in place of the image file at
+   `/var/lib/slopos/toolchain` and the `apps` tree. A host build that
+   changed offers a higher version; one the guest installed since stays,
+   by its floor.
 3. The installer copying the medium's images into the new root's offered
    directory (`installer/root.rs`, `fill`), and
    `scripts/build_install_medium.sh` carrying image files in place of the
@@ -400,7 +312,10 @@ Build:
 
 Find out first: whether an image is better shown at its first use than at
 boot. Showing all at boot is what a hundred images pay for; showing on
-demand moves the cost to the first program started.
+demand moves the cost to the first program started. And why a program
+starts slower from an image: on the dev tests kernel, `rustc --version`
+takes 9 s from `/opt/slopos-toolchain` and took 1.5 s from `/usr/local`,
+`rustc hello.rs` 24 s and 4 s, on both boots of `test-toolchain`.
 
 Done when a test shows more images than 32, updates one of them, and the
 measured cost of each is in the plan's place in the docs.
@@ -429,14 +344,11 @@ an installed image.
 
 ## Order
 
-Phase 1 changes the cross-built toolchain, so it shares the rebuild that
-`self-hosting-on-hardware.md`'s phase 2 needs. Phase 2 needs phase
-1's image and phase 3's. Phase 3 needs no toolchain and can come first.
-Phase 4 removes what the first three stopped using. Phase 5 depends on
-none of them and is small; it can come first. Phase 6 is needed before
-software from elsewhere arrives one image at a time, not before. Phase 7
-comes last, so that no other phase is written against names that move
-under it.
+Phase 2 needs phase 3's image, and phase 3 can come first. Phase 4
+removes what the first three stopped using. Phase 5 depends on none of
+them and is small; it can come first. Phase 6 is needed before software
+from elsewhere arrives one image at a time, not before. Phase 7 comes
+last, so that no other phase is written against names that move under it.
 
 ## Later
 

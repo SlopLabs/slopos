@@ -5,7 +5,7 @@ use slopos_slibc::test_harness::note;
 use slopos_tls_core::pem;
 use slopos_tls_core::server::{Server, ServerConfig};
 use slopos_tls_core::testpki::{self, Key, Profile};
-use slopos_userland::selfhost::{SCRATCH, SOURCE};
+use slopos_userland::selfhost::{SCRATCH, SOURCE, TOOLCHAIN_OFFER};
 use slopos_userland::tls::{self, CipherSuite};
 use std::ffi::OsStr;
 use std::fs;
@@ -19,81 +19,47 @@ use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const PREFIX: &str = "/usr/local";
-/// What the host installed there: an `identity` line, an `at` line naming
-/// where, then `<kind> <size or -> <path>`.
-const MANIFEST: &str = "/var/lib/slopos/trees/usr_local";
 /// What the host seeds on the self-hosting root for the ladder: a bare
 /// repository of one crate, a sparse registry of one crate, and the guest's
 /// half of the ssh fixture.
 const FIXTURES: &str = "/home/user/ladder";
 
-/// Gates a rung on the root carrying a toolchain; `Err` is the verdict, a pass
-/// with a note on any root but the self-hosting one.
+/// Gates a rung on the root carrying the toolchain image, installed; `Err` is
+/// the verdict, a pass with a note on any root but the self-hosting one.
 fn toolchain() -> Result<&'static str, bool> {
-    if Path::new(PREFIX).join("bin/rustc").is_file() {
-        return Ok(PREFIX);
+    match slopos_userland::selfhost::toolchain() {
+        Ok(Some(prefix)) => Ok(prefix),
+        Ok(None) => {
+            note(&format!(
+                "the root carries no toolchain image at {TOOLCHAIN_OFFER}"
+            ));
+            Err(true)
+        }
+        Err(why) => {
+            note(&why);
+            Err(false)
+        }
     }
-    note("the root carries no toolchain at /usr/local");
-    Err(true)
 }
 
-/// Every entry the host installed is there as the kind, and each file at the
-/// size, it installed: a toolchain whose `lib/` never arrived, or arrived
-/// short, says so here rather than as a link error in a guest build hours
-/// later.
-fn toolchain_matches_its_manifest() -> bool {
-    if let Err(verdict) = toolchain() {
-        return verdict;
-    }
-    let text = match fs::read_to_string(MANIFEST) {
-        Ok(text) => text,
-        Err(e) => {
-            note(&format!("{MANIFEST}: {e}"));
-            return false;
-        }
+/// The image the host built is the one shown, by the root its sidecar names,
+/// and every block of it is held to that root as it is read; its commands
+/// reach the default search path.
+fn toolchain_is_the_image_the_host_built() -> bool {
+    let prefix = match toolchain() {
+        Ok(p) => p,
+        Err(verdict) => return verdict,
     };
-    let mut counts = [0usize; 3];
-    for line in text
-        .lines()
-        .filter(|l| !l.starts_with("identity ") && !l.starts_with("at "))
-    {
-        let mut fields = line.splitn(3, ' ');
-        let (Some(kind), Some(size), Some(rel)) = (fields.next(), fields.next(), fields.next())
-        else {
-            note(&format!("malformed manifest line {line:?}"));
-            return false;
-        };
-        let path = format!("{PREFIX}/{rel}");
-        let meta = match fs::symlink_metadata(&path) {
-            Ok(meta) => meta,
-            Err(e) => {
-                note(&format!("{path}: {e}"));
-                return false;
-            }
-        };
-        let (slot, held) = match kind {
-            "f" => (0, meta.is_file() && size.parse() == Ok(meta.len())),
-            "d" => (1, meta.is_dir()),
-            "l" => (2, meta.file_type().is_symlink()),
-            _ => (0, false),
-        };
-        if !held {
+    for command in ["cargo", "rustc", "cc", "c++", "ld.lld", "git", "just"] {
+        let reached = fs::canonicalize(format!("/opt/bin/{command}"));
+        if !reached.as_ref().is_ok_and(|at| at.starts_with(prefix)) {
             note(&format!(
-                "{path} is not the {kind} of {size} bytes the host installed"
+                "/opt/bin/{command} reaches {reached:?}, not {prefix}"
             ));
             return false;
         }
-        counts[slot] += 1;
     }
-    if counts[0] == 0 {
-        note(&format!("{MANIFEST} lists no file"));
-        return false;
-    }
-    note(&format!(
-        "{PREFIX}: {} files, {} directories and {} links as installed",
-        counts[0], counts[1], counts[2]
-    ));
+    note(&format!("{prefix} shows the image the host built"));
     true
 }
 
@@ -285,25 +251,15 @@ fn toolchain_starts() -> bool {
         Ok(p) => p,
         Err(verdict) => return verdict,
     };
-    let Some(rustc) = run(
-        "/",
-        &format!("{prefix}/bin/rustc"),
-        &["--version"],
-        &[("LD_DEBUG", "statistics")],
-    ) else {
+    let Some(rustc) = run("/", &format!("{prefix}/bin/rustc"), &["--version"], &[]) else {
         return false;
     };
     if !rustc.ok("rustc --version") {
         return false;
     }
-    let version = rustc.stdout.trim_end();
-    let bound = rustc
-        .stderr
-        .lines()
-        .find_map(|l| l.strip_prefix("ld.so: "))
-        .unwrap_or("no statistics");
     note(&format!(
-        "{version} in {} ms; {bound}",
+        "{} in {} ms",
+        rustc.stdout.trim_end(),
         rustc.took.as_millis()
     ));
     let rust_lld = format!("{prefix}/lib/rustlib/x86_64-unknown-slopos/bin/rust-lld");
@@ -1524,9 +1480,10 @@ fn cmake_builds_a_project() -> bool {
         .is_some_and(|ran| ran.ok("ladder") && ran.stdout == "cmake 42\n")
 }
 
-/// Rung 14: the toolchain carries the std fork the clone pins, by the stamp
-/// `build_userland.sh` checks, computed here with the toolchain's own bash.
-fn std_is_the_clones_fork() -> bool {
+/// Rung 14: the toolchain is the one the clone needs, by the identity of its
+/// pins `build_userland.sh` holds it to, computed here with the toolchain's
+/// own bash.
+fn toolchain_is_the_one_the_clone_needs() -> bool {
     let prefix = match toolchain() {
         Ok(p) => p,
         Err(verdict) => return verdict,
@@ -1535,30 +1492,18 @@ fn std_is_the_clones_fork() -> bool {
         note("the root carries no workspace");
         return true;
     }
-    let bash = format!("{prefix}/bin/bash");
-    let script = ". scripts/lib/toolchain_pin.sh && tp_std_stamp .";
-    let Some(ran) = run(SOURCE, &bash, &["-c", script], &[]) else {
+    let script = format!(
+        ". scripts/lib/toolchain_pin.sh && . scripts/lib/toolchain_identity.sh && \
+         tp_hold_toolchain . {prefix} && tp_toolchain_identity ."
+    );
+    let Some(ran) = run(SOURCE, &format!("{prefix}/bin/bash"), &["-c", &script], &[]) else {
         return false;
     };
-    if !ran.ok("tp_std_stamp") {
+    if !ran.ok("tp_hold_toolchain") {
         return false;
     }
-    let carried = format!("{prefix}/lib/rustlib/src/rust/library/.slopos-std-stamp");
-    match fs::read_to_string(&carried) {
-        Ok(stamp) if stamp.trim() == ran.stdout.trim() => true,
-        Ok(stamp) => {
-            note(&format!(
-                "{carried} is {}, the clone pins {}",
-                stamp.trim(),
-                ran.stdout.trim()
-            ));
-            false
-        }
-        Err(e) => {
-            note(&format!("{carried}: {e}"));
-            false
-        }
-    }
+    note(&format!("{prefix} is {}", ran.stdout.trim()));
+    true
 }
 
 const JUSTFILE: &str = r#"set shell := ["bash", "-euo", "pipefail", "-c"]
@@ -1726,10 +1671,16 @@ fn clippy_lints_a_crate() -> bool {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--install") {
+        slopos_slibc::test_harness::run(&[(
+            "the_host_s_image_installs",
+            toolchain_is_the_image_the_host_built,
+        )]);
+    }
     slopos_slibc::test_harness::run(&[
         (
-            "toolchain_matches_its_manifest",
-            toolchain_matches_its_manifest,
+            "toolchain_is_the_image_the_host_built",
+            toolchain_is_the_image_the_host_built,
         ),
         ("source_is_vendored", source_is_vendored),
         ("toolchain_starts", toolchain_starts),
@@ -1754,7 +1705,10 @@ fn main() {
         ("bash_runs_a_script", bash_runs_a_script),
         ("ninja_runs_a_graph", ninja_runs_a_graph),
         ("cmake_builds_a_project", cmake_builds_a_project),
-        ("std_is_the_clones_fork", std_is_the_clones_fork),
+        (
+            "toolchain_is_the_one_the_clone_needs",
+            toolchain_is_the_one_the_clone_needs,
+        ),
         ("just_runs_a_justfile", just_runs_a_justfile),
         ("rustfmt_formats_a_crate", rustfmt_formats_a_crate),
         ("clippy_lints_a_crate", clippy_lints_a_crate),
