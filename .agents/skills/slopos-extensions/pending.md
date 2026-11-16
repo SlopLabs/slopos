@@ -59,3 +59,11 @@
   the SHA instructions, built only where SSE2 is (userland: the kernel is
   soft-float); `extctl` takes it when `ni::present()` says the CPU has
   them (`extctl/disk.rs`, the one `unsafe`).
+- `docs/architecture/extensions` (install): on a terminal, `extctl
+  install` draws one line in place on standard error: *reading the
+  image*, *copying* with a bar, percent, sizes, rate and time left,
+  *saving the copy*, *checking its files*, *starting it*, *finishing*,
+  each with how long it has run, redrawn when it changes and checked
+  every 100 ms (`extctl/progress.rs`). The line is taken back before the
+  last, which ends with how long the install took (`… (7.4 s)`). Nothing
+  is drawn elsewhere.

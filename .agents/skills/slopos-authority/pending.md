@@ -27,3 +27,13 @@
   `install ? ? name ? grant ? unasked ? users ? commands ?`, and names
   *Installs*, *Capabilities*, *Runs unasked*, *Adds users* and *Adds
   commands*.
+- `docs/architecture/privd` (the requester): output for a terminal goes to
+  a terminal of the mechanism's own, sized as the requester's and resized
+  with it, whose master the requester relays, as run0 does: a mechanism
+  draws progress and colour as it would at the terminal. Unless it takes
+  keys (`Input::Terminal`) that terminal has `OPOST` off, since the
+  requester's stays cooked and turns newlines into CR LF once. With no
+  terminal free, output alone falls back to pipes. A socket still goes
+  through a pipe. On a terminal, *waiting for you to allow this
+  on the screen* is taken back (`\r`, `ESC [K`) once privd answers or the
+  mechanism writes; elsewhere it stays a line.

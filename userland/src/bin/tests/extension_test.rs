@@ -4,10 +4,11 @@
 //! nothing, and a test boot runs no compositor, so one that needs the person
 //! is refused for want of anyone to ask.
 
+use std::os::fd::FromRawFd;
 use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use slopos_abi::fs::{S_IFREG, inode_flags::FS_IMMUTABLE_FL};
 use slopos_extension_core::elf::{self, Kind};
@@ -21,7 +22,7 @@ use slopos_slibc::test_harness::note;
 use slopos_tls_core::ed25519::SigningKey;
 use slopos_tls_core::sshsig::{self, KEY_TYPE, PublicKey};
 use slopos_userland::privd::STATUS_REFUSED;
-use slopos_userland::syscall::{UserSysInfo, core as sys_core, fs};
+use slopos_userland::syscall::{UserSysInfo, UserWinsize, core as sys_core, fs, process};
 
 const EXTCTL: &str = "/bin/extctl";
 /// A program linked against `libc.so` and a library of its image's, as an
@@ -358,6 +359,97 @@ fn a_signed_one_installs_and_updates_unasked() -> bool {
     ) && installed("ext-signed", 2)
 }
 
+/// At a terminal, the mechanism draws each step of an install in place on a
+/// terminal of its own, takes the line back before its last one, and says
+/// how long it took; each newline reaches this terminal as one CR LF.
+fn an_install_at_a_terminal_draws_its_steps_in_place() -> bool {
+    let owner = key(5);
+    let Some(path) = image("ext-shown", 1, "Power", "") else {
+        return false;
+    };
+    if !trust(&owner, "Power", "-") || !sign(&owner, &path) {
+        return false;
+    }
+    let Ok((master, _)) = process::openpty() else {
+        return fail("no pty");
+    };
+    let size = UserWinsize {
+        ws_row: 24,
+        ws_col: 120,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    if fs::tiocswinsz(master.raw(), &size).is_err() {
+        return fail("the pty took no size");
+    }
+    let Ok(slave) = fs::ioctl_tiocgptpeer(master.raw()) else {
+        return fail("no pty slave");
+    };
+    let tty = || {
+        fs::dup(slave.raw())
+            // SAFETY: `dup` just opened this descriptor for us.
+            .map(|dup| Stdio::from(unsafe { std::fs::File::from_raw_fd(dup.into_raw()) }))
+    };
+    let (Ok(out), Ok(err)) = (tty(), tty()) else {
+        return fail("no copy of the pty slave");
+    };
+    let child = Command::new(EXTCTL)
+        .args(["install-signed", &path])
+        .uid(USER)
+        .gid(USER)
+        .env_remove(ENV_FD)
+        .current_dir(DIR)
+        .stdin(Stdio::null())
+        .stdout(out)
+        .stderr(err)
+        .spawn();
+    drop(slave);
+    let Ok(mut child) = child else {
+        return fail("extctl did not start");
+    };
+    let _ = slopos_userland::syscall::net::set_nonblocking(master.raw());
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 1024];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let status = loop {
+        while let Ok(n @ 1..) = fs::read_slice(master.raw(), &mut buf) {
+            seen.extend_from_slice(&buf[..n]);
+        }
+        match child.try_wait() {
+            Ok(Some(exit)) => break exit.code(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                break None;
+            }
+        }
+    };
+    while let Ok(n @ 1..) = fs::read_slice(master.raw(), &mut buf) {
+        seen.extend_from_slice(&buf[..n]);
+    }
+    let text = String::from_utf8_lossy(&seen);
+    let last = text.find("ext-shown 1 installed; ");
+    let drawn = [
+        "reading the image",
+        "copying",
+        "checking its files",
+        "starting it",
+        "finishing",
+    ]
+    .iter()
+    .all(|step| text.contains(&format!("\rextctl: {step}")));
+    let timed = last.is_some_and(|at| text[at..].contains(" s)\r\n"));
+    let taken_back = last.is_some_and(|at| text[..at].ends_with("\r\x1b[K"));
+    if status != Some(0) || !drawn || !timed || !taken_back || text.contains("\r\r\n") {
+        return fail(format!(
+            "an install at a terminal exited {status:?}, wrote {text:?}"
+        ));
+    }
+    true
+}
+
 /// Past the key's ceiling, or an unasked action past its user ceiling, and
 /// a key the owner does not trust: each refused.
 fn one_past_either_ceiling_is_refused() -> bool {
@@ -675,17 +767,19 @@ fn its_hash_is_sha256_on_this_cpu() -> bool {
 }
 
 fn cleanup() -> bool {
-    for name in ["ext-first", "ext-signed", "ext-large"] {
+    for name in ["ext-first", "ext-signed", "ext-large", "ext-shown"] {
         let _ = extctl(ROOT, &["remove", name]);
     }
     let back = extctl(
         USER,
         &["install-signed", &format!("{DIR}/ext-signed-3.ext")],
     );
-    for seed in [1, 2, 4] {
+    for seed in [1, 2, 4, 5] {
         let _ = extctl(ROOT, &["key", "remove", &fingerprint(&key(seed))]);
     }
-    let gone = ["ext-first", "ext-signed"].iter().all(|n| !shown(n))
+    let gone = ["ext-first", "ext-signed", "ext-shown"]
+        .iter()
+        .all(|n| !shown(n))
         && !Path::new("/opt/ext-large/share/large").exists();
     let kept = record("ext-signed").is_some_and(|r| r.current.is_none() && r.floor.is_some());
     let forged = Path::new(&format!("{STORE}/ext-signed/{RECORD}.999999")).exists();
@@ -716,6 +810,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "a_signed_one_installs_and_updates_unasked",
         a_signed_one_installs_and_updates_unasked,
+    ),
+    (
+        "an_install_at_a_terminal_draws_its_steps_in_place",
+        an_install_at_a_terminal_draws_its_steps_in_place,
     ),
     (
         "one_past_either_ceiling_is_refused",

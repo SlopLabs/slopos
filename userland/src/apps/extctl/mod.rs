@@ -10,6 +10,7 @@ mod accounts;
 mod commands;
 mod configure;
 pub mod disk;
+mod progress;
 pub(crate) mod store;
 
 use std::fs::OpenOptions;
@@ -35,6 +36,7 @@ use crate::app_entry::read_bounded;
 use crate::init_control::{self, Command};
 use crate::privd::{self, Input};
 use crate::syscall::core as sys_core;
+use progress::Progress;
 
 const USAGE: &str = "usage: extctl <command>
   status [<name>]                 what the store holds and what runs
@@ -448,16 +450,27 @@ impl Request {
             Request::Status(only) => status(only.as_deref()),
             Request::Build { dir, out } => build(&dir, &out),
             Request::Install { image, vouched } => {
+                let progress = Progress::on_terminal();
+                progress.step("reading the image");
                 let store = Store::open(true)?;
                 let prepared = prepare(&store, &image, &vouched)?;
-                let _people = crate::accounts::Store::write(Path::new("/"))?;
+                let people = crate::accounts::Store::write(Path::new("/"))?;
                 if let Prepared::Install {
                     name, installed, ..
                 } = &prepared
                 {
                     no_person_named(&image, name, installed)?;
                 }
-                install(&store, prepared)
+                let fresh = matches!(prepared, Prepared::Install { .. });
+                let outcome = install(&store, prepared, &progress);
+                drop((store, people));
+                progress.step("finishing");
+                let after = settle(tells_init);
+                return match outcome {
+                    Ok(said) if fresh => Ok(format!("{said} ({}){after}", progress.took())),
+                    Ok(said) => Ok(said + &after),
+                    Err(why) => Err(why + &after),
+                };
             }
             Request::KeyAdd(key) => key_add(key),
             Request::KeyRemove(fingerprint) => key_remove(&fingerprint),
@@ -669,7 +682,7 @@ fn idle(record: &Record) -> Option<String> {
 
 /// Put what `prepared` admitted in the store as its current image and run
 /// it. One that will not run leaves the store as it was.
-fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
+fn install(store: &Store, prepared: Prepared, progress: &Progress) -> Result<String, String> {
     let (mut image, path, name, voucher, before, installed, libc) = match prepared {
         Prepared::Current { name, before } => {
             let idle = before.as_ref().and_then(idle);
@@ -696,15 +709,19 @@ fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
     let bytes = image.bytes();
     store.edit(&name, |edit| {
         edit.put_image(&digest, bytes, voucher.signed(), |sink| {
-            let copied = image.copy(sink);
+            progress.copying(bytes);
+            let copied = image.copy(&mut progress.counting(sink));
+            progress.step("saving the copy");
             copied.map_err(|e| ImageError::Damaged(format!("{path}: {e}")))
         })?;
+        progress.step("checking its files");
         admit::contents(&mut image, &libc).map_err(|e| format!("{path}: {e}"))?;
         edit.put_record(&record)
     })?;
     if let Some(why) = idle(&record) {
         return Ok(format!("{name} {version} installed; {why}"));
     }
+    progress.step("starting it");
     let stored = store
         .image(&name, &digest)
         .and_then(|file| Image::open(file, Some(digest)).map_err(|e| e.to_string()));

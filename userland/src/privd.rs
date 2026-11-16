@@ -8,9 +8,11 @@
 //!
 //! The requester's terminal is never handed over. A mechanism runs outside
 //! the requester's session, where that terminal answers `EIO`, so output for
-//! one, or for a socket, is relayed through pipes, and input only for a
-//! mechanism that reads it; one that runs a terminal session gets a
-//! terminal of its own, whose master the requester relays.
+//! one goes to a terminal of the mechanism's own, sized as this one, whose
+//! master the requester relays: the mechanism draws as it would here.
+//! Output for a socket is relayed through a pipe, and input only for a
+//! mechanism that reads it; one that runs a terminal session takes its keys
+//! through its terminal too.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStringExt;
@@ -24,7 +26,7 @@ use slopos_abi::net::{AF_UNIX, SOCK_CLOEXEC, SOCK_STREAM};
 use slopos_abi::signal::SIGWINCH;
 use slopos_abi::syscall::{
     BOOT_FLAG_MEDIUM, F_DUPFD_CLOEXEC, F_GETFD, F_SETFD, FD_CLOEXEC, MSG_NOSIGNAL, O_CLOEXEC,
-    POLLIN, POLLOUT, UserPollFd, UserTermios,
+    OutputFlags, POLLIN, POLLOUT, UserPollFd, UserTermios,
 };
 use slopos_priv_core::wire::{self, CONNECTION, Exit, Reply, Request};
 use slopos_priv_core::{ENV_ACTION, ENV_FD, POLICY, PROGRAM, Policy, RunsAs, SOCKET};
@@ -524,6 +526,10 @@ struct Stdio {
     to_stdin: Option<Forward>,
     from_out: [Option<OwnedFd>; 2],
     terminal: Option<OwnedFd>,
+    /// The terminal here that one is sized as.
+    sized_as: RawFd,
+    /// The mechanism reads keys through that terminal, this one raw.
+    takes_keys: bool,
     /// What that terminal shows, relayed to `shown_at` only once the
     /// mechanism has started and this terminal is raw, so a reply typed at a
     /// prompt is never echoed by it.
@@ -590,14 +596,14 @@ fn dup(fd: &OwnedFd) -> Result<OwnedFd, String> {
 
 /// The slave is taken through its master, locked, so no process opens it by
 /// its path before the mechanism makes it its own or after.
-fn terminal_pair() -> Result<(OwnedFd, OwnedFd), String> {
+fn terminal_pair(sized_as: RawFd) -> Result<(OwnedFd, OwnedFd), String> {
     let fail = |why: String| format!("no terminal for the mechanism: {why}");
     let (master, slave) = process::openpty_handed_on().map_err(|e| fail(e.to_string()))?;
     let (master, slave) = (above_stdio(master)?, above_stdio(slave)?);
     for end in [&master, &slave] {
         fs::set_fd_cloexec(end.raw()).map_err(|e| format!("fcntl: {e}"))?;
     }
-    if let Ok(size) = fs::tiocgwinsz(0) {
+    if let Ok(size) = fs::tiocgwinsz(sized_as) {
         let _ = fs::tiocswinsz(master.raw(), &size);
     }
     Ok((master, slave))
@@ -627,26 +633,41 @@ impl Drop for RawTerminal {
 
 impl Stdio {
     fn build(input: Input) -> Result<Stdio, String> {
+        let takes_keys = input == Input::Terminal && fs::isatty(0);
+        let to_terminal = |fd: RawFd| fs::isatty(fd) && (fd != 0 || takes_keys);
         let mut stdio = Stdio {
             passed: Vec::new(),
             to_stdin: None,
             from_out: [None, None],
             terminal: None,
+            sized_as: 0,
+            takes_keys,
             terminal_out: None,
             shown_at: 2,
             raw: None,
         };
-        let pair = match input == Input::Terminal && fs::isatty(0) {
-            true => Some(terminal_pair()?),
-            false => None,
+        let sized_as = (0..3).find(|&fd| to_terminal(fd));
+        // Output alone falls back to pipes when no terminal is free.
+        let pair = match sized_as.map(terminal_pair) {
+            Some(Ok(pair)) => Some(pair),
+            Some(Err(why)) if takes_keys => return Err(why),
+            _ => None,
         };
+        stdio.sized_as = sized_as.unwrap_or(0);
+        // The requester's terminal stays cooked, so it turns newlines into CR LF.
+        if let Some((_, slave)) = pair.as_ref().filter(|_| !takes_keys)
+            && let Ok(mut termios) = fs::tcgetattr(slave.raw())
+        {
+            termios.c_oflag.remove(OutputFlags::OPOST);
+            let _ = fs::tcsetattr(slave.raw(), &termios);
+        }
         for fd in 0..3 {
             let open = Sys::fcntl(fd, F_GETFD as i32, 0).is_ok();
             let passed = if !open {
                 null()?
             } else if !stands_in(fd) {
                 above_stdio(fs::dup(fd).map_err(|e| format!("fd {fd}: {e}"))?)?
-            } else if let Some((_, slave)) = pair.as_ref().filter(|_| fs::isatty(fd)) {
+            } else if let Some((_, slave)) = pair.as_ref().filter(|_| to_terminal(fd)) {
                 dup(slave)?
             } else if fd == 0 {
                 if input == Input::Closed {
@@ -671,11 +692,13 @@ impl Stdio {
         if let Some((master, _)) = pair {
             let shown_at = [1, 2].into_iter().find(|&fd| fs::isatty(fd)).unwrap_or(2);
             net::set_nonblocking(master.raw()).map_err(|e| format!("the terminal: {e}"))?;
-            stdio.to_stdin = Some(Forward {
-                pipe: dup(&master)?,
-                held: Vec::new(),
-                ended: false,
-            });
+            if takes_keys {
+                stdio.to_stdin = Some(Forward {
+                    pipe: dup(&master)?,
+                    held: Vec::new(),
+                    ended: false,
+                });
+            }
             stdio.terminal_out = Some(dup(&master)?);
             stdio.shown_at = shown_at;
             stdio.terminal = Some(master);
@@ -686,8 +709,7 @@ impl Stdio {
 
 /// Whether a mechanism privd starts gets something in place of `fd` rather
 /// than `fd` itself: a terminal answers `EIO` to a mechanism in privd's
-/// session, and a socket cannot travel as `SCM_RIGHTS`, so either reaches it
-/// through a pipe.
+/// session, and a socket cannot travel as `SCM_RIGHTS`.
 pub fn stands_in(fd: RawFd) -> bool {
     if fs::isatty(fd) {
         return true;
@@ -736,6 +758,7 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
     // starts.
     let typed_here = fs::isatty(0);
     let mut started = false;
+    let mut waiting = Waiting(false);
     let mut signalled = false;
     let mut withdrawn_by: Option<u8> = None;
     let mut exited: Option<Exit> = None;
@@ -747,7 +770,7 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
             .filter(|&signal| pending & (1 << signal) != 0)
             .collect();
         if pending & (1 << SIGWINCH) != 0
-            && let (Some(master), Ok(size)) = (&stdio.terminal, fs::tiocgwinsz(0))
+            && let (Some(master), Ok(size)) = (&stdio.terminal, fs::tiocgwinsz(stdio.sized_as))
         {
             let _ = fs::tiocswinsz(master.raw(), &size);
         }
@@ -766,16 +789,18 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
             }
         }
         while exited.is_none() {
-            match connection.buffered(request.id)? {
+            let reply = connection.buffered(request.id)?;
+            if !matches!(reply, Some(Reply::Asking { .. }) | None) {
+                waiting.answered();
+            }
+            match reply {
                 Some(Reply::Started { .. }) => {
                     started = true;
-                    if stdio.terminal.is_some() {
+                    if stdio.takes_keys {
                         stdio.raw = RawTerminal::enter();
                     }
                 }
-                Some(Reply::Asking { .. }) => {
-                    eprintln!("{program}: {WAITING}");
-                }
+                Some(Reply::Asking { .. }) => waiting.show(&program),
                 Some(Reply::Prompt { about, prompt }) => {
                     eprintln!("{about}");
                     let typed = crate::secret::read(&prompt)?;
@@ -827,7 +852,7 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
             polled.push(poll(out.raw(), POLLIN));
         }
         if let Some(forward) = &stdio.to_stdin {
-            if forward.wants_input() && (started || (stdio.terminal.is_none() && !typed_here)) {
+            if forward.wants_input() && (started || (!stdio.takes_keys && !typed_here)) {
                 polled.push(poll(0, POLLIN));
             }
             if !forward.held.is_empty() {
@@ -866,9 +891,37 @@ pub fn run(connection: &mut Connection, request: Request, input: Input) -> Resul
                 .iter()
                 .position(|out| out.as_ref().is_some_and(|out| out.raw() == entry.fd))
             {
+                waiting.answered();
                 relay(&mut stdio.from_out[index], index as RawFd + 1);
             }
         }
+    }
+}
+
+/// On a terminal, taken back once answered, so nothing reads as still waiting.
+struct Waiting(bool);
+
+impl Waiting {
+    fn show(&mut self, program: &str) {
+        if !fs::isatty(2) {
+            eprintln!("{program}: {WAITING}");
+            return;
+        }
+        self.answered();
+        let _ = write_all(2, format!("{program}: {WAITING}").as_bytes());
+        self.0 = true;
+    }
+
+    fn answered(&mut self) {
+        if std::mem::take(&mut self.0) {
+            let _ = write_all(2, b"\r\x1b[K");
+        }
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.answered();
     }
 }
 
