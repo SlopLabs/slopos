@@ -16,6 +16,7 @@ use slopos_userland as _;
 
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_userland::apps::shell::script::SCRIPT_LINE_MAX;
+use slopos_userland::apps::terminal::grid::TerminalGrid;
 use slopos_userland::syscall::{SyscallError, core as sys_core, fs, process};
 
 /// Bounded wait so a regressed shell fails the case rather than hanging the
@@ -786,14 +787,13 @@ fn trap_interrupts_wait_for_every_child() -> bool {
 /// Bounded so a regressed shell fails rather than wedging the harness.
 const PTY_IDLE_READS: usize = 20_000;
 
-/// Type `script` at an interactive shell on a PTY and collect everything the
-/// terminal shows, until the shell has exited having printed `done`.
+/// The PTY master, non-blocking, and the task to reap.
 ///
 /// The shell is spawned from a child that first becomes the slave's session
 /// and foreground group, as `/bin/terminal` does. That topology matters: a
 /// shell taking the terminal for itself instead of joining the session that
 /// owns it leaves every command it forks in a background group.
-fn interactive_session(script: &[u8], done: &[u8]) -> Option<Vec<u8>> {
+fn open_interactive_shell() -> Option<(i32, i32)> {
     let Ok((master, _slave_num)) = process::openpty() else {
         eprintln!("shell_script_test: openpty failed");
         return None;
@@ -846,6 +846,13 @@ fn interactive_session(script: &[u8], done: &[u8]) -> Option<Vec<u8>> {
     let _ = fs::close_fd_raw(slave);
 
     let _ = fs::set_fd_nonblocking(master);
+    Some((master, tid))
+}
+
+/// Type `script` at an interactive shell on a PTY and collect everything the
+/// terminal shows, until the shell has exited having printed `done`.
+fn interactive_session(script: &[u8], done: &[u8]) -> Option<Vec<u8>> {
+    let (master, tid) = open_interactive_shell()?;
     let mut fed = 0usize;
     let mut seen = Vec::new();
     let mut idle = 0usize;
@@ -884,6 +891,99 @@ fn interactive_session(script: &[u8], done: &[u8]) -> Option<Vec<u8>> {
     let _ = process::kill(tid as u32, slopos_abi::signal::SIGKILL);
     let _ = fs::close_fd_raw(master);
     Some(seen)
+}
+
+/// Idle reads after which the shell has said all it had to about one key.
+const KEY_SETTLE_READS: usize = 2_000;
+
+/// Feeds `grid` until `settled` holds and the shell is quiet; `frame` runs
+/// wherever a terminal that had read everything would paint.
+fn show_until(
+    master: i32,
+    grid: &mut TerminalGrid,
+    settled: impl Fn(&TerminalGrid) -> bool,
+    mut frame: impl FnMut(&TerminalGrid),
+) -> bool {
+    let mut chunk = [0u8; 256];
+    let mut idle = 0usize;
+    let mut unpainted = false;
+    while idle < PTY_IDLE_READS {
+        match fs::read_slice(master, &mut chunk) {
+            Ok(n) if n > 0 => {
+                for &b in &chunk[..n] {
+                    grid.process_byte(b);
+                }
+                unpainted = true;
+                idle = 0;
+            }
+            Err(SyscallError::EAGAIN) | Ok(_) => {
+                if unpainted {
+                    frame(grid);
+                    unpainted = false;
+                }
+                idle += 1;
+                if idle >= KEY_SETTLE_READS && settled(grid) {
+                    return true;
+                }
+                sys_core::yield_now();
+            }
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+/// A terminal paints once it has read all there is, unless a synchronized
+/// update is open. None of those frames may lack the prompt.
+fn typing_never_shows_a_line_without_its_prompt() -> bool {
+    let Some((master, tid)) = open_interactive_shell() else {
+        return false;
+    };
+    let mut grid = TerminalGrid::new(24, 80);
+    let glyph = |g: &TerminalGrid, col: usize| g.visible_cell(g.cursor_row as usize, col).glyph();
+    let prompted = |g: &TerminalGrid| {
+        let col = g.cursor_col as usize;
+        col >= 2 && glyph(g, col - 1) == u32::from(b' ') && glyph(g, col - 2) == u32::from(b'#')
+    };
+
+    let mut frames = 0usize;
+    let mut torn = 0usize;
+    let mut ok = show_until(master, &mut grid, prompted, |_| {});
+    if !ok {
+        eprintln!("shell_script_test: no prompt on the terminal");
+    }
+    let first = glyph(&grid, 0);
+    let start = grid.cursor_col;
+    for (typed, key) in (1u16..).zip(*b"echo") {
+        if !ok {
+            break;
+        }
+        let _ = fs::write_slice(master, &[key]);
+        ok = show_until(
+            master,
+            &mut grid,
+            |g| g.cursor_col == start + typed,
+            |g| {
+                if g.synchronized() {
+                    return;
+                }
+                frames += 1;
+                if glyph(g, 0) != first {
+                    torn += 1;
+                }
+            },
+        );
+        if !ok {
+            eprintln!("shell_script_test: key {typed} never reached the line");
+        }
+    }
+
+    let _ = process::kill(tid as u32, slopos_abi::signal::SIGKILL);
+    let _ = fs::close_fd_raw(master);
+    if torn > 0 {
+        eprintln!("shell_script_test: {torn} of {frames} frames had no prompt");
+    }
+    ok && torn == 0
 }
 
 fn saw_every(name: &str, seen: &[u8], markers: &[&[u8]]) -> bool {
@@ -1107,6 +1207,10 @@ const CASES: &[(&str, fn() -> bool)] = &[
     (
         "the_interactive_prompt_continues_an_unfinished_command",
         the_interactive_prompt_continues_an_unfinished_command,
+    ),
+    (
+        "typing_never_shows_a_line_without_its_prompt",
+        typing_never_shows_a_line_without_its_prompt,
     ),
     (
         "tab_completes_commands_and_arguments",

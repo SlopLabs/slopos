@@ -18,6 +18,7 @@ use slopos_rt::{Ring, slopfut};
 use grid::TerminalGrid;
 use input::{CompositorEvent, KeyAction, KeyBytes, MouseEventKind, PointerState, Selection};
 use slopos_terminal_core::damage::{CellDamage, DamageHistory};
+use slopos_terminal_core::shown::Shown;
 
 const OPEN_COLS: i32 = 80;
 const OPEN_ROWS: i32 = 30;
@@ -25,6 +26,9 @@ const OPEN_ROWS: i32 = 30;
 /// against a recorded frame.
 const SURFACE_BUFFERS: usize = 2;
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
+/// Longest a synchronized update (DECSET 2026) holds frames back, so a
+/// program that never ends one cannot freeze the window.
+const SYNC_HOLD: Duration = Duration::from_millis(150);
 
 const MASTER_READ_CHUNK: usize = 1024;
 /// Per loop turn, so output cannot starve input.
@@ -178,6 +182,8 @@ async fn event_loop(
     // Only a present clears it, so a skipped frame carries its damage forward.
     let mut pending = CellDamage::new();
     pending.set_rows(grid.rows as usize);
+    let mut shown = Shown::new(grid.rows as usize, grid.cols as usize);
+    let mut sync_since: Option<Instant> = None;
     let mut pending_writes = MasterWriteQueue::new();
     // Between a paste's ready and its result: the receiver provides the buffer.
     let mut pending_paste: Option<ShmBuffer> = None;
@@ -185,7 +191,15 @@ async fn event_loop(
     let mut last_mouse_cell: Option<(usize, usize)> = None;
 
     let _ = grid.take_damage();
-    render_full(win, grid, &selection, cursor_on, &mut history, &mut pending);
+    render_full(
+        win,
+        grid,
+        &selection,
+        cursor_on,
+        &mut history,
+        &mut pending,
+        &mut shown,
+    );
 
     loop {
         let mut repaint_all = false;
@@ -243,8 +257,17 @@ async fn event_loop(
                         last_mouse_cell = None;
                         history.clear();
                         pending.set_rows(grid.rows as usize);
+                        shown.reshape(grid.rows as usize, grid.cols as usize);
                         let _ = grid.take_damage();
-                        render_full(win, grid, &selection, cursor_on, &mut history, &mut pending);
+                        render_full(
+                            win,
+                            grid,
+                            &selection,
+                            cursor_on,
+                            &mut history,
+                            &mut pending,
+                            &mut shown,
+                        );
                     }
                 }
                 CompositorEvent::Close => {
@@ -402,21 +425,45 @@ async fn event_loop(
             pending.add_all(grid.cols);
         }
         pending.union(&grid.take_damage());
-        present_pending(win, grid, &selection, cursor_on, &mut history, &mut pending);
 
         let elapsed = last_blink.elapsed();
-        if elapsed >= BLINK_INTERVAL {
+        let blinked = elapsed >= BLINK_INTERVAL;
+        if blinked {
             cursor_on = !cursor_on;
             last_blink = Instant::now();
             grid.damage_cursor();
             pending.union(&grid.take_damage());
-            present_pending(win, grid, &selection, cursor_on, &mut history, &mut pending);
+        }
+
+        let hold = match grid.synchronized() {
+            true => SYNC_HOLD
+                .checked_sub(sync_since.get_or_insert_with(Instant::now).elapsed())
+                .filter(|left| !left.is_zero()),
+            false => {
+                sync_since = None;
+                None
+            }
+        };
+        if hold.is_none() {
+            present_pending(
+                win,
+                grid,
+                &selection,
+                cursor_on,
+                &mut history,
+                &mut pending,
+                &mut shown,
+            );
+        }
+        if blinked {
             continue;
         }
+
         let blink_ms = (BLINK_INTERVAL - elapsed).as_millis().max(1) as u64;
-        let owed_ms = match pending.is_empty() {
-            true => None,
-            false => win.renderer().wait_ms(),
+        let owed_ms = match (pending.is_empty(), hold) {
+            (true, _) => None,
+            (false, Some(left)) => Some(left.as_millis() as u64),
+            (false, None) => win.renderer().wait_ms(),
         };
         let blink_ms = owed_ms.map_or(blink_ms, |ms| blink_ms.min(ms.max(1)));
         let comp = slopfut::poll_add(compositor_fd, POLLIN);
@@ -439,6 +486,7 @@ fn render_full(
     cursor_on: bool,
     history: &mut DamageHistory,
     pending: &mut CellDamage,
+    shown: &mut Shown,
 ) {
     // No recorded frame describes what the other slots hold.
     history.clear();
@@ -447,11 +495,12 @@ fn render_full(
         pending.add_all(grid.cols);
         return;
     }
-    render::render_full(win, grid, selection, cursor_on);
-    pending.clear();
     let mut all = CellDamage::new();
     all.set_rows(grid.rows as usize);
     all.add_all(grid.cols);
+    let _ = shown.update(&all, grid, selection, cursor_on);
+    render::render_full(win, shown);
+    pending.clear();
     history.push(all);
 }
 
@@ -462,20 +511,22 @@ fn present_pending(
     cursor_on: bool,
     history: &mut DamageHistory,
     pending: &mut CellDamage,
+    shown: &mut Shown,
 ) {
     if pending.is_empty() || !win.renderer().ready() {
         return;
     }
-    match history.resolve(win.renderer().buffer_age(), pending) {
+    let changed = shown.update(pending, grid, selection, cursor_on);
+    pending.clear();
+    if changed.is_empty() {
+        return;
+    }
+    match history.resolve(win.renderer().buffer_age(), &changed) {
         Some(repaint) => {
-            render::render_damage(win, grid, selection, cursor_on, &repaint);
-            history.push(core::mem::replace(pending, {
-                let mut d = CellDamage::new();
-                d.set_rows(grid.rows as usize);
-                d
-            }));
+            render::render_damage(win, shown, &repaint);
+            history.push(changed);
         }
-        None => render_full(win, grid, selection, cursor_on, history, pending),
+        None => render_full(win, grid, selection, cursor_on, history, pending, shown),
     }
 }
 

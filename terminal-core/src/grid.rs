@@ -680,6 +680,7 @@ pub struct TerminalGrid {
     /// cursor there with the wrap pending; the wrap commits only when the
     /// next printable char arrives.
     wrap_pending: bool,
+    synchronized: bool,
     /// Cells whose visible content changed since the last [`take_damage`].
     ///
     /// [`take_damage`]: TerminalGrid::take_damage
@@ -720,6 +721,7 @@ impl TerminalGrid {
             reflow_scratch: ScrollbackBuf::empty(),
             total_scrolled: 0,
             wrap_pending: false,
+            synchronized: false,
             damage: {
                 let mut d = CellDamage::new();
                 d.set_rows(rows as usize);
@@ -770,7 +772,7 @@ impl TerminalGrid {
     /// The screen cell the cursor renders on, or `None` while it is not drawn
     /// (hidden by DECTCEM, or suppressed because the view is in scrollback).
     #[inline]
-    fn cursor_cell(&self) -> Option<(usize, usize)> {
+    pub(crate) fn cursor_cell(&self) -> Option<(usize, usize)> {
         if !self.cursor_visible || self.viewing_history() {
             return None;
         }
@@ -872,6 +874,12 @@ impl TerminalGrid {
     #[inline]
     pub fn bracketed_paste(&self) -> bool {
         self.parser.bracketed_paste
+    }
+
+    /// True inside a synchronized update (DECSET 2026): not a frame to show.
+    #[inline]
+    pub fn synchronized(&self) -> bool {
+        self.synchronized
     }
 
     /// True when the slave-side app enabled DECCKM (DECSET 1), i.e. expects
@@ -1628,6 +1636,7 @@ impl TerminalGrid {
                 self.damage_cursor();
             }
             1049 => self.enter_alt_screen(),
+            2026 => self.synchronized = true,
             _ => {}
         }
     }
@@ -1639,6 +1648,7 @@ impl TerminalGrid {
                 self.damage_cursor();
             }
             1049 => self.leave_alt_screen(),
+            2026 => self.synchronized = false,
             _ => {}
         }
     }
@@ -2268,6 +2278,16 @@ mod tests {
         assert!(g.bracketed_paste());
         feed(&mut g, b"\x1b[?2004l");
         assert!(!g.bracketed_paste());
+    }
+
+    #[test]
+    fn a_synchronized_update_lasts_from_its_decset_2026_to_its_reset() {
+        let mut g = TerminalGrid::new(3, 10);
+        assert!(!g.synchronized());
+        feed(&mut g, b"\x1b[?2026h\r\x1b[J");
+        assert!(g.synchronized());
+        feed(&mut g, b"$ ls\x1b[?2026l");
+        assert!(!g.synchronized());
     }
 
     #[test]

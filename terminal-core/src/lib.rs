@@ -12,6 +12,7 @@ extern crate alloc;
 pub mod damage;
 pub mod grid;
 pub mod input;
+pub mod shown;
 
 /// `n` as decimal digits, most significant first, with the count. One writer
 /// for both the key/mouse encoder's fixed buffer and the grid's reply queue.

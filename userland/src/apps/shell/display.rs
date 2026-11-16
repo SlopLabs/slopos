@@ -166,6 +166,19 @@ fn emit_colored(bytes: &[u8], color_idx: u8) -> bool {
     ok
 }
 
+/// What [`shell_write_idx`] would write, appended to `out`.
+pub fn push_colored(out: &mut Vec<u8>, bytes: &[u8], color_idx: u8, colored: bool) {
+    if color_idx == COLOR_DEFAULT || !colored {
+        out.extend_from_slice(bytes);
+        return;
+    }
+    let mut sgr = [0u8; 24];
+    let len = write_sgr_set(&mut sgr, palette_color(color_idx));
+    out.extend_from_slice(&sgr[..len]);
+    out.extend_from_slice(bytes);
+    out.extend_from_slice(b"\x1b[0m");
+}
+
 /// Write to standard output; `false` on failure, e.g. a broken pipe.
 ///
 /// A redirected builtin needs nothing special: the executor `dup2`s the target
@@ -184,10 +197,4 @@ pub fn shell_write_idx(buf: &[u8], color_idx: u8) -> bool {
 pub fn shell_output_target() -> (i32, bool) {
     let plain = PLAIN.load(Ordering::Relaxed);
     (STDOUT_FD, !plain && fs::isatty(STDOUT_FD))
-}
-
-/// Echo a single character to fd 1 (line-editor local echo).
-pub fn shell_echo_char(c: u8) {
-    let buf = [c];
-    emit_stdout(&buf);
 }

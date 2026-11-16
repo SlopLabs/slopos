@@ -14,7 +14,10 @@ use slopos_rt::{Ring, slopfut};
 
 use super::buffers;
 use super::completion;
-use super::display::{COLOR_COMMENT_GRAY, shell_write, shell_write_idx};
+use super::display::{
+    COLOR_COMMENT_GRAY, COLOR_DEFAULT, push_colored, shell_output_target, shell_write,
+    shell_write_idx,
+};
 use super::history;
 
 use std::collections::VecDeque;
@@ -61,9 +64,6 @@ const DEFAULT_ROWS: usize = 24;
 /// sequence's bytes arrive back-to-back, a lone ESC keypress has no follow-up.
 const ESC_TIMEOUT_MS: u64 = 30;
 
-static PROMPT_COLORS: Mutex<[u8; super::PROMPT_BUF_MAX]> = Mutex::new([0; super::PROMPT_BUF_MAX]);
-static PROMPT_COLORS_LEN: AtomicUsize = AtomicUsize::new(0);
-
 /// Events decoded from bytes already taken off fd 0 but not yet dispatched.
 /// Those bytes are off the descriptor, so dropping them at the end of a prompt
 /// would lose input no other reader can recover. It never holds bytes the editor
@@ -93,12 +93,6 @@ pub enum LineOutcome {
 /// whole command is the parser's question, and the caller prompts again for
 /// the rest of one that is not.
 pub fn read_command_line(out: &mut Vec<u8>, prompt: &[u8], prompt_colors: &[u8]) -> LineOutcome {
-    {
-        let mut colors = PROMPT_COLORS.lock().unwrap();
-        let copy_len = prompt_colors.len().min(super::PROMPT_BUF_MAX);
-        colors[..copy_len].copy_from_slice(&prompt_colors[..copy_len]);
-        PROMPT_COLORS_LEN.store(copy_len, Ordering::Relaxed);
-    }
     buffers::with_line_buf(|buf| {
         buf.fill(0);
     });
@@ -123,7 +117,10 @@ pub fn read_command_line(out: &mut Vec<u8>, prompt: &[u8], prompt_colors: &[u8])
     let _ = fs::write_slice(1, b"\x1b[?2004h");
 
     let result = match Ring::setup(16) {
-        Ok(ring) => slopfut::block_on(ring, input_loop(out, prompt, cols, winch.as_ref())),
+        Ok(ring) => {
+            let region = Region::new(prompt, prompt_colors, cols);
+            slopfut::block_on(ring, input_loop(out, region, winch.as_ref()))
+        }
         Err(_) => {
             crate::syscall::core::yield_now();
             if RING_FAILURES.fetch_add(1, Ordering::Relaxed) + 1 >= RING_FAILURE_LIMIT {
@@ -147,12 +144,6 @@ pub fn read_command_line(out: &mut Vec<u8>, prompt: &[u8], prompt_colors: &[u8])
     let _ = fs::write_slice(1, b"\x1b[?2004l");
 
     result
-}
-
-fn prompt_colors_snapshot() -> ([u8; super::PROMPT_BUF_MAX], usize) {
-    let colors = *PROMPT_COLORS.lock().unwrap();
-    let len = PROMPT_COLORS_LEN.load(Ordering::Relaxed);
-    (colors, len)
 }
 
 enum Decoded {
@@ -446,26 +437,20 @@ type WinchFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = u32> +
 
 async fn input_loop(
     out: &mut Vec<u8>,
-    prompt: &[u8],
-    cols: usize,
+    mut region: Region<'_>,
     winch: Option<&SignalListener>,
 ) -> LineOutcome {
-    let mut cols = cols;
     let mut parser = EscParser::new();
     let mut winch_fut: Option<WinchFuture<'_>> =
         winch.map(|w| -> WinchFuture<'_> { Box::pin(w.recv()) });
     let mut queue: VecDeque<Decoded> = std::mem::take(&mut *PENDING_EVENTS.lock().unwrap());
     let mut overflowed = false;
 
-    // Region-relative cursor row (see `redraw`): the REPL pre-printed the
-    // prompt, so the first region starts at its row, cursor resting after it.
-    let mut cur_row = row_of_offset(prompt.len(), cols.max(1));
-
     'restart: loop {
         let mut len = 0usize;
         let mut cursor_pos = 0usize;
 
-        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+        region.redraw(len, cursor_pos);
 
         loop {
             let decoded = match queue.pop_front() {
@@ -478,8 +463,8 @@ async fn input_loop(
                             if let (Some(slot), Some(w)) = (winch_fut.as_mut(), winch) {
                                 *slot = Box::pin(w.recv());
                             }
-                            cols = query_cols();
-                            redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                            region.cols = query_cols();
+                            region.redraw(len, cursor_pos);
                             continue;
                         }
                         Wake::Eof => return LineOutcome::Eof,
@@ -507,12 +492,12 @@ async fn input_loop(
                     } else {
                         overflowed |= !insert_text(&text, text.len(), &mut len, &mut cursor_pos);
                     }
-                    redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                    region.redraw(len, cursor_pos);
                     continue;
                 }
                 Decoded::Char(seq, n) => {
                     overflowed |= !insert_text(&seq, n, &mut len, &mut cursor_pos);
-                    redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                    region.redraw(len, cursor_pos);
                     continue;
                 }
                 Decoded::Key(c) => c,
@@ -520,11 +505,7 @@ async fn input_loop(
 
             match c {
                 b'\n' | b'\r' => {
-                    // Finish below the LAST wrapped row of the input, not
-                    // wherever the cursor happens to sit mid-region.
-                    let end_row = row_of_offset(prompt.len() + cells_upto(len), cols.max(1));
-                    emit_cursor_move(end_row.saturating_sub(cur_row), b'B');
-                    super::display::shell_echo_char(b'\n');
+                    region.leave(len, b"\n");
                     buffers::with_line_buf(|buf| {
                         history::push(buf, len);
                     });
@@ -535,14 +516,14 @@ async fn input_loop(
                 b'\x08' | 0x7f => {
                     if cursor_pos > 0 {
                         delete_char_before_cursor(&mut len, &mut cursor_pos);
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        region.redraw(len, cursor_pos);
                     }
                 }
 
                 KEY_DELETE => {
                     if cursor_pos < len {
                         delete_char_at_cursor(&mut len, cursor_pos);
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        region.redraw(len, cursor_pos);
                     }
                 }
 
@@ -553,7 +534,7 @@ async fn input_loop(
                     if let Some(nl) = new_len {
                         len = nl;
                         cursor_pos = nl;
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        region.redraw(len, cursor_pos);
                     }
                 }
 
@@ -562,14 +543,14 @@ async fn input_loop(
                     if let Some(nl) = new_len {
                         len = nl;
                         cursor_pos = nl;
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        region.redraw(len, cursor_pos);
                     }
                 }
 
                 KEY_LEFT => {
                     if cursor_pos > 0 {
                         cursor_pos = buffers::with_line_buf(|buf| prev_char_start(buf, cursor_pos));
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        region.redraw(len, cursor_pos);
                     }
                 }
 
@@ -577,7 +558,7 @@ async fn input_loop(
                     if cursor_pos < len {
                         cursor_pos =
                             buffers::with_line_buf(|buf| next_char_end(buf, cursor_pos, len));
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        region.redraw(len, cursor_pos);
                     }
                 }
 
@@ -585,7 +566,7 @@ async fn input_loop(
                     let new_pos = buffers::with_line_buf(|buf| word_start(buf, cursor_pos));
                     if new_pos != cursor_pos {
                         cursor_pos = new_pos;
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        region.redraw(len, cursor_pos);
                     }
                 }
 
@@ -593,21 +574,21 @@ async fn input_loop(
                     let new_pos = buffers::with_line_buf(|buf| word_end(buf, cursor_pos, len));
                     if new_pos != cursor_pos {
                         cursor_pos = new_pos;
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        region.redraw(len, cursor_pos);
                     }
                 }
 
                 KEY_HOME | CTRL_A => {
                     if cursor_pos != 0 {
                         cursor_pos = 0;
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        region.redraw(len, cursor_pos);
                     }
                 }
 
                 KEY_END | CTRL_E => {
                     if cursor_pos != len {
                         cursor_pos = len;
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        region.redraw(len, cursor_pos);
                     }
                 }
 
@@ -622,7 +603,7 @@ async fn input_loop(
                             }
                         });
                         len = cursor_pos;
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        region.redraw(len, cursor_pos);
                     }
                 }
 
@@ -639,7 +620,7 @@ async fn input_loop(
                         });
                         len = shift;
                         cursor_pos = 0;
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        region.redraw(len, cursor_pos);
                     }
                 }
 
@@ -664,22 +645,20 @@ async fn input_loop(
                         });
                         len -= old_cursor - new_cursor;
                         cursor_pos = new_cursor;
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        region.redraw(len, cursor_pos);
                     }
                 }
 
                 CTRL_L => {
                     shell_write(b"\x1b[2J\x1b[H");
-                    cur_row = 0;
+                    region.cur_row = 0;
                     // Restart with a blank line on the cleared screen; an async
                     // fn cannot tail-recurse.
                     continue 'restart;
                 }
 
                 CTRL_C => {
-                    let end_row = row_of_offset(prompt.len() + cells_upto(len), cols.max(1));
-                    emit_cursor_move(end_row.saturating_sub(cur_row), b'B');
-                    shell_write(b"^C\n");
+                    region.leave(len, b"^C\n");
                     history::reset_cursor();
                     stash(&mut queue);
                     return LineOutcome::Interrupted;
@@ -694,7 +673,7 @@ async fn input_loop(
                     }
                     if cursor_pos < len {
                         delete_char_at_cursor(&mut len, cursor_pos);
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        region.redraw(len, cursor_pos);
                     }
                 }
 
@@ -702,14 +681,12 @@ async fn input_loop(
                     let before = buffers::with_line_buf(|buf| buf[..cursor_pos.min(len)].to_vec());
                     // Leave the prompt and the line in view below the listing.
                     let max_lines = query_rows().saturating_sub(2);
-                    let outcome = completion::complete(&before, cols.max(1), max_lines);
+                    let outcome = completion::complete(&before, region.cols, max_lines);
 
                     if let Some(listing) = &outcome.listing {
-                        let end_row = row_of_offset(prompt.len() + cells_upto(len), cols.max(1));
-                        emit_cursor_move(end_row.saturating_sub(cur_row), b'B');
-                        shell_write(b"\n");
+                        region.leave(len, b"\n");
                         show_listing(listing);
-                        cur_row = 0;
+                        region.cur_row = 0;
                     }
                     // A completion that does not fit is not inserted in part.
                     let room = buffers::with_line_buf(|buf| buf.len()).saturating_sub(len + 1);
@@ -723,7 +700,7 @@ async fn input_loop(
                         );
                     }
                     if inserted || outcome.listing.is_some() {
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        region.redraw(len, cursor_pos);
                     }
                 }
 
@@ -740,7 +717,7 @@ async fn input_loop(
                         });
                         len += 1;
                         cursor_pos += 1;
-                        redraw(prompt, len, cursor_pos, cols, &mut cur_row);
+                        region.redraw(len, cursor_pos);
                     }
                 }
 
@@ -1021,74 +998,110 @@ fn row_of_offset(offset: usize, cols: usize) -> usize {
     if offset == 0 { 0 } else { (offset - 1) / cols }
 }
 
-/// Redraw the edit region in place. Inputs wider than the terminal wrap across
-/// rows, so the redraw is region-based: move to the region's first row, erase
-/// everything below, reprint prompt + buffer, then reposition the cursor.
-/// `cur_row` is the row within the region the previous redraw left it on.
-fn redraw(prompt: &[u8], len: usize, cursor_pos: usize, cols: usize, cur_row: &mut usize) {
-    let cols = cols.max(1);
+/// DECSET 2026: the terminal shows nothing written between the two.
+const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
+const SYNC_END: &[u8] = b"\x1b[?2026l";
 
-    // Column 0 of the region's first row, then wipe every rendered row below.
-    shell_write(b"\r");
-    emit_cursor_move(*cur_row, b'A');
-    shell_write(b"\x1b[J");
-
-    // Colored prompt: emit per-color runs.
-    let (pc_buf, pc_len) = prompt_colors_snapshot();
-    let mut i = 0;
-    while i < prompt.len() {
-        let color = if i < pc_len { pc_buf[i] } else { 0 };
-        let start = i;
-        while i < prompt.len() && (i >= pc_len || pc_buf[i] == color) {
-            i += 1;
-        }
-        shell_write_idx(&prompt[start..i], color);
-    }
-
-    buffers::with_line_buf(|buf| {
-        shell_write(&buf[..len]);
-    });
-
-    // Mid-content offsets use committed-wrap coordinates (a row-boundary offset
-    // sits at column 0 of the next row); the end-of-content offset uses the
-    // deferred resting position (last column of the full row). All geometry is
-    // in display cells, not bytes.
-    let total = prompt.len() + cells_upto(len);
-    let end_row = row_of_offset(total, cols);
-    let offset = prompt.len() + cells_upto(cursor_pos);
-    let (target_row, target_col) = if offset == total {
-        let col = if total == 0 {
-            0
-        } else if total % cols == 0 {
-            cols - 1
-        } else {
-            total % cols
-        };
-        (end_row, col)
-    } else {
-        (offset / cols, offset % cols)
-    };
-
-    shell_write(b"\r");
-    emit_cursor_move(end_row, b'A');
-    emit_cursor_move(target_row, b'B');
-    emit_cursor_move(target_col, b'C');
-    *cur_row = target_row;
+/// The terminal rows the prompt and the edited line occupy.
+struct Region<'a> {
+    prompt: &'a [u8],
+    prompt_colors: &'a [u8],
+    colored: bool,
+    cols: usize,
+    /// The row within the region the last redraw left the cursor on.
+    cur_row: usize,
+    frame: Vec<u8>,
 }
 
-/// Emit a `\x1b[<n><dir>` relative cursor move (`A` up, `B` down,
-/// `C` forward); zero distance emits nothing.
-fn emit_cursor_move(n: usize, dir: u8) {
+impl<'a> Region<'a> {
+    /// The REPL already printed the prompt: the cursor rests after it.
+    fn new(prompt: &'a [u8], prompt_colors: &'a [u8], cols: usize) -> Self {
+        Self {
+            prompt,
+            prompt_colors,
+            colored: shell_output_target().1,
+            cols,
+            cur_row: row_of_offset(prompt.len(), cols),
+            frame: Vec::new(),
+        }
+    }
+
+    /// One write inside a synchronized update: the erase precedes the text,
+    /// and a terminal painting between the two would show the prompt gone.
+    fn redraw(&mut self, len: usize, cursor_pos: usize) {
+        let (prompt, colors, cols) = (self.prompt, self.prompt_colors, self.cols);
+        let frame = &mut self.frame;
+        frame.clear();
+        frame.extend_from_slice(SYNC_BEGIN);
+
+        // Column 0 of the region's first row, then wipe every rendered row below.
+        frame.push(b'\r');
+        push_cursor_move(frame, self.cur_row, b'A');
+        frame.extend_from_slice(b"\x1b[J");
+
+        let color_at = |at: usize| colors.get(at).copied().unwrap_or(COLOR_DEFAULT);
+        let mut i = 0;
+        while i < prompt.len() {
+            let color = color_at(i);
+            let start = i;
+            while i < prompt.len() && color_at(i) == color {
+                i += 1;
+            }
+            push_colored(frame, &prompt[start..i], color, self.colored);
+        }
+
+        buffers::with_line_buf(|buf| frame.extend_from_slice(&buf[..len]));
+
+        // Mid-content offsets use committed-wrap coordinates (a row-boundary offset
+        // sits at column 0 of the next row); the end-of-content offset uses the
+        // deferred resting position (last column of the full row). All geometry is
+        // in display cells, not bytes.
+        let total = prompt.len() + cells_upto(len);
+        let end_row = row_of_offset(total, cols);
+        let offset = prompt.len() + cells_upto(cursor_pos);
+        let (target_row, target_col) = if offset == total {
+            let col = if total == 0 {
+                0
+            } else if total % cols == 0 {
+                cols - 1
+            } else {
+                total % cols
+            };
+            (end_row, col)
+        } else {
+            (offset / cols, offset % cols)
+        };
+
+        frame.push(b'\r');
+        push_cursor_move(frame, end_row, b'A');
+        push_cursor_move(frame, target_row, b'B');
+        push_cursor_move(frame, target_col, b'C');
+        frame.extend_from_slice(SYNC_END);
+        shell_write(frame);
+        self.cur_row = target_row;
+    }
+
+    /// Writes `tail` below the region's last wrapped row.
+    fn leave(&mut self, len: usize, tail: &[u8]) {
+        let end_row = row_of_offset(self.prompt.len() + cells_upto(len), self.cols);
+        self.frame.clear();
+        push_cursor_move(&mut self.frame, end_row.saturating_sub(self.cur_row), b'B');
+        self.frame.extend_from_slice(tail);
+        shell_write(&self.frame);
+    }
+}
+
+/// Append a `\x1b[<n><dir>` relative cursor move (`A` up, `B` down,
+/// `C` forward); zero distance appends nothing.
+fn push_cursor_move(out: &mut Vec<u8>, n: usize, dir: u8) {
     if n == 0 {
         return;
     }
-    let mut seq = [0u8; 16];
-    seq[0] = ESC;
-    seq[1] = b'[';
-    let mut pos = 2usize;
-    pos += write_usize_decimal(&mut seq[pos..], n);
-    seq[pos] = dir;
-    shell_write(&seq[..pos + 1]);
+    let mut digits = [0u8; 20];
+    let count = write_usize_decimal(&mut digits, n);
+    out.extend_from_slice(&[ESC, b'[']);
+    out.extend_from_slice(&digits[..count]);
+    out.push(dir);
 }
 
 fn write_usize_decimal(buf: &mut [u8], mut value: usize) -> usize {
