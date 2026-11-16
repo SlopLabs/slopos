@@ -715,7 +715,8 @@ fn install(store: &Store, prepared: Prepared, progress: &Progress) -> Result<Str
             copied.map_err(|e| ImageError::Damaged(format!("{path}: {e}")))
         })?;
         progress.step("checking its files");
-        admit::contents(&mut image, &libc).map_err(|e| format!("{path}: {e}"))?;
+        let needs = admit::contents(&mut image, &libc).map_err(|e| format!("{path}: {e}"))?;
+        edit.put_needs(&digest, &needs)?;
         edit.put_record(&record)
     })?;
     if let Some(why) = idle(&record) {
@@ -784,8 +785,8 @@ fn deactivate(name: &str) -> Result<(), String> {
 }
 
 /// `record`'s current image, once it holds to everything it was installed
-/// under. Its files were held to its manifest when it went in, and its root
-/// is the one installed, so they are read only as the check needs them.
+/// under. Its files were held to its manifest when it went in, and what its
+/// programs need of `libc.so` is kept, so they are read only when it is not.
 fn checked(
     store: &Store,
     record: &Record,
@@ -803,7 +804,19 @@ fn checked(
         image => image.map_err(|e| e.to_string())?,
     };
     let signed = signed.as_ref().map(|(s, g)| (s.as_slice(), g.as_slice()));
-    admit::activation(record, &mut image, signed, &base.bounds(keys)).map_err(|e| e.to_string())?;
+    let kept = store.needs(&record.name, &current.sha256);
+    let found = admit::activation(
+        record,
+        &mut image,
+        signed,
+        &base.bounds(keys),
+        kept.as_ref(),
+    )
+    .map_err(|e| e.to_string())?;
+    // Kept only to spare the next check reading, so a failure is no refusal.
+    if let Some(needs) = found.filter(|_| store.writable()) {
+        let _ = store.edit(&record.name, |edit| edit.put_needs(&current.sha256, &needs));
+    }
     Ok(image)
 }
 

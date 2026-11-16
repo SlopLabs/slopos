@@ -67,3 +67,14 @@
   every 100 ms (`extctl/progress.rs`). The line is taken back before the
   last, which ends with how long the install took (`… (7.4 s)`). Nothing
   is drawn elsewhere.
+- `docs/architecture/extensions` (activation, store layout): an install
+  keeps what the image's programs bind that none of its own libraries
+  export, `<root>.needs` beside `<root>.ext`, sealed (`symbols::Needs`:
+  a line a name, the name and a program binding it, bytes outside
+  `!`..`~` and `\` written `\xNN`). Each activation, a boot's included,
+  holds the base's `libc.so` to that list and reads none of the image's
+  programs: an older base's smaller `libc.so` still stops it. An image
+  kept without the list is read, and a check holding the store to change
+  keeps the list then, a failure to keep it no refusal. On the release
+  kernel the toolchain's check fell from 2.0 s to under 1 ms and its
+  whole activation from 2.1 s to 0.16-0.26 s.

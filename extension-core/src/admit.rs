@@ -16,7 +16,7 @@ use crate::keys::{Key, Keys};
 use crate::record::{Installed, Record};
 use crate::release::Release;
 use crate::sidecar::Sidecar;
-use crate::symbols;
+use crate::symbols::{self, Needs};
 use crate::words::render_list;
 
 pub struct Bounds<'a> {
@@ -120,7 +120,7 @@ pub fn install<S: Source>(
     }))
 }
 
-pub fn contents<S: Source>(image: &mut Image<S>, libc: &[u8]) -> Result<(), Refusal> {
+pub fn contents<S: Source>(image: &mut Image<S>, libc: &[u8]) -> Result<Needs, Refusal> {
     image.check_contents().map_err(|e| Refusal(e.to_string()))?;
     symbols::check_image(image, libc).map_err(|e| Refusal(e.to_string()))
 }
@@ -188,13 +188,15 @@ fn beside(
 }
 
 /// Whether the current image of `record` may run as `image` is now, its
-/// sidecar and signature beside it when a key installed it.
+/// sidecar and signature beside it when a key installed it. Without `kept`
+/// the image's programs are read, and their needs answered for keeping.
 pub fn activation<S: Source>(
     record: &Record,
     image: &mut Image<S>,
     signed: Option<(&[u8], &[u8])>,
     bounds: &Bounds<'_>,
-) -> Result<(), Refusal> {
+    kept: Option<&Needs>,
+) -> Result<Option<Needs>, Refusal> {
     let current = record
         .current
         .as_ref()
@@ -227,7 +229,13 @@ pub fn activation<S: Source>(
         return refuse("its version is below the floor or refused");
     }
     within_base(&declared, bounds.ceiling)?;
-    symbols::check_image(image, bounds.libc).map_err(|e| Refusal(e.to_string()))
+    let refused = |e: symbols::SymbolError| Refusal(e.to_string());
+    match kept {
+        Some(needs) => needs.held_by(bounds.libc).map(|()| None).map_err(refused),
+        None => symbols::check_image(image, bounds.libc)
+            .map(Some)
+            .map_err(refused),
+    }
 }
 
 fn signed<'k>(

@@ -107,6 +107,10 @@ pub fn signature_file(digest: &[u8; 32]) -> alloc::string::String {
     alloc::format!("{}.meta.sig", hex(digest))
 }
 
+pub fn needs_file(digest: &[u8; 32]) -> alloc::string::String {
+    alloc::format!("{}.needs", hex(digest))
+}
+
 /// `data`'s SHA-256.
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     slopos_verity_core::sha256::digest(data)

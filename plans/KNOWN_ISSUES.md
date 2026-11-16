@@ -198,19 +198,15 @@ signer.
 
 ---
 
-## Extension activations cost more than their images
+## An extension activation's index costs more than its image
 
 **Status**: Open
-**Severity**: Low (memory and boot time; only an `ExtensionUpdate` holder makes an activation)
-**Component**: `fs/src/extension/index.rs:168`,
-`extension-core/src/admit.rs:186-225`, `userland/src/apps/extctl/mod.rs:962-978`
+**Severity**: Low (memory; only an `ExtensionUpdate` holder makes an activation)
+**Component**: `fs/src/extension/index.rs:168`
 
-- An activation's index holds up to `MAX_ENTRIES` (65 536) names of up to 255
-  bytes and each one's `stat`, about 24 MB of kernel heap, and 32 activations
-  about 770 MB.
-- Every boot's `extctl activate-all` runs `admit::activation`, whose symbol
-  check reads each extension's ELF files whole through the tree, before privd
-  starts.
+An activation's index holds up to `MAX_ENTRIES` (65 536) names of up to 255
+bytes and each one's `stat`, about 24 MB of kernel heap, and 32 activations
+about 770 MB.
 
 ---
 

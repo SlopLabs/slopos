@@ -16,7 +16,10 @@ use slopos_abi::syscall::posix::O_CLOEXEC;
 use slopos_extension_core::image::{ImageError, Sink, runs, verify_tree};
 use slopos_extension_core::keys::Keys;
 use slopos_extension_core::record::Record;
-use slopos_extension_core::{KEYS, RECORD, STORE, image_file, sidecar_file, signature_file};
+use slopos_extension_core::symbols::Needs;
+use slopos_extension_core::{
+    KEYS, RECORD, STORE, image_file, needs_file, sidecar_file, signature_file,
+};
 
 use super::disk::Disk;
 use crate::sealed::{
@@ -27,7 +30,7 @@ use crate::syscall::process;
 
 pub struct Store {
     root: PathBuf,
-    _lock: Option<File>,
+    lock: Option<File>,
 }
 
 pub trait Copies: FnOnce(&mut (dyn Sink + Send)) -> Result<(), ImageError> {}
@@ -84,6 +87,8 @@ const BEHIND: usize = 4;
 const BUFFERS: usize = BEHIND + 4;
 /// The writer's stack: a run's write, not std's 2 MiB.
 const WRITER_STACK: usize = 64 << 10;
+/// Far past what any image's programs bind of `libc.so`.
+const NEEDS_MAX: u64 = 4 << 20;
 
 fn put_runs(path: &Path, file: &File, at: u64, bytes: &[u8]) -> Result<(), String> {
     for run in runs(bytes) {
@@ -220,7 +225,7 @@ impl Store {
             open_dir(&walked).map_err(|e| shown(&walked, e))?;
         }
         if !write {
-            return Ok(Store { root, _lock: None });
+            return Ok(Store { root, lock: None });
         }
         for signum in [SIGHUP, SIGINT, SIGQUIT, SIGTERM] {
             let _ = process::ignore_signal(signum);
@@ -233,8 +238,13 @@ impl Store {
         set_sealed(&dir, true).map_err(|e| shown(&root, format!("sealing: {e}")))?;
         Ok(Store {
             root,
-            _lock: Some(lock),
+            lock: Some(lock),
         })
+    }
+
+    /// Opened to change, holding the store's lock.
+    pub fn writable(&self) -> bool {
+        self.lock.is_some()
     }
 
     pub fn keys(&self) -> Result<Keys, String> {
@@ -320,6 +330,15 @@ impl Store {
         Ok(sidecar.zip(signature))
     }
 
+    /// `None` when no readable list was kept.
+    pub fn needs(&self, name: &str, digest: &[u8; 32]) -> Option<Needs> {
+        let path = self.dir(name).join(needs_file(digest));
+        read_sealed(&path, NEEDS_MAX)
+            .ok()
+            .flatten()
+            .and_then(|bytes| Needs::parse(&bytes))
+    }
+
     /// Change what the store keeps of `name`: `f` writes through the
     /// [`Edit`] it is handed, the record last, and what the believed record
     /// does not name is taken away after, whether or not `f` finished.
@@ -373,6 +392,10 @@ impl Edit<'_> {
         put_generation(self.dir, RECORD, record.render().as_bytes(), 0o644)
     }
 
+    pub fn put_needs(&self, digest: &[u8; 32], needs: &Needs) -> Result<(), String> {
+        put_sealed(self.dir, &needs_file(digest), &needs.render())
+    }
+
     fn collect(&self) -> Result<(), String> {
         let believed = newest(self.dir, RECORD)?;
         let record = believed
@@ -391,6 +414,7 @@ impl Edit<'_> {
                 image_file(&image.sha256),
                 sidecar_file(&image.sha256),
                 signature_file(&image.sha256),
+                needs_file(&image.sha256),
             ]);
         }
         for entry in fs::read_dir(self.dir).map_err(|e| shown(self.dir, e))? {

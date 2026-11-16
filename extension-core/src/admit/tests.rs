@@ -149,7 +149,9 @@ impl Owner {
             &mut image,
             Some((&sidecar, &signature)),
             &self.bounds(),
+            None,
         )
+        .map(drop)
     }
 }
 
@@ -203,7 +205,23 @@ fn a_first_install_grants_exactly_what_the_person_read() {
     let mut runs = record.clone();
     runs.current.as_mut().unwrap().signer = None;
     let mut image = Image::check(&bytes[..]).unwrap();
-    assert_eq!(activation(&runs, &mut image, None, &owner.bounds()), Ok(()));
+    let needs = activation(&runs, &mut image, None, &owner.bounds(), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        activation(&runs, &mut image, None, &owner.bounds(), Some(&needs)),
+        Ok(None)
+    );
+    let lacking = Owner {
+        libc: build(Kind::Shared, None, &[], &[], &["gets"]),
+        ..Owner::new(0, 0)
+    };
+    refused(
+        activation(&runs, &mut image, None, &lacking.bounds(), Some(&needs))
+            .map(|_| Admitted::Current),
+        "binds puts",
+    );
+    assert_eq!(symbols::Needs::parse(&needs.render()), Some(needs));
 }
 
 #[test]
@@ -401,7 +419,7 @@ fn an_activation_holds_the_image_to_its_record_and_its_key() {
     );
     let mut image = Image::check(&bytes[..]).unwrap();
     refused(
-        activation(&record, &mut image, None, &owner.bounds()).map(|()| Admitted::Current),
+        activation(&record, &mut image, None, &owner.bounds(), None).map(|_| Admitted::Current),
         "signature is not in the store",
     );
 }

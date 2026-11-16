@@ -140,9 +140,7 @@ pub(crate) fn gather(gathered: &mut Gathered, path: &str, bytes: &[u8]) {
     }
 }
 
-/// [`check`] over `image`'s files and symlinks: those its contents check
-/// read, or each file read alone.
-pub fn check_image<S: Source>(image: &mut Image<S>, libc: &[u8]) -> Result<(), SymbolError> {
+pub fn needs_of_image<S: Source>(image: &mut Image<S>) -> Result<Needs, SymbolError> {
     let read = match image.take_gathered() {
         Some(gathered) => gathered?,
         None => {
@@ -160,7 +158,14 @@ pub fn check_image<S: Source>(image: &mut Image<S>, libc: &[u8]) -> Result<(), S
         }
     };
     let links: Vec<(&str, &str)> = image.links().collect();
-    bind(&read, &links, libc)
+    needs(&read, &links)
+}
+
+/// [`check`] over `image`'s files and symlinks; what it needs of `libc`.
+pub fn check_image<S: Source>(image: &mut Image<S>, libc: &[u8]) -> Result<Needs, SymbolError> {
+    let needs = needs_of_image(image)?;
+    needs.held_by(libc)?;
+    Ok(needs)
 }
 
 /// Hold `files`, an image's `(path, bytes)`, to binding only what `libc`
@@ -178,12 +183,84 @@ pub fn check(
             read.push((path.to_string(), linked));
         }
     }
-    bind(&read, links, libc)
+    needs(&read, links)?.held_by(libc)
 }
 
-fn bind(read: &[(String, Linked)], links: &[(&str, &str)], libc: &[u8]) -> Result<(), SymbolError> {
-    let libc = elf::read(libc).map_err(SymbolError::Libc)?;
-    let libc: BTreeSet<&[u8]> = libc.exports.iter().copied().collect();
+/// What an image's own libraries leave its programs binding of `libc.so`,
+/// each name with a program: kept beside the image, so it is not read again.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Needs(BTreeMap<Vec<u8>, String>);
+
+impl Needs {
+    pub fn held_by(&self, libc: &[u8]) -> Result<(), SymbolError> {
+        let libc = elf::read(libc).map_err(SymbolError::Libc)?;
+        let libc: BTreeSet<&[u8]> = libc.exports.iter().copied().collect();
+        match self
+            .0
+            .iter()
+            .find(|(name, _)| !libc.contains(name.as_slice()))
+        {
+            Some((name, path)) => Err(SymbolError::Unbound(path.clone(), shown(name))),
+            None => Ok(()),
+        }
+    }
+
+    /// A line a name and a program, each byte outside `!`..`~` or `\` as `\xNN`.
+    pub fn render(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (name, path) in &self.0 {
+            escape(name, &mut out);
+            out.push(b' ');
+            escape(path.as_bytes(), &mut out);
+            out.push(b'\n');
+        }
+        out
+    }
+
+    pub fn parse(text: &[u8]) -> Option<Needs> {
+        let mut needs = BTreeMap::new();
+        for line in text.split(|&b| b == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let mut words = line.split(|&b| b == b' ');
+            let (Some(name), Some(path), None) = (words.next(), words.next(), words.next()) else {
+                return None;
+            };
+            let path = String::from_utf8(unescape(path)?).ok()?;
+            needs.insert(unescape(name)?, path);
+        }
+        Some(Needs(needs))
+    }
+}
+
+fn escape(bytes: &[u8], out: &mut Vec<u8>) {
+    for &b in bytes {
+        match b {
+            b'!'..=b'~' if b != b'\\' => out.push(b),
+            _ => out.extend_from_slice(format!("\\x{b:02x}").as_bytes()),
+        }
+    }
+}
+
+fn unescape(word: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(word.len());
+    let mut rest = word;
+    while let Some((&b, tail)) = rest.split_first() {
+        if b != b'\\' {
+            out.push(b);
+            rest = tail;
+            continue;
+        }
+        let hex = tail.strip_prefix(b"x").filter(|hex| hex.len() >= 2)?;
+        let digits = core::str::from_utf8(&hex[..2]).ok()?;
+        out.push(u8::from_str_radix(digits, 16).ok()?);
+        rest = &hex[2..];
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn needs(read: &[(String, Linked)], links: &[(&str, &str)]) -> Result<Needs, SymbolError> {
     let shared: BTreeMap<&str, usize> = read
         .iter()
         .enumerate()
@@ -192,6 +269,7 @@ fn bind(read: &[(String, Linked)], links: &[(&str, &str)], libc: &[u8]) -> Resul
         .collect();
     let links: BTreeMap<&str, &str> = links.iter().copied().collect();
     let mut found: BTreeMap<&[u8], Option<usize>> = BTreeMap::new();
+    let mut needs = BTreeMap::new();
     for (path, linked) in read {
         if !linked.dynamic {
             return Err(SymbolError::Static(path.clone()));
@@ -223,14 +301,14 @@ fn bind(read: &[(String, Linked)], links: &[(&str, &str)], libc: &[u8]) -> Resul
             }
             frontier.extend(read[library].1.needed.iter().map(Vec::as_slice));
         }
-        let bound = |name: &[u8]| {
-            libc.contains(name) || reached.iter().any(|&at| read[at].1.exports.contains(name))
-        };
-        if let Some(name) = linked.imports.iter().find(|name| !bound(name)) {
-            return Err(SymbolError::Unbound(path.clone(), shown(name)));
+        for name in &linked.imports {
+            let own = |name| reached.iter().any(|&at| read[at].1.exports.contains(name));
+            if !needs.contains_key(name) && !own(name) {
+                needs.insert(name.clone(), path.clone());
+            }
         }
     }
-    Ok(())
+    Ok(Needs(needs))
 }
 
 /// The shared library of the image `name` names in `/lib`, through its

@@ -172,3 +172,41 @@ fn a_file_that_needs_too_much_is_refused_and_repeats_count_once() {
         Err(SymbolError::TooMany(_))
     ));
 }
+
+#[test]
+fn what_an_image_needs_of_libc_reads_back_and_is_held_to_one() {
+    let files = [
+        (
+            "/bin/a b",
+            program(&["libc.so", "libx.so"], &["puts", "x_own", "odd\\\n\x7f"]),
+        ),
+        (
+            "/lib/libx.so",
+            build(Kind::Shared, None, &[], &["malloc"], &["x_own"]),
+        ),
+    ];
+    let read: Vec<(String, Linked)> = files
+        .iter()
+        .map(|(path, bytes)| (path.to_string(), Linked::read(path, bytes).unwrap()))
+        .collect();
+    let needs = needs(&read, &[]).unwrap();
+    let names: Vec<&[u8]> = needs.0.keys().map(Vec::as_slice).collect();
+    assert_eq!(names, [&b"malloc"[..], b"odd\\\n\x7f", b"puts"]);
+    let rendered = needs.render();
+    assert_eq!(rendered.iter().filter(|&&b| b == b'\n').count(), 3);
+    assert_eq!(Needs::parse(&rendered), Some(needs.clone()));
+    assert!(matches!(
+        needs.held_by(&libc()),
+        Err(SymbolError::Unbound(path, name)) if path == "/bin/a b" && name.starts_with("odd")
+    ));
+    let fuller = build(
+        Kind::Shared,
+        None,
+        &[],
+        &[],
+        &["puts", "malloc", "odd\\\n\x7f"],
+    );
+    assert_eq!(needs.held_by(&fuller), Ok(()));
+    assert_eq!(Needs::parse(b"puts\n"), None);
+    assert_eq!(Needs::parse(b"bad\\x4 /bin/a\n"), None);
+}
