@@ -17,16 +17,15 @@ use slopos_accounts_core::valid_name as valid_person;
 use slopos_remote_core::{Fields, frame};
 pub use slopos_tls_core::ct::wipe;
 
-use crate::policy::valid_name;
+use crate::policy::{MAX_TERMS, valid_name};
 use crate::wire::{MAX_ARGS, Malformed, known, number, optional};
 
 /// How long a question waits for its answer, from when privd sends it, before
 /// it is a refusal.
 pub const EXPIRY_MS: u64 = 120_000;
-/// The longest command line, and the longest directory, a question may carry:
-/// the person sees all of it or is not asked.
-pub const MAX_SHOWN: usize = 320;
-pub const VERSION: u32 = 1;
+/// The dialog scrolls, so the person still sees all of it or is not asked.
+pub const MAX_SHOWN: usize = 4096;
+pub const VERSION: u32 = 2;
 /// What the dialog calls a program the kernel attests as none of the system's.
 pub const UNIDENTIFIED: &str = "An unidentified app";
 pub const APP_MAX: usize = 64;
@@ -268,6 +267,7 @@ pub struct Ask {
     pub verb: String,
     pub destructive: bool,
     pub extension: Option<String>,
+    pub terms: Vec<(String, Vec<u8>)>,
 }
 
 impl Ask {
@@ -303,6 +303,10 @@ impl Ask {
                 fields.push(key, value);
             }
         }
+        for (label, value) in &self.terms {
+            fields.push("term", label);
+            fields.push("value", value);
+        }
         fields.push("verb", &self.verb);
         if self.destructive {
             fields.push("destructive", "1");
@@ -331,6 +335,8 @@ impl Ask {
                 "verb",
                 "destructive",
                 "extension",
+                "term",
+                "value",
             ],
         )?;
         let text = |key| match (fields.text(key), fields.all(key).count()) {
@@ -389,6 +395,20 @@ impl Ask {
             (Some(b"1"), 1) => true,
             _ => return Err(Malformed),
         };
+        let labels: Vec<&[u8]> = fields.all("term").collect();
+        let values: Vec<&[u8]> = fields.all("value").collect();
+        if labels.len() != values.len() || labels.len() > MAX_TERMS {
+            return Err(Malformed);
+        }
+        let terms = labels
+            .into_iter()
+            .zip(values)
+            .map(|(label, value)| {
+                let label = core::str::from_utf8(label).map_err(|_| Malformed)?;
+                crate::words::term(label).map_err(|_| Malformed)?;
+                Ok((label.to_string(), value.to_vec()))
+            })
+            .collect::<Result<Vec<_>, Malformed>>()?;
         let ask = Ask {
             id: number(&fields, "id")?,
             action,
@@ -407,6 +427,7 @@ impl Ask {
             verb,
             destructive,
             extension,
+            terms,
         };
         if !ask.fits() {
             return Err(Malformed);
@@ -425,7 +446,12 @@ impl Ask {
 
     /// Whether the dialog can show all of the question.
     pub fn fits(&self) -> bool {
-        self.command_line().len() <= MAX_SHOWN && self.directory().len() <= MAX_SHOWN
+        self.command_line().len() <= MAX_SHOWN
+            && self.directory().len() <= MAX_SHOWN
+            && self
+                .terms
+                .iter()
+                .all(|(_, value)| term_text(value).len() <= MAX_SHOWN)
     }
 
     /// What will run, every byte outside printable ASCII escaped so nothing
@@ -446,6 +472,21 @@ impl Ask {
         quote(self.cwd.as_bytes(), &mut out);
         out
     }
+}
+
+/// `-` reads as [`crate::words::NONE`]; a list's names go escaped, comma-spaced.
+pub fn term_text(value: &[u8]) -> String {
+    if value == b"-" {
+        return crate::words::NONE.to_string();
+    }
+    let mut out = String::new();
+    for (i, name) in value.split(|&b| b == b',').enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        quote(name, &mut out);
+    }
+    out
 }
 
 fn printable(text: &str, max: usize) -> bool {

@@ -197,6 +197,7 @@ impl Action {
             exclusive: self.exclusive.clone(),
             keep: self.keep,
             medium: false,
+            terms: Vec::new(),
         }
     }
 }

@@ -7,12 +7,14 @@ use crate::CAPABILITIES;
 
 pub const DESCRIBE_MAX: usize = 72;
 pub const DETAIL_MAX: usize = 160;
+pub const TERM_MAX: usize = 24;
 pub const VERB: &str = "Allow";
 pub const ADMIN_NEEDED: &str = "This needs an administrator's password.";
 pub const ASKED_BY: &str = "Asked by";
 pub const RUNS: &str = "Runs";
 pub const IN: &str = "In";
 pub const EXTENSION: &str = "Extension";
+pub const NONE: &str = "None";
 
 // The dialog's own controls, which no verb may say: what has focus is found by
 // what it says.
@@ -98,6 +100,22 @@ pub fn verb(text: &str) -> Result<(), &'static str> {
         true => Ok(()),
         false => Err("verb is one of slopos_priv_core::words::VERBS: Allow, Install, Run…"),
     }
+}
+
+pub fn term(text: &str) -> Result<(), &'static str> {
+    if text.len() > TERM_MAX {
+        return Err("a term is at most 24 characters");
+    }
+    if !text.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return Err("a term starts with a capital");
+    }
+    if text.ends_with(|c: char| c.is_ascii_punctuation()) {
+        return Err("a term ends without punctuation");
+    }
+    if [ASKED_BY, RUNS, IN, EXTENSION].contains(&text) {
+        return Err("a term is none of the details' own");
+    }
+    plain(text)
 }
 
 fn plain(text: &str) -> Result<(), &'static str> {

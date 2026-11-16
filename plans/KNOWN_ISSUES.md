@@ -180,20 +180,6 @@ holding its exclusive group.
 
 ---
 
-## A trusted key whose ceiling words pass 320 bytes cannot be added from the session
-
-**Status**: Open
-**Severity**: Low (usability)
-**Component**: `priv-core/src/consent.rs:28` (`MAX_SHOWN`),
-`userland/src/apps/extctl/mod.rs` (`key add`)
-
-privd asks about no command line past 320 escaped bytes, and `key add`'s line
-names the key's fingerprint, the key itself and both its ceilings word by
-word, so a key whose ceilings name most of the base's is refused when the
-session asks; root and the paired agent, whom nothing asks, add it.
-
----
-
 ## An administrator's approval replaces an image with another publisher's
 
 **Status**: Open (read from the code, not run)

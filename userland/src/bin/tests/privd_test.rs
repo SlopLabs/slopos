@@ -1306,8 +1306,11 @@ fn every_question_reads_whole_at_every_width() -> bool {
         verb: "Install".into(),
         destructive: true,
         extension: None,
+        terms: Vec::new(),
     };
     let long = vec![b"/bin/bootctl".to_vec(), vec![b'x'; 300]];
+    let commands: Vec<String> = (0..60).map(|n| format!("command-{n}")).collect();
+    let longest = vec![b"/bin/extctl".to_vec(), vec![b'x'; MAX_SHOWN - 12]];
     let shapes = [
         ask.clone(),
         Ask {
@@ -1340,9 +1343,26 @@ fn every_question_reads_whole_at_every_width() -> bool {
             cwd: format!("/{}", "d".repeat(MAX_SHOWN - 3)),
             ..ask.clone()
         },
+        Ask {
+            kind: Kind::Admin,
+            person: Some(BOB.into()),
+            admins: vec![ALICE.into()],
+            command: longest,
+            terms: vec![
+                ("Installs".into(), b"slopos-toolchain".to_vec()),
+                ("Capabilities".into(), b"-".to_vec()),
+                ("Adds commands".into(), commands.join(",").into_bytes()),
+                ("Adds users".into(), vec![b'u'; MAX_SHOWN]),
+            ],
+            ..ask.clone()
+        },
     ];
     let mut clean = true;
     for shape in shapes {
+        if !shape.fits() {
+            note(&format!("{}: not a question privd asks", shape.headline()));
+            return false;
+        }
         let mut dialogs = vec![Dialog::new(shape.clone())];
         let mut hidden = Dialog::new(shape);
         hidden.drawn(0);

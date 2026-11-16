@@ -22,6 +22,7 @@ fn ask() -> Ask {
         verb: "Install".into(),
         destructive: false,
         extension: None,
+        terms: vec![],
     }
 }
 
@@ -102,6 +103,10 @@ fn every_field_a_question_names_round_trips_and_ready_names_a_version() {
         destructive: true,
         extension: Some("act".into()),
         icon: Some("/opt/act/share/slopos/icons/act.png".into()),
+        terms: vec![
+            ("Installs".into(), b"act".to_vec()),
+            ("Adds commands".into(), b"a,\x1bb".to_vec()),
+        ],
         ..ask()
     };
     assert_eq!(Ask::decode(&payload(&full.frame()).1), Ok(full));
@@ -122,9 +127,10 @@ fn what_a_question_may_carry_is_its_version_s() {
     // An agent refuses a question it cannot carry, so a change here takes the
     // next VERSION.
     let mut shape = format!(
-        "{} {} {APP_MAX} {ICON_PATH_MAX} {MAX_SHOWN} {MAX_ADMINS} {MAX_ARGS}",
+        "{} {} {} {APP_MAX} {ICON_PATH_MAX} {MAX_SHOWN} {MAX_ADMINS} {MAX_ARGS} {MAX_TERMS}",
         crate::words::DESCRIBE_MAX,
         crate::words::DETAIL_MAX,
+        crate::words::TERM_MAX,
     );
     for verb in crate::words::VERBS {
         shape.push('\n');
@@ -133,7 +139,7 @@ fn what_a_question_may_carry_is_its_version_s() {
     let digest = shape.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3)
     });
-    assert_eq!((VERSION, digest), (1, 0x7d19_33f5_4750_6d7c));
+    assert_eq!((VERSION, digest), (2, 0x8f1c_a615_18c7_1452));
 }
 
 #[test]
@@ -197,6 +203,18 @@ fn what_names_the_app_is_held_to_its_shape() {
         },
         Ask {
             detail: Some("caf\u{e9}.".into()),
+            ..ask()
+        },
+        Ask {
+            terms: vec![("adds commands".into(), b"a".to_vec())],
+            ..ask()
+        },
+        Ask {
+            terms: vec![(crate::words::RUNS.into(), b"a".to_vec())],
+            ..ask()
+        },
+        Ask {
+            terms: vec![("Adds commands".into(), vec![b'a'; MAX_SHOWN + 1])],
             ..ask()
         },
     ] {
@@ -679,6 +697,13 @@ fn the_directory_is_shown_apart_from_the_command() {
     assert_eq!(elsewhere.command_line(), "/bin/bootctl in /x");
     assert_eq!(elsewhere.directory(), "'/home/user/my src'");
     assert_eq!(ask().directory(), "/");
+}
+
+#[test]
+fn a_term_reads_as_a_list_and_escapes_as_the_command_does() {
+    assert_eq!(term_text(b"-"), crate::words::NONE);
+    assert_eq!(term_text(b"cargo,c++,ld.lld"), "cargo, c++, ld.lld");
+    assert_eq!(term_text(b"a b,\x1b[2J"), "'a b', '\\x1b[2J'");
 }
 
 #[test]

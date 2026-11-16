@@ -98,8 +98,15 @@ pub fn view(dialog: &Dialog, icon: Option<&ImageData>, anchor: Option<Rect>) -> 
             .tone(Tone::Secondary)
             .wrap_anywhere()
     };
-    let mut details = PropertyList::new()
-        .row_with(words::ASKED_BY, shown(dialog.requester()))
+    let mut details = PropertyList::new().row_with(words::ASKED_BY, shown(dialog.requester()));
+    for (label, value) in &ask.terms {
+        let named = Text::new(protocol::term_text(value))
+            .role(TextRole::Mono)
+            .tone(Tone::Secondary)
+            .wrap();
+        details = details.row_with(label.clone(), named);
+    }
+    details = details
         .row_with(words::RUNS, shown(ask.command_line()))
         .row_with(words::IN, shown(ask.directory()));
     if let Some(extension) = &ask.extension {

@@ -987,6 +987,8 @@ fn ask_about(
     command: Vec<Vec<u8>>,
 ) -> Ask {
     let (app, icon) = named(&peer.program);
+    let args: Vec<&[u8]> = command[1..].iter().map(Vec::as_slice).collect();
+    let terms = action.terms_of(&args);
     Ask {
         id: 0,
         action: action.name.clone(),
@@ -1005,6 +1007,7 @@ fn ask_about(
         verb: action.verb().to_owned(),
         destructive: action.destructive,
         extension: origin.map(|o| o.extension.clone()),
+        terms,
     }
 }
 

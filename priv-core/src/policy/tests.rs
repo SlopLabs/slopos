@@ -1172,11 +1172,7 @@ fn the_extension_actions_hold_the_store_and_nothing_wider() {
     let session = shell(USER);
     let asked = |verdict: Verdict| asks(verdict).is_some();
     let names = [
-        (
-            "org.slopos.extension.install",
-            true,
-            &["install", "/x.ext"][..],
-        ),
+        ("org.slopos.extension.install", true, &INSTALL[..]),
         (
             "org.slopos.extension.install-signed",
             false,
@@ -1232,6 +1228,72 @@ fn the_extension_actions_hold_the_store_and_nothing_wider() {
         policy.action("org.slopos.rescue").unwrap().caps & caps::EXTENSION_UPDATE,
         caps::EXTENSION_UPDATE
     );
+}
+
+const INSTALL: [&str; 13] = [
+    "install", "/x.ext", "3f9c", "name", "commands", "grant", "Power", "unasked", "-", "users",
+    "x", "commands", "x,y",
+];
+
+#[test]
+fn an_install_names_what_it_grants_by_position_and_takes_only_its_line() {
+    let policy = Policy::parse(SHIPPED).unwrap();
+    let install = policy.action("org.slopos.extension.install").unwrap();
+    let terms: Vec<(String, Vec<u8>)> = install.terms_of(&args_of(&INSTALL));
+    let shown: Vec<(&str, &[u8])> = terms
+        .iter()
+        .map(|(label, value)| (label.as_str(), value.as_slice()))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("Installs", &b"commands"[..]),
+            ("Capabilities", b"Power"),
+            ("Runs unasked", b"-"),
+            ("Adds users", b"x"),
+            ("Adds commands", b"x,y"),
+        ]
+    );
+    assert!(!install.accepts(&args_of(&INSTALL[..12])));
+    assert!(!install.accepts(&args_of(&["install", "/x.ext"])));
+    let mut more = INSTALL.to_vec();
+    more.push("x");
+    assert!(!install.accepts(&args_of(&more)));
+    assert!(install.terms_of(&args_of(&more)).is_empty());
+}
+
+#[test]
+fn a_term_names_a_word_every_shape_follows_with_one_argument() {
+    let named =
+        Policy::parse(&with("  term name \"Installs\"").replace("args *", "args name ?")).unwrap();
+    let action = named.action("org.slopos.x").unwrap();
+    assert_eq!(
+        action.terms_of(&args_of(&["name", "x"])),
+        [("Installs".to_string(), b"x".to_vec())]
+    );
+    for (line, msg) in [
+        (
+            "  term name \"Installs\"",
+            "every shape follows a term's key with ?",
+        ),
+        ("  term name Installs", "the setting takes one quoted line"),
+        ("  term name \"installs\"", "a term starts with a capital"),
+        ("  term name \"Runs\"", "a term is none of the details' own"),
+        (
+            "  term name \"Installs.\"",
+            "a term ends without punctuation",
+        ),
+        (
+            "  term \"Installs\"",
+            "a term is a word and its quoted label",
+        ),
+    ] {
+        let text = with(line);
+        assert_eq!(refusal(&text).msg, msg, "{line}");
+    }
+    let twice =
+        with("  term name \"Installs\"\n  term name \"Adds\"").replace("args *", "args name ?");
+    assert_eq!(refusal(&twice).msg, "the term is already named");
 }
 
 fn args_of<'a>(words: &[&'a str]) -> Vec<&'a [u8]> {

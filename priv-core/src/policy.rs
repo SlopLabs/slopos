@@ -57,6 +57,7 @@ const MAX_SETTING: usize = crate::words::DETAIL_MAX;
 const MAX_PATH: usize = 255;
 /// The longest an answer is kept, as sudo's timestamps commonly last.
 pub const MAX_KEEP: u32 = 900;
+pub const MAX_TERMS: usize = 8;
 const PROGRAM_DIRS: [&str; 3] = ["/bin/", "/sbin/", "/usr/bin/"];
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -80,6 +81,14 @@ pub struct Action {
     pub exclusive: Option<String>,
     pub keep: Option<u32>,
     pub medium: bool,
+    pub terms: Vec<Term>,
+}
+
+/// The argument after `key`'s `?` in every shape.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Term {
+    pub key: String,
+    pub label: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -380,6 +389,20 @@ impl Action {
         self.shapes.iter().any(|shape| shape.matches(args))
     }
 
+    /// By position, so no argument can pass for a key.
+    pub fn terms_of(&self, args: &[&[u8]]) -> Vec<(String, Vec<u8>)> {
+        let Some(shape) = self.shapes.iter().find(|shape| shape.matches(args)) else {
+            return Vec::new();
+        };
+        self.terms
+            .iter()
+            .filter_map(|term| {
+                let at = shape.term_at(&term.key)?;
+                Some((term.label.clone(), args.get(at)?.to_vec()))
+            })
+            .collect()
+    }
+
     /// What it takes for `who` to run the action, `people` as they stand.
     pub fn admits(&self, who: &Requester<'_>, people: &People) -> Verdict {
         let person = who.person(people);
@@ -470,6 +493,14 @@ impl Shape {
                 Word::Any => true,
             })
     }
+
+    fn term_at(&self, key: &str) -> Option<usize> {
+        let at = self
+            .words
+            .windows(2)
+            .position(|pair| matches!(pair, [Word::Is(word), Word::Any] if word == key))?;
+        Some(at + 1)
+    }
 }
 
 impl Policy {
@@ -553,6 +584,7 @@ struct Draft {
     exclusive: Option<String>,
     keep: Option<u32>,
     medium: bool,
+    terms: Vec<Term>,
 }
 
 impl Draft {
@@ -625,6 +657,30 @@ impl Draft {
                 };
                 once(&mut self.exclusive, group)
             }
+            "term" => {
+                let (key, label) = rest
+                    .split_once(|c: char| c.is_ascii_whitespace())
+                    .ok_or("a term is a word and its quoted label")?;
+                if !valid_word(key) {
+                    return Err("a term's key is one word");
+                }
+                let label = said(label.trim(), words::term)?;
+                if self
+                    .terms
+                    .iter()
+                    .any(|term| term.key == key || term.label == label)
+                {
+                    return Err("the term is already named");
+                }
+                if self.terms.len() == MAX_TERMS {
+                    return Err("an action names at most 8 terms");
+                }
+                self.terms.push(Term {
+                    key: key.to_string(),
+                    label,
+                });
+                Ok(())
+            }
             _ => Err("unknown setting"),
         }
     }
@@ -657,6 +713,14 @@ impl Draft {
                 ));
             }
         }
+        let named = |term: &Term| {
+            self.shapes
+                .iter()
+                .all(|shape| shape.term_at(&term.key).is_some())
+        };
+        if !self.terms.iter().all(named) {
+            return Err(fail("every shape follows a term's key with ?"));
+        }
         Ok(Action {
             program: self.program.ok_or(fail("the action names no program"))?,
             caps,
@@ -672,6 +736,7 @@ impl Draft {
             exclusive: self.exclusive,
             keep: self.keep,
             medium: self.medium,
+            terms: self.terms,
         })
     }
 }

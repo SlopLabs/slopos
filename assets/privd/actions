@@ -8,8 +8,8 @@
 # stands.
 #
 # What a person reads is held to slopos_priv_core::words: describe completes
-# "{App} wants to ...", detail says what follows from allowing it, and verb
-# names the button that allows it.
+# "{App} wants to ...", detail says what follows from allowing it, verb names
+# the button that allows it, and each term labels the argument after its word.
 
 action org.slopos.power.poweroff
   program  /bin/halt
@@ -224,7 +224,7 @@ action org.slopos.boot.reboot
 
 action org.slopos.extension.install
   program  /bin/extctl
-  args     install *
+  args     install ? ? name ? grant ? unasked ? users ? commands ?
   caps     ExtensionUpdate Seal
   uid      0
   cwd
@@ -235,6 +235,11 @@ action org.slopos.extension.install
   describe "install an extension and give it what it asks for"
   detail   "If it asks for the disks or every file, it can take over the whole computer."
   verb     "Install"
+  term     name "Installs"
+  term     grant "Capabilities"
+  term     unasked "Runs unasked"
+  term     users "Adds users"
+  term     commands "Adds commands"
 
 action org.slopos.extension.install-signed
   program  /bin/extctl
