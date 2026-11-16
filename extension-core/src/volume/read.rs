@@ -224,6 +224,10 @@ impl<B: Blocks> Volume<B> {
         &self.blocks
     }
 
+    pub fn blocks_mut(&mut self) -> &mut B {
+        &mut self.blocks
+    }
+
     fn read_block(&mut self, block: u64) -> Got<(), B::Error> {
         if self.held == Some(block) {
             return Ok(());
@@ -312,6 +316,35 @@ impl<B: Blocks> Volume<B> {
             }
         }
         Ok(found.filter(|m| !m.unwritten).map(|m| (m.pblk, m.len)))
+    }
+
+    /// `(lblk, pblk, len)` of each written extent; the rest reads as zeros.
+    pub fn runs(&mut self, inode: &Inode) -> Got<Vec<(u32, u64, u32)>, B::Error> {
+        if inode.kind() != Some(Kind::File) {
+            return Err(VolumeError::Damaged("read as a file", inode.ino));
+        }
+        let mut found = Vec::new();
+        let mut store = Tree {
+            volume: self,
+            root: inode.i_block,
+            ino: inode.ino,
+        };
+        extent::for_each(&mut store, &mut |e| {
+            if !e.unwritten && e.len > 0 {
+                found.push((e.lblk, e.pblk, e.len));
+            }
+            true
+        })?;
+        for &(_, pblk, len) in &found {
+            let last = pblk.checked_add(u64::from(len) - 1);
+            if !self.owned.contains(&pblk) || !last.is_some_and(|b| self.owned.contains(&b)) {
+                return Err(VolumeError::Damaged(
+                    "an extent outside the volume's blocks",
+                    inode.ino,
+                ));
+            }
+        }
+        Ok(found)
     }
 
     /// Up to `buf.len()` bytes of `inode` from `offset`; answers how many.

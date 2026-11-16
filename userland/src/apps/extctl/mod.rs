@@ -82,15 +82,6 @@ fn open_image(path: &str, named: Option<([u8; 32], &str)>) -> Result<Image<Disk>
     Image::open(Disk(file), named.map(|(root, _)| root)).map_err(|e| shown_image(path, named, e))
 }
 
-/// [`open_image`], every file held to the manifest.
-fn read_image(path: &str, named: Option<([u8; 32], &str)>) -> Result<Image<Disk>, String> {
-    let mut image = open_image(path, named)?;
-    image
-        .check_contents()
-        .map_err(|e| shown_image(path, named, e))?;
-    Ok(image)
-}
-
 fn shown_image(path: &str, named: Option<([u8; 32], &str)>, e: ImageError) -> String {
     match e {
         ImageError::Other => format!(
@@ -589,10 +580,12 @@ enum Prepared {
     },
     Install {
         image: Image<Disk>,
+        path: String,
         name: String,
         voucher: Voucher,
         before: Option<Record>,
         installed: Installed,
+        libc: Vec<u8>,
     },
 }
 
@@ -632,14 +625,14 @@ fn prepare(store: &Store, path: &str, vouched: &Vouched) -> Result<Prepared, Str
         }
         (Vouched::Signed { .. }, None) => return Err(format!("{path}: no signature was read")),
     };
-    let mut image = read_image(path, Some(named))?;
+    let image = open_image(path, Some(named))?;
     let name = image.release.name.clone();
     let base = Base::read()?;
     let before = store.record(&name)?;
     let others = others(store, &name)?;
     let admitted = admit::install(
         before.as_ref(),
-        &mut image,
+        &image,
         &voucher.authority(),
         &base.bounds(&keys),
         &borrowed(&others),
@@ -652,10 +645,12 @@ fn prepare(store: &Store, path: &str, vouched: &Vouched) -> Result<Prepared, Str
         Admitted::Current => Prepared::Current { name, before },
         Admitted::Install(installed) => Prepared::Install {
             image,
+            path: path.to_owned(),
             name,
             voucher,
             before,
             installed,
+            libc: base.libc,
         },
     })
 }
@@ -675,7 +670,7 @@ fn idle(record: &Record) -> Option<String> {
 /// Put what `prepared` admitted in the store as its current image and run
 /// it. One that will not run leaves the store as it was.
 fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
-    let (image, name, voucher, before, installed) = match prepared {
+    let (mut image, path, name, voucher, before, installed, libc) = match prepared {
         Prepared::Current { name, before } => {
             let idle = before.as_ref().and_then(idle);
             return Ok(format!(
@@ -685,19 +680,26 @@ fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
         }
         Prepared::Install {
             image,
+            path,
             name,
             voucher,
             before,
             installed,
-        } => (image, name, voucher, before, installed),
+            libc,
+        } => (image, path, name, voucher, before, installed, libc),
     };
     let digest = image.digest;
     let version = installed.version;
     let mut record = before.clone().unwrap_or_else(|| Record::new(&name));
     record.install(installed);
     give_uids(store, &mut record)?;
+    let bytes = image.bytes();
     store.edit(&name, |edit| {
-        edit.put_image(&digest, &image.source().0, image.bytes(), voucher.signed())?;
+        edit.put_image(&digest, bytes, voucher.signed(), |sink| {
+            let copied = image.copy(sink);
+            copied.map_err(|e| ImageError::Damaged(format!("{path}: {e}")))
+        })?;
+        admit::contents(&mut image, &libc).map_err(|e| format!("{path}: {e}"))?;
         edit.put_record(&record)
     })?;
     if let Some(why) = idle(&record) {

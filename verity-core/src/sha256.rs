@@ -116,7 +116,9 @@ impl Sha256 {
             self.fill = 0;
         }
         let whole = data.len() - data.len() % BLOCK;
-        (self.compress)(&mut self.state, &data[..whole]);
+        if whole > 0 {
+            (self.compress)(&mut self.state, &data[..whole]);
+        }
         let rest = &data[whole..];
         self.buf[..rest.len()].copy_from_slice(rest);
         self.fill = rest.len();

@@ -388,6 +388,145 @@ pub fn verify_tree(
     Ok(())
 }
 
+/// `upper`, the levels from the top down to level 0, is already held to the
+/// root.
+pub fn verify_leaves(
+    geometry: &Geometry,
+    compress: sha256::Compress,
+    upper: &[u8],
+    first: u64,
+    leaves: &[u8],
+) -> Result<(), Fault<()>> {
+    let (start, count) = geometry.level(0).ok_or(Fault::OutOfRange)?;
+    let top = geometry.top();
+    let blocks = (leaves.len() / BLOCK) as u64;
+    let in_range = first.checked_add(blocks).is_some_and(|end| end <= count);
+    if !leaves.len().is_multiple_of(BLOCK)
+        || !in_range
+        || upper.len() as u64 != (start - top) * BLOCK as u64
+    {
+        return Err(Fault::OutOfRange);
+    }
+    for (index, leaf) in (first..).zip(leaves.chunks_exact(BLOCK)) {
+        let leaf: &[u8; BLOCK] = leaf.try_into().map_err(|_| Fault::OutOfRange)?;
+        let (holder, at) = geometry.digest_at(1, index).ok_or(Fault::OutOfRange)?;
+        let from = (holder - top) as usize * BLOCK + at;
+        if upper[from..from + DIGEST] != hash_using(compress, leaf) {
+            return Err(Fault::Mismatch(start + index));
+        }
+    }
+    Ok(())
+}
+
+/// Keeps only the levels above the leaves, each leaf emitted as it fills,
+/// so its room is about 1/16 000 of the data.
+pub struct Streamed<'t> {
+    geometry: Geometry,
+    compress: sha256::Compress,
+    upper: &'t mut [u8],
+    leaf: &'t mut [u8; BLOCK],
+    in_leaf: usize,
+    leaves: u64,
+    pushed: u64,
+    only: Digest,
+}
+
+impl<'t> Streamed<'t> {
+    /// `upper` spans the blocks from `geometry`'s top to its level 0.
+    pub fn new(
+        geometry: Geometry,
+        compress: sha256::Compress,
+        upper: &'t mut [u8],
+        leaf: &'t mut [u8; BLOCK],
+    ) -> Option<Self> {
+        let leaves_at = geometry.level(0).map_or(geometry.top(), |(start, _)| start);
+        if upper.len() as u64 != (leaves_at - geometry.top()) * BLOCK as u64 {
+            return None;
+        }
+        upper.fill(0);
+        leaf.fill(0);
+        Some(Self {
+            geometry,
+            compress,
+            upper,
+            leaf,
+            in_leaf: 0,
+            leaves: 0,
+            pushed: 0,
+            only: ZERO,
+        })
+    }
+
+    pub fn push_digest<E>(
+        &mut self,
+        digest: Digest,
+        emit: &mut impl FnMut(u64, &[u8; BLOCK]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.pushed += 1;
+        if self.geometry.levels == 0 {
+            self.only = digest;
+            return Ok(());
+        }
+        self.leaf[self.in_leaf * DIGEST..][..DIGEST].copy_from_slice(&digest);
+        self.in_leaf += 1;
+        if self.in_leaf as u64 == FANOUT {
+            self.emit_leaf(emit)?;
+        }
+        Ok(())
+    }
+
+    fn emit_leaf<E>(
+        &mut self,
+        emit: &mut impl FnMut(u64, &[u8; BLOCK]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let index = self.leaves;
+        emit(self.geometry.start[0] + index, self.leaf)?;
+        let digest = hash_using(self.compress, self.leaf);
+        self.place(1, index, digest);
+        self.leaves += 1;
+        self.in_leaf = 0;
+        self.leaf.fill(0);
+        Ok(())
+    }
+
+    fn place(&mut self, layer: usize, index: u64, digest: Digest) {
+        match self.geometry.digest_at(layer, index) {
+            Some((block, at)) => {
+                let offset = (block - self.geometry.top()) as usize * BLOCK + at;
+                if let Some(slot) = self.upper.get_mut(offset..offset + DIGEST) {
+                    slot.copy_from_slice(&digest);
+                }
+            }
+            None => self.only = digest,
+        }
+    }
+
+    /// `None` until every data block is pushed.
+    pub fn finish<E>(
+        mut self,
+        emit: &mut impl FnMut(u64, &[u8; BLOCK]) -> Result<(), E>,
+    ) -> Result<Option<Digest>, E> {
+        if self.pushed != self.geometry.data_blocks {
+            return Ok(None);
+        }
+        if self.in_leaf > 0 {
+            self.emit_leaf(emit)?;
+        }
+        for level in 1..self.geometry.levels {
+            let first = (self.geometry.start[level] - self.geometry.top()) as usize;
+            for index in 0..blocks_at(self.geometry.data_blocks, level) {
+                let at = (first + index as usize) * BLOCK;
+                let Ok(block) = self.upper[at..at + BLOCK].try_into() else {
+                    return Ok(None);
+                };
+                let digest = hash_using(self.compress, block);
+                self.place(level + 1, index, digest);
+            }
+        }
+        Ok(Some(self.only))
+    }
+}
+
 /// A tree built from an image's data blocks, pushed in order.
 pub struct Builder<'t> {
     geometry: Geometry,

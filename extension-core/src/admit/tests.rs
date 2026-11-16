@@ -7,8 +7,20 @@ use slopos_tls_core::ed25519::SigningKey;
 use slopos_tls_core::sshsig::{self, PublicKey};
 
 use crate::elf::{Kind, build};
-use crate::image::Packer;
+use crate::image::{Packer, Sink};
 use crate::{INTERPRETER, NAMESPACE};
+
+struct Dropped;
+
+impl Sink for Dropped {
+    fn buffer(&mut self) -> Result<Vec<u8>, String> {
+        Ok(Vec::new())
+    }
+
+    fn put(&mut self, _: u64, _: Vec<u8>) -> Result<(), String> {
+        Ok(())
+    }
+}
 
 const CEILING: u64 = caps::POWER | caps::NET_ADMIN | caps::MOUNT | caps::SCHED_HIGH;
 
@@ -91,8 +103,23 @@ impl Owner {
             sidecar: &sidecar,
             signature: &signature,
         };
-        let mut image = Image::check(bytes).unwrap();
-        install(record, &mut image, &authority, &self.bounds(), &[])
+        self.whole(record, bytes, &authority)
+    }
+
+    /// As the mechanism admits: policy, then the copy, then its contents.
+    fn whole(
+        &self,
+        record: Option<&Record>,
+        bytes: &[u8],
+        authority: &Authority<'_>,
+    ) -> Result<Admitted, Refusal> {
+        let mut image = Image::open(bytes, None).unwrap();
+        let admitted = install(record, &image, authority, &self.bounds(), &[])?;
+        if matches!(admitted, Admitted::Install(_)) {
+            image.copy(&mut Dropped).unwrap();
+            contents(&mut image, &self.libc)?;
+        }
+        Ok(admitted)
     }
 
     fn ahead(&self, record: Option<&Record>, bytes: &[u8]) -> Result<Option<Admitted>, Refusal> {
@@ -111,8 +138,7 @@ impl Owner {
             name: "hello",
             grant,
         };
-        let mut image = Image::check(bytes).unwrap();
-        install(record, &mut image, &authority, &self.bounds(), &[])
+        self.whole(record, bytes, &authority)
     }
 
     fn runs(&self, record: &Record, bytes: &[u8]) -> Result<(), Refusal> {
@@ -432,7 +458,7 @@ fn two_extensions_never_declare_one_command() {
     let bytes = packer
         .finish("name hello\nversion 1\n", "command hi\n")
         .unwrap();
-    let mut image = Image::check(&bytes[..]).unwrap();
+    let image = Image::check(&bytes[..]).unwrap();
     let grant = image.declaration.grant();
     let authority = Authority::Person {
         name: "hello",
@@ -445,17 +471,17 @@ fn two_extensions_never_declare_one_command() {
     let taken = [("other", &theirs)];
     let ours = [("hello", &theirs)];
     refused(
-        install(None, &mut image, &authority, &owner.bounds(), &taken),
+        install(None, &image, &authority, &owner.bounds(), &taken),
         "other declares the command hi",
     );
-    assert!(install(None, &mut image, &authority, &owner.bounds(), &ours).is_ok());
+    assert!(install(None, &image, &authority, &owner.bounds(), &ours).is_ok());
 }
 
 #[test]
 fn two_extensions_never_declare_one_user() {
     let owner = Owner::new(CEILING, 0);
     let bytes = image(1, "NetAdmin", "", &["puts"]);
-    let mut image = Image::check(&bytes[..]).unwrap();
+    let image = Image::check(&bytes[..]).unwrap();
     let grant = image.declaration.grant();
     let authority = Authority::Person {
         name: "hello",
@@ -468,7 +494,7 @@ fn two_extensions_never_declare_one_user() {
     refused(
         install(
             None,
-            &mut image,
+            &image,
             &authority,
             &owner.bounds(),
             &[("hel", &theirs)],

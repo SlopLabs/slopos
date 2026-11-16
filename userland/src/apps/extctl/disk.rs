@@ -7,8 +7,7 @@ use std::io;
 use std::os::unix::fs::FileExt;
 use std::sync::OnceLock;
 
-use slopos_extension_core::image::{Source, hash_blocks};
-use slopos_verity_core::Digest;
+use slopos_extension_core::image::Source;
 use slopos_verity_core::sha256::{self, Compress};
 
 pub struct Disk<F = File>(pub F);
@@ -52,7 +51,7 @@ impl<F: Borrow<File>> Source for Disk<F> {
         compress()
     }
 
-    fn hash_blocks(&self, data: &[u8], out: &mut [Digest]) {
-        hash_blocks(compress(), data, out, cores());
+    fn cores(&self) -> usize {
+        cores()
     }
 }

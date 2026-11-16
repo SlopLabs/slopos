@@ -7,13 +7,13 @@ use std::fs::{self, File, OpenOptions};
 use std::io::ErrorKind;
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread;
 
 use slopos_abi::fs::O_NOFOLLOW;
 use slopos_abi::signal::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use slopos_abi::syscall::posix::O_CLOEXEC;
-use slopos_extension_core::image::{ImageError, copy, verify_tree};
+use slopos_extension_core::image::{ImageError, Sink, runs, verify_tree};
 use slopos_extension_core::keys::Keys;
 use slopos_extension_core::record::Record;
 use slopos_extension_core::{KEYS, RECORD, STORE, image_file, sidecar_file, signature_file};
@@ -30,46 +30,32 @@ pub struct Store {
     _lock: Option<File>,
 }
 
-/// Copy `source`, the image `len` long whose root is `digest`, to the sealed
-/// file `name` in `dir`, open for changes, its zero blocks left holes. A
-/// source of another length is refused before anything is written, and a
-/// copy that is not the image is taken away.
+pub trait Copies: FnOnce(&mut (dyn Sink + Send)) -> Result<(), ImageError> {}
+impl<F: FnOnce(&mut (dyn Sink + Send)) -> Result<(), ImageError>> Copies for F {}
+
 fn create_sealed_image(
     dir: &Path,
     name: &str,
-    source: &File,
     len: u64,
     digest: &[u8; 32],
+    copy: impl Copies,
 ) -> Result<(), String> {
     let path = dir.join(name);
     remove_entry(&path)?;
-    let copied = copy_sealed_image(&path, source, len, digest);
+    let copied = copy_sealed_image(&path, len, digest, copy);
     if copied.is_err() {
         let _ = remove_entry(&path);
     }
     copied
 }
 
-fn shown_image(path: &Path, e: ImageError) -> String {
-    match e {
-        ImageError::Other => shown(path, "changed since it was read"),
-        e => shown(path, e),
-    }
-}
-
-/// The image read once, each block hashed once and written as it passes,
-/// its tree the one those digests build. The bytes written are the bytes
-/// hashed, and every reader holds a block to the tree as it reads it, so
-/// the copy is read back only as far as its tree, once sealed.
+/// Read back only as far as its tree: every reader holds data blocks to it.
 fn copy_sealed_image(
     path: &Path,
-    source: &File,
     len: u64,
     digest: &[u8; 32],
+    copy: impl Copies,
 ) -> Result<(), String> {
-    if source.metadata().map(|m| m.len()).ok() != Some(len) {
-        return Err(shown(path, "the image changed since it was read"));
-    }
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -78,8 +64,7 @@ fn copy_sealed_image(
         .custom_flags(O_NOFOLLOW as i32 | O_CLOEXEC as i32)
         .open(path)
         .map_err(|e| shown(path, e))?;
-    written_behind(&file, |sink| copy(&mut Disk(source), digest, sink))
-        .map_err(|e| shown_image(path, e))?;
+    written_behind(path, &file, copy)?;
     file.set_len(len)
         .and_then(|()| file.sync_all())
         .map_err(|e| shown(path, e))?;
@@ -94,38 +79,104 @@ fn copy_sealed_image(
     verify_tree(&mut Disk(&file), digest).map_err(|e| shown(path, format!("the copy: {e}")))
 }
 
-/// Runs of the image queued while a copy reads on.
 const BEHIND: usize = 4;
+/// Queued, being written, two read ahead, and the leaves'.
+const BUFFERS: usize = BEHIND + 4;
 /// The writer's stack: a run's write, not std's 2 MiB.
 const WRITER_STACK: usize = 64 << 10;
 
-/// `copy`, its runs written to `file` by a thread of their own while it
-/// reads and hashes the next, or here when no thread can be started.
-fn written_behind(
-    file: &File,
-    copy: impl FnOnce(&mut dyn FnMut(u64, &[u8]) -> Result<(), String>) -> Result<u64, ImageError>,
-) -> Result<u64, ImageError> {
-    let write = |at: u64, run: &[u8]| file.write_all_at(run, at).map_err(|e| e.to_string());
-    let (queue, runs) = mpsc::sync_channel::<(u64, Vec<u8>)>(BEHIND);
+fn put_runs(path: &Path, file: &File, at: u64, bytes: &[u8]) -> Result<(), String> {
+    for run in runs(bytes) {
+        file.write_all_at(&bytes[run.clone()], at + run.start as u64)
+            .map_err(|e| shown(path, e))?;
+    }
+    Ok(())
+}
+
+struct Behind {
+    queue: SyncSender<(u64, Vec<u8>)>,
+    done: Receiver<Vec<u8>>,
+    made: usize,
+}
+
+impl Sink for Behind {
+    fn buffer(&mut self) -> Result<Vec<u8>, String> {
+        if let Ok(buffer) = self.done.try_recv() {
+            return Ok(buffer);
+        }
+        if self.made < BUFFERS {
+            self.made += 1;
+            return Ok(Vec::new());
+        }
+        self.done.recv().map_err(|_| "the writer stopped".into())
+    }
+
+    fn put(&mut self, at: u64, bytes: Vec<u8>) -> Result<(), String> {
+        self.queue
+            .send((at, bytes))
+            .map_err(|_| "the writer stopped".into())
+    }
+}
+
+/// Without a writer thread; a write's failure is kept to be told first.
+struct Here<'a> {
+    path: &'a Path,
+    file: &'a File,
+    spare: Vec<Vec<u8>>,
+    failed: Option<String>,
+}
+
+impl Sink for Here<'_> {
+    fn buffer(&mut self) -> Result<Vec<u8>, String> {
+        Ok(self.spare.pop().unwrap_or_default())
+    }
+
+    fn put(&mut self, at: u64, bytes: Vec<u8>) -> Result<(), String> {
+        if let Err(e) = put_runs(self.path, self.file, at, &bytes) {
+            self.failed = Some(e);
+            return Err("the writer stopped".into());
+        }
+        self.spare.push(bytes);
+        Ok(())
+    }
+}
+
+/// A write's failure is told before the copy's, which follows from it.
+fn written_behind(path: &Path, file: &File, copy: impl Copies) -> Result<(), String> {
+    let (queue, queued) = mpsc::sync_channel::<(u64, Vec<u8>)>(BEHIND);
+    let (written, done) = mpsc::sync_channel::<Vec<u8>>(BUFFERS);
     thread::scope(|scope| {
         let writer = thread::Builder::new()
             .stack_size(WRITER_STACK)
             .spawn_scoped(scope, move || {
-                runs.iter().try_for_each(|(at, run)| write(at, &run))
+                queued.iter().try_for_each(|(at, bytes)| {
+                    put_runs(path, file, at, &bytes)?;
+                    let _ = written.try_send(bytes);
+                    Ok::<(), String>(())
+                })
             });
         let Ok(writer) = writer else {
-            return copy(&mut |at, run| write(at, run));
+            let mut here = Here {
+                path,
+                file,
+                spare: Vec::new(),
+                failed: None,
+            };
+            let copied = copy(&mut here);
+            return here
+                .failed
+                .map_or(Ok(()), Err)
+                .and(copied.map_err(|e| e.to_string()));
         };
-        let copied = copy(&mut |at, run| {
-            queue
-                .send((at, run.to_vec()))
-                .map_err(|_| "the writer stopped".to_owned())
+        let copied = copy(&mut Behind {
+            queue,
+            done,
+            made: 0,
         });
-        drop(queue);
-        let wrote = writer
+        writer
             .join()
-            .unwrap_or_else(|_| Err("the writer stopped".into()));
-        wrote.map_err(ImageError::Damaged).and(copied)
+            .unwrap_or_else(|_| Err(shown(path, "the writer stopped")))?;
+        copied.map_err(|e| e.to_string())
     })
 }
 
@@ -299,18 +350,17 @@ pub struct Edit<'a> {
 }
 
 impl Edit<'_> {
-    /// A sealed copy of `source`, the image whose root is `digest`, unless
-    /// the store holds it already, and what signed it.
+    /// Copies only when the store does not hold the image already.
     pub fn put_image(
         &self,
         digest: &[u8; 32],
-        source: &File,
         len: u64,
         signed: Option<(&[u8], &[u8])>,
+        copy: impl Copies,
     ) -> Result<(), String> {
         let name = image_file(digest);
         if !holds_image(&self.dir.join(&name), len, digest) {
-            create_sealed_image(self.dir, &name, source, len, digest)?;
+            create_sealed_image(self.dir, &name, len, digest, copy)?;
         }
         if let Some((sidecar, signature)) = signed {
             put_sealed(self.dir, &sidecar_file(digest), sidecar)?;

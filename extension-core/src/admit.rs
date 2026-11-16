@@ -74,9 +74,11 @@ pub fn clashes(name: &str, grant: &Grant, others: &[(&str, &Grant)]) -> Result<(
     Ok(())
 }
 
+/// Policy only: the image's bytes are [`contents`]'s, left to the mechanism
+/// because it reads the whole image.
 pub fn install<S: Source>(
     record: Option<&Record>,
-    image: &mut Image<S>,
+    image: &Image<S>,
     authority: &Authority<'_>,
     bounds: &Bounds<'_>,
     others: &[(&str, &Grant)],
@@ -110,13 +112,17 @@ pub fn install<S: Source>(
     }
     within_base(&declared, bounds.ceiling)?;
     clashes(&release.name, &declared, others)?;
-    symbols::check_image(image, bounds.libc).map_err(|e| Refusal(e.to_string()))?;
     Ok(Admitted::Install(Installed {
         version: release.version,
         sha256: digest,
         signer,
         grant: declared,
     }))
+}
+
+pub fn contents<S: Source>(image: &mut Image<S>, libc: &[u8]) -> Result<(), Refusal> {
+    image.check_contents().map_err(|e| Refusal(e.to_string()))?;
+    symbols::check_image(image, libc).map_err(|e| Refusal(e.to_string()))
 }
 
 /// What `record` alone decides of the install `key` vouches for with `said`,

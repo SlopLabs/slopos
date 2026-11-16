@@ -20,7 +20,7 @@ description: >
 - Locks nest activation, then the filesystem holding the image file; the device holds `EXT_VERITY_KEPT` across no read.
 - Every extension program starts `AT_SECURE` (`exec_image`), whoever starts it; do not make it conditional on the caller.
 - Keep `EXT: image block <n> fails its tree` rate-limited: any reader of an activation can provoke it.
-- Store writers never rename: lock `EXTENSION_STORE.lock`, write the next generation, seal it through the descriptor that wrote it, read it back, then remove older ones. Only a sealed file with uid 0's owner and mode is believed.
+- Store writers never rename: lock `EXTENSION_STORE.lock`, write the next generation, seal it through the descriptor that wrote it, read it back (an image as far as its tree), then remove older ones. Only a sealed file with uid 0's owner and mode is believed.
 - A mechanism reads the files a request names as uid 0 without `DacOverride`; settings arrive on the requester's standard input.
 - Init and privd take uids from records, never from a name lookup, and start a program only after checking the opened file is of the activation its declaration was read from.
 - Read `SO_PEEREXTENSION` before `SO_PEERPROGRAM`, so a label that lapses between the reads gives no program.

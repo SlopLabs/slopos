@@ -402,6 +402,68 @@ fn a_builder_takes_exactly_its_data() {
     assert!(builder.finish().is_none());
 }
 
+#[test]
+fn a_streamed_tree_is_the_built_one_its_leaves_in_order() {
+    for n in [1, 2, 128, 129, 300, 16385] {
+        let (geometry, image, root) = built(n);
+        let data = n as usize * BLOCK;
+        let top = geometry.top();
+        let leaves_at = geometry.level(0).map_or(top, |(start, _)| start);
+        let mut upper = vec![0; (leaves_at - top) as usize * BLOCK];
+        let mut leaf = [0; BLOCK];
+        let mut streamed =
+            Streamed::new(geometry, sha256::compress_blocks, &mut upper, &mut leaf).unwrap();
+        let mut emitted = Vec::new();
+        let mut emit = |block: u64, leaf: &[u8; BLOCK]| -> Result<(), ()> {
+            emitted.push((block, leaf.to_vec()));
+            Ok(())
+        };
+        for block in image.blocks[..data].chunks_exact(BLOCK) {
+            streamed
+                .push_digest(hash(block.try_into().unwrap()), &mut emit)
+                .unwrap();
+        }
+        assert_eq!(streamed.finish(&mut emit), Ok(Some(root)), "{n}");
+        let at = |block: u64| (block * BLOCK as u64) as usize;
+        for (k, (block, leaf)) in emitted.iter().enumerate() {
+            assert_eq!(*block, leaves_at + k as u64, "{n}: leaves in order");
+            assert_eq!(
+                leaf[..],
+                image.blocks[at(*block)..at(*block) + BLOCK],
+                "{n}"
+            );
+        }
+        assert_eq!(
+            upper[..],
+            image.blocks[at(top)..at(leaves_at)],
+            "{n}: the upper levels"
+        );
+        if geometry.levels() >= 2 {
+            let leaves = &image.blocks[at(leaves_at)..];
+            assert_eq!(
+                verify_leaves(&geometry, sha256::compress_blocks, &upper, 0, leaves),
+                Ok(())
+            );
+            let mut bent = leaves.to_vec();
+            bent[BLOCK + 9] ^= 1;
+            assert_eq!(
+                verify_leaves(&geometry, sha256::compress_blocks, &upper, 0, &bent),
+                Err(Fault::Mismatch(leaves_at + 1)),
+                "{n}"
+            );
+            assert_eq!(
+                verify_leaves(&geometry, sha256::compress_blocks, &upper, 1, leaves),
+                Err(Fault::OutOfRange)
+            );
+        }
+    }
+    let (geometry, _, _) = built(300);
+    let mut upper = vec![0; BLOCK];
+    let mut leaf = [0; BLOCK];
+    let short = Streamed::new(geometry, sha256::compress_blocks, &mut upper, &mut leaf).unwrap();
+    assert_eq!(short.finish(&mut |_, _| Ok::<(), ()>(())), Ok(None));
+}
+
 /// The tree and root `veritysetup` writes for the same data, where it is
 /// installed.
 #[test]

@@ -159,21 +159,23 @@ an image and from the root it is a file of.
 the host over a 950 MB image of the Rust nightly's 5018 files, the passes
 took 2 145 reads to open it, 24 475 to hold its files to the manifest,
 20 992 to read its ELF files again for the symbol check, 14 500 to copy it
-and 19 112 to read the copy back: 83 000 reads of 5.8 GB.
+and 19 112 to read the copy back: 81 224 reads of 5.8 GB.
 
-The copy is now one pass (`image::copy`): 4 MiB reads, each block hashed
-once, runs written by a thread of their own, the tree the one those digests
-build. The kernel holds every block it reads to the tree, so the sealed copy
-is read back only as far as its tree (`image::verify_tree`). The reader
-takes a file's extent as one run, held with `verity::check` to the levels
-kept from open, and the contents check reads each ELF file whole as it
-hashes it, so the symbol check reads nothing. Hashing takes the SHA
-instructions where the CPU has them (`sha256::ni`, userland only) and a long
-run every core.
+The image is now read once (`Image::copy`). One thread reads 4 MiB chunks,
+another hashes each block once into the tree, held to the named root, and
+each file into its manifest digest, and a third writes runs of non-zero
+blocks. Only the levels above the leaves are held. The requester checks only
+what the image says; the manifest and symbol checks are the mechanism's,
+from the digests the copy took, or a read of the files when the store holds
+the image already. The kernel holds every block it reads to the tree, so
+the sealed copy is read back only as far as its tree
+(`image::verify_tree`). Hashing takes the SHA instructions where the CPU has
+them (`sha256::ni`, userland only) and a long run every core.
 
-The same image now takes 14 500 reads of 2.0 GB; the contents check 1.8 s
-in place of 7.4, hashing four times as fast. The release kernel's time
-against the raw time for the bytes is still to be taken by hand.
+On the release kernel, `extctl install` takes 7.5 s by its own clock where
+a plain copy of the file in the same boot, 4 MiB reads and writes and an
+fsync, takes 5.8 s: 1.3 times the raw time.
+Measured once by hand; no gate holds it.
 
 ## Phase 4: an image reaches a root without a person
 
@@ -390,11 +392,11 @@ an installed image.
 ## Order
 
 Phases 4 and 5 put the toolchain and the apps through an install on every
-root. Phase 4 needs phase 5's image, and phase 5 can come before it. Phase 6 removes what
-phases 1, 4 and 5 stopped using. Phase 7 depends on none of them and is
-small; it can come early. Phase 8 is needed before software from elsewhere
-arrives one image at a time, not before. Phase 9 comes last, so that no
-other phase is written against names that move under it.
+root. Phase 4 needs phase 5's image, and phase 5 can come before it. Phase
+6 removes what phases 1, 4 and 5 stopped using. Phase 7 depends on none of
+them and is small; it can come early. Phase 8 is needed before software
+from elsewhere arrives one image at a time, not before. Phase 9 comes last,
+so that no other phase is written against names that move under it.
 
 ## Later
 

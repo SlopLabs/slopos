@@ -271,26 +271,93 @@ impl Source for Cores<'_> {
         (&mut &self.0[..]).read_at(offset, out)
     }
 
-    fn hash_blocks(&self, data: &[u8], out: &mut [Digest]) {
-        hash_blocks(compress_blocks, data, out, self.1);
+    fn cores(&self) -> usize {
+        self.1
     }
 }
 
-/// An image's bytes as `copy` hands them over, a hole where it hands none.
-fn copied(
+/// Puts past `fails_after` fail.
+struct Handed {
+    out: Vec<u8>,
+    puts: usize,
+    made: usize,
+    spare: Vec<Vec<u8>>,
+    fails_after: usize,
+}
+
+impl Handed {
+    fn new(len: usize) -> Self {
+        Self {
+            out: vec![0; len],
+            puts: 0,
+            made: 0,
+            spare: Vec::new(),
+            fails_after: usize::MAX,
+        }
+    }
+}
+
+impl Sink for Handed {
+    fn buffer(&mut self) -> Result<Vec<u8>, String> {
+        Ok(self.spare.pop().unwrap_or_else(|| {
+            self.made += 1;
+            Vec::new()
+        }))
+    }
+
+    fn put(&mut self, at: u64, bytes: Vec<u8>) -> Result<(), String> {
+        if self.puts == self.fails_after {
+            return Err("the disk is full".into());
+        }
+        self.puts += 1;
+        assert!(bytes.len() % BLOCK == 0);
+        for run in runs(&bytes) {
+            assert!(
+                bytes[run.clone()]
+                    .chunks(BLOCK)
+                    .all(|b| b.iter().any(|&x| x != 0))
+            );
+            self.out[at as usize + run.start..][..run.len()].copy_from_slice(&bytes[run]);
+        }
+        self.spare.push(bytes);
+        Ok(())
+    }
+}
+
+fn copied_to(
     source: &[u8],
     digest: &Digest,
     threads: usize,
-) -> (Result<u64, ImageError>, Vec<u8>, usize) {
-    let mut out = vec![0; source.len()];
-    let mut runs = 0;
-    let copied = copy(&mut Cores(source, threads), digest, &mut |at, run| {
-        runs += 1;
-        assert!(run.len() % BLOCK == 0 && run.chunks(BLOCK).all(|b| b.iter().any(|&x| x != 0)));
-        out[at as usize..][..run.len()].copy_from_slice(run);
-        Ok(())
-    });
-    (copied, out, runs)
+    mut sink: Handed,
+) -> (Result<(), ImageError>, Handed) {
+    let copied = copy(
+        &mut Cores(source, threads),
+        source.len() as u64,
+        digest,
+        &mut sink,
+        &mut |_, _| {},
+    );
+    (copied, sink)
+}
+
+fn copied(source: &[u8], digest: &Digest, threads: usize) -> (Result<(), ImageError>, Handed) {
+    copied_to(source, digest, threads, Handed::new(source.len()))
+}
+
+#[test]
+fn a_sink_that_fails_ends_the_copy_with_its_failure() {
+    let mut packer = packer();
+    let big: Vec<u8> = (0..6 * COPY_CHUNK).map(|i| (i % 251) as u8 | 1).collect();
+    packer.add("/share/big", S_IFREG | 0o644, big);
+    let bytes = packer.finish(RELEASE_TEXT, DECLARE_TEXT).unwrap();
+    let (_, root) = root_of(&mut &bytes[..]).unwrap();
+    for fails_after in [0, 2] {
+        let mut sink = Handed::new(bytes.len());
+        sink.fails_after = fails_after;
+        let (copied, _) = copied_to(&bytes, &root, 2, sink);
+        let why = copied.unwrap_err().to_string();
+        assert!(why.contains("the disk is full"), "{why}");
+    }
 }
 
 #[test]
@@ -303,21 +370,73 @@ fn a_copy_is_the_image_its_root_names_its_zeros_left_holes() {
     let bytes = packer.finish(RELEASE_TEXT, DECLARE_TEXT).unwrap();
     let (_, root) = root_of(&mut &bytes[..]).unwrap();
     for threads in [1, 3] {
-        let (copied, out, runs) = copied(&bytes, &root, threads);
-        assert_eq!(copied, Ok(bytes.len() as u64));
-        assert!(out == bytes, "{threads}");
-        assert!(runs < 32, "{runs} runs");
+        let (copied, sink) = copied(&bytes, &root, threads);
+        assert_eq!(copied, Ok(()));
+        assert!(sink.out == bytes, "{threads}");
+        let most = bytes.len().div_ceil(COPY_CHUNK) + 2;
+        assert!(sink.puts <= most, "{} puts, {most} at most", sink.puts);
+        let most = READ_AHEAD + 2;
+        assert!(
+            sink.made <= most,
+            "{} buffers made, {most} at most",
+            sink.made
+        );
     }
     let mut other = root;
     other[5] ^= 1;
-    assert_eq!(copied(&bytes, &other, 2).0, Err(ImageError::Other));
+    assert!(matches!(
+        copied(&bytes, &other, 2).0,
+        Err(ImageError::Damaged(_))
+    ));
     let mut flipped = bytes.clone();
     flipped[2 * BLOCK + 1] ^= 4;
-    assert_eq!(copied(&flipped, &root, 2).0, Err(ImageError::Other));
+    assert!(matches!(
+        copied(&flipped, &root, 2).0,
+        Err(ImageError::Damaged(_))
+    ));
     assert!(matches!(
         copied(&bytes[..bytes.len() - 1], &root, 1).0,
         Err(ImageError::Format(_))
     ));
+}
+
+#[test]
+fn a_large_tree_is_copied_and_held_a_chunk_of_leaves_at_a_time() {
+    let blocks = 128 * 128 + 300;
+    let geometry = Geometry::new(blocks as u64).unwrap();
+    let mut bytes = vec![0; geometry.image_bytes() as usize];
+    for (k, block) in bytes[..blocks * BLOCK].chunks_mut(BLOCK).enumerate() {
+        if k % 5 != 0 {
+            block[..8].copy_from_slice(&(k as u64 + 1).to_le_bytes());
+        }
+    }
+    let (data, tree) = bytes.split_at_mut(blocks * BLOCK);
+    let mut builder = verity::Builder::new(geometry, tree).unwrap();
+    for block in data.chunks_exact(BLOCK) {
+        builder.push(block.try_into().unwrap());
+    }
+    let root = builder.finish().unwrap();
+    assert!(geometry.levels() >= 3);
+    let (copied, sink) = copied(&bytes, &root, 2);
+    assert_eq!(copied, Ok(()));
+    assert!(sink.out == bytes);
+    assert_eq!(verify_tree(&mut &bytes[..], &root), Ok(()));
+    let (start, _) = geometry.level(0).unwrap();
+    let mut flipped = bytes.clone();
+    flipped[(start as usize + 1) * BLOCK + 70] ^= 2;
+    assert!(verify_tree(&mut &flipped[..], &root).is_err());
+}
+
+#[test]
+fn a_run_is_every_block_between_two_of_zeros() {
+    let mut bytes = vec![0; 6 * BLOCK];
+    for k in [1, 2, 4] {
+        bytes[k * BLOCK + 3] = 1;
+    }
+    let found: Vec<_> = runs(&bytes).collect();
+    assert_eq!(found, [BLOCK..3 * BLOCK, 4 * BLOCK..5 * BLOCK]);
+    assert_eq!(runs(&vec![0; 2 * BLOCK]).count(), 0);
+    assert_eq!(runs(&[]).count(), 0);
 }
 
 /// Bytes read through a counter of calls.
@@ -369,4 +488,99 @@ fn a_file_is_read_in_runs_and_its_symbols_with_its_digest() {
         "the symbol check takes it once"
     );
     assert_eq!(image.source().reads, read);
+}
+
+/// The copy's answer, the contents check's, the sink, and the reads each took.
+fn copied_whole(
+    bytes: &[u8],
+) -> (
+    Result<(), ImageError>,
+    Result<(), ImageError>,
+    Handed,
+    usize,
+    usize,
+) {
+    let mut image = Image::open(Counted { bytes, reads: 0 }, None).unwrap();
+    let mut sink = Handed::new(bytes.len());
+    let opened = image.source().reads;
+    let copied = image.copy(&mut sink);
+    let read = image.source().reads - opened;
+    let checked = image.check_contents();
+    let after = image.source().reads - opened - read;
+    (copied, checked, sink, read, after)
+}
+
+#[test]
+fn a_copy_holds_the_files_to_the_manifest_in_its_one_read() {
+    let mut packer = packer();
+    let big: Vec<u8> = (0..3 * COPY_CHUNK + 77)
+        .map(|i| (i % 249) as u8 | 1)
+        .collect();
+    packer.add("/share/big", S_IFREG | 0o644, big);
+    packer.add("/share/tail", S_IFREG | 0o644, vec![7; 5]);
+    let bytes = packer.finish(RELEASE_TEXT, DECLARE_TEXT).unwrap();
+    let (copied, checked, sink, read, after) = copied_whole(&bytes);
+    assert_eq!(copied, Ok(()));
+    assert_eq!(checked, Ok(()));
+    assert!(sink.out == bytes);
+    let (geometry, _) = root_of(&mut &bytes[..]).unwrap();
+    let chunks = (geometry.data_blocks() as usize * BLOCK).div_ceil(COPY_CHUNK);
+    assert!(read <= chunks + 2, "{read} reads for {chunks} chunks");
+    assert_eq!(after, 0, "the contents check reads nothing a copy read");
+
+    let bent = rebuilt(&bytes, b"hellod", b"hellox");
+    let (copied, checked, sink, _, _) = copied_whole(&bent);
+    assert_eq!(copied, Ok(()), "the bytes are the tree's");
+    assert!(sink.out == bent);
+    let why = checked.unwrap_err().to_string();
+    assert!(why.contains("/bin/hellod: not what"), "{why}");
+}
+
+#[test]
+fn a_passing_file_is_hashed_with_its_holes_and_only_in_order() {
+    let gathered = || Ok(Vec::new());
+    let want = |bytes: &[u8]| sha256(bytes);
+    let mut whole = vec![0u8; 3 * BLOCK + 10];
+    whole[..4].copy_from_slice(b"text");
+    whole[2 * BLOCK..2 * BLOCK + 4].copy_from_slice(b"more");
+    let mut file = Passing::new(
+        "/f".into(),
+        12,
+        want(&whole),
+        whole.len() as u64,
+        compress_blocks,
+    );
+    file.feed(0, &whole[..BLOCK]);
+    file.feed(2 * BLOCK as u64, &whole[2 * BLOCK..3 * BLOCK]);
+    let mut g = gathered();
+    assert_eq!(
+        file.finish(&mut g),
+        Some(want(&whole)),
+        "holes read as zeros"
+    );
+    assert!(g.is_ok_and(|g| g.is_empty()));
+
+    let mut late = Passing::new(
+        "/f".into(),
+        12,
+        want(&whole),
+        whole.len() as u64,
+        compress_blocks,
+    );
+    late.feed(2 * BLOCK as u64, &whole[2 * BLOCK..3 * BLOCK]);
+    late.feed(0, &whole[..BLOCK]);
+    assert_eq!(
+        late.finish(&mut gathered()),
+        None,
+        "a piece before what was fed"
+    );
+
+    let mut past = Passing::new("/f".into(), 12, want(b"ab"), 2, compress_blocks);
+    past.feed(0, &[b'a', b'b', 9, 9]);
+    past.feed(BLOCK as u64, &[1; BLOCK]);
+    assert_eq!(
+        past.finish(&mut gathered()),
+        Some(want(b"ab")),
+        "only its size"
+    );
 }
