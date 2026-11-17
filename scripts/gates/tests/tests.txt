@@ -1810,6 +1810,7 @@ kernel	slopos_fs::tests::test_quota_fdslot_refusal_refunds_once
 kernel	slopos_fs::tests::test_quota_ledger_is_consistent_after_exhaustion
 kernel	slopos_fs::tests::test_quota_objectrow_cross_process_isolation
 kernel	slopos_fs::tests::test_quota_objectrow_drive_to_full
+kernel	slopos_fs::tests::test_ram_seal_comes_off_only_with_seal
 kernel	slopos_fs::tests::test_ramfs_long_name_refused
 kernel	slopos_fs::tests::test_ramfs_rename_into_descendant_refused
 kernel	slopos_fs::tests::test_rdonly_mount_refuses_mutation
