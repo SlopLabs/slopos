@@ -60,3 +60,9 @@
   toolchain's, which `PATH` finds before `/opt/bin` and `build_userland.sh`
   refuses, and the apps', whose entries replace the image's in the dock.
   `just reset root` drops them.
+- `build_fs_image.sh` holds every debugfs request: debugfs exits 0 whatever
+  happened, so any line on its stderr but the banner stops the build, as in
+  `fs_tree.py`. An image is grown for a tree and the free floor, never for
+  the base: a base past `FS_IMAGE_SIZE` stops the build at the file that did
+  not fit. `FS_IMAGE_SIZE` is `64M` and `FS_IMAGE_SIZE_TESTS` `142M`, where
+  `getting-started/qemu-options` says `32M` and `128M`.

@@ -26,10 +26,12 @@ fs_image_dir     := "fs/assets"
 fs_image         := fs_image_dir / "ext4.img"
 fs_image_tests   := fs_image_dir / "ext4-tests.img"
 fs_image_persist := fs_image_dir / "ext4-persist.img"
-fs_image_size    := env("FS_IMAGE_SIZE", "32M")
+# What the base's programs and assets (32M) and the apps' image (6M) need
+# beside a 4M journal, with room to grow: a build that does not fit stops.
+fs_image_size    := env("FS_IMAGE_SIZE", "64M")
 # The tests image carries `bigprog_test`, a 24 MiB binary `exec` must map
 # without staging it in kernel memory, and the C++ runtime with the two
-# fixtures that exercise it. Sized on its own so the shipped root stays 32M.
+# fixtures that exercise it. Sized on its own so the shipped root stays small.
 # Kept tight: free blocks the suite writes stay in the block cache, and the 1G
 # machine has no frames to spare by the time `sessions_test` forks its bomb.
 # 6M of it holds the store's copy of the apps' image.

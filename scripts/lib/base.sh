@@ -6,7 +6,8 @@
 # `/sbin/<name>`.
 BASE_PROGRAMS="init privd shell coreutils terminal compositor roulette halt bootctl installer installer-ui sysmon nmap ip keymap ss nc curl ping oops_smoke cpufreq remoted kconsole endtask prof tree-install session login extctl users authcheck priv netctl prefs settings"
 
-# The apps outside the base, the tree `apps` every root holds at /usr/local.
+# The apps outside the base, which every root is offered as the image
+# slopos-essentials.
 APPS="breach editor file_manager image_viewer widget_gallery"
 
 # The multicall utility binary's installed names. `/bin/<name>` is a symlink to

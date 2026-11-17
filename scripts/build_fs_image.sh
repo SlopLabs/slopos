@@ -139,9 +139,12 @@ if ! command -v debugfs >/dev/null 2>&1; then
     exit 1
 fi
 
-# debugfs prints its version banner on stderr on every run; drop only that line.
+# debugfs exits 0 whatever a request did, and prints its banner on stderr on
+# every run: the banner is dropped, and any other line there fails the call.
 debugfs() {
-    { command debugfs "$@" 2>&1 1>&3 3>&- | sed '/^debugfs [0-9][0-9.]* (/d' >&2; } 3>&1
+    { command debugfs "$@" 2>&1 1>&3 3>&- | sed '/^debugfs [0-9][0-9.]* (/d' | { ! grep . >&2; }; } 3>&1 && return 0
+    echo "build_fs_image: debugfs $* failed" >&2
+    return 1
 }
 
 IMAGE_DIR="$(dirname "$IMAGE_PATH")"
@@ -407,7 +410,7 @@ meets_profile() {
 # loses its map.
 seal() {
     local flags
-    flags="$(debugfs -R "stat $1" "$IMAGE_PATH" 2>/dev/null | sed -n 's/.*Flags: \(0x[0-9a-f]*\).*/\1/p' | head -n 1)"
+    flags="$(debugfs -R "stat $1" "$IMAGE_PATH" | sed -n 's/.*Flags: \(0x[0-9a-f]*\).*/\1/p' | head -n 1)"
     debugfs -w -R "set_inode_field $1 flags $(printf '0x%x' $(( ${flags:-0} | IMMUTABLE_FL )))" "$IMAGE_PATH" >/dev/null
 }
 
@@ -433,16 +436,17 @@ mkdir_p() {
     make_dir "$1" || true
 }
 
-# Like mkdir_p, but false when $1 was already there.
+# Like mkdir_p, but false when $1 was already there. Its callers test it, so
+# it exits by hand: `set -e` is off in here.
 make_dir() {
     local out
-    out="$(debugfs -R "stat $1" "$IMAGE_PATH" 2>&1)"
+    out="$(debugfs -R "stat $1" "$IMAGE_PATH" 2>&1)" || true
     case "$out" in
         *'Inode:'*) return 1 ;;
         *'File not found by ext2_lookup'*) ;;
         *) echo "build_fs_image: debugfs could not tell whether $1 exists" >&2; exit 1 ;;
     esac
-    debugfs -w -R "mkdir $1" "$IMAGE_PATH" >/dev/null 2>&1 || true
+    debugfs -w -R "mkdir $1" "$IMAGE_PATH" >/dev/null || exit 1
 }
 
 # Each directory of the map the root lacks, and the first person's home where
@@ -596,8 +600,8 @@ install_base() {
         fi
     done
 
-    # A symlink, not a copy: fifty-odd copies of std would be ~8 MiB of a
-    # 32 MiB root, and `argv[0]` selects the tool anyway. `debugfs symlink`
+    # A symlink, not a copy: fifty-odd copies of std would be ~8 MiB of the
+    # root, and `argv[0]` selects the tool anyway. `debugfs symlink`
     # writes a fast symlink, so a name costs an inode and no block.
     if [ -n "${COREUTILS_LINKS:-}" ]; then
         if [ ! -f "${BUILD_DIR}/coreutils.elf" ]; then
