@@ -743,19 +743,13 @@ impl System {
 
         run.step(Step::CopySystem);
         let mounted = root::Mounted::at(&root_node)?;
-        let owners = root::lay_out(&mounted, !keep_root)?;
+        root::lay_out(&mounted, !keep_root)?;
         if keep_root {
             root::forget_slots(&mounted)?;
         }
         run.root = Some(root_node.clone());
         run.keep_on(&mounted);
-        root::fill(
-            &mounted,
-            medium,
-            p.view.setup.remote.as_deref(),
-            &owners,
-            run,
-        )?;
+        root::fill(&mounted, medium, p.view.setup.remote.as_deref(), run)?;
         mounted.write_cmdline(&p.view.setup.cmdline)?;
         if let Some(person) = &p.person {
             root::make_people(&mounted, &person.name, person.password.clone())?;

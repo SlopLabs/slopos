@@ -1,5 +1,6 @@
-//! Each app names its window as its dock entry does, and each in `/usr/local`
-//! links `libc.so`; `--trees` grades installing there and in `~/.local`.
+//! Each app names its window as its dock entry does, and each of the image
+//! slopos-essentials links `libc.so`; `--trees` grades installing in
+//! `/usr/local` and in `~/.local`.
 
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -30,18 +31,25 @@ const RETRY: Duration = Duration::from_millis(20);
 const INTERP: &[u8] = b"/lib/ld-slopos.so.1\0";
 
 const APPS: &[(&str, &str)] = &[
-    ("/usr/local/bin/editor", "org.slopos.editor"),
-    ("/usr/local/bin/file_manager", "org.slopos.files"),
-    ("/usr/local/bin/image_viewer", "org.slopos.image-viewer"),
+    ("/opt/slopos-essentials/bin/editor", "org.slopos.editor"),
+    (
+        "/opt/slopos-essentials/bin/file_manager",
+        "org.slopos.files",
+    ),
+    (
+        "/opt/slopos-essentials/bin/image_viewer",
+        "org.slopos.image-viewer",
+    ),
     ("/bin/settings", "org.slopos.settings"),
     ("/bin/sysmon", "org.slopos.sysmon"),
     ("/bin/terminal", "org.slopos.terminal"),
-    ("/usr/local/bin/breach", "org.slopos.breach"),
+    ("/opt/slopos-essentials/bin/breach", "org.slopos.breach"),
 ];
+const ESSENTIALS: &str = "/opt/slopos-essentials/";
 
 fn entry_name(program: &str, id: &str) -> Option<String> {
-    let dir = match program.starts_with("/usr/local/") {
-        true => "/usr/local/share",
+    let dir = match program.starts_with(ESSENTIALS) {
+        true => "/opt/slopos-essentials/share",
         false => "/usr/share",
     };
     let share = slopos_userland::app_entry::Share {
@@ -166,7 +174,7 @@ fn serve(server: &mut Server, child: &mut Child) -> Result<(String, String), Str
 }
 
 fn run(program: &str, want: &str) -> bool {
-    let loose = program.starts_with("/usr/local/");
+    let loose = program.starts_with(ESSENTIALS);
     match loose.then(|| interpreter(program)) {
         None => {}
         Some(Ok(interp)) if interp == INTERP => {}
@@ -494,8 +502,7 @@ fn entries(top: &Path) -> Vec<(PathBuf, fs::Metadata)> {
     out
 }
 
-/// Every entry becomes uid 0's, but the apps' manifest stays the first
-/// person's, which uid 0 installs over without believing.
+/// Every entry becomes uid 0's.
 fn a_second_person_makes_usr_local_the_system_s() -> bool {
     if users(&["add", BOB, "--keep-autologin"]) != Some(0) || bob().is_none() {
         return fail(format!("{BOB} was not added"));
@@ -507,11 +514,7 @@ fn a_second_person_makes_usr_local_the_system_s() -> bool {
     {
         return fail(format!("{OWNERS_RECORD} still names {LOCAL}: {record:?}"));
     }
-    let manifest = Path::new(MANIFEST_DIR).join(slopos_tree_core::APPS);
     let tree = entries(Path::new(LOCAL));
-    if tree.len() < 2 {
-        return fail(format!("{LOCAL} holds no apps"));
-    }
     let others = |meta: &fs::Metadata| {
         meta.uid() != 0 || !meta.file_type().is_symlink() && meta.mode() & 0o022 != 0
     };
@@ -523,16 +526,10 @@ fn a_second_person_makes_usr_local_the_system_s() -> bool {
             meta.mode()
         ));
     }
-    if fs::symlink_metadata(&manifest).map(|meta| meta.uid()).ok() != Some(SESSION_UID) {
-        return fail(format!("{} is not the first person's", manifest.display()));
-    }
-    if !Path::new(LOCAL).join("bin").is_dir() {
-        return fail(format!("{LOCAL}/bin is not a directory"));
-    }
     let (code, said) = shell_as(
         SESSION_UID,
         SESSION_HOME,
-        "echo started; echo x > /usr/local/bin/apps-test-mine",
+        "echo started; echo x > /usr/local/apps-test-mine",
     );
     said.starts_with("started\n") && matches!(code, Some(code) if code != 0)
         || fail(format!(

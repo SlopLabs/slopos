@@ -48,10 +48,7 @@ pub fn set_sealed(file: &File, sealed: bool) -> Result<(), String> {
         return Ok(());
     }
     sys_fs::set_inode_flags(file.as_raw_fd(), want).map_err(|e| match e {
-        crate::syscall::SyscallError::EOPNOTSUPP => {
-            "a filesystem that keeps a seal for good, as a RAM root does; extensions need a disk root"
-                .into()
-        }
+        crate::syscall::SyscallError::EOPNOTSUPP => "a filesystem that keeps no seal".into(),
         e => e.to_string(),
     })
 }

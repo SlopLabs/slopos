@@ -1,7 +1,9 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
 use slopos_mm::page_alloc::get_page_allocator_stats;
 use slopos_mm::slab::MAX_ALLOC_SIZE;
+use slopos_ostd::authority::{Cap, Seal};
 use slopos_ostd::{KBox, KVec};
 
 use crate::MAX_NAME_LEN;
@@ -407,7 +409,7 @@ struct RamInode {
     atime: Timestamp,
     mtime: Timestamp,
     ctime: Timestamp,
-    /// Refuses every mutation once set; never cleared while the inode lives.
+    /// Refuses every mutation while set; only a holder of `Seal` clears it.
     sealed: bool,
     /// Bumped on every reset, so a stale id fails to resolve.
     generation: u32,
@@ -1367,6 +1369,31 @@ impl FileSystem for RamFs {
     fn set_sealed(&self, inode: InodeId) -> VfsResult<()> {
         self.with_inner_mut(|inner| {
             inner.get_inode_mut(inode)?.sealed = true;
+            Ok(())
+        })
+    }
+
+    /// The seal alone, which `Seal` clears as on ext4.
+    fn set_inode_flags(
+        &self,
+        inode: InodeId,
+        flags: u32,
+        seal: Option<&Cap<'_, Seal>>,
+    ) -> VfsResult<()> {
+        let sealed = flags & FS_IMMUTABLE_FL != 0;
+        if flags & !FS_IMMUTABLE_FL != 0 {
+            return Err(VfsError::NotSupported);
+        }
+        self.with_inner_mut(|inner| {
+            let ram_inode = inner.get_inode_mut(inode)?;
+            if ram_inode.sealed == sealed {
+                return Ok(());
+            }
+            if seal.is_none() {
+                return Err(VfsError::PermissionDenied);
+            }
+            ram_inode.sealed = sealed;
+            stamp(&mut ram_inode.ctime);
             Ok(())
         })
     }

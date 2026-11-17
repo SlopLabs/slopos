@@ -117,9 +117,9 @@ crate::utest!(
     uid = 1000
 );
 crate::utest!(name = utest_mount, bin = "/bin/mount_test", caps = MOUNT);
-// The toolchain image the host put on a root, installed as uid 0; the
-// session's tests that use it (`utest_reboot_clone`, `utest_selfhost`,
-// `utest_toolchain`) are `rank = 1`, so they follow it.
+// The toolchain image the host offered a root, which init installed, held to
+// that offer; the session's tests that use it (`utest_reboot_clone`,
+// `utest_selfhost`, `utest_toolchain`) are `rank = 1`, so they follow it.
 crate::utest!(
     name = utest_install_toolchain,
     bin = "/bin/toolchain_test",

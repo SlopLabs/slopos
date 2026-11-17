@@ -16,9 +16,10 @@
 //!   privd's `installer --serve`.
 //! 1 (`slopos-a` of the installed disk): the root is the disk's, its first
 //!   administrator the person the installer was told of, the other system's
-//!   entry is still in `BootOrder` and in Limine's menu, and the clone
-//!   fetches from the remote it was given. With a toolchain at
-//!   `/usr/local`, `just install tests` builds the system and installs its
+//!   entry is still in `BootOrder` and in Limine's menu, the images the
+//!   medium offered are shown, and the clone fetches from the remote it was
+//!   given. With the toolchain's image, `just install tests` builds the
+//!   system and installs its
 //!   base, and `just install-kernel tests` puts its kernel into slot b, as a
 //!   person at the shell runs them; without one, slot a's kernel is cloned
 //!   into b. Boot b once.
@@ -829,7 +830,7 @@ fn payload_held() -> Result<(), String> {
         Err(SyscallError::EPERM) => {}
         other => return Err(format!("umount {dir}: {other:?}, not EPERM")),
     }
-    let under = format!("{dir}/usr");
+    let under = format!("{dir}/{}", layout::MEDIUM_IMAGES);
     match mount(b"", under.as_bytes(), b"ramfs", 0) {
         Err(SyscallError::EPERM) => {}
         other => return Err(format!("mounting over {under}: {other:?}, not EPERM")),
@@ -1225,6 +1226,9 @@ fn cmdline_travels(disk: &str) -> Result<(), String> {
     Ok(())
 }
 
+const ESSENTIALS: &str = "slopos-essentials";
+const TOOLCHAIN: &str = "slopos-toolchain";
+
 fn first_boot(status: &str) -> bool {
     let (booted, default) = (field(status, "booted"), field(status, "default"));
     if booted != "slopos-a" || default != "slopos-a" {
@@ -1272,6 +1276,17 @@ fn first_boot(status: &str) -> bool {
             ));
             return false;
         }
+    }
+    let shown = |name: &str| slopos_userland::activation::open(name).is_ok();
+    if !shown(ESSENTIALS) {
+        note(&format!("the installed root shows no {ESSENTIALS}"));
+        return false;
+    }
+    for name in [ESSENTIALS, TOOLCHAIN]
+        .into_iter()
+        .filter(|name| shown(name))
+    {
+        println!("INSTALLER-SHOWN {name}");
     }
     let foreign = var(FOREIGN).and_then(|v| Some(u16::from_le_bytes(v.get(..2)?.try_into().ok()?)));
     if let Some(number) = foreign {

@@ -46,3 +46,14 @@
   `RECIPE_LICENSE_DIR/<recipe>`; `RECIPE_PREFIX` is gone. The justfile names
   the recipes' prefix's `libexec` and `share/licenses` on the host and
   `/opt/slopos-toolchain`'s on SlopOS.
+- `docs/architecture/software`: the apps under `apps/` ship as the image
+  `slopos-essentials` (five commands, four apps). `build_userland.sh` stages
+  `builddir/apps` with `.extension/{release,declare}`, its version a UTC
+  stamp that moves only when the staged files do
+  (`builddir/slopos-essentials.version`); `_build-userland` packs it through
+  `build_extension.sh` into `builddir/slopos-essentials/`. Entries name
+  `/opt/slopos-essentials/bin/<app>`; the editor's manual is looked for in
+  `~/.local/share`, `/opt/slopos-essentials/share`, `/usr/share`. Every root
+  is offered the image, no root carries the `apps` tree, init no longer lays
+  the medium's apps out on a live boot, and `just install` installs the
+  image with `extctl install`, which an administrator approves.

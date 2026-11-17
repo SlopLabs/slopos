@@ -122,29 +122,24 @@ fn live() -> bool {
             .is_ok_and(|stats| stats.f_type == slopos_abi::fs::RAMFS_MAGIC)
 }
 
-/// On a live boot, the medium's apps at the RAM root's `/usr/local`, where an
-/// install puts them on a disk, `holder`'s.
-fn install_live_apps(holder: (u32, u32)) {
-    use slopos_boot_core::layout::{MEDIUM_APPS, MEDIUM_DIR};
-    let apps = std::path::Path::new(MEDIUM_DIR).join(MEDIUM_APPS);
-    if !live() || !apps.is_dir() {
+/// On a live boot the medium's images, which its RAM root keeps.
+fn install_offered() {
+    use slopos_boot_core::layout::{MEDIUM_DIR, MEDIUM_IMAGES};
+    let dir = match live() {
+        true => std::path::Path::new(MEDIUM_DIR).join(MEDIUM_IMAGES),
+        false => std::path::PathBuf::from(slopos_extension_core::OFFERED),
+    };
+    if !dir.is_dir() || sys_core::boot_flag(BOOT_FLAG_EXTENSIONS_OFF) {
         return;
     }
-    let install = crate::tree::Install {
-        root: "",
-        name: slopos_tree_core::APPS,
-        guest: LOCAL,
-        manifests: slopos_tree_core::MANIFEST_DIR,
-        source: &apps,
-        owner: Some(holder),
-        keeper: Some(holder),
-        remedy: "move it aside",
+    let Ok(dir) = std::ffi::CString::new(dir.into_os_string().into_encoded_bytes()) else {
+        return;
     };
-    match crate::tree::scan(&apps).and_then(|new| install.run(&new, &mut |_| {})) {
-        Ok(Some(_)) => println!("init: installed the medium's apps at /usr/local"),
-        Ok(None) => {}
-        Err(e) => eprintln!("init: the medium's apps: {e}"),
-    }
+    run_holding(
+        b"/bin/extctl",
+        &[c"extctl", c"install-offered", &dir],
+        EXTENSION_UPDATE | SEAL,
+    );
 }
 
 pub fn init_user_main() {
@@ -194,8 +189,8 @@ fn boot() -> ! {
     if let Err(e) = crate::tree::hand_over(slopos_tree_core::APPS, holder) {
         eprintln!("init: the apps' manifest: {e}");
     }
-    install_live_apps(holder);
     sync_accounts();
+    install_offered();
     activate_extensions();
 
     let consent = Consent::make();

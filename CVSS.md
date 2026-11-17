@@ -62,7 +62,7 @@ names the evidence that would lift it.
 - Status: `open`
 - Confidence: 35 — evidence 25 (a working directory is a path; privd's check before the spawn compares `(st_dev, st_ino)` and `st_dev` is 0 for every file; `bootctl` installs whatever a path holds when no digest follows it, and `just install` names none), exploitability 5 (session code of the same person must move a directory or replace a file between the answer and the read), reproducibility 5. Raised by: a test that swaps a base under `bootctl base install` after the answer.
 - Impact: a `priv` command allowed in one directory runs, holding `DacOverride` and `Mount`, against relative paths session code re-pointed by renaming directories; a base or kernel allowed by its path is replaced before `bootctl` reads it, and a base runs at once.
-- Evidence: `slopos-ostd/src/task/fs_context.rs:20` (`CwdPath`); `userland/src/apps/privd/mod.rs:960` and `:1202-1207` (`still_at`); `fs/src/vfs/traits.rs:126` (`st_dev = 0`); `assets/privd/actions:59`, `:86`, `:385-386` (`cwd`); `userland/src/apps/bootctl.rs:463-484` (the digest is optional) and `:1072`; `justfile:387` and `:401` (`install`, `install-kernel`).
+- Evidence: `slopos-ostd/src/task/fs_context.rs:20` (`CwdPath`); `userland/src/apps/privd/mod.rs:960` and `:1202-1207` (`still_at`); `fs/src/vfs/traits.rs:126` (`st_dev = 0`); `assets/privd/actions:59`, `:86`, `:385-386` (`cwd`); `userland/src/apps/bootctl.rs:463-484` (the digest is optional) and `:1072`; `justfile:410` and `:423` (`install`, `install-kernel`).
 - Repro: as an administrator run `just install`; while the question shows, replace the base it names with another that passes `boot_core::base::check`, then allow; `bootctl status` names the other build tag.
 - Remediation: the requester opens the directory and files and privd hands the mechanism descriptors, or each image travels with the SHA-256 the question shows; `stat` reports a real `st_dev`.
 
@@ -125,7 +125,7 @@ names the evidence that would lift it.
 - Status: `open`
 - Confidence: 30 — evidence 25, exploitability 5, reproducibility 0. Raised by: a utest whose fork loop outlives `end-session`.
 - Impact: a person's process forking in a loop survives their logout (the request is answered with how many did), and the old broker's survive a pairing change; ending a person's 256 processes costs init a task-table walk per `kill`, while it answers no other session.
-- Evidence: `userland/src/apps/init/session.rs:26-27`, `:839`, `:869-897`; `userland/src/apps/init/mod.rs:741-772` (one `SIGKILL` pass, then the new remoted).
+- Evidence: `userland/src/apps/init/session.rs:26-27`, `:839`, `:869-897`; `userland/src/apps/init/mod.rs:737-768` (one `SIGKILL` pass, then the new remoted).
 - Repro: a session process whose children each fork again in a loop; `end-session` answers with a count above zero and `process_list` still shows the tag.
 - Remediation: one kernel call that freezes and kills every process of a login tag, as `cgroup.kill` does.
 
@@ -179,7 +179,7 @@ names the evidence that would lift it.
 - Status: `open`
 - Confidence: 15 — evidence 15, exploitability 0, reproducibility 0. Raised by: a utest that tells two refusals apart for paths only uid 0 searches.
 - Impact: an administrator's session code, unasked through `install-signed`, learns from the refusal whether a path under a directory only uid 0 searches exists and is a regular file.
-- Evidence: `userland/src/apps/extctl/mod.rs:71-81` and `:633`; `assets/privd/actions:182-191`.
+- Evidence: `userland/src/apps/extctl/mod.rs:79-89` and `:647`; `assets/privd/actions:182-191`.
 - Repro: ask `org.slopos.extension.install-signed` naming `/root/a`, then a file that exists there; the refusals differ.
 - Remediation: the requester opens what it names and hands the descriptors over, as `config install` does with standard input.
 
@@ -224,7 +224,7 @@ names the evidence that would lift it.
 - Status: `open`
 - Confidence: 10 — evidence 10, exploitability 0 (a power loss must fall between the seal and the read-back), reproducibility 0. Raised by: a test hook that writes between the write and the seal and survives a cut before the read-back.
 - Impact: a write in that window fails the edit, a writable mapping refuses the seal (`EBUSY`) so such a holder fails every edit it races, and a power loss between the seal and the read-back leaves its bytes sealed and believed as the newest generation.
-- Evidence: `userland/src/sealed.rs:122-143`; `userland/src/apps/extctl/store.rs:243-260`.
+- Evidence: `userland/src/sealed.rs:119-140`; `userland/src/apps/extctl/store.rs:243-260`.
 - Repro: nearest deterministic: a test hook between `create_sealed`'s write and its seal that writes the file through a second descriptor.
 - Remediation: write the generation where no other process can name it and link it in once sealed.
 

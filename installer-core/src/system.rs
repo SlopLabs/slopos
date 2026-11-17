@@ -19,7 +19,7 @@ pub struct System {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Medium {
-    /// Whether the payload carries the toolchain for `/usr/local`.
+    /// Whether the payload carries the toolchain image.
     pub toolchain: bool,
     /// Whether the payload carries the clone for `/src`.
     pub source: bool,

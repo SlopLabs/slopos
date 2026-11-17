@@ -78,3 +78,20 @@
   keeps the list then, a failure to keep it no refusal. On the release
   kernel the toolchain's check fell from 2.0 s to under 1 ms and its
   whole activation from 2.1 s to 0.16-0.26 s.
+- `docs/architecture/extensions` (install): an image uid 0 offers goes in
+  unasked. `slopos_extension_core::OFFERED`, `/var/lib/slopos/offered`,
+  holds `<name>.ext` beside its sidecar; the directory, those above it and
+  both files are uid 0's and nobody else writes them. Init runs `extctl
+  install-offered [<dir>]` holding `ExtensionUpdate Seal` after `users sync`
+  and before `activate-all` (not with `extensions=off`); a live boot offers
+  the medium's `images/`. `admit::Authority::Offered` takes only an image
+  declaring no user, service, action, state, config or runtime
+  (`admit::offerable`), signed by nobody, never over a key's record, a
+  removed one or a version rolled back from, and above the floor;
+  `admit::ahead_offered` judges the sidecar first, so a current image is not
+  opened, and what the record holds back passes in silence.
+  `Record::install_offered` leaves a disabled one disabled. On a RAM root no
+  accounts lock is taken and no user database written.
+- A RAM file's seal comes off for `Seal` as an ext4 file's does (ramfs
+  `set_inode_flags`), so the store works on a live boot's RAM root; the
+  accounts store still refuses one.

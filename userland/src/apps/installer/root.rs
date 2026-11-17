@@ -1,8 +1,7 @@
 //! The new root, mounted while it is filled: the directories a SlopOS root
 //! has with the owners the ownership map gives them, its base mount points
-//! sealed, the medium's toolchain and apps installed at `/usr/local` by the
-//! rule host trees follow, and its clone seeded at `/src`, the first
-//! person's.
+//! sealed, the medium's images offered to it, which its first boot installs,
+//! and its clone seeded at `/src`, the first person's.
 
 use std::ffi::CString;
 use std::fs::{self, File};
@@ -13,20 +12,22 @@ use std::path::Path;
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
 use slopos_abi::fs::{OWNERS_RECORD, ROOT_LAYOUT, SESSION_GID, SESSION_UID};
 use slopos_boot_core::layout;
-use slopos_tree_core::{Kind, Manifest};
+use slopos_extension_core::OFFERED;
+use slopos_tree_core::Kind;
 
 use super::engine::Events;
 use super::medium::Medium;
 use crate::root_layout::Owners;
 use crate::syscall::fs::{inode_flags, mount, set_inode_flags, sync, umount2};
-use crate::tree::{self, create_new, give, make_dir, write_durably};
+use crate::tree::{create_new, give, make_dir, write_durably};
 
 /// Where the new root's mount point is made: memory, which the next boot does
 /// not see.
 const MOUNT_PARENT: &str = "/tmp";
 pub(super) const EXT4_ROOT_INODE: u64 = 2;
 const SLOT_STATE: &str = "/var/lib/slopos/slots";
-pub const LOCAL: &str = "/usr/local";
+pub const TOOLCHAIN: &str = "slopos-toolchain";
+const IMAGE_MODE: u32 = 0o644;
 pub const SOURCE: &str = "/src";
 const CLONE_CONFIG: &str = "slopos/.git/config";
 const COPY_CHUNK: usize = 1 << 20;
@@ -317,50 +318,6 @@ fn put(
     give(&dest, (SESSION_UID, SESSION_GID))
 }
 
-/// Install the medium's tree `name`, the `what` it says it installs, from
-/// `source` at `/usr/local` as `holder`'s, keeping whatever the root's user
-/// put beside what an earlier install left, its manifest `keeper`'s.
-fn install_tree(
-    root: &Mounted,
-    name: &str,
-    what: &str,
-    source: &Path,
-    new: &Manifest,
-    (holder, keeper): ((u32, u32), (u32, u32)),
-    events: &mut dyn Events,
-) -> Result<(), String> {
-    let total = new
-        .items
-        .iter()
-        .filter(|item| item.kind == Kind::File)
-        .filter_map(|item| item.size)
-        .sum();
-    let mut copying = Copying {
-        done: 0,
-        total,
-        events: &mut *events,
-    };
-    let installed = tree::Install {
-        root: &root.dir,
-        name,
-        guest: LOCAL,
-        manifests: slopos_tree_core::MANIFEST_DIR,
-        source,
-        owner: Some(holder),
-        keeper: Some(keeper),
-        remedy: "move it aside, or format the root",
-    }
-    .run(new, &mut |n| copying.add(n))?;
-    events.log(match installed {
-        Some(bytes) => format!(
-            "installed the {what} at {LOCAL} ({})",
-            slopos_installer_core::disk_size(bytes)
-        ),
-        None => format!("{LOCAL} already holds this medium's {what}"),
-    });
-    Ok(())
-}
-
 fn tree_bytes(dir: &Path) -> Result<u64, String> {
     let mut bytes = 0;
     let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -494,46 +451,82 @@ fn with_origin(config: &str, url: &str) -> String {
     out.join("\n") + "\n"
 }
 
-/// Fill the root from the medium: `/usr/local` with the toolchain and the
-/// apps by their manifests, as whoever `owners` says holds it, `/src` once.
+/// Copy each image in `from` and its sidecar into the root's [`OFFERED`],
+/// unless offered already.
+fn offer(root: &Mounted, from: &Path, events: &mut dyn Events) -> Result<(), String> {
+    root.owned_dir(OFFERED, (0, 0), 0o755)?;
+    let shown = |e: std::io::Error| format!("{}: {e}", from.display());
+    let mut names: Vec<String> = fs::read_dir(from)
+        .map_err(shown)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            name.strip_suffix(".ext")
+                .filter(|name| slopos_extension_core::valid_name(name))
+                .map(str::to_owned)
+        })
+        .collect();
+    names.sort();
+    for name in names {
+        let (image, sidecar) = (
+            from.join(format!("{name}.ext")),
+            from.join(format!("{name}.meta")),
+        );
+        let said = fs::read(&sidecar).map_err(|e| format!("{}: {e}", sidecar.display()))?;
+        let len = fs::metadata(&image)
+            .map_err(|e| format!("{}: {e}", image.display()))?
+            .len();
+        let at = |ext: &str| root.path(&format!("{OFFERED}/{name}.{ext}"));
+        let held = fs::symlink_metadata(at("ext")).is_ok_and(|m| m.is_file() && m.len() == len)
+            && fs::read(at("meta")).is_ok_and(|held| held == said);
+        if held {
+            events.log(format!("{OFFERED} offers this medium's {name} already"));
+            continue;
+        }
+        for stale in [at("meta"), at("ext.partial")] {
+            match fs::remove_file(&stale) {
+                Err(e) if e.kind() != ErrorKind::NotFound => return Err(format!("{stale}: {e}")),
+                _ => {}
+            }
+        }
+        let partial = at("ext.partial");
+        let mut copying = Copying {
+            done: 0,
+            total: len,
+            events: &mut *events,
+        };
+        copy_file(&image, &partial, &mut copying)?;
+        fs::set_permissions(&partial, fs::Permissions::from_mode(IMAGE_MODE))
+            .map_err(|e| format!("{partial}: {e}"))?;
+        File::open(&partial)
+            .and_then(|file| file.sync_all())
+            .and_then(|()| fs::rename(&partial, at("ext")))
+            .map_err(|e| format!("{partial}: {e}"))?;
+        write_durably(&at("meta"), &said)?;
+        fs::set_permissions(at("meta"), fs::Permissions::from_mode(IMAGE_MODE))
+            .map_err(|e| format!("{}: {e}", at("meta")))?;
+        events.log(format!(
+            "offered {name} to the root at {OFFERED} ({})",
+            slopos_installer_core::disk_size(len)
+        ));
+    }
+    Ok(())
+}
+
+/// Fill the root from the medium: the apps' image offered, the toolchain's
+/// too when the payload carries it, and `/src` seeded once.
 pub fn fill(
     root: &Mounted,
     medium: &Medium,
     remote: Option<&str>,
-    owners: &Owners,
     events: &mut dyn Events,
 ) -> Result<(), String> {
-    let holder = owners.owner(LOCAL);
-    if !medium.toolchain {
-        events.log("the medium carries no toolchain".to_owned());
+    offer(root, &medium.path(layout::MEDIUM_IMAGES), events)?;
+    if medium.toolchain {
+        offer(root, &medium.payload_path(layout::MEDIUM_IMAGES), events)?;
     } else {
-        let recorded = slopos_tree_core::manifest_path(slopos_tree_core::TOOLCHAIN);
-        let text = fs::read_to_string(medium.payload_path(&recorded))
-            .map_err(|e| format!("the medium's manifest of {LOCAL}: {e}"))?;
-        let new = Manifest::parse(&text)
-            .map_err(|e| format!("the medium's manifest of {LOCAL}, line {}", e.line))?;
-        let source = medium.payload_path(LOCAL);
-        install_tree(
-            root,
-            slopos_tree_core::TOOLCHAIN,
-            "toolchain",
-            &source,
-            &new,
-            (holder, (0, 0)),
-            events,
-        )?;
+        events.log("the medium carries no toolchain".to_owned());
     }
-    let apps = medium.path(layout::MEDIUM_APPS);
-    let new = tree::scan(&apps)?;
-    install_tree(
-        root,
-        slopos_tree_core::APPS,
-        "apps",
-        &apps,
-        &new,
-        (holder, holder),
-        events,
-    )?;
     if !medium.source {
         return Ok(());
     }

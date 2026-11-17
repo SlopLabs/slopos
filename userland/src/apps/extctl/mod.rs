@@ -1,10 +1,11 @@
 //! `/bin/extctl`: installs extensions, keeps their store and their
 //! configuration. A first install's command line names what it grants, which
 //! the person approves; a signed one goes in unasked within its key's
-//! ceilings; every activation holds the image to its record, its key and the
+//! ceilings; an image uid 0 offers that asks for nothing goes in unasked at
+//! boot; every activation holds the image to its record, its key and the
 //! base's ceiling again. `status`, `build` and `config edit` need nothing,
-//! `activate-all` and `--root` the capabilities their caller holds, and the
-//! rest are privd's `org.slopos.extension.*` actions.
+//! `activate-all`, `install-offered` and `--root` the capabilities their
+//! caller holds, and the rest are privd's `org.slopos.extension.*` actions.
 
 mod accounts;
 mod commands;
@@ -15,7 +16,7 @@ pub(crate) mod store;
 
 use std::fs::OpenOptions;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use slopos_abi::fs::O_NOFOLLOW;
@@ -26,7 +27,8 @@ use slopos_extension_core::grant::Grant;
 use slopos_extension_core::image::{Image, ImageError};
 use slopos_extension_core::keys::{Key, Keys, valid_comment};
 use slopos_extension_core::record::{Installed, Record, valid_fingerprint};
-use slopos_extension_core::{CEILING, LIBC, ceiling, hex, parse_digest, valid_name};
+use slopos_extension_core::sidecar::Sidecar;
+use slopos_extension_core::{CEILING, LIBC, OFFERED, ceiling, hex, parse_digest, valid_name};
 use slopos_tls_core::sshsig::{KEY_TYPE, PublicKey};
 
 use self::accounts::give_uids;
@@ -49,6 +51,8 @@ const USAGE: &str = "usage: extctl <command>
   key remove <SHA256:fingerprint>
   enable|disable|remove|rollback <name>
   activate-all                    run every enabled extension the store holds
+  install-offered [<dir>]         install unasked what uid 0 offers there that
+                                  asks for nothing (default /var/lib/slopos/offered)
   config edit <name> <file>       edit /etc/<name>/<file>, installing it once allowed
   config install <name> <file> <from>
                                   install <from> as /etc/<name>/<file> once allowed
@@ -252,6 +256,7 @@ enum Request {
     Remove(String),
     Rollback(String),
     ActivateAll,
+    Offered(PathBuf),
     ConfigEdit {
         name: String,
         file: String,
@@ -341,6 +346,8 @@ fn parse(args: &[String]) -> Result<Request, String> {
         ["remove", name] => Request::Remove(existing(name)?),
         ["rollback", name] => Request::Rollback(named(name)?),
         ["activate-all"] => Request::ActivateAll,
+        ["install-offered"] => Request::Offered(PathBuf::from(OFFERED)),
+        ["install-offered", dir] => Request::Offered(PathBuf::from(dir)),
         ["config", "edit", name, file] => Request::ConfigEdit {
             name: named(name)?,
             file: config_file(file)?,
@@ -404,6 +411,7 @@ impl Request {
             Request::Status(_)
             | Request::Build { .. }
             | Request::ActivateAll
+            | Request::Offered(_)
             | Request::ConfigEdit { .. }
             | Request::Rooted {
                 command: Rooted::Status(_),
@@ -432,6 +440,7 @@ impl Request {
             Request::Status(_)
             | Request::Build { .. }
             | Request::ActivateAll
+            | Request::Offered(_)
             | Request::ConfigEdit { .. }
             | Request::Rooted { .. } => Ok(()),
         }
@@ -441,6 +450,7 @@ impl Request {
         let settles = !matches!(
             self,
             Request::Status(_)
+                | Request::Offered(_)
                 | Request::Build { .. }
                 | Request::ConfigEdit { .. }
                 | Request::Rooted { .. }
@@ -479,6 +489,7 @@ impl Request {
             Request::Remove(name) => remove(&name),
             Request::Rollback(name) => rollback(&name),
             Request::ActivateAll => activate_all(),
+            Request::Offered(dir) => install_offered(&dir),
             Request::ConfigEdit { name, file } => {
                 let code = configure::edit(&name, &file)?;
                 sys_core::exit_with_code(code)
@@ -553,6 +564,7 @@ enum Voucher {
         sidecar: Vec<u8>,
         signature: Vec<u8>,
     },
+    Offered,
 }
 
 impl Voucher {
@@ -573,12 +585,13 @@ impl Voucher {
         match self {
             Voucher::Person { name, grant } => Authority::Person { name, grant },
             Voucher::Key { sidecar, signature } => Authority::Signed { sidecar, signature },
+            Voucher::Offered => Authority::Offered,
         }
     }
 
     fn signed(&self) -> Option<(&[u8], &[u8])> {
         match self {
-            Voucher::Person { .. } => None,
+            Voucher::Person { .. } | Voucher::Offered => None,
             Voucher::Key { sidecar, signature } => Some((sidecar, signature)),
         }
     }
@@ -704,7 +717,10 @@ fn install(store: &Store, prepared: Prepared, progress: &Progress) -> Result<Str
     let digest = image.digest;
     let version = installed.version;
     let mut record = before.clone().unwrap_or_else(|| Record::new(&name));
-    record.install(installed);
+    match voucher {
+        Voucher::Offered => record.install_offered(installed),
+        _ => record.install(installed),
+    }
     give_uids(store, &mut record)?;
     let bytes = image.bytes();
     store.edit(&name, |edit| {
@@ -1010,6 +1026,133 @@ fn activate_all() -> Result<String, String> {
         said.push(ran.unwrap_or_else(|why| why));
     }
     Ok(said.join("\n"))
+}
+
+/// Whether only uid 0 may write `path` and every directory above it.
+fn uid_0_alone(path: &Path) -> bool {
+    path.is_absolute()
+        && path.ancestors().all(|at| {
+            std::fs::symlink_metadata(at).is_ok_and(|meta| {
+                meta.uid() == 0 && meta.mode() & 0o022 == 0 && (at == path || meta.is_dir())
+            })
+        })
+}
+
+fn offers(dir: &Path) -> Result<Vec<(String, PathBuf, PathBuf)>, String> {
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    if !uid_0_alone(dir) {
+        return Err(format!(
+            "{}: not uid 0's alone, so nothing there is offered",
+            dir.display()
+        ));
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+        let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+        let Some(name) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".ext"))
+            .filter(|n| valid_name(n))
+        else {
+            continue;
+        };
+        let sidecar = dir.join(format!("{name}.meta"));
+        out.push((name.to_owned(), path, sidecar));
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Install each offer its record does not hold back; what it holds back is
+/// passed over in silence, since every boot offers it again.
+fn install_offered(dir: &Path) -> Result<String, String> {
+    let offers = offers(dir)?;
+    if offers.is_empty() {
+        return Ok(String::new());
+    }
+    let store = Store::open(true)?;
+    let mut people = None;
+    let mut said = Vec::new();
+    let mut installed = false;
+    for (name, image, sidecar) in offers {
+        match offer(&store, &mut people, &name, &image, &sidecar) {
+            Ok(Some(done)) => {
+                installed = true;
+                said.push(done);
+            }
+            Ok(None) => {}
+            Err(why) => said.push(why),
+        }
+    }
+    drop((store, people));
+    let after = if installed {
+        settle(false)
+    } else {
+        String::new()
+    };
+    Ok(said.join("\n") + &after)
+}
+
+/// `people` is the accounts lock, taken before the first install; a RAM root
+/// has none.
+fn offer(
+    store: &Store,
+    people: &mut Option<crate::accounts::Store>,
+    name: &str,
+    path: &Path,
+    sidecar: &Path,
+) -> Result<Option<String>, String> {
+    let shown = path.display().to_string();
+    if std::fs::symlink_metadata(sidecar).is_err() {
+        return Err(format!("{shown}: no sidecar beside it"));
+    }
+    if !uid_0_alone(path) || !uid_0_alone(sidecar) {
+        return Err(format!("{shown}: it or its sidecar is not uid 0's alone"));
+    }
+    let said = Sidecar::parse(&read_file(&sidecar.to_string_lossy(), SIDECAR_MAX)?)
+        .filter(|said| said.name == name)
+        .ok_or_else(|| format!("{}: no sidecar of {name}", sidecar.display()))?;
+    let before = store.record(name)?;
+    if !matches!(admit::ahead_offered(before.as_ref(), &said), Ok(None)) {
+        return Ok(None);
+    }
+    let refused = |e: admit::Refusal| format!("{shown}: {e}");
+    let image = open_image(&shown, Some((said.sha256, "its sidecar")))?;
+    let base = Base::read()?;
+    let keys = store.keys()?;
+    let others = others(store, name)?;
+    let admitted = admit::install(
+        before.as_ref(),
+        &image,
+        &Authority::Offered,
+        &base.bounds(&keys),
+        &borrowed(&others),
+    )
+    .map_err(refused)?;
+    let Admitted::Install(installed) = admitted else {
+        return Ok(None);
+    };
+    if people.is_none() && !crate::accounts::in_memory(Path::new("/")) {
+        *people = Some(crate::accounts::Store::write(Path::new("/"))?);
+    }
+    no_person_named(&shown, name, &installed)?;
+    println!(
+        "extctl: installing {name} {}, offered at {shown}",
+        installed.version
+    );
+    let prepared = Prepared::Install {
+        image,
+        path: shown,
+        name: name.to_owned(),
+        voucher: Voucher::Offered,
+        before,
+        installed,
+        libc: base.libc,
+    };
+    install(store, prepared, &Progress::quiet()).map(Some)
 }
 
 /// `command` on the store of the root at `root`, which runs nothing here:

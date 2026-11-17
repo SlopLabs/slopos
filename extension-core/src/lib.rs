@@ -55,6 +55,9 @@ pub fn valid_name(name: &str) -> bool {
 
 /// The store: a directory per extension and the keys the owner trusts.
 pub const STORE: &str = slopos_abi::fs::EXTENSION_STORE;
+/// Images uid 0 offers, `<name>.ext` beside `<name>.meta`, installed unasked
+/// at boot.
+pub const OFFERED: &str = "/var/lib/slopos/offered";
 /// The trusted keys, in the store, as generations: `keys.<n>`.
 pub const KEYS: &str = "keys";
 /// What the store keeps of an extension, in its directory, as generations:

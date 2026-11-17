@@ -1,4 +1,4 @@
 id=org.slopos.files
 name=Files
-exec=/usr/local/bin/file_manager
+exec=/opt/slopos-essentials/bin/file_manager
 icon=org.slopos.files.png

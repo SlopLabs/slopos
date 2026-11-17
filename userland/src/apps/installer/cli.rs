@@ -55,7 +55,7 @@ const USAGE: &str = "usage: installer [--disk /dev/<disk>] [--mode erase|free|re
                  and the rest stays free
   --root         the partition reuse installs SlopOS on
   --keep-root    keep the SlopOS that partition holds, its accounts and their
-                 files, updating /usr/local
+                 files, offering it this medium's software
   --format-root  erase it instead
   --remote       the address /src/slopos fetches from and pushes to
   --first        put SlopOS first in the startup order
@@ -346,7 +346,7 @@ fn settle(opts: Options, system: &mut System) -> Result<(Choices, Settled), Stri
             Some(keep) => keep,
             None if slopos => ask_yes(
                 &format!(
-                    "{} holds SlopOS: keep its accounts and their files, updating /usr/local",
+                    "{} holds SlopOS: keep its accounts and their files, offering it this medium's software",
                     open.node(*root).map_err(issue)?
                 ),
                 true,

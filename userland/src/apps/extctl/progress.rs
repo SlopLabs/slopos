@@ -42,12 +42,16 @@ struct Copy {
 }
 
 impl Progress {
-    pub fn on_terminal() -> Progress {
-        let mut progress = Progress {
+    pub fn quiet() -> Progress {
+        Progress {
             shared: None,
             ticker: None,
             started: Instant::now(),
-        };
+        }
+    }
+
+    pub fn on_terminal() -> Progress {
+        let mut progress = Progress::quiet();
         if !fs::isatty(2) {
             return progress;
         }

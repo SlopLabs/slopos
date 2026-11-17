@@ -35,7 +35,7 @@ fn slopos_s_types_are_named_by_role_and_others_as_fdisk_names_them() {
 #[test]
 fn a_root_needs_the_payload_and_room_to_build_beside_it() {
     assert_eq!(root_min(None), GIB);
-    assert_eq!(root_min(Some(3 * GIB)), 9 * GIB);
+    assert_eq!(root_min(Some(3 * GIB)), 12 * GIB);
 }
 
 #[test]

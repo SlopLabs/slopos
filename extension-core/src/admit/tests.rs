@@ -520,3 +520,83 @@ fn two_extensions_never_declare_one_user() {
         "hel declares the user hello",
     );
 }
+
+fn offered(version: u64) -> Vec<u8> {
+    let mut packer = Packer::default();
+    let program = build(Kind::Executable, Some(INTERPRETER), &["libc.so"], &[], &[]);
+    packer.add("/bin/hi", S_IFREG | 0o755, program);
+    packer
+        .finish(
+            &alloc::format!("name hello\nversion {version}\n"),
+            "command hi\n",
+        )
+        .unwrap()
+}
+
+fn sidecar_of(bytes: &[u8]) -> Sidecar {
+    let image = Image::check(bytes).unwrap();
+    Sidecar {
+        name: image.release.name.clone(),
+        version: image.release.version,
+        sha256: image.digest,
+    }
+}
+
+#[test]
+fn an_offered_image_goes_in_unasked_only_asking_for_nothing() {
+    let owner = Owner::new(CEILING, 0);
+    let got = installed(owner.whole(None, &offered(1), &Authority::Offered));
+    assert_eq!((got.signer, got.grant.commands), (None, vec!["hi".into()]));
+    refused(
+        owner.whole(
+            None,
+            &image(1, "NetAdmin", "", &["puts"]),
+            &Authority::Offered,
+        ),
+        "asks for a user",
+    );
+}
+
+#[test]
+fn an_offer_goes_above_the_floor_and_over_nothing_a_person_or_key_decided() {
+    let owner = Owner::new(CEILING, 0);
+    let (v1, v2) = (offered(1), offered(2));
+    let mut record = Record::new("hello");
+    record.install_offered(installed(owner.whole(None, &v1, &Authority::Offered)));
+    assert!(record.enabled);
+    assert_eq!(
+        ahead_offered(Some(&record), &sidecar_of(&v1)),
+        Ok(Some(Admitted::Current))
+    );
+    assert_eq!(ahead_offered(Some(&record), &sidecar_of(&v2)), Ok(None));
+    record.enabled = false;
+    record.install_offered(installed(owner.whole(
+        Some(&record),
+        &v2,
+        &Authority::Offered,
+    )));
+    assert!(
+        !record.enabled,
+        "an offer re-enabled what the person disabled"
+    );
+    refused(
+        owner.whole(Some(&record), &v1, &Authority::Offered),
+        "older than version 2",
+    );
+    record.roll_back().unwrap();
+    refused(
+        owner.whole(Some(&record), &v2, &Authority::Offered),
+        "version 2 was rolled back from",
+    );
+    record.remove();
+    refused(
+        ahead_offered(Some(&record), &sidecar_of(&offered(3))).map(|_| Admitted::Current),
+        "it was removed",
+    );
+    let mut signed = Record::new("hello");
+    signed.install(installed(owner.signed(None, &v1)));
+    refused(
+        owner.whole(Some(&signed), &v2, &Authority::Offered),
+        "only that key's updates",
+    );
+}

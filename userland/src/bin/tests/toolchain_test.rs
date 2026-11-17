@@ -1,11 +1,12 @@
 use slopos_userland as _;
 
 use slopos_abi::fs::DEFAULT_PATH;
+use slopos_extension_core::OFFERED;
 use slopos_slibc::test_harness::note;
 use slopos_tls_core::pem;
 use slopos_tls_core::server::{Server, ServerConfig};
 use slopos_tls_core::testpki::{self, Key, Profile};
-use slopos_userland::selfhost::{SCRATCH, SOURCE, TOOLCHAIN_OFFER};
+use slopos_userland::selfhost::{SCRATCH, SOURCE};
 use slopos_userland::tls::{self, CipherSuite};
 use std::ffi::OsStr;
 use std::fs;
@@ -31,7 +32,7 @@ fn toolchain() -> Result<&'static str, bool> {
         Ok(Some(prefix)) => Ok(prefix),
         Ok(None) => {
             note(&format!(
-                "the root carries no toolchain image at {TOOLCHAIN_OFFER}"
+                "the root is offered no toolchain image at {OFFERED}"
             ));
             Err(true)
         }

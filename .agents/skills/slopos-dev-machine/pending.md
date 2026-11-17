@@ -44,21 +44,19 @@
 - `just` is a program of the toolchain (`toolchain/recipes/just/`, the `cargo`
   recipe template); `toolchain_test`'s rung `just_runs_a_justfile` runs a
   justfile and has the clone's `just boot` refuse.
-- The persistent and self-hosting roots carry the toolchain image
-  (`builddir/slopos-toolchain/image`, or `TOOLCHAIN_STAGE`) as the host tree
-  `/var/lib/slopos/toolchain`, not a tree at `/usr/local`. A person installs
-  it with `extctl install /var/lib/slopos/toolchain/slopos-toolchain.ext`.
-  `selfhost::toolchain` holds the store's current image to the root its
-  sidecar names and installs it when it is another and the caller is uid 0:
-  `utest_install_toolchain` (`toolchain_test --install`) does that before the
-  session's `utest_reboot_clone`, `utest_selfhost` and `utest_toolchain`,
-  which are `rank = 1` (`utest_libc_abi`, last, is `rank = 2`), and
-  `test-selfhost` names it beside `*selfhost*`. `toolchain_test`'s first rung
-  holds the shown image to that root and `/opt/bin`'s commands to it; its
-  rung 14 holds it to the clone's toolchain identity. The install medium's
-  payload still lays the tree out at `/usr/local`, which `selfhost::workspace`
-  and the justfile's `recipes_prefix` accept; git's helpers and ssh's
-  configuration are not found there.
-- A persistent root made before this keeps its `/usr/local` toolchain tree,
-  which `PATH` finds before `/opt/bin`; `build_userland.sh` refuses it, having
-  no identity.
+- The persistent and self-hosting roots offer the toolchain image
+  (`builddir/slopos-toolchain/image`, or `TOOLCHAIN_STAGE`) and the apps'
+  (`builddir/slopos-essentials`) as host trees `slopos-toolchain` and
+  `slopos-essentials` in `/var/lib/slopos/offered`; the shipped and tests
+  roots offer the apps' alone. Init installs each at boot; one the guest
+  installed since stands, by its floor. `selfhost::toolchain` holds the shown
+  image to the offered sidecar and installs nothing; `utest_install_toolchain`
+  (`toolchain_test --install`) keeps its place before the session's
+  `utest_reboot_clone`, `utest_selfhost` and `utest_toolchain` (`rank = 1`).
+  `toolchain_test`'s first rung holds `/opt/bin`'s commands to the shown
+  image; its rung 14 holds it to the clone's identity. `selfhost::workspace`
+  no longer takes a `/usr/local` toolchain.
+- A persistent root made before this keeps its `/usr/local` trees: the
+  toolchain's, which `PATH` finds before `/opt/bin` and `build_userland.sh`
+  refuses, and the apps', whose entries replace the image's in the dock.
+  `just reset root` drops them.

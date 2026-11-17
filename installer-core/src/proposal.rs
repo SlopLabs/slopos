@@ -93,7 +93,7 @@ pub enum Part {
 /// What an install sets up beside the partitions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Setup {
-    /// Whether `/usr/local` gets the medium's toolchain.
+    /// Whether the root is offered the medium's toolchain image.
     pub toolchain: bool,
     /// Where `/src/slopos` fetches from, when the medium carries a clone.
     pub remote: Option<String>,
@@ -333,7 +333,7 @@ impl Proposal {
         }
         let setup = &self.setup;
         if setup.toolchain {
-            lines.push("Developer tools at /usr/local, from the installer".into());
+            lines.push("Developer tools at /opt/slopos-toolchain, from the installer".into());
         }
         match &setup.remote {
             Some(url) if self.keeps_root() => lines.push(format!(

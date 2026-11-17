@@ -126,12 +126,12 @@ pub fn disk_stamp(path: &str) -> Option<DiskStamp> {
 }
 
 /// The editor's manual: `slopos/doc/editor.md` in the first share holding it,
-/// ranked as the dock ranks the shares' app entries.
+/// the person's, then the image the editor ships in, then the base's.
 pub fn manual() -> Option<String> {
     let person = std::env::home_dir().map(|home| home.join(".local/share"));
     person
         .into_iter()
-        .chain(["/usr/local/share", "/usr/share"].map(PathBuf::from))
+        .chain(["/opt/slopos-essentials/share", "/usr/share"].map(PathBuf::from))
         .map(|share| share.join("slopos/doc/editor.md"))
         .find(|path| path.is_file())
         .and_then(|path| path.into_os_string().into_string().ok())

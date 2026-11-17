@@ -17,10 +17,16 @@ const HOME: &str = "/var/tmp/dock_test";
 const INSTALLER: &str = "org.slopos.installer";
 
 const INSTALLED: &[(&str, &str)] = &[
-    ("org.slopos.breach", "/usr/local/bin/breach"),
-    ("org.slopos.editor", "/usr/local/bin/editor"),
-    ("org.slopos.files", "/usr/local/bin/file_manager"),
-    ("org.slopos.image-viewer", "/usr/local/bin/image_viewer"),
+    ("org.slopos.breach", "/opt/slopos-essentials/bin/breach"),
+    ("org.slopos.editor", "/opt/slopos-essentials/bin/editor"),
+    (
+        "org.slopos.files",
+        "/opt/slopos-essentials/bin/file_manager",
+    ),
+    (
+        "org.slopos.image-viewer",
+        "/opt/slopos-essentials/bin/image_viewer",
+    ),
     ("org.slopos.settings", "/bin/settings"),
     ("org.slopos.sysmon", "/bin/sysmon"),
     ("org.slopos.terminal", "/bin/terminal"),
@@ -33,7 +39,7 @@ fn pinned(home: Option<&str>, medium: bool) -> (Vec<AppEntry>, Dock) {
     (entries, dock)
 }
 
-/// The dock pins every entry the base and `/usr/local` carry, in the order
+/// The dock pins every entry the base and slopos-essentials carry, in the order
 /// read, each launching an executable and showing an icon that decodes.
 fn the_dock_pins_every_installed_app() -> bool {
     let (entries, dock) = pinned(None, false);

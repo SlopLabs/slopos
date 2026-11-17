@@ -1,8 +1,8 @@
 //! The install medium the live system serves: what the loader brought at
 //! [`layout::MEDIUM_DIR`] — the kernel every slot gets, the base every slot
-//! boots and Limine for the ESP — and on a stick built with the payload, the
-//! partition the kernel mounts at [`layout::PAYLOAD_DIR`], the toolchain for
-//! `/usr/local` and a clone of the source for `/src`.
+//! boots, Limine for the ESP and the apps' image — and on a stick built with
+//! the payload, the partition the kernel mounts at [`layout::PAYLOAD_DIR`],
+//! the toolchain's image and a clone of the source for `/src`.
 
 use std::fs;
 use std::path::PathBuf;
@@ -17,7 +17,7 @@ pub struct Medium {
     /// The GPT disk GUID its image was built with: the disk never offered.
     pub disk_guid: Guid,
     payload: bool,
-    /// Whether the payload carries the toolchain for `/usr/local`.
+    /// Whether the payload carries the toolchain's image.
     pub toolchain: bool,
     /// Whether the payload carries the clone for `/src`.
     pub source: bool,
@@ -93,15 +93,16 @@ impl Medium {
             layout::MEDIUM_LOADER_LICENSE,
             layout::MEDIUM_LOADER_NOTICES,
             layout::MEDIUM_NOTICE,
-            layout::MEDIUM_APPS,
+            layout::MEDIUM_IMAGES,
         ] {
             if !medium.has(file) {
                 return Err(format!("{} is missing", medium.path(file).display()));
             }
         }
-        let toolchain_manifest = slopos_tree_core::manifest_path(slopos_tree_core::TOOLCHAIN);
+        let toolchain = format!("{}/{}.ext", layout::MEDIUM_IMAGES, root::TOOLCHAIN);
+        let sidecar = format!("{}/{}.meta", layout::MEDIUM_IMAGES, root::TOOLCHAIN);
         for (tree, needs) in [
-            (root::LOCAL, toolchain_manifest.as_str()),
+            (toolchain.as_str(), sidecar.as_str()),
             (root::SOURCE, "/src/slopos/.git/config"),
         ] {
             if medium.payload_has(tree) && !medium.payload_has(needs) {
@@ -110,7 +111,7 @@ impl Medium {
                 ));
             }
         }
-        medium.toolchain = medium.payload_has(root::LOCAL);
+        medium.toolchain = medium.payload_has(&toolchain);
         medium.source = medium.payload_has(root::SOURCE);
         if !payload {
             medium.unmounted_payload = unmounted_payload(disk_guid);

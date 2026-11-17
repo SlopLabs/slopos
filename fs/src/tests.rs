@@ -3146,6 +3146,57 @@ pub fn test_sealed_inode_refuses_mutation() -> TestResult {
     TestResult::Pass
 }
 
+/// A RAM file's seal comes off for `Seal` alone, as on ext4.
+pub fn test_ram_seal_comes_off_only_with_seal() -> TestResult {
+    use crate::vfs::{VfsError, vfs_open, vfs_set_sealed};
+    use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
+    use slopos_ostd::authority::{Capability, Seal, check_mask};
+
+    if !ensure_vfs_ready() {
+        return TestResult::Fail;
+    }
+    const FILE: &[u8] = b"/tmp/seal_comes_off";
+    let Ok(file) = vfs_open(FILE, true) else {
+        return slopos_testing::fail!("could not create the fixture");
+    };
+    if file.write(0, b"original").is_err() || vfs_set_sealed(FILE).is_err() {
+        return slopos_testing::fail!("could not seal the fixture");
+    }
+    let flags = file.fs.inode_flags(file.inode).unwrap_or(0);
+    if flags & FS_IMMUTABLE_FL == 0 {
+        return slopos_testing::fail!("a sealed RAM file reports flags {:#x}", flags);
+    }
+    if !matches!(
+        file.fs.set_inode_flags(file.inode, 0, None),
+        Err(VfsError::PermissionDenied)
+    ) {
+        return slopos_testing::fail!("the seal came off without Seal");
+    }
+    let holder = ();
+    let Ok(seal) = check_mask::<Seal, _>(&holder, Capability::Seal.bit()) else {
+        return slopos_testing::fail!("the test holds no Seal");
+    };
+    if file.fs.set_inode_flags(file.inode, 0, Some(&seal)).is_err() {
+        return slopos_testing::fail!("Seal could not take the seal off");
+    }
+    if file.write(0, b"changed").is_err() {
+        return slopos_testing::fail!("an unsealed RAM file refused a write");
+    }
+    if file
+        .fs
+        .set_inode_flags(file.inode, FS_IMMUTABLE_FL, Some(&seal))
+        .is_err()
+        || !matches!(file.write(0, b"x"), Err(VfsError::PermissionDenied))
+    {
+        return slopos_testing::fail!("the seal did not go back on");
+    }
+    let _ = file.fs.set_inode_flags(file.inode, 0, Some(&seal));
+    if vfs_unlink(FILE).is_err() {
+        return slopos_testing::fail!("the unsealed fixture could not be removed");
+    }
+    TestResult::Pass
+}
+
 /// A filesystem that cannot store the bit refuses to be asked, rather than
 /// reporting success and leaving the caller believing a file is protected.
 pub fn test_set_sealed_defaults_closed() -> TestResult {
@@ -3272,6 +3323,7 @@ pub fn test_readonly_maps_to_erofs() -> TestResult {
 }
 
 slopos_testing::stest!(name = test_sealed_inode_refuses_mutation);
+slopos_testing::stest!(name = test_ram_seal_comes_off_only_with_seal);
 slopos_testing::stest!(name = test_set_sealed_defaults_closed);
 slopos_testing::stest!(name = test_rdonly_mount_refuses_mutation);
 slopos_testing::stest!(name = test_readonly_maps_to_erofs);

@@ -5,38 +5,39 @@ set -euo pipefail
 # beside the kernel and base it booted, carried by the loader as its `install`
 # module.
 #
-# Usage: build_install_medium.sh <out.cpio> [<toolchain>]
+# Usage: build_install_medium.sh <out.cpio> [<toolchain image dir>]
 #
 # Always Limine's loader, its licence and notices, and NOTICE.md, under boot/,
 # which the installer puts on the ESP and beside the slots, with the GPT disk
 # GUID chosen for this medium, also left beside the archive as
 # <out.cpio>.disk-guid for scripts/build_iso.sh to build the image with; under
-# apps/ the apps outside the base, which the installer puts at /usr/local and
-# a live boot's init at its RAM root's; under sources/
-# the pinned tarball and recipe of each recipe the base takes programs from,
-# with the scripts that build them, the source of what the medium distributes
-# of them.
-# Given a toolchain, the payload as well, an ext4 volume left beside the
-# archive as <out.cpio>.payload, which build_iso.sh appends to the image as a
-# partition the kernel mounts: the toolchain at usr/local, the manifest an
-# install records for it at var/lib/slopos/trees/usr_local, and at src/ a
-# `--vendored` clone of HEAD whose origin is GitHub, which the installer
-# points at whatever remote the user names, with every recipe's tarball in its
-# third_party/recipes/. The volume is in the profile, shrunk with resize2fs -M
-# and given ext4's read-only feature, which mke2fs refuses at creation, so no
-# system that mounts it writes it.
+# images/ the apps' image slopos-essentials beside its sidecar, which the
+# installer offers the new root and a live boot's init installs into its RAM
+# root; under sources/ the pinned tarball and recipe of each recipe the base
+# takes programs from, with the scripts that build them, the source of what
+# the medium distributes of them.
+# Given the directory `just toolchain` packed the toolchain's image into, the
+# payload as well, an ext4 volume left beside the archive as
+# <out.cpio>.payload, which build_iso.sh appends to the image as a partition
+# the kernel mounts: the image and its sidecar under images/, which the
+# installer offers the new root, and at src/ a `--vendored` clone of HEAD
+# whose origin is GitHub, which the installer points at whatever remote the
+# user names, with every recipe's tarball in its third_party/recipes/. The
+# volume is in the profile, shrunk with resize2fs -M and given ext4's
+# read-only feature, which mke2fs refuses at creation, so no system that
+# mounts it writes it.
 #
 # Environment:
 #   LIMINE_DIR       Limine's binaries (default: third_party/limine)
 #   CARGO            cargo command, split on blanks (default: cargo)
 #   CARGO_TARGET_DIR where the packer is built (default: <out dir>/target)
-#   APPS_TREE        the apps tree scripts/build_userland.sh staged
-#                    (default: <out dir>/apps)
+#   ESSENTIALS       the directory the userland build packed the apps' image
+#                    into (default: <out dir>/slopos-essentials)
 
 SELF="build_install_medium"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-USAGE="usage: $SELF.sh <out.cpio> [<toolchain>]"
+USAGE="usage: $SELF.sh <out.cpio> [<toolchain image dir>]"
 REMOTE="https://github.com/SlopLabs/slopos"
 
 OUT="${1:?$USAGE}"
@@ -49,7 +50,8 @@ die() {
     exit 1
 }
 
-[ -z "$TOOLCHAIN" ] || [ -x "$TOOLCHAIN/bin/rustc" ] || die "$TOOLCHAIN holds no toolchain; run just toolchain"
+[ -z "$TOOLCHAIN" ] || { [ -f "$TOOLCHAIN/slopos-toolchain.ext" ] && [ -f "$TOOLCHAIN/slopos-toolchain.meta" ]; } ||
+    die "$TOOLCHAIN holds no toolchain image; run just toolchain"
 "$SCRIPT_DIR/ensure_limine.sh"
 . "$SCRIPT_DIR/lib/bootdisk.sh"
 bootdisk_layout
@@ -61,19 +63,28 @@ OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 STAGE="$(mktemp -d "$OUT_DIR/.medium.XXXXXX")"
 trap 'rm -rf "$STAGE"; rm -f "$OUT.tmp" "$OUT.disk-guid.tmp" "$OUT.payload.tmp"' EXIT INT TERM
 
-# The toolchain and the staged clone, every path a file of its own as
+# Linked where it can be: the toolchain's is a gigabyte.
+stage_image() {
+    local from="$1" name="$2" to="$3" ext
+    mkdir -p "$to"
+    for ext in ext meta; do
+        [ -f "$from/$name.$ext" ] || die "$from holds no $name.$ext"
+        ln "$from/$name.$ext" "$to/" 2>/dev/null || cp "$from/$name.$ext" "$to/"
+    done
+}
+
+# The toolchain's image and the staged clone, every path a file of its own as
 # fs_tree.py writes it, in a volume sized for them and then shrunk.
 payload_volume() {
     local image="$1" bytes entries inodes said block blocks
-    read -r bytes entries < <(find -H "$TOOLCHAIN" "$STAGE/src" -printf '%s\n' |
+    read -r bytes entries < <(find -H "$STAGE/payload-images" "$STAGE/src" -printf '%s\n' |
         awk '{ total += $1 } END { print total, NR }')
     inodes=$((entries + entries / 10 + 1024))
     rm -f "$image"
     truncate -s "$(((bytes + entries * 4096 + inodes * 256) * 21 / 20 + (64 << 20)))" "$image"
     ext4_mkfs_args
     mke2fs -q -F "${EXT4_MKFS_ARGS[@]}" -J size=4 -m 0 -N "$inodes" "$image"
-    python3 "$SCRIPT_DIR/fs_tree.py" install "$image" "$TOOLCHAIN" /usr/local \
-        --manifests "$STAGE/manifests" --name usr_local
+    python3 "$SCRIPT_DIR/fs_tree.py" install "$image" "$STAGE/payload-images" "/$MEDIUM_IMAGES"
     python3 "$SCRIPT_DIR/fs_tree.py" install "$image" "$STAGE/src" /src
     # 1: debugfs left counts e2fsck corrected.
     e2fsck -fp "$image" >/dev/null || [ $? -eq 1 ] || die "e2fsck refused the payload before it was shrunk"
@@ -111,11 +122,13 @@ for script in build_recipes.sh make_slopos_cross.sh cxx_host_tools.sh make_slopo
 done
 trees+=("$STAGE/sources=sources")
 
-APPS_TREE="${APPS_TREE:-$OUT_DIR/apps}"
-[ -d "$APPS_TREE/bin" ] || die "$APPS_TREE holds no apps; build the userland first"
-trees+=("$APPS_TREE=$MEDIUM_APPS")
+ESSENTIALS="${ESSENTIALS:-$OUT_DIR/slopos-essentials}"
+[ -f "$ESSENTIALS/slopos-essentials.ext" ] || die "$ESSENTIALS holds no apps' image; build the userland first"
+stage_image "$ESSENTIALS" slopos-essentials "$STAGE/images"
+trees+=("$STAGE/images=$MEDIUM_IMAGES")
 
 if [ -n "$TOOLCHAIN" ]; then
+    stage_image "$TOOLCHAIN" slopos-toolchain "$STAGE/payload-images"
     "$SCRIPT_DIR/stage_workspace.sh" "$STAGE/src" --vendored --remote "$REMOTE"
     mkdir -p "$STAGE/src/slopos/third_party/recipes"
     "$SCRIPT_DIR/build_recipes.sh" --fetch-source | while IFS= read -r tarball; do

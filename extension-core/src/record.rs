@@ -152,6 +152,13 @@ impl Record {
         }
     }
 
+    /// [`Self::install`], leaving one the person disabled disabled.
+    pub fn install_offered(&mut self, image: Installed) {
+        let disabled = !self.enabled && self.why.is_none() && self.current.is_some();
+        self.install(image);
+        self.enabled &= !disabled;
+    }
+
     /// The previous image made current and the current one previous; the
     /// floor falls to the one that runs, which is refused no longer, and the
     /// version left is refused until a newer one installs.

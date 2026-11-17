@@ -1,8 +1,9 @@
 //! Whether an image goes in, and whether an installed one may run. Three
 //! things stay apart: the measurement, the digest of the bytes the kernel is
 //! to serve; the authority that vouched for them, a person's approval of a
-//! grant or a trusted key's signature; and the grant, which every activation
-//! holds again to the key's ceilings and the base's.
+//! grant, a trusted key's signature or uid 0's offer of an image that asks
+//! for nothing; and the grant, which every activation holds again to the
+//! key's ceilings and the base's.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -33,6 +34,8 @@ pub enum Authority<'a> {
         sidecar: &'a [u8],
         signature: &'a [u8],
     },
+    /// uid 0 offered it; it asks for nothing ([`offerable`]).
+    Offered,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -106,6 +109,11 @@ pub fn install<S: Source>(
             within_key(&declared, &image.declaration, key)?;
             Some(fingerprint)
         }
+        Authority::Offered => {
+            offerable(&image.declaration)?;
+            over_offered(record, release.version)?;
+            None
+        }
     };
     if let Some(admitted) = beside(record, release.version, digest)? {
         return Ok(admitted);
@@ -137,6 +145,52 @@ pub fn ahead(
     }
     under_key(record, &key.key.fingerprint(), said.version)?;
     beside(record, said.version, said.sha256)
+}
+
+/// [`ahead`] for an offered image.
+pub fn ahead_offered(record: Option<&Record>, said: &Sidecar) -> Result<Option<Admitted>, Refusal> {
+    if record.is_some_and(|r| r.name != said.name) {
+        return refuse("the sidecar describes another image");
+    }
+    over_offered(record, said.version)?;
+    beside(record, said.version, said.sha256)
+}
+
+/// Only an image that hands out nothing goes in unasked.
+pub fn offerable(declaration: &crate::declare::Declaration) -> Result<(), Refusal> {
+    let asks = [
+        (!declaration.users.is_empty(), "a user"),
+        (!declaration.services.is_empty(), "a service"),
+        (!declaration.actions.is_empty(), "an action"),
+        (declaration.state, "/var/lib/<name>"),
+        (declaration.config, "/etc/<name>"),
+        (declaration.runtime, "/run/<name>"),
+    ];
+    match asks.iter().find(|(asked, _)| *asked) {
+        Some((_, what)) => refuse(format!(
+            "it asks for {what}, so it goes in only as a person allows it"
+        )),
+        None => Ok(()),
+    }
+}
+
+/// An offer replaces only what nobody signed, removed or rolled back from.
+fn over_offered(record: Option<&Record>, version: u64) -> Result<(), Refusal> {
+    let Some(record) = record else {
+        return Ok(());
+    };
+    if record.signer.is_some() {
+        return refuse("a key installed it, so only that key's updates replace it");
+    }
+    if record.current.is_none() {
+        return refuse("it was removed, so it goes back in only as a first install");
+    }
+    if record.refused.contains(&version) {
+        return refuse(format!(
+            "version {version} was rolled back from, so it goes in only as a first install"
+        ));
+    }
+    Ok(())
 }
 
 fn under_key(record: Option<&Record>, fingerprint: &str, version: u64) -> Result<(), Refusal> {

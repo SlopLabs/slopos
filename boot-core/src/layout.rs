@@ -79,8 +79,9 @@ pub const MEDIUM_NOTICE: &str = "boot/NOTICE.md";
 /// The GPT disk GUID the medium's image was built with, spelled out: the
 /// disk the installer never offers, however the loader was started.
 pub const MEDIUM_DISK_GUID: &str = "boot/disk-guid";
-/// The apps outside the base, as the tree an install puts at `/usr/local`.
-pub const MEDIUM_APPS: &str = "apps";
+/// The images the medium offers, `<name>.ext` beside its sidecar: the apps'
+/// in the archive, the toolchain's on the payload.
+pub const MEDIUM_IMAGES: &str = "images";
 
 /// Where the live system mounts the medium's payload partition, which holds
 /// the toolchain and the clone where an installed root has them.

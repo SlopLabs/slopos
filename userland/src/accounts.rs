@@ -58,8 +58,8 @@ fn under(top: &Path, path: &str) -> PathBuf {
     top.join(path.trim_start_matches('/'))
 }
 
-/// Whether the root at `top` keeps its records in memory, where a seal is for
-/// good and nothing could be changed a second time.
+/// Whether the root at `top` keeps its records in memory, which a boot from
+/// the install medium does and nobody's account outlives.
 pub fn in_memory(top: &Path) -> bool {
     under(top, ACCOUNTS_STORE).parent().is_some_and(on_ram)
 }
@@ -84,7 +84,7 @@ impl Store {
 
     /// The store of the root at `top` to change: every other writer locked
     /// out, and its directory made uid 0's alone and sealed. A root in memory
-    /// keeps a seal for good, so it keeps the one person's record.
+    /// keeps the one person's record, which nobody changes.
     pub fn write(top: &Path) -> Result<Store, String> {
         let mut store = Store::read(top);
         let parent = store.dir.parent().ok_or("the store has no parent")?;
@@ -94,7 +94,7 @@ impl Store {
             open_dir(&walked).map_err(|e| shown(&walked, e))?;
         }
         if on_ram(parent) {
-            return Err("accounts need a disk root: a RAM root keeps every seal for good".into());
+            return Err("accounts need a disk root: a RAM root keeps nobody past the boot".into());
         }
         let mut at = store.dir.clone().into_os_string();
         at.push(".lock");

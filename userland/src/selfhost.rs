@@ -1,5 +1,5 @@
 //! The self-hosting workspace as a test sees it: the clone the host seeds at
-//! `/src/slopos`, built with the toolchain image the host puts beside it.
+//! `/src/slopos`, built with the toolchain image the root is offered.
 
 use std::ffi::OsStr;
 use std::io::ErrorKind;
@@ -10,34 +10,28 @@ use std::process::{Command, Stdio};
 use std::sync::LazyLock;
 
 use slopos_abi::fs::{DEFAULT_PATH, SESSION_GID, SESSION_UID};
+use slopos_extension_core::OFFERED;
 use slopos_extension_core::declare::mount_point;
-use slopos_extension_core::hex;
 use slopos_extension_core::sidecar::Sidecar;
-use slopos_priv_core::ENV_FD;
 
 use crate::apps::extctl::store::Store;
 
 pub const SOURCE: &str = "/src/slopos";
 /// Room on the root disk; `/tmp` is memory.
 pub const SCRATCH: &str = "/var/tmp";
-/// Where the host puts the toolchain image it built, `<name>.ext` beside its
-/// sidecar, for a test to install.
-pub const TOOLCHAIN_OFFER: &str = "/var/lib/slopos/toolchain";
 const TOOLCHAIN: &str = "slopos-toolchain";
 static TOOLCHAIN_MOUNT: LazyLock<String> = LazyLock::new(|| mount_point(TOOLCHAIN));
 static TOOLCHAIN_SHOWN: LazyLock<Result<Option<&'static str>, String>> =
-    LazyLock::new(install_toolchain);
+    LazyLock::new(shown_toolchain);
 
-/// The toolchain image the host put on this root, shown at
-/// `/opt/slopos-toolchain` as the root its sidecar names: installed by
-/// `extctl` the first time a uid 0 process asks when the store's is another
-/// one; `None` on a root the host put none on.
+/// `/opt/slopos-toolchain`, once it shows the image the root is offered;
+/// `None` on a root offered none.
 pub fn toolchain() -> Result<Option<&'static str>, String> {
     TOOLCHAIN_SHOWN.clone()
 }
 
-fn install_toolchain() -> Result<Option<&'static str>, String> {
-    let meta = format!("{TOOLCHAIN_OFFER}/{TOOLCHAIN}.meta");
+fn shown_toolchain() -> Result<Option<&'static str>, String> {
+    let meta = format!("{OFFERED}/{TOOLCHAIN}.meta");
     let text = match std::fs::read(&meta) {
         Ok(text) => text,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
@@ -49,29 +43,9 @@ fn install_toolchain() -> Result<Option<&'static str>, String> {
         .sha256;
     let mount = TOOLCHAIN_MOUNT.as_str();
     if shown_root() != Some(want) {
-        if crate::syscall::process::geteuid() != 0 {
-            return Err(format!(
-                "{mount} does not show the image {meta} names, which only uid 0 installs here"
-            ));
-        }
-        let image = format!("{TOOLCHAIN_OFFER}/{TOOLCHAIN}.ext");
-        // A privd connection handed down speaks for whoever made it, who
-        // would be asked; extctl's own speaks for this process.
-        let out = Command::new("/bin/extctl")
-            .args(["install", &image, &hex(&want)])
-            .env_remove(ENV_FD)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| format!("extctl: {e}"))?;
-        if !out.status.success() {
-            return Err(format!(
-                "extctl install {image}: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-        if shown_root() != Some(want) {
-            return Err(format!("{mount} does not show the image {meta} names"));
-        }
+        return Err(format!(
+            "{mount} does not show the image {meta} names, which init installs at boot"
+        ));
     }
     Ok(Some(mount))
 }
@@ -84,18 +58,15 @@ fn shown_root() -> Option<[u8; 32]> {
     record.current.map(|image| image.sha256)
 }
 
-/// The workspace, or why there is none to build. The install medium's payload
-/// still lays the toolchain out at `/usr/local`, where a root it installed
-/// keeps it.
+/// The workspace, or why there is none to build.
 pub fn workspace() -> Result<&'static str, &'static str> {
     if !Path::new(SOURCE).join(".git").is_dir() {
         return Err("no clone at /src/slopos");
     }
     match toolchain() {
         Ok(Some(_)) => Ok(SOURCE),
-        Ok(None) if Path::new("/usr/local/bin/cargo").is_file() => Ok(SOURCE),
         Ok(None) => Err("no toolchain on this root"),
-        Err(_) => Err("the toolchain image this root carries does not install"),
+        Err(_) => Err("the toolchain image this root is offered is not shown"),
     }
 }
 

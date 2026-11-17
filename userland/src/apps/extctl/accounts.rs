@@ -27,7 +27,12 @@ pub fn give_uids(store: &Store, record: &mut Record) -> Result<(), String> {
     accounts::allocate(record, &others).map_err(|e| format!("{}: {e}", record.name))
 }
 
-/// Write the database the records describe beside the people.
+/// Write the database the records describe beside the people; a RAM root
+/// keeps none.
 pub fn sync() -> Result<(), String> {
-    crate::accounts::Store::write(Path::new("/"))?.sync()
+    let top = Path::new("/");
+    if crate::accounts::in_memory(top) {
+        return Ok(());
+    }
+    crate::accounts::Store::write(top)?.sync()
 }

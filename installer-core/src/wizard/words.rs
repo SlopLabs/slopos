@@ -556,7 +556,7 @@ impl Wizard {
         lines.push((
             "Developer tools",
             match (p.setup.toolchain, self.system.as_ref().map(|s| &s.medium)) {
-                (true, _) => "Installed at /usr/local".into(),
+                (true, _) => "Installed at /opt/slopos-toolchain".into(),
                 (false, Some(m)) if m.unmounted_payload.is_some() => {
                     "Not installed, since they couldn't be read".into()
                 }

@@ -19,11 +19,10 @@ An extension is already this image. The work is to make it the only form.
 ## What stands today
 
 Software outside the base has two forms. An extension is one ext4 image
-with a verity tree, installed by `extctl`; the toolchain is one,
-`slopos-toolchain`. A tree is files copied into `/usr/local` or `~/.local`
-by `tree-install`, with a manifest of what was copied: `apps` on every
-root, and `usr_local`, the toolchain image's tree, on a root the install
-medium's payload filled.
+with a verity tree, installed by `extctl`; the toolchain and the apps are
+two, which every root is offered. A tree is files copied into `/usr/local`
+or `~/.local` by `tree-install`, with a manifest of what was copied; no root
+carries one any more.
 
 `/usr/local` is a directory the first person owns that is on everyone's
 search path, and the tree guards it in five places: the hand-over to uid 0
@@ -123,9 +122,7 @@ changes what phase 7 stores.
 ## Phase 1: the toolchain is built as an image — done
 
 `just toolchain` ends in `slopos-toolchain.ext`, held to every check an
-install makes. Until phase 4 a root carries it as a file at
-`/var/lib/slopos/toolchain` that a test or a person installs with
-`extctl`, and the install medium's payload lays its tree at `/usr/local`.
+install makes.
 
 ## Phase 2: an image reads as fast as the root — done
 
@@ -177,79 +174,27 @@ a plain copy of the file in the same boot, 4 MiB reads and writes and an
 fsync, takes 5.8 s: 1.3 times the raw time.
 Measured once by hand; no gate holds it.
 
-## Phase 4: an image reaches a root without a person
+## Phase 4: an image reaches a root without a person — done
 
-**For:** the host's image builder, the installer and the install medium to
-put the toolchain and the apps on a root through the store, as `extctl`
-does, with nobody there to approve.
+Before `activate-all`, init runs `extctl install-offered` holding
+`ExtensionUpdate` and `Seal`: each image in `/var/lib/slopos/offered`, uid
+0's alone, that asks for nothing but commands and apps goes in above its
+record's floor, never over a key's, a removed one or a version rolled back
+from (`admit::Authority::Offered`). Host roots offer `slopos-toolchain` and
+`slopos-essentials` there, and the installer copies the medium's images into
+the new root's. A live boot installs the archive's `images/` into its RAM
+root, whose seal `Seal` now clears as on ext4: smaller than teaching userland
+a second way to show an image. `priv` takes a command through `/opt/bin`, an
+image's files being uid 0's. The cheap boot came with phase 3's kept needs.
 
-No host script writes a store, the installer has no path into one
-(`extctl --root` offers `status`, `enable` and `disable`), and init
-installs the medium's apps as a tree. A test installs the toolchain the
-host put on a root (`selfhost::toolchain`); a person does it by hand.
+## Phase 5: the apps SlopOS ships are one image — done
 
-Build:
-
-1. A directory on the root that only uid 0 writes, holding images offered
-   to the machine. Before `activate-all`, init runs `extctl` holding
-   `ExtensionUpdate` and `Seal`, as it runs `activate-all`
-   (`userland/src/apps/init/mod.rs`), to install each offered image above
-   its record's floor. This path installs only an image that asks for
-   nothing but commands and apps, so it can never hand out a capability.
-2. `scripts/build_fs_image.sh` offering the `slopos-toolchain` and
-   `slopos-essentials` images there, in place of the image file at
-   `/var/lib/slopos/toolchain` and the `apps` tree. A host build that
-   changed offers a higher version; one the guest installed since stays,
-   by its floor.
-3. The installer copying the medium's images into the new root's offered
-   directory (`installer/root.rs`, `fill`), and
-   `scripts/build_install_medium.sh` carrying image files in place of the
-   `apps` tree and the payload's `usr/local`.
-4. The live boot. A store needs a seal taken off to add a generation, and
-   a root in memory keeps a seal for good (`fs/src/ramfs/mod.rs`); the
-   accounts store refuses such a root outright. Either ramfs lets a `Seal`
-   holder clear one as ext4 does, or the live boot shows the apps' image
-   straight from the medium, which the kernel accepts (`ext_activate`
-   takes any readable file) and userland does not yet, since the dock
-   reads the store's names.
-5. A cheap boot. Every `activate-all` reads each ELF of each image whole
-   to hold it to `libc.so`, 7.9 s for the toolchain. The record keeps the
-   digest of the `libc.so` an image was last held to, and the check runs
-   again only when the base's differs.
-
-Find out first: which of the two live-boot answers is smaller, and whether
-`priv` accepts a command reached through `/opt/bin` (`trusted_within`,
-`userland/src/apps/priv.rs`).
-
-Done when `just test-installer` installs a disk whose toolchain and apps
-are images, and `just boot-live` shows the apps.
-
-## Phase 5: the apps SlopOS ships are one image
-
-**For:** the five apps under `apps/` to be installed, replaced and rolled
-back as the image `slopos-essentials`.
-
-They are built the way an image needs: `bin/` and `share/` alone, dynamic,
-`libc.so` their one library, no `syscall` instruction.
-
-Build:
-
-1. `scripts/build_userland.sh` staging `builddir/apps` with a release and a
-   declaration (four apps, five commands), its entries naming
-   `/opt/slopos-essentials/bin/…`, and packing it.
-2. The editor finding its manual in its own image; it looks in
-   `~/.local/share`, `/usr/local/share` and `/usr/share`
-   (`apps/src/editor/files.rs`).
-3. `just install` installing the image with `extctl install`. Changed
-   bytes need a higher version, so the build stamps one; an administrator
-   is asked each time, as for a base.
-4. The tests that name `/usr/local/bin/<app>`: `apps_test`, `dock_test`,
-   `privd_test`, `extension_action_test`.
-
-What changes for a person: the apps start `AT_SECURE`, and privd names one
-that asks as the image `slopos-essentials` where it names none today.
-
-Done when `apps_test` and `dock_test` pass with no `apps` tree on the root.
+`build_userland.sh` stages `builddir/apps` with a release and a declaration
+(four apps, five commands), its version moving only with its files, and
+`_build-userland` packs it as `slopos-essentials`. Its entries name
+`/opt/slopos-essentials/bin/…`, the editor reads its manual from the image,
+and `just install` installs it with `extctl install`. The apps start
+`AT_SECURE`.
 
 ## Phase 6: `/usr/local` goes
 
@@ -263,7 +208,7 @@ Goes, with nothing in its place:
   `org.slopos.software.install` and its staging directories.
 - In `root_layout.rs`: `LOCAL`, `settled` and its mark, the hand-over mark,
   `take_local` and the checks under it. In init: `hand_over`, `settle`,
-  `install_live_apps`. In `users add`: the hand-over and the restart
+  In `users add`: the hand-over and the restart
   advice. In `priv`: the clause on `settled`.
 - `/usr/local/bin` from `DEFAULT_PATH` and `search_path`, `/usr/local` from
   `ROOT_LAYOUT` and `PERSON_TREES` (`abi/src/fs.rs`) and their mirrors
@@ -391,9 +336,7 @@ an installed image.
 
 ## Order
 
-Phases 4 and 5 put the toolchain and the apps through an install on every
-root. Phase 4 needs phase 5's image, and phase 5 can come before it. Phase
-6 removes what phases 1, 4 and 5 stopped using. Phase 7 depends on none of
+Phase 6 removes what phases 1, 4 and 5 stopped using. Phase 7 depends on none of
 them and is small; it can come early. Phase 8 is needed before software
 from elsewhere arrives one image at a time, not before. Phase 9 comes last,
 so that no other phase is written against names that move under it.

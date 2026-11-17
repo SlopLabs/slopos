@@ -625,12 +625,35 @@ staged="$(
     (cd "$REPO_ROOT/apps" && find share -type f) | while IFS= read -r rel; do
         stage "$REPO_ROOT/apps/$rel" "$rel"
     done
+    for app in $APPS; do
+        printf 'command %s\n' "$app"
+    done >"$BUILD_DIR/essentials.declare"
+    for entry in "$REPO_ROOT"/apps/share/slopos/apps/*.app; do
+        entry="${entry##*/}"
+        printf 'app %s\n' "${entry%.app}"
+    done >>"$BUILD_DIR/essentials.declare"
+    stage "$BUILD_DIR/essentials.declare" .extension/declare
+    printf '%s\n' .extension/release
 )"
+rm -f "$BUILD_DIR/essentials.declare"
 (cd "$APPS_TREE" && find . -type f -o -type l) | sed 's|^\./||' | while IFS= read -r rel; do
     printf '%s\n' "$staged" | grep -qxF "$rel" || rm -f "$APPS_TREE/$rel"
 done
 find "$APPS_TREE" -mindepth 1 -type d -empty -delete
-echo "Apps built: $APPS_TREE"
+# The version moves only with the files, so a root holding this build passes
+# it over.
+ESSENTIALS_STAMP="$BUILD_DIR/slopos-essentials.version"
+held="$(cd "$APPS_TREE" && find . -path ./.extension/release -prune -o \( -type f -o -type l \) -print0 |
+    LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+read -r last_held version 2>/dev/null <"$ESSENTIALS_STAMP" || version=0
+if [ "${last_held:-}" != "$held" ] || [ ! -f "$APPS_TREE/.extension/release" ]; then
+    now="$(date -u +%Y%m%d%H%M%S)"
+    version=$(( now > version ? now : version + 1 ))
+    printf 'name slopos-essentials\nversion %s\nsummary The apps SlopOS ships outside its base\n' "$version" \
+        >"$APPS_TREE/.extension/release"
+    printf '%s %s\n' "$held" "$version" >"$ESSENTIALS_STAMP"
+fi
+echo "Apps built: $APPS_TREE (slopos-essentials $version)"
 
 if [ "$TEST_MODE" = "--test" ]; then
     # The dynamically linked probe and the object it dlopens. Built against

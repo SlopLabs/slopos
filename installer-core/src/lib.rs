@@ -39,10 +39,11 @@ const ROOT_MIN_BYTES: u64 = 1 << 30;
 /// clean dev and tests build holds 3.8 GiB of.
 const ROOT_WORK_BYTES: u64 = 6 << 30;
 
-/// A root's least size: the payload of `payload` bytes and room to build
-/// beside it, or the system's own needs without one.
+/// A root's least size: the payload of `payload` bytes twice, offered and in
+/// the store, and room to build beside it, or the system's own needs without
+/// one.
 pub fn root_min(payload: Option<u64>) -> u64 {
-    payload.map_or(ROOT_MIN_BYTES, |bytes| bytes + ROOT_WORK_BYTES)
+    payload.map_or(ROOT_MIN_BYTES, |bytes| 2 * bytes + ROOT_WORK_BYTES)
 }
 
 pub fn capitalised(text: &str) -> String {

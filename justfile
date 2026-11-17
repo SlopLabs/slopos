@@ -32,7 +32,8 @@ fs_image_size    := env("FS_IMAGE_SIZE", "32M")
 # fixtures that exercise it. Sized on its own so the shipped root stays 32M.
 # Kept tight: free blocks the suite writes stay in the block cache, and the 1G
 # machine has no frames to spare by the time `sessions_test` forks its bomb.
-fs_image_size_tests := env("FS_IMAGE_SIZE_TESTS", "136M")
+# 6M of it holds the store's copy of the apps' image.
+fs_image_size_tests := env("FS_IMAGE_SIZE_TESTS", "142M")
 # Sized on its own: this disk holds work, not the shipped appliance root. What
 # bounds it is the 4 bytes of resident verity hash per 4 KiB block the
 # machine's RAM can hold, which the mount refuses past rather than discovering.
@@ -49,13 +50,16 @@ capacity_qemu_mem     := env("CAPACITY_QEMU_MEM", "2G")
 # and so `git clean` reclaims it.
 capacity_stage        := build_dir / "capacity-stage"
 
-# The toolchain `just toolchain` built: the image a root carries at
-# /var/lib/slopos/toolchain, for a test or a person to install with extctl,
-# unless TOOLCHAIN_STAGE names another image's directory; and the tree it packs,
-# which an install medium's payload lays out at /usr/local. A root without one
-# builds all the same.
+# The toolchain `just toolchain` built: the image a root offers, unless
+# TOOLCHAIN_STAGE names another image's directory, and the tree it packs. A root
+# without one builds all the same.
 toolchain_image       := env("TOOLCHAIN_STAGE", build_dir / "slopos-toolchain/image")
 toolchain_install     := build_dir / "slopos-toolchain/install"
+essentials_image      := build_dir / "slopos-essentials"
+# slopos_extension_core::OFFERED; each image is a host tree of its own.
+offered               := "/var/lib/slopos/offered"
+essentials_offered    := essentials_image + ":" + offered + ":slopos-essentials"
+toolchain_offered     := toolchain_image + ":" + offered + ":slopos-toolchain"
 # Free space a root keeps for a checkout's builds: a clean dev and tests system
 # build, kernels, userlands, bases and the C++ runtime, holds 4.8G of it, and
 # `just precommit` over them (the host crates' tests, clippy's three targets)
@@ -86,7 +90,7 @@ initramfs        := build_dir / "initramfs.cpio"
 initramfs_tests  := build_dir / "initramfs-tests.cpio"
 
 # The installer's medium beside the kernel and base: Limine for the ESP, and
-# with PAYLOAD=1 the toolchain at /usr/local and a clone of HEAD for /src.
+# with PAYLOAD=1 the toolchain's image and a clone of HEAD for /src.
 payload      := env("PAYLOAD", "0")
 payload_on   := if payload =~ '^(1|true|on|yes)$' { "1" } else { "0" }
 
@@ -170,7 +174,6 @@ base_recipes        := `. scripts/lib/base.sh && printf %s "$BASE_RECIPES"`
 # On SlopOS the toolchain image, or the tree an install medium's payload laid
 # out at /usr/local on a root it installed.
 recipes_prefix      := if os() == "slopos" { if path_exists("/opt/slopos-toolchain/libexec") == "true" { "/opt/slopos-toolchain" } else { "/usr/local" } } else { build_dir / "slopos-recipes/prefix" }
-apps_tree           := build_dir / "apps:/usr/local:apps"
 base_recipe_env     := "RECIPE_PROGRAM_DIR=" + recipes_prefix / "libexec" + " RECIPE_PROGRAMS=\"" + base_recipe_programs + "\" RECIPE_LICENSE_DIR=" + recipes_prefix / "share/licenses" + " RECIPE_LICENSES=\"" + base_recipes + "\""
 # A machine the host drives through remoted stays paired: on SlopOS the base it
 # builds carries the pairing the running base does.
@@ -214,8 +217,10 @@ _userland mode:
     CARGO="{{cargo}}" USERLAND_TARGET={{userland_target}} \
         scripts/build_userland.sh "{{build_dir}}" "{{cargo_target_dir}}" {{mode}}
 
+# Holds the apps' programs to the programs gate as it packs them.
 _build-userland: (_userland "")
-    {{xtask}} programs {{build_dir}}/apps/bin/*
+    CARGO="{{host_cargo}}" CARGO_TARGET_DIR={{cargo_target_dir}} \
+        scripts/build_extension.sh {{build_dir}}/apps {{essentials_image}} {{build_dir}}/libc.so
 
 # The programs the extensions of `extension_test`, `extension_action_test` and
 # `extension_service_test` carry are held to the gate here.
@@ -229,19 +234,19 @@ _build-userland-tests: _build-userland (_userland "--test")
 # from, so CI is order-independent only if each run starts from a fresh one.
 _fs-image: (_host "_fs-image") _build-userland
     FS_IMAGE_SIZE={{fs_image_size}} VERITY=on PRESERVE_FS_IMAGE=0 COREUTILS_LINKS="{{coreutils_tools}}" \
-        FS_HOST_TREES="{{apps_tree}}" \
+        FS_HOST_TREES="{{essentials_offered}}" \
         scripts/build_fs_image.sh "{{fs_image}}" "{{build_dir}}" {{userland_bins}}
 
 _fs-image-tests: (_host "_fs-image-tests") _build-userland-tests
     FS_IMAGE_SIZE={{fs_image_size_tests}} VERITY=off PRESERVE_FS_IMAGE=0 COREUTILS_LINKS="{{coreutils_tools}}" \
-        EXTRA_SHARED_OBJECTS="{{test_shared_objects}}" FS_HOST_TREES="{{apps_tree}}" \
+        EXTRA_SHARED_OBJECTS="{{test_shared_objects}}" FS_HOST_TREES="{{essentials_offered}}" \
         scripts/build_fs_image.sh "{{fs_image_tests}}" "{{build_dir}}" {{test_userland_bins}}
 
 # `VERITY=rw`: writable, and attested wherever no boot rewrote a block. The
 # system is the booted base, mounted over the root's base directories; the
-# toolchain image at /var/lib/slopos/toolchain is the host's, replaced when it
-# changes, which `extctl install` installs; the clone at /src/slopos is the
-# guest's once seeded, so it is staged only for a root without one.
+# images it offers are the host's, replaced when they change; the clone at
+# /src/slopos is the guest's once seeded, so it is staged only for a root
+# without one.
 _fs-image-persist: (_host "_fs-image-persist") _build-userland
     #!/usr/bin/env bash
     set -euo pipefail
@@ -251,14 +256,14 @@ _fs-image-persist: (_host "_fs-image-persist") _build-userland
         seed="{{build_dir}}/workspace:/src"
     fi
     FS_IMAGE_SIZE={{persist_image_size}} FS_JOURNAL_SIZE={{root_journal_size}} VERITY=rw PRESERVE_FS_IMAGE=1 FS_BASE=boot \
-        FS_HOST_TREES="{{toolchain_image}}:/var/lib/slopos/toolchain {{apps_tree}}" FS_SEED_TREES="$seed" FS_FREE_FLOOR={{root_free_floor}} \
+        FS_HOST_TREES="{{toolchain_offered}} {{essentials_offered}}" FS_SEED_TREES="$seed" FS_FREE_FLOOR={{root_free_floor}} \
         scripts/build_fs_image.sh "{{fs_image_persist}}" "{{build_dir}}"
     rm -rf "{{build_dir}}/workspace"
 
 # The persistent root's shape, with the clone seeded `--vendored`, so a build
 # in the guest reads no network, and the fixtures the toolchain ladder fetches
-# from. The tests base comes from the boot module; a test installs the
-# toolchain image.
+# from. The tests base comes from the boot module; init installs the images it
+# offers.
 _fs-image-selfhost: (_host "_fs-image-selfhost") _build-userland
     #!/usr/bin/env bash
     set -euo pipefail
@@ -266,7 +271,7 @@ _fs-image-selfhost: (_host "_fs-image-selfhost") _build-userland
     scripts/stage_workspace.sh "{{selfhost_stage}}/src" --vendored
     scripts/stage_ladder_fixtures.sh "{{selfhost_stage}}/ladder" "{{ladder_sshd}}"
     FS_IMAGE_SIZE=1G FS_JOURNAL_SIZE={{root_journal_size}} VERITY=rw PRESERVE_FS_IMAGE=0 FS_BASE=boot \
-        FS_HOST_TREES="{{toolchain_image}}:/var/lib/slopos/toolchain {{apps_tree}} {{selfhost_stage}}/ladder:/home/user/ladder" \
+        FS_HOST_TREES="{{toolchain_offered}} {{essentials_offered}} {{selfhost_stage}}/ladder:/home/user/ladder" \
         FS_SEED_TREES="{{selfhost_stage}}/src:/src" FS_FREE_FLOOR={{root_free_floor}} \
         scripts/build_fs_image.sh "{{fs_image_selfhost}}" "{{build_dir}}"
     rm -rf "{{selfhost_stage}}"
@@ -394,15 +399,13 @@ build VARIANT=kernel_variant: (_variant-kernel VARIANT) (_variant-base VARIANT)
 [doc("Build the kernel ELF alone, skipping the userland and the base — for gate-only jobs")]
 build-kernel-only: (_kernel kernel_variant)
 
-# The apps go in as whoever runs this while /usr/local is theirs, and through
-# privd's org.slopos.software.install once it is the system's.
-[doc("On SlopOS, try a build: build the kernel, the userland, the base and the apps for VARIANT (release, dev or tests), hold the build to the base interface and libc.so's growth, and hand the base and the kernel to bootctl base try, which runs the base at once when the running kernel serves it, writing nothing, and otherwise writes it for the next boot and puts the kernel into the spare slot, armed to boot once; it prints the command that keeps the trial. The apps go to /usr/local once the running libc.so is the one they were built against; otherwise the command that installs them is printed")]
+[doc("On SlopOS, try a build: build the kernel, the userland, the base and the apps for VARIANT (release, dev or tests), hold the build to the base interface and libc.so's growth, and hand the base and the kernel to bootctl base try, which runs the base at once when the running kernel serves it, writing nothing, and otherwise writes it for the next boot and puts the kernel into the spare slot, armed to boot once; it prints the command that keeps the trial. The apps' image goes in with extctl once the running libc.so is the one they were built against; otherwise the command that installs it is printed")]
 install VARIANT="release": (_slopos "install") (_variant-kernel VARIANT) (_variant-base VARIANT) base-interface libc-exports
     #!/usr/bin/env bash
     set -euo pipefail
     bootctl base try "$PWD/{{build_dir}}/{{ if VARIANT =~ 'tests$' { "initramfs-tests.cpio" } else { "initramfs.cpio" } }}" \
         --kernel "$PWD/{{build_dir}}/kernel-{{VARIANT}}.elf"
-    apps="/bin/tree-install apps {{build_dir}}/apps /usr/local"
+    apps="/bin/extctl install $PWD/{{essentials_image}}/slopos-essentials.ext"
     if cmp -s /lib/libc.so "{{build_dir}}/libc.so"; then
         $apps || echo "install: the apps stay as they were"
     else
@@ -423,11 +426,11 @@ _install-medium: (_host "_install-medium") _build-userland
     set -euo pipefail
     toolchain=""
     if [ "{{payload_on}}" = 1 ]; then
-        toolchain="{{toolchain_install}}"
+        toolchain="{{toolchain_image}}"
     fi
-    LIMINE_DIR={{limine_dir}} scripts/build_install_medium.sh "{{install_medium}}" ${toolchain:+"$toolchain"}
+    LIMINE_DIR={{limine_dir}} ESSENTIALS={{essentials_image}} scripts/build_install_medium.sh "{{install_medium}}" ${toolchain:+"$toolchain"}
 
-[doc("Build the live ISO (builddir/slop.iso): kernel + initramfs, runs from RAM with no disk, and installs from it with /bin/installer. PAYLOAD=1 builds the release kernel and adds the toolchain and a clone of HEAD in a partition the kernel mounts from the stick, which the installer copies to /usr/local and /src; booted as a CD, as boot-live attaches it, the kernel reads no payload. REMOTE=1 packs the base paired with this host's broker (builddir/initramfs-remote.cpio), so the live system and every system installed from it dial `just remote-serve`; that ISO carries the broker's token and is for your own machines. Honors BOOT_CMDLINE")]
+[doc("Build the live ISO (builddir/slop.iso): kernel + initramfs, runs from RAM with no disk, and installs from it with /bin/installer. PAYLOAD=1 builds the release kernel and adds the toolchain image and a clone of HEAD in a partition the kernel mounts from the stick, which the installer offers to the new root and copies to /src; booted as a CD, as boot-live attaches it, the kernel reads no payload. REMOTE=1 packs the base paired with this host's broker (builddir/initramfs-remote.cpio), so the live system and every system installed from it dial `just remote-serve`; that ISO carries the broker's token and is for your own machines. Honors BOOT_CMDLINE")]
 iso: (_host "iso") _initramfs _install-medium (_kernel kernel_variant)
     #!/usr/bin/env bash
     set -euo pipefail
@@ -449,9 +452,9 @@ _iso-installer: (_host "_iso-installer") _initramfs-tests (_kernel kernel_varian
     set -euo pipefail
     toolchain=""
     if [[ ! "${INSTALLER_PAYLOAD:-1}" =~ ^(0|false|off|no)$ ]]; then
-        toolchain="{{toolchain_install}}"
+        toolchain="{{toolchain_image}}"
     fi
-    LIMINE_DIR={{limine_dir}} scripts/build_install_medium.sh "{{installer_medium}}" ${toolchain:+"$toolchain"}
+    LIMINE_DIR={{limine_dir}} ESSENTIALS={{essentials_image}} scripts/build_install_medium.sh "{{installer_medium}}" ${toolchain:+"$toolchain"}
     KERNEL_ELF={{kernel_elf_tests}} LIMINE_DIR={{limine_dir}} INITRAMFS_FILE={{initramfs_tests}} \
     INSTALL_ARCHIVE={{installer_medium}} QEMU_FB_AUTO=0 \
         scripts/build_iso.sh "{{iso_installer}}" "{{build_dir}}" "{{installer_live_cmdline}}"
@@ -700,8 +703,8 @@ test-installer *DISKS: (_host "test-installer")
     [[ ! "${INSTALLER_PAYLOAD:-1}" =~ ^(0|false|off|no)$ ]] || payload=0
     # Copying the payload over emulated USB doubles the install's budget.
     install_budget="${INSTALLER_TIMEOUT_SECS:-$((1800 + 1800 * payload))}"
-    if [ "$payload" = 1 ] && [ ! -d "{{toolchain_install}}" ]; then
-        echo "FAIL: no toolchain at {{toolchain_install}} — run just toolchain, or INSTALLER_PAYLOAD=0" >&2
+    if [ "$payload" = 1 ] && [ ! -d "{{toolchain_image}}" ]; then
+        echo "FAIL: no toolchain image at {{toolchain_image}} — run just toolchain, or INSTALLER_PAYLOAD=0" >&2
         exit 1
     fi
     # The optimized tests kernel: the installed system is the machine that
@@ -885,7 +888,7 @@ test-installer *DISKS: (_host "test-installer")
         fi
         built="$payload"
         markers=("INSTALLER-INSTALLED" "ok 1 - installed_built_and_committed"
-            "installed the apps at /usr/local" "installer:   e2fsck: Pass 5: ")
+            "offered slopos-essentials to the root" "installer:   e2fsck: Pass 5: ")
         [ "$kind" != foreign ] || markers+=("INSTALLER-REVIEWED-CHANGED" "INSTALLER-ROOT-SIZE ")
         [ "$kind" != reuse ] || markers+=("INSTALLER-SERVED-LEFT")
         if [ "$kind" = optical ]; then
@@ -894,7 +897,7 @@ test-installer *DISKS: (_host "test-installer")
                 "the medium carries no toolchain")
         elif [ "$payload" = 1 ]; then
             markers+=("INSTALLER-NOT-OFFERED /dev/sda: $passed_over" "INSTALL: the payload sda"
-                " is at /media/payload (" "installed the toolchain at /usr/local")
+                " is at /media/payload (" "offered slopos-toolchain to the root")
         else
             markers+=("INSTALLER-NOT-OFFERED /dev/sda: $passed_over"
                 "INSTALL: the medium's disk carries no payload" "the medium carries no toolchain")
@@ -910,10 +913,10 @@ test-installer *DISKS: (_host "test-installer")
             # The build's budget: under TCG the guest's build alone takes hours.
             budget=1800
             [ "$built" = 0 ] || budget=28800
-            markers=("INSTALLER-BOOTED slopos-a" "INSTALLER-LOG /var/log/installer.log"
+            markers=("INSTALLER-BOOTED slopos-a" "INSTALLER-LOG /var/log/installer.log" "INSTALLER-SHOWN slopos-essentials"
                 "INSTALLER-STAGE 2: rebooting into slopos-b"
                 "INSTALLER-COMMITTED slopos-b" "ok 1 - installed_built_and_committed")
-            [ "$built" = 0 ] || markers+=("INSTALLER-BUILT guest-" "INSTALLER-RUNS " "INSTALLER-RUNS-BASE guest-")
+            [ "$built" = 0 ] || markers+=("INSTALLER-SHOWN slopos-toolchain" "INSTALLER-BUILT guest-" "INSTALLER-RUNS " "INSTALLER-RUNS-BASE guest-")
             [ "$kind" != foreign ] || markers+=("INSTALLER-FOREIGN-KEPT")
             boot_once "$logs-boot.log" "${INSTALLER_BOOT_TIMEOUT_SECS:-$budget}" "" "${markers[@]}" || missing=1
             [ "$built" = 1 ] || ! grep -aqF "INSTALLER-BUILT" "$logs-boot.log" ||
@@ -929,9 +932,9 @@ test-installer *DISKS: (_host "test-installer")
             markers=("INSTALLER-NOT-OFFERED /dev/sda: ReadOnly"
                 "INSTALLER-RESCUED /dev/" "INSTALLER-RESCUED at a terminal"
                 "INSTALLER-INSTALLED Reinstall" "ok 1 - installed_built_and_committed"
-                "installed the apps at /usr/local" "installer:   e2fsck: Pass 5: ")
+                "offers this medium's slopos-essentials already" "installer:   e2fsck: Pass 5: ")
             [ "$payload" = 0 ] ||
-                markers+=("/usr/local already holds this medium's toolchain" "the root has a /src already")
+                markers+=("offers this medium's slopos-toolchain already" "the root has a /src already")
             boot_once "$logs-reinstall.log" "$install_budget" "stick:{{iso_installer}}" \
                 "${markers[@]}" || missing=1
             [ "$missing" = 1 ] ||
