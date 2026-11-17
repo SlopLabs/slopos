@@ -3058,7 +3058,6 @@ userland	slopos_core::tests::authority_tests::only_init_reexecuting_itself_keeps
 userland	slopos_core::utests::utest_accounts
 userland	slopos_core::utests::utest_appkit
 userland	slopos_core::utests::utest_apps
-userland	slopos_core::utests::utest_apps_trees
 userland	slopos_core::utests::utest_bigprog
 userland	slopos_core::utests::utest_buildctl
 userland	slopos_core::utests::utest_buildloop
@@ -3134,5 +3133,4 @@ userland	slopos_core::utests::utest_sysmon
 userland	slopos_core::utests::utest_terminal_grid
 userland	slopos_core::utests::utest_tls_independence
 userland	slopos_core::utests::utest_toolchain
-userland	slopos_core::utests::utest_tree_install
 userland	slopos_core::utests::utest_wizard_window
