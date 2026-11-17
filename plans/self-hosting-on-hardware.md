@@ -78,8 +78,8 @@ Before v1 none of this is promised. At v1, in one change:
   switch of a kernel and a base.
 - How the toolchain and the apps reach a machine and are replaced there.
   `installed-software.md` is that plan: every installed program an image,
-  with `/usr/local`, `tree-install` and the hand-over of `/usr/local` to
-  uid 0 gone. Until it lands the toolchain arrives from the install medium
+  and no shared directory a person can write on anyone's search path. Until
+  a front end fetches images the toolchain arrives from the install medium
   or the host's image builder, and a commit that moves a toolchain pin
   needs it again.
 - Signing Limine or a kernel for Secure Boot.

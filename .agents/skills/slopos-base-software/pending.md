@@ -57,3 +57,21 @@
   is offered the image, no root carries the `apps` tree, init no longer lays
   the medium's apps out on a live boot, and `just install` installs the
   image with `extctl install`, which an administrator approves.
+- Phase 6 of `installed-software.md`: `/usr/local` is gone, with
+  `tree-install`, `tree-core`, `userland/src/tree.rs`, tree manifests in the
+  guest (`/var/lib/slopos/trees`; `fs_tree.py` keeps only the host's beside
+  the image, and lost `walk`) and `utest_tree_install`. `DEFAULT_PATH` is
+  `/bin:/sbin:/opt/bin`, a person's `PATH` `/bin:/sbin:~/.local/bin:/opt/bin`.
+  A bare library name: `SEARCH_DIRS`, the program's image's `lib`, then
+  `$HOME/.local/lib` for a process neither `AT_SECURE` nor uid 0's. The dock
+  reads each image's share, `/usr/share`, `~/.local/share`. The shell's
+  rules for a command, with no `SHELL_COMPLETION_PATH`, come from the
+  `share/shell/completions` of the image `/opt/bin/<command>` links into, then
+  the base's. Software for everyone is an image; a person's own build is a
+  file in `~/.local`, copied there. Pages: `architecture/software` (trees,
+  manifests, who writes it, the hand-over, its tests and files go),
+  `architecture/base`, `abi/interfaces` (the dock's, the shell's and the
+  tree manifest's rows, `DEFAULT_PATH`), `abi/glossary` (Tree and Host tree
+  go; App, Owners record), `architecture/overview`, `architecture/filesystem`,
+  `architecture/userland`, `architecture/processes`,
+  `status/current-capabilities`, `status/known-limitations`.

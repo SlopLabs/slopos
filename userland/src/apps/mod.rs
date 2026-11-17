@@ -30,5 +30,4 @@ pub mod shell;
 pub mod ss;
 pub mod sysmon;
 pub mod terminal;
-pub mod tree_install;
 pub mod users;

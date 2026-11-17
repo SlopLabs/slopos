@@ -20,7 +20,7 @@
   toolchain step (build_userland.sh's std stamp is the check). `xtask` is
   `host_cargo run -p slopos-xtask` on both, built natively, so a build on
   SlopOS is held to the same ELF and `programs` gates as on the host. On
-  SlopOS the base's recipe programs come from `/usr/local`, and a paired
+  SlopOS the base's recipe programs come from `/opt/slopos-toolchain`, and a paired
   machine's base keeps its pairing.
 - `just precommit` is the lane a commit made on SlopOS passes, the same
   command on the host: `fmt`, `test-host` (its Go half on the host only; on
@@ -55,14 +55,21 @@
   `utest_reboot_clone`, `utest_selfhost` and `utest_toolchain` (`rank = 1`).
   `toolchain_test`'s first rung holds `/opt/bin`'s commands to the shown
   image; its rung 14 holds it to the clone's identity. `selfhost::workspace`
-  no longer takes a `/usr/local` toolchain.
-- A persistent root made before this keeps its `/usr/local` trees: the
-  toolchain's, which `PATH` finds before `/opt/bin` and `build_userland.sh`
-  refuses, and the apps', whose entries replace the image's in the dock.
-  `just reset root` drops them.
+  no longer takes a toolchain tree.
+- A persistent root made before phase 6 of `installed-software.md` keeps the
+  old shared trees and their manifests, on no search path now; `just reset
+  root` drops them.
 - `build_fs_image.sh` holds every debugfs request: debugfs exits 0 whatever
   happened, so any line on its stderr but the banner stops the build, as in
   `fs_tree.py`. An image is grown for a tree and the free floor, never for
   the base: a base past `FS_IMAGE_SIZE` stops the build at the file that did
   not fit. `FS_IMAGE_SIZE` is `64M` and `FS_IMAGE_SIZE_TESTS` `142M`, where
   `getting-started/qemu-options` says `32M` and `128M`.
+- `docs/self-hosting/development-machine`, `docs/self-hosting/toolchain`,
+  `docs/self-hosting/updating`, `docs/getting-started/build-test-recipes`,
+  `docs/getting-started/qemu-options`, `docs/getting-started/quickstart`,
+  `docs/getting-started/troubleshooting`: nothing lands at `/usr/local`; the
+  toolchain and the apps are the images `slopos-toolchain` and
+  `slopos-essentials`, offered to the root, and `just` on SlopOS takes the
+  recipes' programs from `/opt/slopos-toolchain` alone. `PATH` drops
+  `/usr/local/bin`; a person's own builds go in `~/.local`, by `cp`.

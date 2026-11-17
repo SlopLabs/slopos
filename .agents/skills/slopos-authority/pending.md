@@ -37,3 +37,10 @@
   through a pipe. On a terminal, *waiting for you to allow this
   on the screen* is taken back (`\r`, `ESC [K`) once privd answers or the
   mechanism writes; elsewhere it stays a line.
+- `docs/architecture/authority`, `docs/architecture/privd`,
+  `docs/abi/privd-actions`, `docs/self-hosting/remote-control`: the action
+  `org.slopos.software.install`, its `exclusive software` group and staging
+  are gone with `tree-install`, and `priv` takes a program from any
+  `DEFAULT_PATH` directory only uid 0 can change, with no boot mark
+  (`root_layout::settled` is gone). The loader skips only `~/.local/lib` for a
+  process that is `AT_SECURE` or uid 0's; no `/usr/local` is left to name.

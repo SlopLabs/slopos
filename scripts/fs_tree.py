@@ -2,21 +2,19 @@
 """Copy a host directory tree into an ext4 image through one debugfs session.
 
 `mke2fs -d` populates only a new filesystem; a preserved image holds what
-its guest wrote, so a tree reaches one through debugfs, every entry and its
-manifest copy owned by `--owner` (uid 0's by default).
+its guest wrote, so a tree reaches one through debugfs, every entry owned by
+`--owner` (uid 0's by default).
 
 A host tree (`install --manifests DIR --name NAME`) is the host's. What it
 installed is recorded in DIR/NAME, on the host, where the guest cannot edit
 it — an `identity` line, an `at` line naming the destination, then
 `<kind> <size or -> <path>` per entry — and a reinstall removes exactly that
-and keeps whatever the guest put beside it; a copy goes to /var/lib/slopos/trees/NAME for the guest to read. A
-seed tree (no `--name`) is copied onto an image that lacks its directory and
+and keeps whatever the guest put beside it. A seed tree (no `--name`) is copied onto an image that lacks its directory and
 is the guest's from then on. `--owner UID:GID` is who the tree, its
 directory included, belongs to, and nobody else may write it whatever the
 host's modes say; a directory made above it is uid 0's.
 
-`read` prints a small regular file the image holds; `walk` prints `<mode>
-<uid>:<gid> <path>` for a path and everything below it, parents first.
+`read` prints a small regular file the image holds.
 
 Nothing on the image is trusted. It is read only through `ls -l` listings of
 directories, each bound to the inode its parent's listing gave it, so no
@@ -28,7 +26,6 @@ the manifest names, refuses the install before anything is written.
     installed MANIFESTS NAME GUEST
     exists IMAGE PATH
     read IMAGE PATH
-    walk IMAGE PATH
     install IMAGE HOST GUEST [--manifests DIR --name NAME] [--owner UID:GID]
     --self-test
 
@@ -50,7 +47,6 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 from ext4_profile import mkfs_args  # noqa: E402
 
-IMAGE_MANIFESTS = "/var/lib/slopos/trees"
 ROOT_INODE = 2
 # What debugfs's request parser can carry inside double quotes.
 COMPONENT = re.compile(r'[^/"\\\n\r\t\x00]+')
@@ -300,18 +296,6 @@ def read_file(image, path):
     return out[len(echo) :] if out.startswith(echo) else out
 
 
-def walk_image(image, top):
-    """`(mode, uid, gid, path)` for `top` and everything below it, parents
-    first; nothing when `top` is not there."""
-    if not safe_abs(top) or top == "/":
-        raise Refused(f"{top}: not a path this tool walks")
-    img = Image(image, [top], below=top)
-    if img.state(top) in ("absent", "blocked"):
-        return []
-    found = [p for p in img.stats if p == top or p.startswith(top + "/")]
-    return [(*img.stats[p][:3], p) for p in sorted(found, key=lambda p: (p.count("/"), p))]
-
-
 def owned(path, owner):
     """The requests that give `path` to `owner`, a `(uid, gid)`."""
     return [f'sif "{path}" uid {owner[0]}', f'sif "{path}" gid {owner[1]}']
@@ -328,12 +312,9 @@ def plan(image, host, guest, name, owner=(0, 0)):
     known, at, old = read_manifest(manifest_path) if manifest_path else (None, None, [])
     if known is not None and at != guest:
         raise Refused(f"{manifest_path} installed its tree at {at}, not {guest}")
-    copy = join(IMAGE_MANIFESTS, name[1]) if name else None
 
     dirs = {guest} | {join(guest, rel) for kind, rel in old if kind == "d"}
     dirs |= {join(guest, rel) for kind, _, rel, _, _ in tree if kind == "d"}
-    if copy:
-        dirs.add(IMAGE_MANIFESTS)
     img = Image(image, sorted(dirs))
 
     conflicts = {}
@@ -399,15 +380,6 @@ def plan(image, host, guest, name, owner=(0, 0)):
     during = [f"identity {UNFINISHED}", f"at {guest}"] + sorted(
         set(entries) | {f"{k} - {r}" for k, r in old}
     )
-    if copy:
-        for a in ancestors(copy):
-            if a != "/" and claim_dir(a, copy) == "absent":
-                creates.append(f'mkdir "{a}"')
-        state = img.state(copy)
-        if state in ("f", "l"):
-            creates.append(f'rm "{copy}"')
-        elif state not in ("absent", "blocked"):
-            conflict(copy, f"is a {NAMES[state]}, where the manifest copy goes")
     if conflicts:
         unrecorded = ""
         if name and known is None:
@@ -418,7 +390,7 @@ def plan(image, host, guest, name, owner=(0, 0)):
             + ("\n  ..." if len(conflicts) > 10 else "")
             + f"\n{unrecorded}Move it aside in the guest, or discard the root with `just reset root`."
         )
-    return removes + creates, (during, lines), copy, manifest_path
+    return removes + creates, (during, lines), manifest_path
 
 
 def manifest(host, tree=None):
@@ -436,20 +408,11 @@ def write_manifest(path, lines):
 
 
 def install(image, host, guest, name=None, owner=(0, 0)):
-    requests, (during, lines), copy, manifest_path = plan(image, host, guest, name, owner)
-    work = tempfile.mkdtemp(prefix="fs_tree.")
-    try:
-        if manifest_path:
-            os.makedirs(name[0], exist_ok=True)
-            write_manifest(manifest_path, during)
-            listing = os.path.join(work, "manifest")
-            write_manifest(listing, lines)
-            requests.append(f'write "{listing}" "{copy}"')
-            requests.append(f'sif "{copy}" mode 0100644')
-            requests += owned(copy, owner)
-        _, said = debugfs(image, requests, write=True)
-    finally:
-        shutil.rmtree(work)
+    requests, (during, lines), manifest_path = plan(image, host, guest, name, owner)
+    if manifest_path:
+        os.makedirs(name[0], exist_ok=True)
+        write_manifest(manifest_path, during)
+    _, said = debugfs(image, requests, write=True)
     if said:
         raise Refused(f"debugfs refused requests for {image}:\n" + "\n".join(said[:5]))
     if manifest_path:
@@ -472,7 +435,7 @@ def _self_test(work):
     image = os.path.join(work, "root.img")
     manifests = os.path.join(work, "trees")
     tree = os.path.join(work, "tree")
-    name = (manifests, "usr_local")
+    name = (manifests, "kit")
     with open(image, "wb") as f:
         f.truncate(16 << 20)
     subprocess.run(["mke2fs", "-q", "-F", *mkfs_args(), image], check=True)
@@ -503,7 +466,12 @@ def _self_test(work):
         m = re.search(rb"User:\s+(\d+)\s+Group:\s+(\d+)", out)
         return (int(m[1]), int(m[2])) if m else None
 
-    def refused(what, target="/usr/local", manifest=name):
+    def mode(path):
+        out, _ = debugfs(image, [f'stat "{path}"'])
+        m = re.search(rb"Mode:\s+([0-7]+)", out)
+        return int(m[1], 8) if m else None
+
+    def refused(what, target="/opt/kit", manifest=name):
         try:
             install(image, tree, target, manifest)
         except Refused:
@@ -517,42 +485,41 @@ def _self_test(work):
     put("bin/tool", "one\n", 0o775)
     put("lib/libx.so", "lib\n")
     os.symlink("tool", os.path.join(tree, "bin/alias"))
-    install(image, tree, "/usr/local", name)
-    assert kind("/usr/local/bin/tool") == "f" and kind("/usr/local/bin/alias") == "l"
+    install(image, tree, "/opt/kit", name)
+    assert kind("/opt/kit/bin/tool") == "f" and kind("/opt/kit/bin/alias") == "l"
     head, *entries = manifest(tree)
-    recorded = "".join(f"{x}\n" for x in [head, "at /usr/local", *entries]).encode()
-    assert read(f"{IMAGE_MANIFESTS}/usr_local") == recorded
-    assert read_file(image, f"{IMAGE_MANIFESTS}/usr_local") == recorded
+    recorded = "".join(f"{x}\n" for x in [head, "at /opt/kit", *entries]).encode()
+    with open(os.path.join(manifests, "kit"), "rb") as f:
+        assert f.read() == recorded
+    assert read_file(image, "/opt/kit/bin/tool") == read("/opt/kit/bin/tool") == b"one\n"
     with contextlib.suppress(Absent):
-        read_file(image, f"{IMAGE_MANIFESTS}/nothing")
+        read_file(image, "/opt/kit/nothing")
         raise AssertionError("a read of nothing answers as absent")
-    for what in ("/usr/local/bin/alias", "/usr/local/bin", "/usr/local/nowhere"):
+    for what in ("/opt/kit/bin/alias", "/opt/kit/bin", "/opt/kit/nowhere"):
         try:
             read_file(image, what)
         except Refused:
             continue
         raise AssertionError(f"read what is no file: {what}")
-    walked = {path: (mode, uid, gid) for mode, uid, gid, path in walk_image(image, "/usr/local")}
-    assert walked["/usr/local/bin/tool"] == (0o100755, 0, 0), "a tree is its owner's to write"
-    assert list(walked)[:2] == ["/usr/local", "/usr/local/bin"], "parents first"
-    assert walk_image(image, "/nowhere") == []
-    assert installed(manifests, "usr_local", "/usr/local") == identity(tree)
-    assert installed(manifests, "usr_local", "/opt/local") == "", "a tree recorded elsewhere"
+    assert owner("/opt/kit/bin/tool") == (0, 0), "a tree given no owner is uid 0's"
+    assert mode("/opt/kit/bin/tool") == 0o755, "a tree is its owner's to write"
+    assert installed(manifests, "kit", "/opt/kit") == identity(tree)
+    assert installed(manifests, "kit", "/opt/elsewhere") == "", "a tree recorded elsewhere"
     sound()
 
-    guest("write /dev/null /usr/local/bin/guest", "mkdir /usr/local/lib/guest")
+    guest("write /dev/null /opt/kit/bin/guest", "mkdir /opt/kit/lib/guest")
     put("bin/tool", "two\n", 0o755)
     os.unlink(os.path.join(tree, "lib/libx.so"))
-    install(image, tree, "/usr/local", name)
-    assert read("/usr/local/bin/tool") == b"two\n"
-    assert kind("/usr/local/lib/libx.so") == "absent"
-    assert kind("/usr/local/bin/guest") == "f" and kind("/usr/local/lib/guest") == "d"
+    install(image, tree, "/opt/kit", name)
+    assert read("/opt/kit/bin/tool") == b"two\n"
+    assert kind("/opt/kit/lib/libx.so") == "absent"
+    assert kind("/opt/kit/bin/guest") == "f" and kind("/opt/kit/lib/guest") == "d"
     sound()
 
     # A listing that lies is refused, whatever the lie.
     module = sys.modules[__name__]
     honest = module.debugfs
-    local = rb"^(\s*)(\d+)(\s+40755 .* local)$"
+    local = rb"^(\s*)(\d+)(\s+40755 .* kit)$"
     for what, lie in (
         ("a directory listed under another inode", rb"\g<1>999\3"),
         ("a name listed twice", rb"\1\2\3\n\1\2\3"),
@@ -568,45 +535,45 @@ def _self_test(work):
         finally:
             module.debugfs = honest
 
-    refused("a reinstall at another destination", "/opt/local")
+    refused("a reinstall at another destination", "/opt/elsewhere")
 
-    recorded_at = os.path.join(manifests, "usr_local")
+    recorded_at = os.path.join(manifests, "kit")
     with open(recorded_at) as f:
         whole = f.read()
     head, _, rest = whole.split("\n", 2)
     with open(recorded_at, "w") as f:
         f.write(f"{head}\n{rest}")
     refused("a manifest that names no destination")
-    assert installed(manifests, "usr_local", "/usr/local") == ""
+    assert installed(manifests, "kit", "/opt/kit") == ""
     with open(recorded_at, "w") as f:
         f.write(whole)
 
-    guest("write /dev/null /usr/local/bin/new")
+    guest("write /dev/null /opt/kit/bin/new")
     put("bin/new")
     refused("a guest file where the tree adds one")
-    assert read("/usr/local/bin/tool") == b"two\n"
+    assert read("/opt/kit/bin/tool") == b"two\n"
     os.unlink(os.path.join(tree, "bin/new"))
 
     guest("mkdir /home", "mkdir /home/keep", "write /dev/null /home/keep/tool")
-    guest(*(f"rm /usr/local/bin/{n}" for n in ("alias", "tool", "guest", "new")))
-    guest("rmdir /usr/local/bin", "symlink /usr/local/bin /home/keep")
+    guest(*(f"rm /opt/kit/bin/{n}" for n in ("alias", "tool", "guest", "new")))
+    guest("rmdir /opt/kit/bin", "symlink /opt/kit/bin /home/keep")
     refused("a host directory the guest made a symlink")
     assert kind("/home/keep/tool") == "f"
-    guest("rm /usr/local/bin", "mkdir /usr/local/bin")
-    install(image, tree, "/usr/local", name)
-    assert read("/usr/local/bin/tool") == b"two\n"
+    guest("rm /opt/kit/bin", "mkdir /opt/kit/bin")
+    install(image, tree, "/opt/kit", name)
+    assert read("/opt/kit/bin/tool") == b"two\n"
 
-    guest("rm /usr/local/bin/tool", "mkdir /usr/local/bin/tool")
+    guest("rm /opt/kit/bin/tool", "mkdir /opt/kit/bin/tool")
     refused("a host file the guest replaced with a directory")
-    guest("rmdir /usr/local/bin/tool")
+    guest("rmdir /opt/kit/bin/tool")
     sound()
 
     guest("mkdir /sbin", "write /dev/null /sbin/init")
-    with open(os.path.join(manifests, "usr_local"), "a") as f:
+    with open(os.path.join(manifests, "kit"), "a") as f:
         f.write("f ../../sbin/init\n")
     refused("a manifest entry that climbs out of the tree")
     assert kind("/sbin/init") == "f"
-    os.unlink(os.path.join(manifests, "usr_local"))
+    os.unlink(os.path.join(manifests, "kit"))
     refused("files no manifest records")
 
     guest("mkdir /srv", "symlink /srv/tree /sbin")
@@ -625,9 +592,9 @@ def _self_test(work):
         f.truncate(8 << 20)
     subprocess.run(["mke2fs", "-q", "-F", *mkfs_args(), "-d", stage, other], check=True)
     assert exists(other, "/src") and not exists(other, "/nowhere")
-    install(other, tree, "/usr/local", None)
-    assert kind_in(other, "/usr/local/bin/tool") == "f"
-    assert owner("/usr/local/bin/tool", other) == (0, 0), "a tree given no owner is uid 0's"
+    install(other, tree, "/opt/kit", None)
+    assert kind_in(other, "/opt/kit/bin/tool") == "f"
+    assert owner("/opt/kit/bin/tool", other) == (0, 0), "a tree given no owner is uid 0's"
     debugfs(other, ["mknod /slashed p"], write=True)
     with contextlib.redirect_stderr(io.StringIO()):
         assert exists(other, "/nowhere"), "a name holding a / passed"
@@ -649,24 +616,24 @@ def _self_test(work):
             f.write("app\n")
     both = os.path.join(work, "shared-trees")
     session = (1000, 1000)
-    install(shared, tree, "/usr/local", (both, "usr_local"), session)
-    install(shared, apps, "/usr/local", (both, "apps"), session)
-    assert kind_in(shared, "/usr/local/bin/tool") == kind_in(shared, "/usr/local/bin/editor") == "f"
-    assert owner(f"{IMAGE_MANIFESTS}/apps", shared) == session, "a manifest copy takes its owner"
-    assert {(u, g) for _, u, g, _ in walk_image(shared, "/usr/local")} == {session}
+    install(shared, tree, "/opt/kit", (both, "kit"), session)
+    install(shared, apps, "/opt/kit", (both, "apps"), session)
+    assert kind_in(shared, "/opt/kit/bin/tool") == kind_in(shared, "/opt/kit/bin/editor") == "f"
+    for path in ("/opt/kit", "/opt/kit/bin", "/opt/kit/bin/tool", "/opt/kit/bin/editor"):
+        assert owner(path, shared) == session, f"{path} takes the tree's owner"
     with open(os.path.join(apps, "bin/tool"), "w") as f:
         f.write("clash\n")
     try:
-        install(shared, apps, "/usr/local", (both, "apps"), session)
+        install(shared, apps, "/opt/kit", (both, "apps"), session)
     except Conflict:
         pass
     else:
         raise AssertionError("not refused: one tree's file in the way of another")
     os.unlink(os.path.join(apps, "bin/tool"))
     os.unlink(os.path.join(apps, "bin/editor"))
-    install(shared, apps, "/usr/local", (both, "apps"), session)
-    assert kind_in(shared, "/usr/local/bin/editor") == "absent"
-    assert kind_in(shared, "/usr/local/bin/tool") == "f", "a tree's reinstall kept the other's file"
+    install(shared, apps, "/opt/kit", (both, "apps"), session)
+    assert kind_in(shared, "/opt/kit/bin/editor") == "absent"
+    assert kind_in(shared, "/opt/kit/bin/tool") == "f", "a tree's reinstall kept the other's file"
 
     seed = os.path.join(work, "seed")
     os.makedirs(os.path.join(seed, "clone"))
@@ -691,9 +658,6 @@ def main(argv):
             return 0 if exists(argv[1], argv[2]) else 1
         elif len(argv) == 3 and argv[0] == "read":
             sys.stdout.buffer.write(read_file(argv[1], argv[2]))
-        elif len(argv) == 3 and argv[0] == "walk":
-            for mode, uid, gid, path in walk_image(argv[1], argv[2]):
-                print(f"{mode:o} {uid}:{gid} {path}")
         elif len(argv) >= 4 and argv[0] == "install":
             image, host, guest, *rest = argv[1:]
             options = dict(zip(rest[::2], rest[1::2]))

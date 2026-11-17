@@ -3,8 +3,8 @@
 # Sourced.
 
 # `<path>:<uid>:<gid>:<mode>`, parents first.
-ROOT_LAYOUT=(/:0:0:0755 /etc:0:0:0755 /var:0:0:0755 /var/lib:0:0:0755 /var/lib/slopos:0:0:0755 /var/log:0:0:0755 /var/tmp:0:0:1777 /root:0:0:0700 /home:0:0:0755 /media:0:0:0755 /usr:0:0:0755 /usr/local:0:0:0755 /opt:0:0:0755 /opt/bin:0:0:0755)
-PERSON_TREES=(/home/user /src /usr/local)
+ROOT_LAYOUT=(/:0:0:0755 /etc:0:0:0755 /var:0:0:0755 /var/lib:0:0:0755 /var/lib/slopos:0:0:0755 /var/log:0:0:0755 /var/tmp:0:0:1777 /root:0:0:0700 /home:0:0:0755 /media:0:0:0755 /usr:0:0:0755 /opt:0:0:0755 /opt/bin:0:0:0755)
+PERSON_TREES=(/home/user /src)
 PERSON_OWNER=1000:1000
 OWNERS_RECORD=/var/lib/slopos/owners
 # The trees the root's record names, every one on a new root.

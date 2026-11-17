@@ -173,9 +173,8 @@ test_userland_bins  := `. scripts/lib/base.sh && printf %s "$BASE_TEST_PROGRAMS"
 test_shared_objects := `. scripts/lib/base.sh && printf %s "$BASE_TEST_SHARED_OBJECTS"`
 base_recipe_programs := `. scripts/lib/base.sh && printf %s "$BASE_RECIPE_PROGRAMS"`
 base_recipes        := `. scripts/lib/base.sh && printf %s "$BASE_RECIPES"`
-# On SlopOS the toolchain image, or the tree an install medium's payload laid
-# out at /usr/local on a root it installed.
-recipes_prefix      := if os() == "slopos" { if path_exists("/opt/slopos-toolchain/libexec") == "true" { "/opt/slopos-toolchain" } else { "/usr/local" } } else { build_dir / "slopos-recipes/prefix" }
+# On SlopOS the toolchain image.
+recipes_prefix      := if os() == "slopos" { "/opt/slopos-toolchain" } else { build_dir / "slopos-recipes/prefix" }
 base_recipe_env     := "RECIPE_PROGRAM_DIR=" + recipes_prefix / "libexec" + " RECIPE_PROGRAMS=\"" + base_recipe_programs + "\" RECIPE_LICENSE_DIR=" + recipes_prefix / "share/licenses" + " RECIPE_LICENSES=\"" + base_recipes + "\""
 # A machine the host drives through remoted stays paired: on SlopOS the base it
 # builds carries the pairing the running base does.
@@ -1433,7 +1432,7 @@ test-remote: (_host "test-remote") _build-userland _base-recipes
         fail "run: exit $rc, stdout '$(cat "$work/out")', stderr '$(cat "$work/err")'; want 3, 'out', 'err'"
     [ "$(remote run --cwd /etc -- pwd)" = /etc ] || fail "run --cwd /etc did not run in /etc"
     remote run --env SLOPOS_E2E=yes -- env >"$work/env"
-    grep -qx 'SLOPOS_E2E=yes' "$work/env" && grep -qx 'PATH=/bin:/sbin:/usr/local/bin:/opt/bin' "$work/env" ||
+    grep -qx 'SLOPOS_E2E=yes' "$work/env" && grep -qx 'PATH=/bin:/sbin:/opt/bin' "$work/env" ||
         fail "the child's environment: $(tr '\n' ' ' <"$work/env")"
     [ "$(printf 'piped stdin' | remote run --stdin -- cat)" = 'piped stdin' ] || fail "stdin did not reach the child"
     rc=0; remote run -- /bin/no-such-program 2>"$work/err" || rc=$?
@@ -1532,9 +1531,9 @@ test-remote: (_host "test-remote") _build-userland _base-recipes
 
 # /tmp is memory on SlopOS, and some of these tests write disk images: there
 # they take the root's /var/tmp.
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, shooter-core, net-core, nvme-core, rtl8168-core, usb-core, hid-core, cpufreq-core, ext4-core, verity-core, http-core, remote-core, installer-core, priv-core, fat-core, boot-core, tree-core, accounts-core, extension-core, tls-core, chrome-core, fate-core, splash-core, theme-core, settings-core, settings-app, slibc-core, kallsyms, initramfs, extension, icons, the gates of tools/xtask and, on Linux and macOS, tools/run_tests, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, shooter-core, net-core, nvme-core, rtl8168-core, usb-core, hid-core, cpufreq-core, ext4-core, verity-core, http-core, remote-core, installer-core, priv-core, fat-core, boot-core, accounts-core, extension-core, tls-core, chrome-core, fate-core, splash-core, theme-core, settings-core, settings-app, slibc-core, kallsyms, initramfs, extension, icons, the gates of tools/xtask and, on Linux and macOS, tools/run_tests, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{ if os() == "slopos" { "TMPDIR=/var/tmp " } else { "" } }}{{host_cargo}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-shooter-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-verity-core -p slopos-http-core -p slopos-remote-core -p slopos-installer-core -p slopos-priv-core -p slopos-fat-core -p slopos-boot-core -p slopos-tree-core -p slopos-accounts-core -p slopos-settings-core -p slopos-settings-app -p slopos-extension-core -p slopos-tls-core -p slopos-chrome-core -p slopos-fate-core -p slopos-splash-core -p slopos-theme-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs -p slopos-extension -p slopos-icons -p slopos-xtask
+    {{ if os() == "slopos" { "TMPDIR=/var/tmp " } else { "" } }}{{host_cargo}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-shooter-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-verity-core -p slopos-http-core -p slopos-remote-core -p slopos-installer-core -p slopos-priv-core -p slopos-fat-core -p slopos-boot-core -p slopos-accounts-core -p slopos-settings-core -p slopos-settings-app -p slopos-extension-core -p slopos-tls-core -p slopos-chrome-core -p slopos-fate-core -p slopos-splash-core -p slopos-theme-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs -p slopos-extension -p slopos-icons -p slopos-xtask
     {{ if os() == "slopos" { "" } else { "just check-tests-host" } }}
 
 [doc("Run the Go test runner's own unit tests and its log gates' (host-side, no QEMU)")]

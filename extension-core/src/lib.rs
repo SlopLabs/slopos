@@ -34,7 +34,7 @@ pub use words::{LineError, parse_caps, render_caps};
 /// Names the system's own paths take beside
 /// [`slopos_abi::extension::RESERVED`]: an extension's `/var/log/<name>`,
 /// `/run/<name>` or `/etc/<name>` would be one of theirs.
-pub const TAKEN: [&str; 11] = [
+pub const TAKEN: [&str; 10] = [
     "crash",
     "init",
     "privd",
@@ -45,7 +45,6 @@ pub const TAKEN: [&str; 11] = [
     "keymap",
     "motd",
     "slopos-auth",
-    "slopos-local",
 ];
 
 /// A name an extension may be installed under.

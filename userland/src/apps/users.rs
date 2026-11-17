@@ -4,7 +4,7 @@
 //! `org.slopos.accounts.manage` adds, removes and renames people, sets a
 //! person's password and changes who administers the computer, for root, an
 //! administrator, or a person an administrator's password answers for. The
-//! add that makes a second person hands `/usr/local` to the system. Init
+//! add that makes a second person closes the first person's home. Init
 //! runs `users sync` at every boot, holding `Seal`, which writes the user
 //! database and gives a root that has no record the one person's: `user`, its
 //! first administrator.
@@ -13,13 +13,13 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, lchown};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use slopos_abi::fs::{OWNERS_RECORD, SESSION_HOME};
+use slopos_abi::fs::SESSION_HOME;
 use slopos_accounts_core::{Accounts, Person};
 use slopos_priv_core::{ENV_ACTION, ENV_UID};
 
 use crate::accounts::{self, Store};
 use crate::privd::{self, Input};
-use crate::root_layout::{self, LOCAL, Owners};
+use crate::root_layout;
 use crate::secret;
 use crate::syscall::core as sys_core;
 
@@ -357,21 +357,20 @@ fn change(request: Request) -> Result<String, String> {
             (format!("{name}'s password is changed"), Home::Kept)
         }
     };
-    let second = matches!(home, Home::Made(_)) && accounts.people().len() > 1;
-    let shared = match second {
-        true => share_for_second(top),
+    let second = matches!(home, Home::Made(_)) && accounts.people().len() == 2;
+    let closed = match second {
+        true => root_layout::close_home(top).map_err(|why| format!("{why}; nobody was added")),
         false => Ok(false),
     };
-    let recorded = shared.and_then(|shared| {
-        store.record(&accounts).map_err(|why| match shared {
-            true => format!("{why}; nobody was added, though {LOCAL} is the system's now"),
+    let recorded = closed.and_then(|closed| {
+        store.record(&accounts).map_err(|why| match closed {
+            true => {
+                format!("{why}; nobody was added, though {SESSION_HOME} is closed to others now")
+            }
             false => why,
         })?;
-        if shared {
-            said.push_str(&format!(
-                "; {LOCAL} is the system's now, installed into through privd, and \
-                 {SESSION_HOME} closed to others"
-            ));
+        if closed {
+            said.push_str(&format!("; {SESSION_HOME} is closed to others now"));
         }
         Ok(())
     });
@@ -383,14 +382,6 @@ fn change(request: Request) -> Result<String, String> {
     }
     let synced = store.sync();
     store.unlock();
-    if matches!(home, Home::Made(_))
-        && !root_layout::settled()
-        && Owners::read(top).is_some_and(|owners| !owners.holds(LOCAL))
-    {
-        said.push_str(&format!(
-            "; restart before they log in, so nothing opened in {LOCAL} before is open still"
-        ));
-    }
     if let Home::Removed(person) = home {
         let gone = remove_home(&person).unwrap_or_else(|why| format!("; its home stays: {why}"));
         said.push_str(&gone);
@@ -398,25 +389,6 @@ fn change(request: Request) -> Result<String, String> {
     synced.map(|()| said.clone()).map_err(|why| {
         format!("{said}, but the user database was not written: {why}; the next boot writes it")
     })
-}
-
-/// Share the root for a second person the add records: whether this add
-/// did, and a refusal where the root's owners record cannot be read.
-fn share_for_second(top: &Path) -> Result<bool, String> {
-    let Some(owners) = Owners::read(top) else {
-        return Err(format!(
-            "{OWNERS_RECORD} is absent or cannot be read; nobody was added"
-        ));
-    };
-    if !owners.holds(LOCAL) {
-        return Ok(false);
-    }
-    root_layout::share(top)
-        .map(|()| true)
-        .map_err(|why| match root_layout::sharing(top) {
-            true => format!("{why}; nobody was added, and the next boot finishes the hand-over"),
-            false => format!("{why}; nobody was added"),
-        })
 }
 
 fn manage(

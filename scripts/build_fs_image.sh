@@ -477,7 +477,9 @@ read_owners() {
     local record
     if record="$("${FS_TREE[@]}" read "$IMAGE_PATH" "$OWNERS_RECORD")"; then
         root_layout_read_record <<<"$record"
-        root_layout_holds /usr/local || HOME_MODE=0700
+        # Whether the guest has a second person is its accounts store's to
+        # say, which is not read here: a home made on a kept image is closed.
+        HOME_MODE=0700
     else
         echo "build_fs_image: installing as uid 0's, as a missing or unread $OWNERS_RECORD grants nothing" >&2
         HELD_TREES=()

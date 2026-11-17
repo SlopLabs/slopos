@@ -95,3 +95,9 @@
 - A RAM file's seal comes off for `Seal` as an ext4 file's does (ramfs
   `set_inode_flags`), so the store works on a live boot's RAM root; the
   accounts store still refuses one.
+- `docs/architecture/extensions`, `docs/abi/extension-images`: an
+  image's command comes after `/bin` and `/sbin` on `DEFAULT_PATH`
+  (`/bin:/sbin:/opt/bin`), and its app entry yields to the base's and
+  `~/.local`'s; `/usr/local` is gone. A command's shell completions come
+  from its image's `share/shell/completions`, found through its `/opt/bin`
+  link, ahead of the base's.

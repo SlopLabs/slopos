@@ -1373,7 +1373,7 @@ impl LineDisc {
     }
 
     /// Word erase (VWERASE). Boundaries are alphanumeric + underscore rather
-    /// than whitespace, so `/usr/local/bin` erases one path component at a time.
+    /// than whitespace, so `/opt/tools/bin` erases one path component at a time.
     fn word_erase(&mut self, lflag: LocalFlags) -> InputAction {
         if self.edit_len == 0 {
             return InputAction::None;

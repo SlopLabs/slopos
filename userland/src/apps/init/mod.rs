@@ -32,7 +32,6 @@ use self::service::{
 use self::session::{Sessions, Then, Want};
 use crate::base_watch::BaseWatch;
 use crate::init_control::{self, At, Command, SOCKET, fds};
-use crate::root_layout::{LOCAL, Owners};
 use crate::syscall::process::{self, Endowment, WaitStatus};
 use crate::syscall::{OwnedFd, RawFd, core as sys_core, fs, net, tty};
 
@@ -180,15 +179,7 @@ fn boot() -> ! {
     upgrade_console_font();
     collect_crash_records();
     let root = std::path::Path::new("/");
-    let holder = crate::root_layout::lay_out(root).owner(LOCAL);
-    if Owners::read(root).is_some_and(|recorded| !recorded.holds(LOCAL))
-        && let Err(e) = crate::root_layout::settle()
-    {
-        eprintln!("init: {LOCAL}: {e}");
-    }
-    if let Err(e) = crate::tree::hand_over(slopos_tree_core::APPS, holder) {
-        eprintln!("init: the apps' manifest: {e}");
-    }
+    crate::root_layout::lay_out(root);
     sync_accounts();
     install_offered();
     activate_extensions();

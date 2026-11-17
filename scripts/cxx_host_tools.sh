@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Resolve the LLVM toolchain that builds the C++ runtime: the host's, or in the
-# guest the one at /usr/local. The guest's bash has no `/dev/fd`, so loops read
+# guest the toolchain image's. The guest's bash has no `/dev/fd`, so loops read
 # here-documents rather than process substitutions.
 #
 # Usage: eval "$(cxx_host_tools.sh)"       # CLANG/CLANGXX/LD_LLD/LLVM_AR/CXX_HOST_MAJOR
@@ -90,8 +90,7 @@ major_dirs() {
         "/usr/lib64/llvm-$m/bin" \
         "/usr/lib/llvm$m/bin" \
         "/usr/lib64/llvm$m/bin" \
-        "/opt/llvm-$m/bin" \
-        "/usr/local/llvm-$m/bin"
+        "/opt/llvm-$m/bin"
 }
 
 CLANG_PATH=""

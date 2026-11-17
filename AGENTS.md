@@ -57,7 +57,7 @@ In `.agents/skills/<name>/SKILL.md`.
 | `slopos-toolchain` | `toolchain/`, the sysroot, the forks, recipes, vendoring, `--pgo` |
 | `slopos-dev-machine` | `just boot`'s root, image builders, guest git, `just install` |
 | `slopos-boot-install` | `boot-core`, `bootctl`, slots, the installer, rescue, crash records |
-| `slopos-base-software` | the base, its interface, `basefs`, `/usr/local` trees, `tree-install` |
+| `slopos-base-software` | the base, its interface, `basefs`, search paths, `~/.local` |
 | `slopos-extensions` | `extctl`, `ext_activate`, extension images, services, grants |
 | `slopos-authority` | capabilities, peer identity, privd and consent, `priv` |
 | `slopos-users-sessions` | uids and file permissions, accounts, init, sessions, login |

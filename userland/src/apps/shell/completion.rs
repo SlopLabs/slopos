@@ -1,8 +1,9 @@
 //! Tab completion's candidates: the command tables, every directory on
 //! `PATH`, the filesystem, and the rules `complete` declares. A command's
 //! rules are read on the first completion of one of its arguments, from a
-//! file named after it in a `SHELL_COMPLETION_PATH` directory, so a program
-//! installed under `/usr/local` can bring its own.
+//! file named after it in a `SHELL_COMPLETION_PATH` directory or, with none
+//! named, in the `share/shell/completions` of the image whose command
+//! `/opt/bin` links it as, then in the base's.
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -18,8 +19,10 @@ use crate::syscall::fs;
 use super::builtins::BUILTINS;
 use super::{env, expand, funcs, script};
 
-const DEFAULT_COMPLETION_PATH: &[u8] =
-    b"/usr/local/share/shell/completions:/usr/share/shell/completions";
+const BASE_COMPLETIONS: &[u8] = b"/usr/share/shell/completions";
+const COMMANDS: &[u8] = b"/opt/bin";
+const BASE_COMMANDS: [&[u8]; 2] = [b"/bin", b"/sbin"];
+const IMAGE_COMPLETIONS: &str = "share/shell/completions";
 
 /// Compiled in: only the shell knows its builtins' arguments.
 const BUILTIN_RULES: &[&[&[u8]]] = &[
@@ -307,13 +310,36 @@ fn rules_file(command: &[u8]) -> Option<Vec<u8>> {
     if command.is_empty() || command == b"." || command == b".." {
         return None;
     }
-    let search =
-        env::get(b"SHELL_COMPLETION_PATH").unwrap_or_else(|| DEFAULT_COMPLETION_PATH.to_vec());
+    let search = env::get(b"SHELL_COMPLETION_PATH").unwrap_or_else(|| {
+        let mut dirs = image_completions(command).unwrap_or_default();
+        dirs.push(b':');
+        dirs.extend_from_slice(BASE_COMPLETIONS);
+        dirs
+    });
     search
         .split(|&b| b == b':')
         .filter(|dir| !dir.is_empty())
         .map(|dir| join(dir, command))
         .find(|path| stat(path).is_some_and(|s| s.is_file()))
+}
+
+/// `/opt/<name>/share/shell/completions` where `/opt/bin/<command>` links
+/// `/opt/<name>/bin/<command>` and no base command of that name comes first.
+fn image_completions(command: &[u8]) -> Option<Vec<u8>> {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::path::Path;
+    if BASE_COMMANDS
+        .iter()
+        .any(|dir| stat(&join(dir, command)).is_some())
+    {
+        return None;
+    }
+    let link = join(COMMANDS, command);
+    let program = std::fs::read_link(std::ffi::OsStr::from_bytes(&link)).ok()?;
+    let image = program.parent()?.parent()?;
+    let opt = Path::new(slopos_abi::extension::DIR);
+    (image.parent() == Some(opt) && program.parent()?.file_name()? == "bin")
+        .then(|| image.join(IMAGE_COMPLETIONS).into_os_string().into_vec())
 }
 
 fn expand_words(text: &[u8]) -> Vec<Vec<u8>> {

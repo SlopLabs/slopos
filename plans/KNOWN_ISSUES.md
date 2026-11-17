@@ -125,7 +125,7 @@ thread: Out of memory`, an ICE), each refusal logged as `process_vm_mmap:
 Failed to insert VMA`. The thread stack's `mmap` is refused by `insert`'s page
 reservation: the commit ceiling is not what refuses it, since a run at 8 GiB,
 with room left under the ceiling and no denial, fails identically. A run with
-the toolchain as a tree at `/usr/local` fails identically too, so neither
+the toolchain as a tree rather than an image failed identically too, so neither
 `AT_SECURE` nor the image is the cause. Find what one rustc maps (incremental
 caches, rlibs, stacker segments, arenas) before raising the share.
 
@@ -157,26 +157,6 @@ Under heavy host load an idle CPU's `prezero_idle` can take
 `INVALID_PAGE_FRAME` from its per-CPU cache and fault zeroing the physical
 address it names. Which path leaves that value where the cache hands out a
 frame is not known.
-
----
-
-## Installing for everyone through privd is bounded by half a ceiling and by what everyone may read
-
-**Status**: Open
-**Severity**: Low (limits, no wrong result)
-**Component**: `userland/src/tree.rs:271-314` (`tree::stage`),
-`userland/src/apps/tree_install.rs:55-67`
-
-`org.slopos.software.install` copies the tree into
-`/var/lib/slopos/tree-install` before installing it, and both count against the
-mechanism's `DiskBlocks` ceiling, so a tree installed through privd is at most
-half of it. The copy takes only what everyone may read, reached through
-directories everyone may search, so once homes are 0700 a person installs for
-everyone only from a tree outside their home. uid 0 running `tree-install`
-itself installs from the same copy, under the same two bounds, wherever the
-tree goes: on the medium's RAM root the copy is memory, and a run that is
-stopped keeps `tree-install.lock`, which privd's install then waits for
-holding its exclusive group.
 
 ---
 

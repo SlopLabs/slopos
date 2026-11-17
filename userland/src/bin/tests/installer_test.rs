@@ -807,7 +807,7 @@ fn served_install(disk: &str, root: u32) -> Result<(), String> {
 /// a root of this medium takes, so it is neither bound.
 fn foreign_root_size() -> Result<u64, String> {
     let payload = std::path::Path::new(layout::PAYLOAD_DIR);
-    let carried = ["usr/local", "src"]
+    let carried = ["images/slopos-toolchain.ext", "src"]
         .iter()
         .any(|tree| payload.join(tree).exists());
     let bytes = if carried {

@@ -5,8 +5,7 @@
 Software reaches a SlopOS machine in one form. What someone distributes is
 an image, verified on every read, shown at `/opt/<name>`, with a version
 and a previous image to go back to. What a person builds themselves is a
-file in their home. `/usr/local`, `tree-install` and everything that guards
-a shared directory a person can write go away.
+file in their home, and no directory a person can write is shared.
 
 | Place | Holds | Changed by |
 |-------|-------|------------|
@@ -18,19 +17,10 @@ An extension is already this image. The work is to make it the only form.
 
 ## What stands today
 
-Software outside the base has two forms. An extension is one ext4 image
-with a verity tree, installed by `extctl`; the toolchain and the apps are
-two, which every root is offered. A tree is files copied into `/usr/local`
-or `~/.local` by `tree-install`, with a manifest of what was copied; no root
-carries one any more.
-
-`/usr/local` is a directory the first person owns that is on everyone's
-search path, and the tree guards it in five places: the hand-over to uid 0
-when a second person is added (`root_layout::share`), the boot mark `priv`
-reads before it takes a command from there (`root_layout::settled`), the
-loader leaving `/usr/local/lib` out for a process that is `AT_SECURE` or
-uid 0's (`slibc/src/ld_so/mod.rs`), privd naming no app from there, and
-the staged copy behind `org.slopos.software.install`.
+Software outside the base is an image: one ext4 image with a verity tree,
+installed by `extctl` and shown at `/opt/<name>`. The toolchain and the
+apps are two, which every root is offered. A person's own builds are files
+in their `~/.local`.
 
 ## Decided here
 
@@ -141,8 +131,8 @@ blocks hashed interleaved gained nothing without the SHA instructions.
 composefs's shape was not taken: per-file verity in ext4 and a new store
 format, for what the device reaches without either.
 
-`toolchain_test` on the dev tests kernel, the image against a `/usr/local`
-tree, means of two and three runs: `rustc --version` (cold) 910 and 1197 ms,
+`toolchain_test` on the dev tests kernel, the image against the same files
+as a tree on the root, means of two and three runs: `rustc --version` (cold) 910 and 1197 ms,
 `rustc hello.rs` 3010 and 3566, `cargo build` 3419 and 3571, cmake's
 configure 2554 and 2704, `cargo clippy` 2158 and 2303, `bash` 2005 and 1944.
 `cargo fmt`, 985 and 849, is the one rung past 10%, inside the tree's own
@@ -196,55 +186,15 @@ image's files being uid 0's. The cheap boot came with phase 3's kept needs.
 and `just install` installs it with `extctl install`. The apps start
 `AT_SECURE`.
 
-## Phase 6: `/usr/local` goes
+## Phase 6: the shared prefix goes — done
 
-**For:** no shared directory a person can write to be left on anyone's
-search path.
-
-Goes, with nothing in its place:
-
-- `tree-install`, `tree-core`, `userland/src/tree.rs` (its four file
-  helpers move to the installer, which imports them), the privd action
-  `org.slopos.software.install` and its staging directories.
-- In `root_layout.rs`: `LOCAL`, `settled` and its mark, the hand-over mark,
-  `take_local` and the checks under it. In init: `hand_over`, `settle`,
-  In `users add`: the hand-over and the restart
-  advice. In `priv`: the clause on `settled`.
-- `/usr/local/bin` from `DEFAULT_PATH` and `search_path`, `/usr/local` from
-  `ROOT_LAYOUT` and `PERSON_TREES` (`abi/src/fs.rs`) and their mirrors
-  (`scripts/lib/root_layout.sh`, `tools/initramfs`), `LOCAL_DIR` from the
-  loader, `/usr/local/share` from the dock's shares.
-- The tests of all of it: `tree_install_test`, `apps_test --trees`, the
-  hand-over cases of `dac_test`, the `/usr/local/lib` cases of `dl_test`,
-  `tree-core`'s host tests, the action's cases in `priv-core`.
-- In `KNOWN_ISSUES.md`, *Installing for everyone through privd is bounded*;
-  in `CVSS.md`, the findings that rest on the hand-over and the staged
-  copy, each re-read before it is deleted.
-
-Needs something in its place:
-
-- **One person or several.** "The owners record holds `/usr/local`" also
-  means "the machine has one person", which decides whether the first home
-  is open to others (`root_layout.rs`, `scripts/build_fs_image.sh`).
-  Closing the first home at the second `users add` stays, on a fact of its
-  own.
-- **Shell completions.** The shell reads
-  `/usr/local/share/shell/completions` and the base's. An image's
-  `share/shell/completions` takes the first one's place.
-- **`scripts/fs_tree.py`** stays for the host trees that are not
-  `/usr/local`: the ladder fixtures, a planted pairing.
-
-What a person loses is `tree-install` into `~/.local`, which remembered
-what it copied. `cp` is what remains, and `extctl build` packs a directory
-for everyone with no tool and no capability. `~/.cargo/bin` is on no
-search path today; decide whether it joins.
-
-Neither `DEFAULT_PATH` nor `ROOT_LAYOUT` is in the base-interface gate's
-roots, so none of this takes an interface number.
-
-Done when nothing in the tree, its tests or `plans/` names `/usr/local`,
-and a note for each of the 25 docs pages that do is in the skills'
-`pending.md`.
+`tree-install`, `tree-core`, `org.slopos.software.install` and the prefix
+the first person held went, with what guarded it: the hand-over, `priv`'s
+boot mark, the loader's, the dock's and the shell's extra directory.
+`DEFAULT_PATH` is `/bin:/sbin:/opt/bin`, and a command's completions come
+from its image. The second `users add` closes the first home; a home made
+anew is open while the accounts record holds one person. `~/.cargo/bin`
+stays off every path.
 
 ## Phase 7: an image is its name and its signer
 
@@ -336,8 +286,7 @@ an installed image.
 
 ## Order
 
-Phase 6 removes what phases 1, 4 and 5 stopped using. Phase 7 depends on none of
-them and is small; it can come early. Phase 8 is needed before software
+Phase 7 is small and can come first. Phase 8 is needed before software
 from elsewhere arrives one image at a time, not before. Phase 9 comes last,
 so that no other phase is written against names that move under it.
 

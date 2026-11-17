@@ -27,3 +27,8 @@
   holding the last key serial; the kernel keeps none. The terminal no longer
   mirrors its shell's output into the kernel log; the terminal and the
   compositor open `/dev/kmsg` at start and log through it.
+- `docs/architecture/desktop`, `docs/development/writing-an-app`: no app
+  lives at `/usr/local`; the dock reads each image's share, `/usr/share`,
+  then `~/.local/share`. An app ships in an image (`slopos-essentials` for
+  SlopOS's, entries naming `/opt/<image>/bin/<app>`), or a person copies
+  their own build into `~/.local`; `tree-install` is gone.
