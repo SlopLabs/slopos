@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use slopos_abi::fs::O_NOFOLLOW;
 use slopos_abi::syscall::BOOT_FLAG_EXTENSIONS_OFF;
 use slopos_abi::syscall::posix::{O_NOCTTY, O_NONBLOCK};
-use slopos_extension_core::admit::{self, Admitted, Authority, Bounds};
+use slopos_extension_core::admit::{self, Admitted, Authority, Bounds, NOBODY};
 use slopos_extension_core::grant::Grant;
 use slopos_extension_core::image::{Image, ImageError};
 use slopos_extension_core::keys::{Key, Keys, valid_comment};
@@ -43,13 +43,16 @@ use progress::Progress;
 const USAGE: &str = "usage: extctl <command>
   status [<name>]                 what the store holds and what runs
   build <dir> [<out-dir>]         pack <dir> as <name>.ext and its sidecar <name>.meta
-  install <image> [<root>]        install it, granting what it declares once allowed
+  install <image> [<root>]        install it, granting what it declares once allowed;
+                                  <image>.meta.sig beside it says who signed it
   install-signed <image> [<meta> <meta.sig>]
                                   install or update it unasked under a trusted key
   key add <key.pub> ceiling <caps> user <caps>
                                   trust a key; <caps> are names joined by commas, or -
   key remove <SHA256:fingerprint>
-  enable|disable|remove|rollback <name>
+  enable|disable|rollback <name>
+  remove <name>                   remove it with its state, settings and log, giving
+                                  up the name
   activate-all                    run every enabled extension the store holds
   install-offered [<dir>]         install unasked what uid 0 offers there that
                                   asks for nothing (default /var/lib/slopos/offered)
@@ -123,10 +126,9 @@ impl Base {
 }
 
 /// The command line a request carries: an `install` of an image alone names
-/// the image's digest and what it is granted, a `config install` of a file
-/// hands the file over as standard input and names its digest, and a `key
-/// add` of a key file or line names the key's fingerprint, so the person
-/// reads each.
+/// the image's digest, signer and grant, a `config install` of a file hands
+/// the file over as standard input and names its digest, and a `key add` of
+/// a key file or line names the key's fingerprint, so the person reads each.
 fn canonical(args: &[String]) -> Result<Vec<String>, String> {
     match args {
         [cmd, image, digest @ ..] if cmd == "install" && digest.len() < 2 => {
@@ -135,12 +137,22 @@ fn canonical(args: &[String]) -> Result<Vec<String>, String> {
                 _ => None,
             };
             let opened = open_image(image, want.map(|root| (root, "the request")))?;
+            let signer = match signature_beside(image)? {
+                Some((sidecar, signature)) => {
+                    admit::signed_by(&sidecar, &signature, &opened.release, opened.digest)
+                        .map_err(|e| format!("{image}: its signature: {e}"))?
+                        .fingerprint()
+                }
+                None => NOBODY.into(),
+            };
             let mut out = vec![
                 cmd.clone(),
                 image.clone(),
                 hex(&opened.digest),
                 "name".into(),
                 opened.release.name.clone(),
+                "signer".into(),
+                signer,
             ];
             out.extend(opened.declaration.grant().words());
             Ok(out)
@@ -192,6 +204,23 @@ fn canonical(args: &[String]) -> Result<Vec<String>, String> {
     }
 }
 
+/// The sidecar and signature beside the image at `path`, when signed.
+fn signature_beside(path: &str) -> Result<Option<(Vec<u8>, Vec<u8>)>, String> {
+    let (sidecar, signature) = beside(path);
+    if std::fs::symlink_metadata(&signature).is_err() {
+        return Ok(None);
+    }
+    Ok(Some((
+        read_file(&sidecar, SIDECAR_MAX)?,
+        read_file(&signature, SIDECAR_MAX)?,
+    )))
+}
+
+fn beside(path: &str) -> (String, String) {
+    let stem = path.strip_suffix(".ext").unwrap_or(path);
+    (format!("{stem}.meta"), format!("{stem}.meta.sig"))
+}
+
 fn key_of(kind: &str, base64: &str) -> Result<PublicKey, String> {
     PublicKey::from_openssh(kind, base64).ok_or_else(|| "not an ssh-ed25519 public key".into())
 }
@@ -227,10 +256,12 @@ fn config_file(file: &str) -> Result<String, String> {
 
 /// Who vouches for an install, as its command line names them.
 enum Vouched {
-    /// The person approved `grant` for `name` and the image of `digest`.
+    /// The person approved `grant` for `name`, the image of `digest` and
+    /// its `signer`.
     Approved {
         digest: [u8; 32],
         name: String,
+        signer: Option<String>,
         grant: Grant,
     },
     /// A key signed the sidecar at `sidecar` with the signature at
@@ -288,22 +319,33 @@ fn parse(args: &[String]) -> Result<Request, String> {
             dir: (*dir).into(),
             out: (*out).into(),
         },
-        ["install", image, digest, "name", name, grant @ ..] => Request::Install {
+        [
+            "install",
+            image,
+            digest,
+            "name",
+            name,
+            "signer",
+            signer,
+            grant @ ..,
+        ] => Request::Install {
             image: (*image).into(),
             vouched: Vouched::Approved {
                 digest: parse_digest(digest).ok_or(USAGE)?,
                 name: named(name)?,
+                signer: match *signer {
+                    NOBODY => None,
+                    fingerprint if valid_fingerprint(fingerprint) => Some(fingerprint.into()),
+                    _ => return Err(USAGE.into()),
+                },
                 grant: Grant::parse(grant).ok_or(USAGE)?,
             },
         },
         ["install-signed", image] => {
-            let stem = image.strip_suffix(".ext").unwrap_or(image);
+            let (sidecar, signature) = beside(image);
             Request::Install {
                 image: (*image).into(),
-                vouched: Vouched::Signed {
-                    sidecar: format!("{stem}.meta"),
-                    signature: format!("{stem}.meta.sig"),
-                },
+                vouched: Vouched::Signed { sidecar, signature },
             }
         }
         ["install-signed", image, sidecar, signature] => Request::Install {
@@ -396,9 +438,9 @@ impl Request {
                 ..
             } => "org.slopos.extension.install-signed",
             Request::KeyAdd(_) | Request::KeyRemove(_) => "org.slopos.extension.trust",
+            Request::Remove(_) => "org.slopos.extension.remove",
             Request::Enable(_)
             | Request::Disable(_)
-            | Request::Remove(_)
             | Request::Rollback(_)
             | Request::Rooted {
                 command: Rooted::Enable(_) | Rooted::Disable(_),
@@ -455,7 +497,7 @@ impl Request {
                 | Request::ConfigEdit { .. }
                 | Request::Rooted { .. }
         );
-        let tells_init = settles && !matches!(self, Request::ActivateAll);
+        let tells_init = settles && !matches!(self, Request::ActivateAll | Request::Remove(_));
         let outcome = match self {
             Request::Status(only) => status(only.as_deref()),
             Request::Build { dir, out } => build(&dir, &out),
@@ -528,12 +570,15 @@ fn settle(tell_init: bool) -> String {
         }
         Err(why) => said.push_str(&format!("\nthe store could not be read again: {why}")),
     }
-    if tell_init && let Err(why) = init_control::ask(Command::Extensions) {
-        said.push_str(&format!(
-            "\ninit has not taken the change ({why}); the next boot does"
-        ));
+    if tell_init && let Err(why) = told_init() {
+        said.push_str(&format!("\n{why}"));
     }
     said
+}
+
+fn told_init() -> Result<(), String> {
+    init_control::ask(Command::Extensions)
+        .map_err(|why| format!("init has not taken the change ({why}); the next boot does"))
 }
 
 /// Every other installed extension's name and grant.
@@ -559,6 +604,8 @@ enum Voucher {
     Person {
         name: String,
         grant: Grant,
+        signer: Option<String>,
+        signed: Option<(Vec<u8>, Vec<u8>)>,
     },
     Key {
         sidecar: Vec<u8>,
@@ -568,11 +615,21 @@ enum Voucher {
 }
 
 impl Voucher {
-    fn read(vouched: &Vouched) -> Result<Voucher, String> {
+    fn read(path: &str, vouched: &Vouched) -> Result<Voucher, String> {
         Ok(match vouched {
-            Vouched::Approved { name, grant, .. } => Voucher::Person {
+            Vouched::Approved {
+                name,
+                signer,
+                grant,
+                ..
+            } => Voucher::Person {
                 name: name.clone(),
                 grant: grant.clone(),
+                signer: signer.clone(),
+                signed: match signer {
+                    Some(_) => signature_beside(path)?,
+                    None => None,
+                },
             },
             Vouched::Signed { sidecar, signature } => Voucher::Key {
                 sidecar: read_file(sidecar, SIDECAR_MAX)?,
@@ -583,7 +640,17 @@ impl Voucher {
 
     fn authority(&self) -> Authority<'_> {
         match self {
-            Voucher::Person { name, grant } => Authority::Person { name, grant },
+            Voucher::Person {
+                name,
+                grant,
+                signer,
+                signed,
+            } => Authority::Person {
+                name,
+                grant,
+                signer: signer.as_deref(),
+                signed: signed.as_ref().map(|(s, g)| (s.as_slice(), g.as_slice())),
+            },
             Voucher::Key { sidecar, signature } => Authority::Signed { sidecar, signature },
             Voucher::Offered => Authority::Offered,
         }
@@ -611,6 +678,7 @@ enum Prepared {
         voucher: Voucher,
         before: Option<Record>,
         installed: Installed,
+        signer: Option<String>,
         libc: Vec<u8>,
     },
 }
@@ -631,7 +699,7 @@ fn no_person_named(path: &str, name: &str, installed: &Installed) -> Result<(), 
 }
 
 fn prepare(store: &Store, path: &str, vouched: &Vouched) -> Result<Prepared, String> {
-    let voucher = Voucher::read(vouched)?;
+    let voucher = Voucher::read(path, vouched)?;
     let keys = store.keys()?;
     let refused = |e: admit::Refusal| format!("{path}: {e}");
     let named = match (vouched, voucher.signed()) {
@@ -655,6 +723,18 @@ fn prepare(store: &Store, path: &str, vouched: &Vouched) -> Result<Prepared, Str
     let name = image.release.name.clone();
     let base = Base::read()?;
     let before = store.record(&name)?;
+    let approved = matches!(vouched, Vouched::Approved { .. });
+    if let Some(removed) = before
+        .as_ref()
+        .filter(|r| approved && r.removed() && valid_name(&name))
+    {
+        let config = configure::kept(&name).then(|| slopos_extension_core::config::dir(&name));
+        if let Some(left) = config.into_iter().chain(owned_dirs(&name, removed)).next() {
+            return Err(format!(
+                "{path}: the removed {name} left {left}; `extctl remove {name}` takes it away"
+            ));
+        }
+    }
     let others = others(store, &name)?;
     let admitted = admit::install(
         before.as_ref(),
@@ -664,20 +744,24 @@ fn prepare(store: &Store, path: &str, vouched: &Vouched) -> Result<Prepared, Str
         &borrowed(&others),
     )
     .map_err(refused)?;
-    if let Admitted::Install(installed) = &admitted {
-        no_person_named(path, &name, installed)?;
-    }
     Ok(match admitted {
         Admitted::Current => Prepared::Current { name, before },
-        Admitted::Install(installed) => Prepared::Install {
-            image,
-            path: path.to_owned(),
-            name,
-            voucher,
-            before,
-            installed,
-            libc: base.libc,
-        },
+        Admitted::Install {
+            image: installed,
+            signer,
+        } => {
+            no_person_named(path, &name, &installed)?;
+            Prepared::Install {
+                image,
+                path: path.to_owned(),
+                name,
+                voucher,
+                before,
+                installed,
+                signer,
+                libc: base.libc,
+            }
+        }
     })
 }
 
@@ -696,7 +780,7 @@ fn idle(record: &Record) -> Option<String> {
 /// Put what `prepared` admitted in the store as its current image and run
 /// it. One that will not run leaves the store as it was.
 fn install(store: &Store, prepared: Prepared, progress: &Progress) -> Result<String, String> {
-    let (mut image, path, name, voucher, before, installed, libc) = match prepared {
+    let (mut image, path, name, voucher, before, installed, signer, libc) = match prepared {
         Prepared::Current { name, before } => {
             let idle = before.as_ref().and_then(idle);
             return Ok(format!(
@@ -711,15 +795,16 @@ fn install(store: &Store, prepared: Prepared, progress: &Progress) -> Result<Str
             voucher,
             before,
             installed,
+            signer,
             libc,
-        } => (image, path, name, voucher, before, installed, libc),
+        } => (image, path, name, voucher, before, installed, signer, libc),
     };
     let digest = image.digest;
     let version = installed.version;
     let mut record = before.clone().unwrap_or_else(|| Record::new(&name));
     match voucher {
         Voucher::Offered => record.install_offered(installed),
-        _ => record.install(installed),
+        _ => record.install(installed, signer),
     }
     give_uids(store, &mut record)?;
     let bytes = image.bytes();
@@ -887,16 +972,56 @@ fn disable(name: &str) -> Result<String, String> {
     Ok(format!("{name} disabled"))
 }
 
+/// Its directories go even when init does not answer: only uid 0 makes
+/// entries where they are, so a running service cannot redirect the removal.
 fn remove(name: &str) -> Result<String, String> {
     let store = Store::open(true)?;
     let mut record = record_of(&store, name)?;
     deactivate(name)?;
     record.remove();
-    store.edit(name, |edit| edit.put_record(&record))?;
-    Ok(format!(
-        "{name} removed; its record keeps version floor {}",
-        floor_of(&record)
-    ))
+    if let Err(why) = store.edit(name, |edit| edit.put_record(&record)) {
+        return Err(match told_init() {
+            Ok(()) => why,
+            Err(told) => format!("{why}\n{told}"),
+        });
+    }
+    let mut said =
+        format!("{name} removed; any publisher's image of it goes in as a first install");
+    if let Err(why) = told_init() {
+        said.push_str(&format!("\n{why}"));
+    }
+    // A name the system takes names the system's directories.
+    if !valid_name(name) {
+        return Ok(said);
+    }
+    let mut left = String::new();
+    if let Err(why) = configure::take_away(name) {
+        left.push_str(&format!("\n{why}"));
+    }
+    for dir in owned_dirs(name, &record) {
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            left.push_str(&format!("\n{dir} was not taken away: {e}"));
+        }
+    }
+    match left.is_empty() {
+        true => Ok(said),
+        false => Err(format!(
+            "{said}{left}\nno first install of {name} goes in until `extctl remove {name}` takes it away"
+        )),
+    }
+}
+
+/// `name`'s state, log and runtime directories a uid of `record` owns.
+fn owned_dirs(name: &str, record: &Record) -> Vec<String> {
+    let owners: Vec<u32> = record.held_uids().collect();
+    ["/var/lib", "/var/log", "/run"]
+        .map(|top| format!("{top}/{name}"))
+        .into_iter()
+        .filter(|dir| {
+            std::fs::symlink_metadata(dir)
+                .is_ok_and(|meta| meta.is_dir() && owners.contains(&meta.uid()))
+        })
+        .collect()
 }
 
 fn floor_of(record: &Record) -> String {
@@ -1132,7 +1257,11 @@ fn offer(
         &borrowed(&others),
     )
     .map_err(refused)?;
-    let Admitted::Install(installed) = admitted else {
+    let Admitted::Install {
+        image: installed,
+        signer,
+    } = admitted
+    else {
         return Ok(None);
     };
     if people.is_none() && !crate::accounts::in_memory(Path::new("/")) {
@@ -1150,6 +1279,7 @@ fn offer(
         voucher: Voucher::Offered,
         before,
         installed,
+        signer,
         libc: base.libc,
     };
     install(store, prepared, &Progress::quiet()).map(Some)
@@ -1222,13 +1352,21 @@ fn status_of(store: &Store, only: Option<&str>, running: bool) -> Result<String,
 }
 
 fn describe(record: &Record, running: bool) -> String {
+    if record.removed() {
+        let mut out = format!("{}: removed", record.name);
+        if !record.retired.is_empty() {
+            let retired: Vec<String> = record.retired.iter().map(u32::to_string).collect();
+            out.push_str(&format!("\n  retired uids {}", retired.join(",")));
+        }
+        return out;
+    }
     let running = match running {
         false => "",
         true if crate::activation::open(&record.name).is_ok() => ", running",
         true => ", not running",
     };
     let mut out = format!(
-        "{}: {}{running}, floor {}{}",
+        "{}: {}{running}, floor {}{}, signed by {}",
         record.name,
         if record.enabled {
             "enabled"
@@ -1241,7 +1379,8 @@ fn describe(record: &Record, running: bool) -> String {
         } else {
             let refused: Vec<String> = record.refused.iter().map(u64::to_string).collect();
             format!(", refusing {} unasked", refused.join(","))
-        }
+        },
+        record.signer.as_deref().unwrap_or(NOBODY)
     );
     if let Some(why) = &record.why {
         out.push_str(&format!("\n  stopped: {why}"));

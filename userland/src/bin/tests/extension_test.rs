@@ -311,6 +311,8 @@ fn one_declaring_more_than_its_grant_line_is_refused() -> bool {
             &digest,
             "name",
             "ext-wider",
+            "signer",
+            "nobody",
             "grant",
             "NetAdmin",
             "unasked",
@@ -357,6 +359,144 @@ fn a_signed_one_installs_and_updates_unasked() -> bool {
         &extctl(USER, &["install-signed", &v1]),
         "older than version 2",
     ) && installed("ext-signed", 2)
+}
+
+fn install_leaving_state(name: &str, path: &str) -> Option<u32> {
+    let ran = extctl(ROOT, &["install", path]);
+    if !ran.ok() || !shown(name) {
+        fail(format!("{path} did not go in: {}", ran.shown()));
+        return None;
+    }
+    let Some(uid) = record(name).and_then(|r| r.number()) else {
+        fail(format!("{name} has no uid"));
+        return None;
+    };
+    let state = format!("/var/lib/{name}");
+    let left = std::fs::create_dir_all(&state)
+        .and_then(|()| std::os::unix::fs::chown(&state, Some(uid), Some(uid)))
+        .and_then(|()| std::fs::write(format!("{state}/left"), b"x"));
+    match left {
+        Ok(()) => Some(uid),
+        Err(e) => {
+            fail(format!("{state}: {e}"));
+            None
+        }
+    }
+}
+
+/// Refused until a removal, then in under `signer` with a fresh uid and no state.
+fn another_publisher_s_waits_for_the_removal(
+    name: &str,
+    path: &str,
+    signer: Option<&SigningKey>,
+    uids: &mut Vec<u32>,
+) -> bool {
+    let theirs = "another publisher's image of ";
+    let asked = extctl(ROOT, &["install", path]);
+    if !refused(&asked, theirs) {
+        return false;
+    }
+    if signer.is_some() && !refused(&extctl(USER, &["install-signed", path]), theirs) {
+        return false;
+    }
+    let removed = extctl(ROOT, &["remove", name]);
+    if !removed.ok() || shown(name) {
+        return fail(format!("remove {name}: {}", removed.shown()));
+    }
+    for gone in ["/var/lib", "/var/log"].map(|dir| format!("{dir}/{name}")) {
+        if Path::new(&gone).exists() {
+            return fail(format!("{gone} outlived the removal: {}", removed.shown()));
+        }
+    }
+    let held = record(name).filter(|r| {
+        r.removed()
+            && r.signer.is_none()
+            && r.floor.is_none()
+            && uids.iter().all(|uid| r.retired.contains(uid))
+    });
+    if held.is_none() {
+        return fail(format!("the removal left {:?}", record(name)));
+    }
+    if signer.is_some() && !refused(&extctl(USER, &["install-signed", path]), "it was removed") {
+        return false;
+    }
+    let Some(uid) = install_leaving_state(name, path) else {
+        return false;
+    };
+    let named = record(name).and_then(|r| r.signer);
+    if named != signer.map(fingerprint) {
+        return fail(format!("{name} is signed by {named:?}"));
+    }
+    if uids.contains(&uid) {
+        return fail(format!("{name} was given uid {uid} again"));
+    }
+    uids.push(uid);
+    true
+}
+
+fn a_name_is_its_publisher_s_until_removed() -> bool {
+    let name = "ext-owned";
+    let (first, second) = (key(7), key(8));
+    if !trust(&first, "NetAdmin", "-") || !trust(&second, "NetAdmin", "-") {
+        return false;
+    }
+    let images: Option<Vec<String>> = (1..=4)
+        .map(|version| image(name, version, "NetAdmin", ""))
+        .collect();
+    let Some(images) = images else {
+        return false;
+    };
+    if !sign(&first, &images[1]) || !sign(&second, &images[2]) {
+        return false;
+    }
+    let Some(uid) = install_leaving_state(name, &images[0]) else {
+        return false;
+    };
+    let mut uids = vec![uid];
+    let Ok(bytes) = std::fs::read(&images[1]) else {
+        return fail(format!("{} is gone", images[1]));
+    };
+    let Ok(signed) = Image::check(&bytes[..]) else {
+        return fail(format!("{} does not check", images[1]));
+    };
+    let mut misnamed = vec![
+        "install".to_string(),
+        images[1].clone(),
+        hex(&signed.digest),
+        "name".into(),
+        name.into(),
+        "signer".into(),
+        fingerprint(&second),
+    ];
+    misnamed.extend(signed.declaration.grant().words());
+    let misnamed: Vec<&str> = misnamed.iter().map(String::as_str).collect();
+    let ok = refused(&extctl(ROOT, &misnamed), "as was approved")
+        && another_publisher_s_waits_for_the_removal(name, &images[1], Some(&first), &mut uids)
+        && another_publisher_s_waits_for_the_removal(name, &images[2], Some(&second), &mut uids)
+        && another_publisher_s_waits_for_the_removal(name, &images[3], None, &mut uids);
+    let removed = extctl(ROOT, &["remove", name]);
+    for owner in [&first, &second] {
+        let _ = extctl(ROOT, &["key", "remove", &fingerprint(owner)]);
+    }
+    ok && (removed.ok() || fail(format!("remove {name}: {}", removed.shown())))
+        && what_a_removal_left_stops_a_first_install(name, &images[0], &uids)
+}
+
+fn what_a_removal_left_stops_a_first_install(name: &str, path: &str, uids: &[u32]) -> bool {
+    let state = format!("/var/lib/{name}");
+    let Some(&retired) = uids.last() else {
+        return fail("no uid was retired");
+    };
+    let left = std::fs::create_dir(&state)
+        .and_then(|()| std::os::unix::fs::chown(&state, Some(retired), Some(retired)));
+    if let Err(e) = left {
+        return fail(format!("{state}: {e}"));
+    }
+    let stopped = refused(&extctl(ROOT, &["install", path]), &format!("left {state}"));
+    let again = extctl(ROOT, &["remove", name]);
+    stopped
+        && (again.ok() && !Path::new(&state).exists()
+            || fail(format!("removing {name} again: {}", again.shown())))
 }
 
 /// At a terminal, the mechanism draws each step of an install in place on a
@@ -781,13 +921,16 @@ fn cleanup() -> bool {
         .iter()
         .all(|n| !shown(n))
         && !Path::new("/opt/ext-large/share/large").exists();
-    let kept = record("ext-signed").is_some_and(|r| r.current.is_none() && r.floor.is_some());
+    let kept = record("ext-signed")
+        .is_some_and(|r| r.removed() && r.floor.is_none() && !r.retired.is_empty());
     let forged = Path::new(&format!("{STORE}/ext-signed/{RECORD}.999999")).exists();
     if !refused(&back, "it was removed") {
         return false;
     }
     gone && kept && !forged
-        || fail("a removed extension still runs, its record went with it, or a forged one stayed")
+        || fail(
+            "a removed extension still runs, its record kept what it held, or a forged one stayed",
+        )
 }
 
 const CASES: &[(&str, fn() -> bool)] = &[
@@ -852,7 +995,11 @@ const CASES: &[(&str, fn() -> bool)] = &[
         "its_hash_is_sha256_on_this_cpu",
         its_hash_is_sha256_on_this_cpu,
     ),
-    ("removing_keeps_the_record", cleanup),
+    (
+        "a_name_is_its_publisher_s_until_removed",
+        a_name_is_its_publisher_s_until_removed,
+    ),
+    ("removing_gives_up_the_name", cleanup),
 ];
 
 fn main() {

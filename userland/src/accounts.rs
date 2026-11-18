@@ -337,8 +337,7 @@ fn extension_records(top: &Path) -> Result<Vec<slopos_extension_core::record::Re
     Ok(out)
 }
 
-/// Every name an extension's record keeps a uid for, its removed ones
-/// included, which no person takes.
+/// Every name an extension's record keeps a uid for, which no person takes.
 pub fn extension_users(top: &Path) -> Result<Vec<String>, String> {
     Ok(extension_records(top)?
         .into_iter()

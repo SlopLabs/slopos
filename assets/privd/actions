@@ -224,7 +224,7 @@ action org.slopos.boot.reboot
 
 action org.slopos.extension.install
   program  /bin/extctl
-  args     install ? ? name ? grant ? unasked ? users ? commands ?
+  args     install ? ? name ? signer ? grant ? unasked ? users ? commands ?
   caps     ExtensionUpdate Seal
   uid      0
   cwd
@@ -236,6 +236,7 @@ action org.slopos.extension.install
   detail   "If it asks for the disks or every file, it can take over the whole computer."
   verb     "Install"
   term     name "Installs"
+  term     signer "Signed by"
   term     grant "Capabilities"
   term     unasked "Runs unasked"
   term     users "Adds users"
@@ -273,7 +274,6 @@ action org.slopos.extension.manage
   program  /bin/extctl
   args     enable *
   args     disable *
-  args     remove *
   args     rollback *
   caps     ExtensionUpdate Seal
   uid      0
@@ -281,7 +281,22 @@ action org.slopos.extension.manage
   allow    root
   allow    admin confirm
   allow    paired
-  describe "turn an extension on or off, remove it or go back to its last version"
+  describe "turn an extension on or off or go back to its last version"
+
+action org.slopos.extension.remove
+  program  /bin/extctl
+  args     remove ?
+  caps     ExtensionUpdate Seal DacOverride
+  uid      0
+  exclusive extensions
+  allow    root
+  allow    admin confirm
+  allow    paired
+  describe "remove an extension with everything it keeps"
+  detail   "Its data, settings and log are deleted."
+  verb     "Remove"
+  term     remove "Removes"
+  destructive
 
 action org.slopos.extension.config
   program  /bin/extctl

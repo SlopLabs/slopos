@@ -115,7 +115,7 @@ impl Owner {
     ) -> Result<Admitted, Refusal> {
         let mut image = Image::open(bytes, None).unwrap();
         let admitted = install(record, &image, authority, &self.bounds(), &[])?;
-        if matches!(admitted, Admitted::Install(_)) {
+        if matches!(admitted, Admitted::Install { .. }) {
             image.copy(&mut Dropped).unwrap();
             contents(&mut image, &self.libc)?;
         }
@@ -137,8 +137,31 @@ impl Owner {
         let authority = Authority::Person {
             name: "hello",
             grant,
+            signer: None,
+            signed: None,
         };
         self.whole(record, bytes, &authority)
+    }
+
+    fn approved_signed(
+        &self,
+        record: Option<&Record>,
+        bytes: &[u8],
+        grant: &Grant,
+        shown: Option<&str>,
+    ) -> Result<Admitted, Refusal> {
+        let (sidecar, signature) = self.sign(bytes);
+        let authority = Authority::Person {
+            name: "hello",
+            grant,
+            signer: shown,
+            signed: Some((&sidecar, &signature)),
+        };
+        self.whole(record, bytes, &authority)
+    }
+
+    fn fingerprint(&self) -> String {
+        PublicKey(self.key.public()).fingerprint()
     }
 
     fn runs(&self, record: &Record, bytes: &[u8]) -> Result<(), Refusal> {
@@ -164,11 +187,20 @@ fn grant(caps: u64) -> Grant {
     }
 }
 
-fn installed(admitted: Result<Admitted, Refusal>) -> Installed {
+fn admitted(admitted: Result<Admitted, Refusal>) -> (Installed, Option<String>) {
     match admitted {
-        Ok(Admitted::Install(installed)) => installed,
+        Ok(Admitted::Install { image, signer }) => (image, signer),
         other => panic!("not installed: {other:?}"),
     }
+}
+
+fn installed(admitted: Result<Admitted, Refusal>) -> Installed {
+    self::admitted(admitted).0
+}
+
+fn put(record: &mut Record, admitted: Result<Admitted, Refusal>) {
+    let (image, signer) = self::admitted(admitted);
+    record.install(image, signer);
 }
 
 fn refused(admitted: Result<Admitted, Refusal>, says: &str) {
@@ -201,7 +233,7 @@ fn a_first_install_grants_exactly_what_the_person_read() {
         "SetId, which no extension",
     );
     let mut record = Record::new("hello");
-    record.install(got);
+    record.install(got, None);
     let mut runs = record.clone();
     runs.current.as_mut().unwrap().signer = None;
     let mut image = Image::check(&bytes[..]).unwrap();
@@ -258,9 +290,10 @@ fn updates_by_the_same_key_go_in_and_nothing_older_does() {
     let mut record = Record::new("hello");
     let v1 = image(1, "NetAdmin", "", &["puts"]);
     let v2 = image(2, "NetAdmin", "", &["puts"]);
-    record.install(installed(owner.signed(None, &v1)));
+    put(&mut record, owner.signed(None, &v1));
     assert_eq!(owner.signed(Some(&record), &v1), Ok(Admitted::Current));
-    record.install(installed(owner.signed(Some(&record), &v2)));
+    let got = owner.signed(Some(&record), &v2);
+    put(&mut record, got);
     assert_eq!(record.floor.map(|(v, _)| v), Some(2));
     assert_eq!(record.previous.as_ref().map(|p| p.version), Some(1));
     refused(owner.signed(Some(&record), &v1), "older than version 2");
@@ -277,16 +310,111 @@ fn updates_by_the_same_key_go_in_and_nothing_older_does() {
     };
     refused(
         other.signed(Some(&record), &image(3, "NetAdmin", "", &["puts"])),
-        "another authority",
+        "another publisher's image of hello",
     );
-    let person = Owner::new(0, 0);
+}
+
+#[test]
+fn a_name_s_images_are_one_publisher_s_until_it_is_removed() {
+    let owner = Owner::new(CEILING, 0);
+    let other = Owner::of(3, CEILING, 0);
+    let (v1, v2) = (
+        image(1, "NetAdmin", "", &["puts"]),
+        image(2, "NetAdmin", "", &["puts"]),
+    );
+    let approve = grant(caps::NET_ADMIN);
     let mut by_person = Record::new("hello");
-    by_person.install(installed(person.approved(
-        None,
-        &v1,
-        &grant(caps::NET_ADMIN),
-    )));
-    refused(owner.signed(Some(&by_person), &v2), "another authority");
+    put(&mut by_person, owner.approved(None, &v1, &approve));
+    assert_eq!(by_person.signer, None);
+    refused(
+        owner.signed(Some(&by_person), &v2),
+        "nobody signed the one installed",
+    );
+    refused(
+        owner.approved_signed(Some(&by_person), &v2, &approve, Some(&owner.fingerprint())),
+        "another publisher's image",
+    );
+    let mut by_key = Record::new("hello");
+    put(&mut by_key, owner.signed(None, &v1));
+    refused(
+        owner.approved(Some(&by_key), &v2, &approve),
+        "and nobody this one",
+    );
+    assert_eq!(
+        owner.approved(Some(&by_key), &v1, &approve),
+        Ok(Admitted::Current)
+    );
+    refused(
+        other.approved_signed(Some(&by_key), &v2, &approve, Some(&other.fingerprint())),
+        "it goes in only once `extctl remove hello` gives up the name",
+    );
+    let (image2, signer) =
+        admitted(owner.approved_signed(Some(&by_key), &v2, &approve, Some(&owner.fingerprint())));
+    assert_eq!((image2.signer, signer), (None, Some(owner.fingerprint())));
+    for record in [&mut by_person, &mut by_key] {
+        record.remove();
+        assert_eq!(record.floor, None);
+        refused(owner.signed(Some(record), &v2), "it was removed");
+        let got = other.approved_signed(Some(record), &v1, &approve, Some(&other.fingerprint()));
+        put(record, got);
+        assert_eq!(record.signer, Some(other.fingerprint()));
+    }
+    let got = other.signed(Some(&by_key), &v2);
+    put(&mut by_key, got);
+    assert_eq!(by_key.current.as_ref().map(|c| c.version), Some(2));
+}
+
+#[test]
+fn a_person_s_install_names_who_signed_it() {
+    let owner = Owner::new(CEILING, 0);
+    let stranger = Owner {
+        keys: Keys::default(),
+        ..Owner::of(2, CEILING, 0)
+    };
+    let bytes = image(1, "NetAdmin", "", &["puts"]);
+    let approve = grant(caps::NET_ADMIN);
+    let (image1, signer) =
+        admitted(stranger.approved_signed(None, &bytes, &approve, Some(&stranger.fingerprint())));
+    assert_eq!(
+        (image1.signer, signer),
+        (None, Some(stranger.fingerprint()))
+    );
+    refused(
+        stranger.approved_signed(None, &bytes, &approve, None),
+        "signed by SHA256:",
+    );
+    refused(
+        stranger.approved_signed(None, &bytes, &approve, Some(&owner.fingerprint())),
+        "as was approved",
+    );
+    refused(
+        owner.whole(
+            None,
+            &bytes,
+            &Authority::Person {
+                name: "hello",
+                grant: &approve,
+                signer: Some(&owner.fingerprint()),
+                signed: None,
+            },
+        ),
+        "signed by nobody, not by SHA256:",
+    );
+    let (sidecar, _) = owner.sign(&image(2, "NetAdmin", "", &["puts"]));
+    let (_, signature) = owner.sign(&bytes);
+    refused(
+        owner.whole(
+            None,
+            &bytes,
+            &Authority::Person {
+                name: "hello",
+                grant: &approve,
+                signer: Some(&owner.fingerprint()),
+                signed: Some((&sidecar, &signature)),
+            },
+        ),
+        "describes another image",
+    );
 }
 
 #[test]
@@ -298,8 +426,9 @@ fn a_rollback_refuses_the_version_it_left_until_a_newer_one() {
         image(2, "NetAdmin", "", &["puts"]),
         image(3, "NetAdmin", "", &["puts"]),
     );
-    record.install(installed(owner.signed(None, &v1)));
-    record.install(installed(owner.signed(Some(&record), &v2)));
+    put(&mut record, owner.signed(None, &v1));
+    let got = owner.signed(Some(&record), &v2);
+    put(&mut record, got);
     record.roll_back().unwrap();
     assert_eq!(record.current.as_ref().map(|c| c.version), Some(1));
     assert_eq!(
@@ -307,9 +436,15 @@ fn a_rollback_refuses_the_version_it_left_until_a_newer_one() {
         (Some(1), vec![2])
     );
     refused(owner.signed(Some(&record), &v2), "rolled back from");
-    let back = installed(owner.approved(Some(&record), &v2, &grant(caps::NET_ADMIN)));
+    let back = installed(owner.approved_signed(
+        Some(&record),
+        &v2,
+        &grant(caps::NET_ADMIN),
+        Some(&owner.fingerprint()),
+    ));
     assert_eq!(back.version, 2);
-    record.install(installed(owner.signed(Some(&record), &v3)));
+    let got = owner.signed(Some(&record), &v3);
+    put(&mut record, got);
     assert!(record.refused.is_empty());
     record.roll_back().unwrap();
     record.roll_back().unwrap();
@@ -323,13 +458,10 @@ fn a_rollback_refuses_the_version_it_left_until_a_newer_one() {
     assert_eq!(owner.runs(&record, &v3), Ok(()));
     record.remove();
     refused(owner.signed(Some(&record), &v3), "it was removed");
-    refused(
-        owner.approved(Some(&record), &v2, &grant(caps::NET_ADMIN)),
-        "older than version 3",
-    );
+    assert!(record.refused.is_empty());
     assert!(matches!(
-        owner.approved(Some(&record), &v3, &grant(caps::NET_ADMIN)),
-        Ok(Admitted::Install(_))
+        owner.approved(Some(&record), &v2, &grant(caps::NET_ADMIN)),
+        Ok(Admitted::Install { .. })
     ));
 }
 
@@ -341,7 +473,7 @@ fn a_signed_install_judged_ahead_is_judged_as_it_is_whole() {
         owner.signed(record, bytes),
     ) {
         (Ok(Some(ahead)), Ok(whole)) => assert_eq!(ahead, whole),
-        (Ok(None), Ok(Admitted::Install(_))) => {}
+        (Ok(None), Ok(Admitted::Install { .. })) => {}
         (Err(ahead), Err(whole)) => assert_eq!(ahead, whole),
         (ahead, whole) => panic!("ahead {ahead:?}, whole {whole:?}"),
     };
@@ -352,10 +484,11 @@ fn a_signed_install_judged_ahead_is_judged_as_it_is_whole() {
     );
     let mut record = Record::new("hello");
     agree(None, &v1);
-    record.install(installed(owner.signed(None, &v1)));
+    put(&mut record, owner.signed(None, &v1));
     agree(Some(&record), &v1);
     agree(Some(&record), &v2);
-    record.install(installed(owner.signed(Some(&record), &v2)));
+    let got = owner.signed(Some(&record), &v2);
+    put(&mut record, got);
     agree(Some(&record), &v1);
     agree(Some(&record), &image(2, "Power", "", &["puts"]));
     record.roll_back().unwrap();
@@ -373,13 +506,15 @@ fn a_key_s_update_leaves_a_disabled_extension_disabled() {
         image(2, "NetAdmin", "", &["puts"]),
         image(3, "NetAdmin", "", &["puts"]),
     );
-    record.install(installed(owner.signed(None, &v1)));
+    put(&mut record, owner.signed(None, &v1));
     assert!(record.enabled);
     record.enabled = false;
-    record.install(installed(owner.signed(Some(&record), &v2)));
+    let got = owner.signed(Some(&record), &v2);
+    put(&mut record, got);
     assert!(!record.enabled, "a key re-enabled what the person disabled");
     record.stop("its key's ceiling fell");
-    record.install(installed(owner.signed(Some(&record), &v3)));
+    let got = owner.signed(Some(&record), &v3);
+    put(&mut record, got);
     assert!(
         record.enabled,
         "a fitting update left a stopped extension stopped"
@@ -387,8 +522,13 @@ fn a_key_s_update_leaves_a_disabled_extension_disabled() {
     record.enabled = false;
     record.why = None;
     let v4 = image(4, "NetAdmin", "", &["puts"]);
-    let by_person = installed(owner.approved(Some(&record), &v4, &grant(caps::NET_ADMIN)));
-    record.install(by_person);
+    let got = owner.approved_signed(
+        Some(&record),
+        &v4,
+        &grant(caps::NET_ADMIN),
+        Some(&owner.fingerprint()),
+    );
+    put(&mut record, got);
     assert!(record.enabled);
 }
 
@@ -397,7 +537,7 @@ fn an_activation_holds_the_image_to_its_record_and_its_key() {
     let owner = Owner::new(CEILING, 0);
     let bytes = image(1, "NetAdmin", "", &["puts"]);
     let mut record = Record::new("hello");
-    record.install(installed(owner.signed(None, &bytes)));
+    put(&mut record, owner.signed(None, &bytes));
     assert_eq!(owner.runs(&record, &bytes), Ok(()));
     let lowered = Owner::new(caps::POWER, 0);
     refused(
@@ -481,6 +621,8 @@ fn two_extensions_never_declare_one_command() {
     let authority = Authority::Person {
         name: "hello",
         grant: &grant,
+        signer: None,
+        signed: None,
     };
     let theirs = Grant {
         commands: vec!["hi".into()],
@@ -504,6 +646,8 @@ fn two_extensions_never_declare_one_user() {
     let authority = Authority::Person {
         name: "hello",
         grant: &grant,
+        signer: None,
+        signed: None,
     };
     let theirs = Grant {
         users: vec!["hel-lo".into(), "hello".into()],
@@ -594,9 +738,9 @@ fn an_offer_goes_above_the_floor_and_over_nothing_a_person_or_key_decided() {
         "it was removed",
     );
     let mut signed = Record::new("hello");
-    signed.install(installed(owner.signed(None, &v1)));
+    put(&mut signed, owner.signed(None, &v1));
     refused(
         owner.whole(Some(&signed), &v2, &Authority::Offered),
-        "only that key's updates",
+        "another publisher's image",
     );
 }

@@ -3,12 +3,13 @@
 //! to serve; the authority that vouched for them, a person's approval of a
 //! grant, a trusted key's signature or uid 0's offer of an image that asks
 //! for nothing; and the grant, which every activation holds again to the
-//! key's ceilings and the base's.
+//! key's ceilings and the base's. A name's images are one publisher's.
 
 use alloc::format;
 use alloc::string::{String, ToString};
 
 use slopos_priv_core::capability_names;
+use slopos_tls_core::sshsig::PublicKey;
 
 use crate::ceiling::NEVER;
 use crate::grant::Grant;
@@ -28,8 +29,13 @@ pub struct Bounds<'a> {
 
 /// Who vouches for an image.
 pub enum Authority<'a> {
-    /// The person approved the grant a first install's command line names.
-    Person { name: &'a str, grant: &'a Grant },
+    /// The person approved the grant and the signer the command line names.
+    Person {
+        name: &'a str,
+        grant: &'a Grant,
+        signer: Option<&'a str>,
+        signed: Option<(&'a [u8], &'a [u8])>,
+    },
     Signed {
         sidecar: &'a [u8],
         signature: &'a [u8],
@@ -42,7 +48,11 @@ pub enum Authority<'a> {
 pub enum Admitted {
     /// The same version and bytes are current.
     Current,
-    Install(Installed),
+    /// `signer` is its publisher's key, `None` for nobody.
+    Install {
+        image: Installed,
+        signer: Option<String>,
+    },
 }
 
 /// Why an image does not go in or does not run, said to whoever asked.
@@ -89,8 +99,14 @@ pub fn install<S: Source>(
     let release = image.release.clone();
     let digest = image.digest;
     let declared = image.declaration.grant();
-    let signer = match authority {
-        Authority::Person { name, grant } => {
+    let held = record.filter(|r| !r.removed());
+    let (voucher, signer) = match authority {
+        Authority::Person {
+            name,
+            grant,
+            signer,
+            signed,
+        } => {
             if *name != release.name {
                 return refuse(format!("the image is {}, not {name}", release.name));
             }
@@ -100,32 +116,53 @@ pub fn install<S: Source>(
                     declared.words().join(" ")
                 ));
             }
-            None
+            let found = match signed {
+                Some((sidecar, signature)) => {
+                    Some(signed_by(sidecar, signature, &release, digest)?.fingerprint())
+                }
+                None => None,
+            };
+            if found.as_deref() != *signer {
+                return refuse(format!(
+                    "it is signed by {}, not by {} as was approved",
+                    by(found.as_deref()),
+                    by(*signer)
+                ));
+            }
+            let current = held.and_then(|r| r.current.as_ref());
+            if current.is_some_and(|c| c.version == release.version && c.sha256 == digest) {
+                return Ok(Admitted::Current);
+            }
+            publisher(record, &release.name, found.as_deref())?;
+            (None, found)
         }
         Authority::Signed { sidecar, signature } => {
-            let key = signed(sidecar, signature, &release, digest, bounds.keys)?;
+            let key = self::signed(sidecar, signature, &release, digest, bounds.keys)?;
             let fingerprint = key.key.fingerprint();
-            under_key(record, &fingerprint, release.version)?;
+            unasked(record, &release.name, Some(&fingerprint), release.version)?;
             within_key(&declared, &image.declaration, key)?;
-            Some(fingerprint)
+            (Some(fingerprint.clone()), Some(fingerprint))
         }
         Authority::Offered => {
             offerable(&image.declaration)?;
-            over_offered(record, release.version)?;
-            None
+            unasked(record, &release.name, None, release.version)?;
+            (None, None)
         }
     };
-    if let Some(admitted) = beside(record, release.version, digest)? {
+    if let Some(admitted) = beside(held, release.version, digest)? {
         return Ok(admitted);
     }
     within_base(&declared, bounds.ceiling)?;
     clashes(&release.name, &declared, others)?;
-    Ok(Admitted::Install(Installed {
-        version: release.version,
-        sha256: digest,
+    Ok(Admitted::Install {
+        image: Installed {
+            version: release.version,
+            sha256: digest,
+            signer: voucher,
+            grant: declared,
+        },
         signer,
-        grant: declared,
-    }))
+    })
 }
 
 pub fn contents<S: Source>(image: &mut Image<S>, libc: &[u8]) -> Result<Needs, Refusal> {
@@ -143,7 +180,12 @@ pub fn ahead(
     if record.is_some_and(|r| r.name != said.name) {
         return refuse("the sidecar describes another image");
     }
-    under_key(record, &key.key.fingerprint(), said.version)?;
+    unasked(
+        record,
+        &said.name,
+        Some(&key.key.fingerprint()),
+        said.version,
+    )?;
     beside(record, said.version, said.sha256)
 }
 
@@ -152,7 +194,7 @@ pub fn ahead_offered(record: Option<&Record>, said: &Sidecar) -> Result<Option<A
     if record.is_some_and(|r| r.name != said.name) {
         return refuse("the sidecar describes another image");
     }
-    over_offered(record, said.version)?;
+    unasked(record, &said.name, None, said.version)?;
     beside(record, said.version, said.sha256)
 }
 
@@ -174,39 +216,43 @@ pub fn offerable(declaration: &crate::declare::Declaration) -> Result<(), Refusa
     }
 }
 
-/// An offer replaces only what nobody signed, removed or rolled back from.
-fn over_offered(record: Option<&Record>, version: u64) -> Result<(), Refusal> {
-    let Some(record) = record else {
-        return Ok(());
-    };
-    if record.signer.is_some() {
-        return refuse("a key installed it, so only that key's updates replace it");
-    }
-    if record.current.is_none() {
-        return refuse("it was removed, so it goes back in only as a first install");
-    }
-    if record.refused.contains(&version) {
-        return refuse(format!(
-            "version {version} was rolled back from, so it goes in only as a first install"
-        ));
-    }
-    Ok(())
+pub const NOBODY: &str = "nobody";
+
+fn by(signer: Option<&str>) -> &str {
+    signer.unwrap_or(NOBODY)
 }
 
-fn under_key(record: Option<&Record>, fingerprint: &str, version: u64) -> Result<(), Refusal> {
+/// Refuses another signer's image over a record that holds one.
+fn publisher(record: Option<&Record>, name: &str, signer: Option<&str>) -> Result<(), Refusal> {
+    let Some(record) = record.filter(|r| !r.removed()) else {
+        return Ok(());
+    };
+    let held = record.signer.as_deref();
+    if held == signer {
+        return Ok(());
+    }
+    refuse(format!(
+        "it is another publisher's image of {name}: {} signed the one installed and {} this one; \
+         it goes in only once `extctl remove {name}` gives up the name",
+        by(held),
+        by(signer)
+    ))
+}
+
+/// A key's or an offer's: never over what was removed or rolled back from.
+fn unasked(
+    record: Option<&Record>,
+    name: &str,
+    signer: Option<&str>,
+    version: u64,
+) -> Result<(), Refusal> {
     let Some(record) = record else {
         return Ok(());
     };
-    if record.signer.as_deref() != Some(fingerprint)
-        && (record.signer.is_some() || record.floor.is_some())
-    {
-        return refuse(
-            "the store's record names another authority than this key, so a person approves it",
-        );
-    }
-    if record.current.is_none() {
+    if record.removed() {
         return refuse("it was removed, so it goes back in only as a first install");
     }
+    publisher(Some(record), name, signer)?;
     if record.refused.contains(&version) {
         return refuse(format!(
             "version {version} was rolled back from, so it goes in only as a first install"
@@ -300,10 +346,27 @@ fn signed<'k>(
     keys: &'k Keys,
 ) -> Result<&'k Key, Refusal> {
     let (said, key) = signer(sidecar, signature, keys)?;
+    describes(&said, release, digest)?;
+    Ok(key)
+}
+
+fn describes(said: &Sidecar, release: &Release, digest: [u8; 32]) -> Result<(), Refusal> {
     if said.name != release.name || said.version != release.version || said.sha256 != digest {
         return refuse("the sidecar describes another image");
     }
-    Ok(key)
+    Ok(())
+}
+
+/// The key that signed the image, trusted or not.
+pub fn signed_by(
+    sidecar: &[u8],
+    signature: &[u8],
+    release: &Release,
+    digest: [u8; 32],
+) -> Result<PublicKey, Refusal> {
+    let said = Sidecar::parse(sidecar).ok_or_else(|| Refusal("the sidecar is malformed".into()))?;
+    describes(&said, release, digest)?;
+    Sidecar::signer(sidecar, signature).map_err(|e| Refusal(e.to_string()))
 }
 
 pub fn signer<'k>(

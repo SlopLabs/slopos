@@ -778,7 +778,7 @@ fn values_outside_their_grammar_refuse() {
 #[test]
 fn the_shipped_policy_speaks_to_the_person() {
     let policy = Policy::parse(SHIPPED).unwrap();
-    assert_eq!(policy.actions().len(), 40);
+    assert_eq!(policy.actions().len(), 41);
     for action in policy.actions() {
         let name = &action.name;
         assert_eq!(crate::words::describe(&action.describe), Ok(()), "{name}");
@@ -793,7 +793,10 @@ fn the_shipped_policy_speaks_to_the_person() {
         .filter(|a| a.destructive)
         .map(|a| a.name.as_str())
         .collect();
-    assert_eq!(destructive, ["org.slopos.install"]);
+    assert_eq!(
+        destructive,
+        ["org.slopos.extension.remove", "org.slopos.install"]
+    );
     let mut said: Vec<&str> = policy
         .actions()
         .iter()
@@ -801,7 +804,7 @@ fn the_shipped_policy_speaks_to_the_person() {
         .collect();
     said.sort_unstable();
     said.dedup();
-    assert_eq!(said.len(), 40, "two actions say the same");
+    assert_eq!(said.len(), 41, "two actions say the same");
 }
 
 #[test]
@@ -1171,6 +1174,7 @@ fn the_extension_actions_hold_the_store_and_nothing_wider() {
         ),
         ("org.slopos.extension.manage", true, &["rollback", "x"]),
     ];
+    let removing = [("org.slopos.extension.remove", true, &["remove", "x"][..])];
     let config = [
         (
             "org.slopos.extension.config",
@@ -1188,6 +1192,7 @@ fn the_extension_actions_hold_the_store_and_nothing_wider() {
         .map(|n| (store, n))
         .into_iter()
         .chain(config.map(|n| (caps::SEAL, n)))
+        .chain(removing.map(|n| (store | caps::DAC_OVERRIDE, n)))
     {
         let action = policy.action(name).unwrap();
         assert_eq!(action.program, "/bin/extctl", "{name}");
@@ -1202,6 +1207,14 @@ fn the_extension_actions_hold_the_store_and_nothing_wider() {
     }
     let manage = policy.action("org.slopos.extension.manage").unwrap();
     assert!(!manage.accepts(&args_of(&["install", "x"])));
+    assert!(!manage.accepts(&args_of(&["remove", "x"])));
+    let remove = policy.action("org.slopos.extension.remove").unwrap();
+    assert!(!remove.accepts(&args_of(&["remove", "x", "y"])));
+    assert!(!remove.accepts(&args_of(&["--root", "/mnt", "remove", "x"])));
+    assert_eq!(
+        remove.terms_of(&args_of(&["remove", "x"])),
+        [("Removes".to_string(), b"x".to_vec())]
+    );
     for name in [
         "org.slopos.extension.config",
         "org.slopos.extension.config-signed",
@@ -1216,9 +1229,9 @@ fn the_extension_actions_hold_the_store_and_nothing_wider() {
     );
 }
 
-const INSTALL: [&str; 13] = [
-    "install", "/x.ext", "3f9c", "name", "commands", "grant", "Power", "unasked", "-", "users",
-    "x", "commands", "x,y",
+const INSTALL: [&str; 15] = [
+    "install", "/x.ext", "3f9c", "name", "commands", "signer", "nobody", "grant", "Power",
+    "unasked", "-", "users", "x", "commands", "x,y",
 ];
 
 #[test]
@@ -1234,13 +1247,20 @@ fn an_install_names_what_it_grants_by_position_and_takes_only_its_line() {
         shown,
         [
             ("Installs", &b"commands"[..]),
+            ("Signed by", b"nobody"),
             ("Capabilities", b"Power"),
             ("Runs unasked", b"-"),
             ("Adds users", b"x"),
             ("Adds commands", b"x,y"),
         ]
     );
-    assert!(!install.accepts(&args_of(&INSTALL[..12])));
+    assert!(!install.accepts(&args_of(&INSTALL[..14])));
+    let unsigned: Vec<&str> = INSTALL
+        .iter()
+        .copied()
+        .filter(|w| !["signer", "nobody"].contains(w))
+        .collect();
+    assert!(!install.accepts(&args_of(&unsigned)));
     assert!(!install.accepts(&args_of(&["install", "/x.ext"])));
     let mut more = INSTALL.to_vec();
     more.push("x");

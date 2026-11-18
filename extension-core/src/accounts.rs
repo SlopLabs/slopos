@@ -22,11 +22,8 @@ pub fn allocate<'a>(
     record: &mut Record,
     others: impl IntoIterator<Item = &'a Record>,
 ) -> Result<(), &'static str> {
-    let mut held: Vec<u32> = others
-        .into_iter()
-        .flat_map(|r| r.uids.iter().map(|&(_, uid)| uid))
-        .chain(record.uids.iter().map(|&(_, uid)| uid))
-        .collect();
+    let mut held: Vec<u32> = others.into_iter().flat_map(Record::held_uids).collect();
+    held.extend(record.held_uids());
     let wanted: Vec<String> = core::iter::once(record.name.clone())
         .chain(
             record
@@ -83,15 +80,18 @@ mod tests {
 
     fn installed(name: &str, users: &[&str]) -> Record {
         let mut record = Record::new(name);
-        record.install(Installed {
-            version: 1,
-            sha256: [1; 32],
-            signer: None,
-            grant: Grant {
-                users: users.iter().map(|u| u.to_string()).collect(),
-                ..Grant::default()
+        record.install(
+            Installed {
+                version: 1,
+                sha256: [1; 32],
+                signer: None,
+                grant: Grant {
+                    users: users.iter().map(|u| u.to_string()).collect(),
+                    ..Grant::default()
+                },
             },
-        });
+            None,
+        );
         record
     }
 
@@ -107,9 +107,14 @@ mod tests {
         assert_eq!(allocate(&mut tool, [&hello]), Ok(()));
         assert_eq!(tool.uids, vec![("tool".into(), 102)]);
         hello.remove();
+        assert_eq!((hello.uids.len(), &hello.retired[..]), (0, &[100, 101][..]));
         let mut late = installed("late", &["late"]);
         assert_eq!(allocate(&mut late, [&hello, &tool]), Ok(()));
         assert_eq!(late.uid("late"), Some(103));
+        hello.install(late.current.clone().unwrap(), None);
+        hello.current.as_mut().unwrap().grant.users = vec!["hello".into()];
+        assert_eq!(allocate(&mut hello, [&tool, &late]), Ok(()));
+        assert_eq!(hello.uids, vec![("hello".into(), 104)]);
     }
 
     #[test]

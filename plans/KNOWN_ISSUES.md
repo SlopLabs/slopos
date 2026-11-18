@@ -160,24 +160,6 @@ frame is not known.
 
 ---
 
-## An administrator's approval replaces an image with another publisher's
-
-**Status**: Open (read from the code, not run)
-**Severity**: Medium (it takes an administrator's click, on a question that does not say so)
-**Component**: `extension-core/src/admit.rs:88-98` (`Authority::Person`),
-`extension-core/src/record.rs:138-150`
-
-A person's install is held to the image's name and grant and to no signer.
-So an image an administrator approves goes in over one of the same name
-that a trusted key installed, once its version is above the floor: the
-record's signer is cleared, and the newcomer keeps the name's uid,
-`/var/lib/<name>` and `/etc/<name>`. The question shows the name and the
-grant, not that another publisher's image is being replaced.
-`plans/installed-software.md`, phase 7, holds an install to the record's
-signer.
-
----
-
 ## An extension activation's index costs more than its image
 
 **Status**: Open

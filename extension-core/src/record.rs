@@ -1,7 +1,7 @@
 //! What the store keeps of an extension: whether it is enabled and why not,
-//! the key whose updates go in unasked, the version floor and the versions
-//! refused since a rollback, and its two images with what each was granted.
-//! Removing the extension keeps the record without images.
+//! the key that signed it, the version floor and the versions refused since
+//! a rollback, and its two images with what each was granted. Removing the
+//! extension keeps only its retired uids and configuration serial.
 //!
 //! ```text
 //! name hello
@@ -10,6 +10,7 @@
 //! floor 3 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
 //! refused 4
 //! uids hello=100,hello-worker=101
+//! retired 102
 //! config 2
 //! image current
 //!   version 3
@@ -18,10 +19,10 @@
 //!   grant NetAdmin unasked - users hello commands hello
 //! ```
 //!
-//! `uids` follows `refused` once any uid is given, `config` once a key's
-//! configuration went in, and `why` follows them when a check stopped the
-//! extension. A record has one spelling, the one
-//! [`Record::render`] writes.
+//! `uids` follows `refused` once any uid is given, `retired` once a removal
+//! gave any up, `config` once a key's configuration went in, and `why`
+//! follows them when a check stopped the extension. A record has one
+//! spelling, the one [`Record::render`] writes.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -37,15 +38,17 @@ const WHY_MAX: usize = 200;
 pub struct Record {
     pub name: String,
     pub enabled: bool,
-    /// The fingerprint of the key whose updates go in unasked.
+    /// The key that signed its images, `None` for nobody: only its images go
+    /// in over them.
     pub signer: Option<String>,
     /// The highest version installed, and its digest.
     pub floor: Option<(u64, [u8; 32])>,
     /// Versions a rollback left, refused to a signed install.
     pub refused: Vec<u64>,
-    /// Every uid ever given it, by name, kept once it is removed:
-    /// [`crate::accounts`].
+    /// The uids given it, by name: [`crate::accounts`].
     pub uids: Vec<(String, u32)>,
+    /// Uids a removal took, never given again.
+    pub retired: Vec<u32>,
     /// The serial of the last configuration a key signed for it,
     /// [`crate::config`], kept for good so none older goes in again.
     pub config: u64,
@@ -58,7 +61,7 @@ pub struct Record {
 pub struct Installed {
     pub version: u64,
     pub sha256: [u8; 32],
-    /// The key that signed it, `None` when a person approved it.
+    /// The key that let it in unasked, `None` otherwise.
     pub signer: Option<String>,
     pub grant: Grant,
 }
@@ -86,6 +89,7 @@ impl Record {
             floor: None,
             refused: Vec::new(),
             uids: Vec::new(),
+            retired: Vec::new(),
             config: 0,
             why: None,
             current: None,
@@ -131,11 +135,19 @@ impl Record {
         self.why = Some(shown).filter(|why| !why.trim().is_empty());
     }
 
-    /// `image` made current, the current one kept as previous; the floor
-    /// rises to it and what it is newer than is no longer refused. A person's
-    /// install enables the extension; a key's leaves one the person disabled
-    /// as it is.
-    pub fn install(&mut self, image: Installed) {
+    pub fn removed(&self) -> bool {
+        self.current.is_none()
+    }
+
+    /// `image`, which `signer` signed, made current, the current one kept as
+    /// previous; the floor rises to it and what it is newer than is no
+    /// longer refused. A person's install enables the extension; a key's
+    /// leaves one the person disabled as it is.
+    pub fn install(&mut self, image: Installed, signer: Option<String>) {
+        // An older removal kept uids, floor and refused versions.
+        if self.removed() {
+            self.remove();
+        }
         let disabled = !self.enabled && self.why.is_none() && self.current.is_some();
         self.enabled = image.signer.is_none() || !disabled;
         if self
@@ -145,7 +157,7 @@ impl Record {
             self.floor = Some((image.version, image.sha256));
         }
         self.refused.retain(|&v| v > image.version);
-        self.signer = image.signer.clone();
+        self.signer = signer;
         self.why = None;
         if let Some(current) = self.current.replace(image) {
             self.previous = Some(current);
@@ -155,7 +167,7 @@ impl Record {
     /// [`Self::install`], leaving one the person disabled disabled.
     pub fn install_offered(&mut self, image: Installed) {
         let disabled = !self.enabled && self.why.is_none() && self.current.is_some();
-        self.install(image);
+        self.install(image, None);
         self.enabled &= !disabled;
     }
 
@@ -170,7 +182,6 @@ impl Record {
         let left = self.current.replace(previous);
         let current = self.current.as_ref().expect("just set");
         self.floor = Some((current.version, current.sha256));
-        self.signer = current.signer.clone();
         let running = current.version;
         self.refused.retain(|&v| v != running);
         if let Some(left) = left {
@@ -183,14 +194,22 @@ impl Record {
         Ok(())
     }
 
-    /// Its images taken away; the floor, the refused versions, the signer and
-    /// the uids stay, so what was refused is refused still and what its users
-    /// left keeps its owner.
+    /// Gives up all the name held but the config serial, retiring its uids.
     pub fn remove(&mut self) {
-        self.current = None;
-        self.previous = None;
-        self.enabled = false;
-        self.why = None;
+        let mut retired: Vec<u32> = self.held_uids().collect();
+        retired.sort_unstable();
+        *self = Record {
+            retired,
+            config: self.config,
+            ..Record::new(&self.name)
+        };
+    }
+
+    pub fn held_uids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.uids
+            .iter()
+            .map(|&(_, uid)| uid)
+            .chain(self.retired.iter().copied())
     }
 
     pub fn render(&self) -> String {
@@ -215,6 +234,10 @@ impl Record {
                 .map(|(name, uid)| format!("{name}={uid}"))
                 .collect();
             out.push_str(&format!("uids {}\n", uids.join(",")));
+        }
+        if !self.retired.is_empty() {
+            let retired: Vec<String> = self.retired.iter().map(u32::to_string).collect();
+            out.push_str(&format!("retired {}\n", retired.join(",")));
         }
         if self.config != 0 {
             out.push_str(&format!("config {}\n", self.config));
@@ -272,6 +295,16 @@ impl Record {
                     && fresh)
                     .then_some(())?;
                 record.uids.push((name.to_string(), uid));
+            }
+        }
+        if let Some(retired) = lines.take_if("retired") {
+            for uid in retired.split(',') {
+                let uid = u32::try_from(parse_number(uid)?).ok()?;
+                let fresh = record.retired.last().is_none_or(|&last| last < uid)
+                    && !record.uids.iter().any(|&(_, held)| held == uid);
+                ((crate::accounts::FIRST_UID..=crate::accounts::LAST_UID).contains(&uid) && fresh)
+                    .then_some(())?;
+                record.retired.push(uid);
             }
         }
         if let Some(serial) = lines.take_if("config") {

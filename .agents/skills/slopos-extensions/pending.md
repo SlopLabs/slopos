@@ -101,3 +101,18 @@
   `~/.local`'s; `/usr/local` is gone. A command's shell completions come
   from its image's `share/shell/completions`, found through its `/opt/bin`
   link, ahead of the base's.
+- `docs/architecture/extensions`, `docs/abi/extension-images` (record),
+  `docs/abi/privd-actions`: a name's images are one publisher's. The record's
+  `signer` is the key that signed them (`-`: nobody), set by an install and
+  kept by a rollback; an image's `signer` is the key that let it in unasked.
+  `admit::install` refuses any install, a person's too, under another signer
+  as *another publisher's image of <name>*. `extctl install` reads
+  `<stem>.meta.sig` beside the image, trusted or not; the command line names
+  `signer <fingerprint>|nobody` (term *Signed by*) and the mechanism holds the
+  signature to it. `remove` is `org.slopos.extension.remove` (`DacOverride`,
+  destructive): the record keeps its name, `retired <uids>` (never given
+  again) and its `config` serial, kept for good. `/etc/<name>` if `extctl`'s
+  and `/var/lib`, `/var/log`, `/run/<name>` if a retired uid's go, after init
+  stops the services if it answers; a first install waits while any is left.
+  Any image then goes in as a first install, never unasked. `config apply`
+  needs the current image's key.

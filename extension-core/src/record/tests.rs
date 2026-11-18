@@ -22,6 +22,7 @@ fn record() -> Record {
         floor: Some((3, [3; 32])),
         refused: vec![4, 5],
         uids: vec![("hello".into(), 100), ("hello-worker".into(), 107)],
+        retired: vec![102],
         config: 2,
         why: None,
         current: Some(image(3, 3)),
@@ -50,6 +51,15 @@ fn a_record_reads_back_as_written() {
         Record {
             uids: Vec::new(),
             ..record()
+        },
+        Record {
+            retired: Vec::new(),
+            ..record()
+        },
+        {
+            let mut removed = record();
+            removed.remove();
+            removed
         },
         Record {
             config: 0,
@@ -88,6 +98,11 @@ fn any_other_spelling_is_refused() {
         ("config 2", "config 02"),
         ("config 2", "config 0"),
         ("config 2\n", "config 2\nconfig 3\n"),
+        ("retired 102", "retired 100"),
+        ("retired 102", "retired 1000"),
+        ("retired 102", "retired 102,102"),
+        ("retired 102", "retired 102,101"),
+        ("retired 102", "retired -"),
     ] {
         let other = text.replacen(from, to, 1);
         assert_ne!(other, text, "{from}");
@@ -129,8 +144,54 @@ fn a_uid_is_in_range_and_held_once() {
         let text = text.replace("uids hello=100,hello-worker=107", bad);
         assert_eq!(Record::parse(&text), None, "{bad}");
     }
+}
+
+#[test]
+fn a_removal_gives_up_all_but_the_name_and_retires_its_uids() {
     let mut removed = record();
     removed.remove();
-    assert_eq!(removed.number(), Some(100));
-    assert_eq!(removed.uid("hello-worker"), Some(107));
+    assert_eq!(
+        removed,
+        Record {
+            retired: vec![100, 102, 107],
+            config: 2,
+            ..Record::new("hello")
+        }
+    );
+    assert!(removed.removed());
+    assert_eq!(removed.number(), None);
+}
+
+#[test]
+fn an_install_over_a_removal_starts_anew_but_for_the_serial() {
+    let image = record().current.unwrap();
+    let mut kept = record();
+    kept.remove();
+    kept.install(image.clone(), None);
+    assert_eq!((kept.signer, kept.config), (None, 2));
+    let mut old = record();
+    old.current = None;
+    old.previous = None;
+    old.install(image, Some(KEY.into()));
+    assert_eq!(
+        (
+            old.floor.map(|(v, _)| v),
+            old.refused,
+            old.uids,
+            old.retired
+        ),
+        (Some(3), Vec::new(), Vec::new(), vec![100, 102, 107])
+    );
+}
+
+#[test]
+fn only_an_install_names_the_signer() {
+    let mut record = record();
+    let previous = record.previous.clone().unwrap();
+    record.roll_back().unwrap();
+    assert_eq!(record.signer.as_deref(), Some(KEY));
+    record.install(previous, None);
+    assert_eq!(record.signer, None);
+    record.roll_back().unwrap();
+    assert_eq!(record.signer, None);
 }

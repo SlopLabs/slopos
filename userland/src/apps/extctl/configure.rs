@@ -138,9 +138,9 @@ pub fn prepare(store: &Store, source: &Source) -> Result<Prepared, String> {
         None => None,
         Some((serial, key)) => {
             let fingerprint = key.fingerprint();
-            if record.signer.as_deref() != Some(fingerprint.as_str()) {
+            if current.signer.as_deref() != Some(fingerprint.as_str()) {
                 return Err(format!(
-                    "it is signed by {fingerprint}, not the key that installed {name}"
+                    "it is signed by {fingerprint}, not the key that installed {name}'s current image unasked"
                 ));
             }
             if store.keys()?.find(&key).is_none() {
@@ -194,6 +194,42 @@ pub fn install(store: &Store, prepared: Prepared) -> Result<String, String> {
     let at = dir.join(&file);
     sealed::unsealed(&dir, || sealed::replace_sealed(&at, &bytes, 0o644))?;
     Ok(format!("{} installed", at.display()))
+}
+
+/// Whether `/etc/<name>` is `extctl`'s: uid 0's, and sealed or holding a
+/// sealed file, as a cut-off write leaves it.
+pub fn kept(name: &str) -> bool {
+    let dir = PathBuf::from(config::dir(name));
+    if !fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir() && meta.uid() == 0) {
+        return false;
+    }
+    sealed::sealed_dir(&dir)
+        || fs::read_dir(&dir).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| sealed::sealed_file(&entry.path()))
+        })
+}
+
+/// Takes a [`kept`] `/etc/<name>` away, sealing it again if it stays.
+pub fn take_away(name: &str) -> Result<(), String> {
+    if !kept(name) {
+        return Ok(());
+    }
+    let dir = PathBuf::from(config::dir(name));
+    let shown = |e: std::io::Error| format!("{}: {e}", dir.display());
+    let handle = sealed::open_dir(&dir).map_err(shown)?;
+    sealed::set_sealed(&handle, false).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let emptied = fs::read_dir(&dir).map_err(shown).and_then(|entries| {
+        entries
+            .into_iter()
+            .try_for_each(|entry| sealed::remove_entry(&entry.map_err(shown)?.path()))
+    });
+    let gone = emptied.and_then(|()| fs::remove_dir(&dir).map_err(shown));
+    if gone.is_err() {
+        let _ = sealed::set_sealed(&handle, true);
+    }
+    gone
 }
 
 /// `/etc/<name>` as `extctl` keeps it, made where there is none: a sealed

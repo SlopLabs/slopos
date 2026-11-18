@@ -19,8 +19,9 @@ An extension is already this image. The work is to make it the only form.
 
 Software outside the base is an image: one ext4 image with a verity tree,
 installed by `extctl` and shown at `/opt/<name>`. The toolchain and the
-apps are two, which every root is offered. A person's own builds are files
-in their `~/.local`.
+apps are two, which every root is offered. Only what an image's signer
+signed replaces it until a removal gives up the name. A person's own builds
+are files in their `~/.local`.
 
 ## Decided here
 
@@ -76,15 +77,11 @@ Three things name an image today, and each is used for something else:
 |------------|------|----------|
 | The root of its hash tree | These exact bytes | The store's file name, `ext_activate`, the label a peer reads (name and root) |
 | Its name | One image per machine | `/opt/<name>`, the record, its uid, `/var/lib/<name>`, `/etc/<name>` |
-| The fingerprint of the key that signed it, kept in the record | Who may update it unasked | `install-signed` |
+| The fingerprint of the key that signed it, kept in the record | Its publisher | Every install, and `install-signed` unasked |
 
-The name alone carries what an image owns. An administrator's approval
-installs any image over one of the same name, whoever signed the first:
-`admit::install` holds a person's install to no signer, the record's
-signer is cleared, and the uid, the state and the settings pass to the
-newcomer. The question the administrator answers names the image and its
-grant, not that it replaces another publisher's. The label a peer reads
-names no publisher either.
+Until phase 7 the name alone carried what an image owns, and an
+administrator's approval put any image over one of its name. The label a
+peer reads still names no publisher.
 
 How systems that grew large settled it:
 
@@ -104,7 +101,7 @@ and no registry has to hand it out; Snap's is the exception and needs its
 store.
 
 So an image's identity is its name and the key that signed it, and an
-image nobody signed belongs to the machine. Phase 7 builds that. A short
+image nobody signed belongs to the machine. Phase 7 built that. A short
 id derived from the key, a successor key vouched for by the old one, and
 name prefixes bound to keys are left for later (below); none of them
 changes what phase 7 stores.
@@ -196,32 +193,17 @@ from its image. The second `users add` closes the first home; a home made
 anew is open while the accounts record holds one person. `~/.cargo/bin`
 stays off every path.
 
-## Phase 7: an image is its name and its signer
+## Phase 7: an image is its name and its signer — done
 
-**For:** nothing to take over what an image owns by using its name.
-
-Build:
-
-1. `admit::install` holding every install to the record's signer, a
-   person's too. An image under another key, or a signed one over one
-   nobody signed, or the reverse, is refused as an update and named as
-   what it is: another publisher's image of that name.
-2. A removal that gives up everything the name owned: the record with its
-   floor, the uid, `/var/lib/<name>`, `/etc/<name>` and `/var/log/<name>`.
-   `extctl remove` today keeps the record, the floor and the uid. Only
-   after it does another signer's image go in, as a first install.
-3. The question privd shows naming who signed the image, by the key's
-   fingerprint, or saying that nobody did.
-4. The cases in `extension_test`: a key's image over a person's, a
-   person's over a key's, a second key's over a first's, each refused
-   until the removal, and each then starting with no state.
-
-What stays as it is: an image nobody signed replaces another nobody
-signed, by an administrator's approval, which is how `just install`
-replaces the apps the install medium offered.
-
-Done when those cases pass and *An administrator's approval replaces an
-image with another publisher's* is gone from `KNOWN_ISSUES.md`.
+`admit::install` holds every install, a person's too, to the key that signed
+what the name holds, or to nobody, and names any other as another
+publisher's image of that name. A person's `extctl install` takes the
+signature beside the image, trusted or not, and the question names its
+signer or nobody. `extctl remove`, an action holding `DacOverride`, gives the
+name up: the record keeps only that it was removed, its retired uids and its
+configuration serial, and `/etc`, `/var/lib`, `/var/log` and
+`/run/<name>` go, a first install waiting while any is left. Another
+publisher's image then goes in as a first install, as `extension_test` shows.
 
 ## Phase 8: as many images as a machine holds
 
@@ -286,7 +268,7 @@ an installed image.
 
 ## Order
 
-Phase 7 is small and can come first. Phase 8 is needed before software
+Phase 8 is needed before software
 from elsewhere arrives one image at a time, not before. Phase 9 comes last,
 so that no other phase is written against names that move under it.
 

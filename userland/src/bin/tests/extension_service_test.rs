@@ -491,7 +491,21 @@ fn it_stops_with_its_extension() -> bool {
     if passwd_uid(NAME).is_some() {
         return fail("/etc/passwd lists a removed extension's user");
     }
-    (own.is_some() && uid_of(NAME) == own) || fail("the record lost its uid")
+    if let Some(left) = ["/var/lib", "/var/log", "/run"]
+        .map(|dir| format!("{dir}/{NAME}"))
+        .into_iter()
+        .find(|path| std::path::Path::new(path).exists())
+    {
+        return fail(format!("{left} outlived the removal"));
+    }
+    let Some(own) = own else {
+        return fail("it had no uid");
+    };
+    record().is_some_and(|r| r.uids.is_empty() && r.retired.contains(&own))
+        || fail(format!(
+            "the record does not retire uid {own}: {:?}",
+            record()
+        ))
 }
 
 const CASES: &[(&str, fn() -> bool)] = &[
