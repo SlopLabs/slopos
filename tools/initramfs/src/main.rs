@@ -63,10 +63,10 @@ const ROOT_DIRS: [(&str, u32); 12] = [
 ];
 
 /// `slopos_abi::fs::OWNERS_RECORD` and the record a new root carries: the
-/// first person holds all three trees.
+/// first person holds both trees.
 const OWNERS_RECORD: (&str, &str) = (
     "/var/lib/slopos/owners",
-    "1000:1000 /home/user\n1000:1000 /src\n1000:1000 /usr/local\n",
+    "1000:1000 /home/user\n1000:1000 /src\n",
 );
 
 /// The programs packed at `/sbin/<name>` rather than `/bin/<name>`.
@@ -822,7 +822,7 @@ mod tests {
 
         let layout_sh = fs::read_to_string(repo.join("scripts/lib/root_layout.sh")).unwrap();
         let layout = abi_root_layout(&abi);
-        assert_eq!(layout.len(), 14);
+        assert_eq!(layout.len(), 13);
         assert_eq!(shell_array(&layout_sh, "ROOT_LAYOUT"), layout);
         let constant = |name: &str| {
             let rest = &abi[abi.find(&format!("pub const {name}")).unwrap()..];
@@ -840,7 +840,7 @@ mod tests {
                 None => constant(tree),
             })
             .collect();
-        assert_eq!(trees, ["/home/user", "/src", "/usr/local"]);
+        assert_eq!(trees, ["/home/user", "/src"]);
         assert_eq!(shell_array(&layout_sh, "PERSON_TREES"), trees);
 
         let person = format!("{}:{}", constant("SESSION_UID"), constant("SESSION_GID"));
@@ -936,28 +936,28 @@ mod tests {
     fn a_tree_packs_below_its_path_with_its_modes_and_links() {
         use std::os::unix::fs::{PermissionsExt, symlink};
         let dir = scratch("tree");
-        let tree = dir.join("root/local");
+        let tree = dir.join("root/tool");
         fs::create_dir_all(tree.join("bin")).unwrap();
         fs::write(tree.join("bin/tool"), b"tool").unwrap();
         fs::set_permissions(tree.join("bin/tool"), fs::Permissions::from_mode(0o755)).unwrap();
         symlink("tool", tree.join("bin/alias")).unwrap();
         let out = dir.join("medium.cpio");
-        pack_trees(&out, &[format!("{}=usr/local", tree.display())]).unwrap();
+        pack_trees(&out, &[format!("{}=opt/tool", tree.display())]).unwrap();
         let got = records(&fs::read(&out).unwrap());
         let names: Vec<&str> = got.iter().map(|(n, _, _)| n.as_str()).collect();
         assert_eq!(
             names,
             [
-                "usr",
-                "usr/local",
-                "usr/local/bin",
-                "usr/local/bin/alias",
-                "usr/local/bin/tool"
+                "opt",
+                "opt/tool",
+                "opt/tool/bin",
+                "opt/tool/bin/alias",
+                "opt/tool/bin/tool"
             ]
         );
         assert_eq!(
             got[3],
-            ("usr/local/bin/alias".into(), MODE_LINK, b"tool".to_vec())
+            ("opt/tool/bin/alias".into(), MODE_LINK, b"tool".to_vec())
         );
         assert_eq!(got[4].1, 0o100_755);
         assert_eq!(got[4].2, b"tool");

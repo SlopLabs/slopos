@@ -1,6 +1,6 @@
 //! Extensions' actions, commands, apps and configuration end to end. The
 //! test extension's actions run as its user holding what they declare, for an
-//! app in `/usr/local` unasked or once the person allows it; its own program
+//! app outside the base unasked or once the person allows it; its own program
 //! is a principal only while it runs that program; privd reads an extension's
 //! actions again as it serves; its command comes last on `PATH`, its app entry
 //! replaces none, a configuration edited or signed restarts the service that
@@ -11,8 +11,8 @@
 //!
 //! The runner hands this binary every capability as uid 0, which privd's
 //! `root` admits unasked to the base's actions and to none of an extension's;
-//! the person's requests come from a copy of this binary in `/usr/local/bin`,
-//! run at uid 1000 holding nothing. A test boot runs no compositor until a
+//! the person's requests come from a copy of this binary in `/var/tmp`, run
+//! at uid 1000 holding nothing. A test boot runs no compositor until a
 //! case asks init for a session, so a request that needs the person is
 //! refused for want of anyone to ask; with one up, the person's answer is
 //! keys the kernel delivers to the compositor as a keyboard's.
@@ -48,7 +48,7 @@ use slopos_tls_core::sshsig::{self, KEY_TYPE, PublicKey};
 use slopos_userland::privd::{Connection, RESTART_WAIT, STATUS_REFUSED, request_id};
 use slopos_userland::syscall::process::{self, Endowment};
 use slopos_userland::syscall::{OwnedFd, fs, net};
-use slopos_userland::{app_entry, init_control};
+use slopos_userland::{app_entry, init_control, root_layout};
 
 use self::asking::Asker;
 
@@ -58,7 +58,7 @@ const DAEMON: &str = "/bin/ext_daemon";
 const LIB: &str = "/lib/libexttest-fixture.so";
 const SELF: &str = "/bin/extension_action_test";
 /// The person's app: this binary outside the base.
-const APP: &str = "/usr/local/bin/act-app-probe";
+const APP: &str = "/var/tmp/act-app-probe";
 const COMMAND: &str = "act-hello";
 /// The argument of the action whose mechanism runs until it is ended.
 const LINGER: &str = "linger";
@@ -417,8 +417,7 @@ fn the_app_asks_its_extension_s_actions() -> bool {
     if !installed {
         return false;
     }
-    let copied = std::fs::create_dir_all("/usr/local/bin")
-        .and_then(|()| std::fs::copy(SELF, APP))
+    let copied = std::fs::copy(SELF, APP)
         .and_then(|_| std::fs::set_permissions(APP, std::fs::Permissions::from_mode(0o755)));
     if let Err(e) = copied {
         return fail(format!("{APP}: {e}"));
@@ -557,30 +556,34 @@ fn its_command_comes_last_on_path() -> bool {
     if target.as_deref().ok() != Some(Path::new(&format!("/opt/{NAME}/bin/{COMMAND}"))) {
         return fail(format!("{link} links to {target:?}"));
     }
-    if !DEFAULT_PATH
-        .to_bytes()
-        .ends_with(b":/usr/local/bin:/opt/bin")
-    {
+    if !DEFAULT_PATH.to_bytes().ends_with(b":/opt/bin") {
         return fail(format!("the default path is {DEFAULT_PATH:?}"));
     }
-    let shell = || {
-        ran(Command::new("/bin/shell")
+    let shell = |path: Option<&str>| {
+        let mut shell = Command::new("/bin/shell");
+        shell
             .args(["-c", COMMAND])
             .env_remove("PATH")
             .uid(USER)
-            .gid(USER))
+            .gid(USER);
+        if let Some(path) = path {
+            shell.env("PATH", path);
+        }
+        ran(&mut shell)
     };
-    let found = shell();
+    let found = shell(None);
     if !found.ok() || !found.says("ext_daemon: pid") {
         return fail(format!("{COMMAND} from /opt/bin: {}", found.shown()));
     }
-    let mine = format!("/usr/local/bin/{COMMAND}");
-    let planted = std::fs::write(&mine, "#!/bin/shell\necho the session-owned one\n")
+    let bin = format!("{DIR}/.local/bin");
+    let mine = format!("{bin}/{COMMAND}");
+    let planted = std::fs::create_dir_all(&bin)
+        .and_then(|()| std::fs::write(&mine, "#!/bin/shell\necho the session-owned one\n"))
         .and_then(|()| std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o755)));
     if let Err(e) = planted {
         return fail(format!("{mine}: {e}"));
     }
-    let shadowed = shell();
+    let shadowed = shell(Some(&root_layout::search_path(DIR)));
     let _ = std::fs::remove_file(&mine);
     shadowed.ok() && shadowed.says("the session-owned one")
         || fail(format!("{COMMAND} beside {mine}: {}", shadowed.shown()))

@@ -236,11 +236,11 @@ reach all four.
 ## The self-hosted toolchain
 
 `just toolchain` cross-builds rustc, cargo, LLVM, clang and lld from the pinned
-rustc source tarball, and `just boot` installs the result at `/usr/local` on
-the development machine's root (`fs/assets/ext4-persist.img`), with each
-project's licence text under `share/licenses`, rustc's and cargo's under
-`share/doc`. An ISO built with `PAYLOAD=1` carries it, and the installer puts
-it at `/usr/local` on the disk it installs onto. Each
+rustc source tarball into the image `slopos-toolchain`, shown at
+`/opt/slopos-toolchain`, with each project's licence text under
+`share/licenses`, rustc's and cargo's under `share/doc`. Every root `just boot`
+makes is offered it, an ISO built with `PAYLOAD=1` carries it, and the
+installer offers it to the disk it installs onto. Each
 keeps its upstream licence: rustc and cargo `MIT OR
 Apache-2.0`, LLVM, clang and lld `Apache-2.0 WITH LLVM-exception`.
 
@@ -417,7 +417,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 `mke2fs`, `e2fsck`, `resize2fs`, `tune2fs`, `debugfs` and `dumpe2fs`, built by
 the recipe `toolchain/recipes/e2fsprogs/` from the pinned, unmodified release
 tarball of e2fsprogs 1.47.4, ship in every base at `/sbin`, and with the
-toolchain's other programs at `/usr/local/sbin`: © Theodore Ts'o and the
+toolchain's other programs in `/opt/slopos-toolchain/libexec`: © Theodore Ts'o and the
 e2fsprogs contributors. They are separate programs aggregated onto the medium,
 under the licences e2fsprogs states in its `NOTICE`: `GPL-2.0-only`, with the
 `lib/ext2fs` and `lib/e2p` code they link `LGPL-2.0-only` (bar the CRC and

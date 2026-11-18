@@ -35,9 +35,7 @@ const TREE: &str = "/tmp/dl_search";
 const SECURE_PROBE: &str = "/bin/dl_secure_probe";
 const SECURE_ORIGIN_DIR: &str = "/tmp/dl_secure";
 const SECURE_ABS_DIR: &str = "/tmp/dl_secure_abs";
-const LOCAL_LIB: &str = "/usr/local/lib";
-/// Below a person's home, their own libraries, searched ahead of
-/// [`LOCAL_LIB`] for them alone.
+/// Below a person's home, their own libraries, searched for them alone.
 const HOME_LIB: &str = ".local/lib";
 /// A probe whose only search entry, `${ORIGIN}/rpath`, names nothing, so a
 /// bare name falls through to the loader's own directories.
@@ -184,12 +182,8 @@ const CASES: &[(&str, fn() -> bool)] = &[
         ld_debug_statistics_reports_startup_binding,
     ),
     (
-        "usr_local_lib_is_not_searched_for_root_or_secure",
-        usr_local_lib_is_not_searched_for_root_or_secure,
-    ),
-    (
-        "a_person_s_own_libraries_come_before_usr_local_lib",
-        a_person_s_own_libraries_come_before_usr_local_lib,
+        "a_person_s_own_libraries_reach_them_alone",
+        a_person_s_own_libraries_reach_them_alone,
     ),
 ];
 
@@ -517,76 +511,6 @@ fn execfn_names_the_resolved_executable() -> bool {
     true
 }
 
-/// The fixture under its own name in [`LOCAL_LIB`] for as long as this
-/// lives, the directory too when it was not there.
-struct LocalLibrary {
-    made_dir: bool,
-}
-
-impl LocalLibrary {
-    fn path() -> String {
-        format!("{LOCAL_LIB}/libdlsearch.so")
-    }
-
-    fn stage() -> Option<LocalLibrary> {
-        let made_dir = !std::path::Path::new(LOCAL_LIB).is_dir();
-        let staged = LocalLibrary { made_dir };
-        stage(FIXTURE, &Self::path()).then_some(staged)
-    }
-}
-
-impl Drop for LocalLibrary {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(Self::path());
-        if self.made_dir {
-            let _ = fs::remove_dir(LOCAL_LIB);
-        }
-    }
-}
-
-/// A library the session put in [`LOCAL_LIB`] reaches no process of uid 0's
-/// and no `AT_SECURE` one, even of the session's uid: either may hold more
-/// than the session does.
-fn usr_local_lib_is_not_searched_for_root_or_secure() -> bool {
-    let Some(_staged) = LocalLibrary::stage() else {
-        return false;
-    };
-    if run_search(DEFAULT_PROBE, &["open", "libdlsearch.so", "-"], None) != Some(0) {
-        eprintln!("dl_test: a uid 0 program found libdlsearch.so in {LOCAL_LIB}");
-        return false;
-    }
-    let as_session = Endowment {
-        ids: Some((SESSION_UID, SESSION_GID)),
-        ..Endowment::NONE
-    };
-    match run_endowed(
-        DEFAULT_PROBE,
-        &["self", DEFAULT_PROBE, "1"],
-        &[],
-        as_session,
-    ) {
-        Some((0, _)) => {}
-        other => {
-            eprintln!(
-                "dl_test: {DEFAULT_PROBE} as the session from uid 0 is not AT_SECURE: {other:?}"
-            );
-            return false;
-        }
-    }
-    match run_endowed(
-        DEFAULT_PROBE,
-        &["open", "libdlsearch.so", "-"],
-        &[],
-        as_session,
-    ) {
-        Some((0, _)) => true,
-        other => {
-            eprintln!("dl_test: an AT_SECURE program searched {LOCAL_LIB}: {other:?}");
-            false
-        }
-    }
-}
-
 /// The fixture in the first person's [`HOME_LIB`] for as long as this
 /// lives, theirs with each directory it made on the way, which go with it.
 struct HomeLibrary {
@@ -651,11 +575,11 @@ fn loads_as_person(expect: &str, home: Option<&str>) -> bool {
     }
 }
 
-/// A person's own libraries, below the `HOME` their process started with,
-/// come before everyone's in [`LOCAL_LIB`], and neither reaches uid 0 or an
-/// `AT_SECURE` process of theirs.
-fn a_person_s_own_libraries_come_before_usr_local_lib() -> bool {
-    let (Some(_everyone), Some(_own)) = (LocalLibrary::stage(), HomeLibrary::stage()) else {
+/// A person's own libraries are found below the `HOME` their process
+/// started with, an absolute one, and reach neither uid 0 nor an `AT_SECURE`
+/// process of theirs.
+fn a_person_s_own_libraries_reach_them_alone() -> bool {
+    let Some(_own) = HomeLibrary::stage() else {
         return false;
     };
     let home = format!("HOME={SESSION_HOME}");
@@ -675,8 +599,8 @@ fn a_person_s_own_libraries_come_before_usr_local_lib() -> bool {
     );
     loads_as_person(&HomeLibrary::path(), Some(SESSION_HOME))
         && loads_as_person(&HomeLibrary::path(), Some(&format!("{SESSION_HOME}/")))
-        && loads_as_person(&LocalLibrary::path(), None)
-        && loads_as_person(&LocalLibrary::path(), Some("home/user"))
+        && loads_as_person("-", None)
+        && loads_as_person("-", Some("home/user"))
         && match root.status().map(|status| status.code()) {
             Ok(Some(0)) => true,
             other => {

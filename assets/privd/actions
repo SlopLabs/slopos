@@ -310,20 +310,6 @@ action org.slopos.extension.config-signed
   describe "change an extension's settings, signed by the key that installed it"
   verb     "Change"
 
-action org.slopos.software.install
-  program  /bin/tree-install
-  args     *
-  caps
-  uid      0
-  cwd
-  exclusive software
-  allow    root
-  allow    admin confirm
-  allow    paired
-  describe "install software for everyone on this computer"
-  detail   "It replaces what its last install put there."
-  verb     "Install"
-
 action org.slopos.accounts.password
   program  /bin/users
   args     passwd

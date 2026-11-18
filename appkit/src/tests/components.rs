@@ -198,7 +198,7 @@ pub(super) fn test_audit_finds_text_past_its_widget() {
         width: Some(crate::constraints::Length::Px(160)),
         height: None,
         child: Box::new(line_edit(
-            "/usr/local/share/slopos/a/path/longer/than/its/field",
+            "/opt/tools/share/slopos/a/path/longer/than/its/field",
         )),
     };
     assert_clean("a field scrolls its text", audit_node(&field, &WIDTHS, 100));
@@ -1138,7 +1138,7 @@ pub(super) fn test_text_wraps_or_ends_in_an_ellipsis() {
         Some("one two three four five six")
     );
     for node in [
-        Text::new("/usr/local/lib/rustlib/x86_64-unknown-slopos/lib").wrap_anywhere(),
+        Text::new("/opt/tools/lib/rustlib/x86_64-unknown-slopos/lib").wrap_anywhere(),
         Text::new("supercalifragilisticexpialidocious").wrap(),
         Text::new("cut short at two lines however long it runs on and on")
             .wrap()

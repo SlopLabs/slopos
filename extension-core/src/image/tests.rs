@@ -98,7 +98,7 @@ fn an_image_out_of_shape_is_refused_saying_why() {
         let why = refusal(packer(), RELEASE_TEXT, declare);
         assert!(why.contains(missing), "{declare:?}: {why}");
     }
-    for target in ["../bin/hello", "/usr/local/lib", "a/../../x", ""] {
+    for target in ["../bin/hello", "/usr/lib", "a/../../x", ""] {
         let mut escapes = packer();
         escapes.add("/lib", S_IFLNK | 0o777, target.as_bytes().to_vec());
         let why = refusal(escapes, RELEASE_TEXT, DECLARE_TEXT);

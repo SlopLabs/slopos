@@ -1392,8 +1392,21 @@ fn every_question_reads_whole_at_every_width() -> bool {
 
 /// A copy of this binary outside the base, which the kernel attests as no
 /// program of the system's.
-const LOCAL_COPY: &str = "/usr/local/bin/privd-test-probe";
-const LOCAL_APPS: &str = "/usr/local/share/slopos/apps";
+const LOCAL_COPY: &str = "/var/tmp/privd-test-probe";
+
+const PERSON_APPS: [&str; 4] = [".local", "share", "slopos", "apps"];
+
+/// The dock's share a person may write, each directory made theirs.
+fn person_apps() -> std::io::Result<String> {
+    let mut dir = slopos_abi::fs::SESSION_HOME.to_owned();
+    for part in PERSON_APPS {
+        dir = format!("{dir}/{part}");
+        if std::fs::create_dir(&dir).is_ok() {
+            std::os::unix::fs::lchown(&dir, Some(USER), Some(USER))?;
+        }
+    }
+    Ok(dir)
+}
 
 /// With a desktop up, the first person's click ends a task of another
 /// user's, which nothing they run could signal.
@@ -1427,8 +1440,9 @@ fn the_first_person_s_click_ends_another_user_s_task() -> bool {
 
 fn the_dialog_names_the_app_only_from_what_no_process_can_write() -> bool {
     let outcome = named_from_what_no_process_can_write();
+    let apps = format!("{}/{}", slopos_abi::fs::SESSION_HOME, PERSON_APPS.join("/"));
     for entry in ["privd-test-base", "privd-test-copy"] {
-        let _ = std::fs::remove_file(format!("{LOCAL_APPS}/org.slopos.{entry}.app"));
+        let _ = std::fs::remove_file(format!("{apps}/org.slopos.{entry}.app"));
     }
     let _ = std::fs::remove_file(LOCAL_COPY);
     outcome
@@ -1444,23 +1458,23 @@ fn named_from_what_no_process_can_write() -> bool {
         asker.ask_naming(&CONFIGURE, Some(asking::tab_and_enter))
     };
     let from_the_base = named(SELF);
-    let copied = std::fs::create_dir_all("/usr/local/bin")
-        .and_then(|()| std::fs::copy(SELF, LOCAL_COPY))
+    let copied = std::fs::copy(SELF, LOCAL_COPY)
         .and_then(|_| std::fs::set_permissions(LOCAL_COPY, Permissions::from_mode(0o755)));
     if let Err(e) = copied {
         note(&format!("{LOCAL_COPY}: {e}"));
         return false;
     }
     let unlisted = named(LOCAL_COPY);
-    let claim = |entry: &str, exec: &str| {
+    let claim = |apps: &str, entry: &str, exec: &str| {
         let text = format!("id=org.slopos.{entry}\nname=System Monitor\nexec={exec}\n");
-        std::fs::write(format!("{LOCAL_APPS}/org.slopos.{entry}.app"), text)
+        std::fs::write(format!("{apps}/org.slopos.{entry}.app"), text)
     };
-    let claimed = std::fs::create_dir_all(LOCAL_APPS)
-        .and_then(|()| claim("privd-test-base", SELF))
-        .and_then(|()| claim("privd-test-copy", LOCAL_COPY));
+    let claimed = person_apps().and_then(|apps| {
+        claim(&apps, "privd-test-base", SELF)?;
+        claim(&apps, "privd-test-copy", LOCAL_COPY)
+    });
     if let Err(e) = claimed {
-        note(&format!("{LOCAL_APPS}: {e}"));
+        note(&format!("the person's app entries: {e}"));
         return false;
     }
     let claimed_base = named(SELF);
@@ -1471,12 +1485,12 @@ fn named_from_what_no_process_can_write() -> bool {
         (
             &claimed_base,
             "privd_test",
-            "a base program /usr/local names System Monitor",
+            "a base program the person's entry names System Monitor",
         ),
         (
             &claimed_copy,
             UNIDENTIFIED,
-            "a program /usr/local names System Monitor",
+            "a program the person's entry names System Monitor",
         ),
     ];
     for ((said, app), want, who) in expected {

@@ -25,7 +25,7 @@ and requires a Go toolchain >= 1.22.
 Install one of:
 
   • Linux (apt):   sudo apt-get install -y golang-go
-  • Linux (other): https://go.dev/dl/  (single-file install to /usr/local/go)
+  • Linux (other): https://go.dev/dl/  (a tarball to unpack anywhere on PATH)
   • macOS (brew):  brew install go
   • macOS (other): https://go.dev/dl/
 

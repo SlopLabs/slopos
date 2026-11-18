@@ -23,7 +23,9 @@ use std::time::{Duration, Instant};
 
 use slopos_abi::caps::{ALL, DAC_OVERRIDE, MOUNT, SEAL, SET_ID};
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
-use slopos_abi::fs::{ACCOUNTS_STORE, ADMIN_GID, MNT_DETACH, PERSON_UIDS, SESSION_UID};
+use slopos_abi::fs::{
+    ACCOUNTS_STORE, ADMIN_GID, MNT_DETACH, PERSON_UIDS, SESSION_HOME, SESSION_UID,
+};
 use slopos_abi::syscall::termios::LocalFlags;
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_priv_core::{ENV_ACTION, ENV_FD, ENV_UID};
@@ -285,6 +287,15 @@ fn an_account_has_a_private_home_and_its_groups() -> bool {
             return fail(format!(
                 "{home} is {:?}",
                 other.map(|m| (m.uid(), m.mode()))
+            ));
+        }
+    }
+    match std::fs::symlink_metadata(SESSION_HOME) {
+        Ok(meta) if meta.mode() & 0o077 == 0 => {}
+        other => {
+            return fail(format!(
+                "with a second person {SESSION_HOME} is {:?}",
+                other.map(|m| m.mode())
             ));
         }
     }

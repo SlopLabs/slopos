@@ -3,10 +3,9 @@
 use core::ffi::CStr;
 
 /// The command search path of a program whose environment names none: the
-/// system's directories first, so nothing installed under `/usr/local`
-/// shadows them, then `/usr/local`'s, then the commands the owner granted
+/// system's directories first, then the commands the owner granted
 /// extensions, which shadow neither.
-pub const DEFAULT_PATH: &CStr = c"/bin:/sbin:/usr/local/bin:/opt/bin";
+pub const DEFAULT_PATH: &CStr = c"/bin:/sbin:/opt/bin";
 
 /// Longest path a syscall accepts, NUL included. Linux's `PATH_MAX`. Too
 /// large for a kernel frame, so the syscall layer stages paths on the heap.
@@ -215,7 +214,7 @@ const fn system(path: &'static str, mode: u16) -> RootDir {
 
 /// Every root's directories, parents first, as the system holds them. `/tmp`
 /// and `/run` are memory the kernel mounts, and the base directories its seal.
-pub const ROOT_LAYOUT: [RootDir; 14] = [
+pub const ROOT_LAYOUT: [RootDir; 13] = [
     system("/", 0o755),
     system("/etc", 0o755),
     system("/var", 0o755),
@@ -227,15 +226,13 @@ pub const ROOT_LAYOUT: [RootDir; 14] = [
     system("/home", 0o755),
     system("/media", 0o755),
     system("/usr", 0o755),
-    system("/usr/local", 0o755),
     system("/opt", 0o755),
     system("/opt/bin", 0o755),
 ];
 
 /// The first person's trees, theirs with all below them while
-/// [`OWNERS_RECORD`] names them: their home, the workspace, and the prefix
-/// software is installed in, which is the system's from the second person on.
-pub const PERSON_TREES: [&str; 3] = [SESSION_HOME, "/src", "/usr/local"];
+/// [`OWNERS_RECORD`] names them: their home and the workspace.
+pub const PERSON_TREES: [&str; 2] = [SESSION_HOME, "/src"];
 
 /// `<uid>:<gid> <tree>` for each of [`PERSON_TREES`] the first person holds.
 pub const OWNERS_RECORD: &str = "/var/lib/slopos/owners";

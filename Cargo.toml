@@ -50,7 +50,6 @@ members = [
   "priv-core",
   "fat-core",
   "boot-core",
-  "tree-core",
   "accounts-core",
   "settings-core",
   "settings-app",
@@ -172,7 +171,6 @@ slopos-installer-core = { path = "installer-core" }
 slopos-priv-core = { path = "priv-core" }
 slopos-fat-core = { path = "fat-core" }
 slopos-boot-core = { path = "boot-core" }
-slopos-tree-core = { path = "tree-core" }
 slopos-accounts-core = { path = "accounts-core" }
 slopos-settings-core = { path = "settings-core" }
 slopos-settings-app = { path = "settings-app" }

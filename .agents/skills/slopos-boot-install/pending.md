@@ -39,9 +39,13 @@
 - `docs/self-hosting/installing`: the archive's `images/`
   (`layout::MEDIUM_IMAGES`, was `MEDIUM_APPS`) holds the apps' image and
   sidecar, the payload `images/slopos-toolchain.{ext,meta}` in place of
-  `usr/local` and its manifest; `build_install_medium.sh` takes the
+  the toolchain's tree and its manifest; `build_install_medium.sh` takes the
   toolchain image's directory and `ESSENTIALS`. `root::fill` offers each to
   the new root: `/var/lib/slopos/offered`, uid 0's, `0644`, through
   `<name>.ext.partial` and a rename, the sidecar last; one offered under the
   same sidecar and size stays. `root_min` counts the payload twice, the
   store copying it at first boot. The words name `/opt/slopos-toolchain`.
+- `docs/architecture/boot`, `docs/self-hosting/installing`: the installer
+  writes no `/usr/local` (gone from `ROOT_LAYOUT`), so `--keep-root` updates
+  none. A kept root's home made anew is `0755` only while the accounts
+  record holds at most one person.

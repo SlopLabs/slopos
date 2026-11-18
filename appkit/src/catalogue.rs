@@ -352,7 +352,7 @@ impl Catalogue {
                         .wrap()
                         .into(),
                         Text::new(
-                            "/usr/local/lib/rustlib/x86_64-unknown-slopos/lib/libstd-a1b2c3d4e5f6a7b8.so --serve --root /media/payload",
+                            "/opt/tools/lib/rustlib/x86_64-unknown-slopos/lib/libstd-a1b2c3d4e5f6a7b8.so --serve --root /media/payload",
                         )
                         .role(TextRole::Mono)
                         .wrap_anywhere()

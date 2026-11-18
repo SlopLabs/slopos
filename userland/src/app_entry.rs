@@ -27,8 +27,8 @@ impl Share {
     }
 }
 
-/// Each extension's share by name, the base's, `/usr/local`'s, then the
-/// person's: a later one's entry replaces an earlier's with its id.
+/// Each extension's share by name, the base's, then the person's: a later
+/// one's entry replaces an earlier's with its id.
 pub fn shares(home: Option<&str>) -> Vec<Share> {
     let mut shares: Vec<Share> = crate::activation::apps()
         .into_iter()
@@ -38,7 +38,6 @@ pub fn shares(home: Option<&str>) -> Vec<Share> {
         })
         .collect();
     shares.push(Share::all("/usr/share"));
-    shares.push(Share::all("/usr/local/share"));
     shares.extend(home.map(|home| Share::all(Path::new(home).join(".local/share"))));
     shares
 }

@@ -4,22 +4,20 @@
 //! and its clone seeded at `/src`, the first person's.
 
 use std::ffi::CString;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt, lchown, symlink};
 use std::path::Path;
 
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
 use slopos_abi::fs::{OWNERS_RECORD, ROOT_LAYOUT, SESSION_GID, SESSION_UID};
 use slopos_boot_core::layout;
 use slopos_extension_core::OFFERED;
-use slopos_tree_core::Kind;
 
 use super::engine::Events;
 use super::medium::Medium;
 use crate::root_layout::Owners;
 use crate::syscall::fs::{inode_flags, mount, set_inode_flags, sync, umount2};
-use crate::tree::{create_new, give, make_dir, write_durably};
 
 /// Where the new root's mount point is made: memory, which the next boot does
 /// not see.
@@ -35,9 +33,50 @@ const LOG: &str = "/var/log/installer.log";
 const LOG_MODE: u32 = 0o644;
 const CMDLINE_MODE: u32 = 0o644;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Dir,
+    File,
+    Link,
+}
+
+fn make_dir(path: &str) -> Result<(), String> {
+    match fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(e)
+            if e.kind() == ErrorKind::AlreadyExists
+                && fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(format!("{path}: {e}")),
+    }
+}
+
+fn give(path: &str, (uid, gid): (u32, u32)) -> Result<(), String> {
+    lchown(path, Some(uid), Some(gid)).map_err(|e| format!("{path}: {e}"))
+}
+
+/// Refuses a link at `path`, which a plain create would follow.
+fn create_new(path: impl AsRef<Path>) -> std::io::Result<File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
+}
+
+fn write_durably(path: &str, bytes: &[u8]) -> Result<(), String> {
+    let temp = format!("{path}.part");
+    match fs::remove_file(&temp) {
+        Err(e) if e.kind() != ErrorKind::NotFound => return Err(format!("{temp}: {e}")),
+        _ => {}
+    }
+    create_new(&temp)
+        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
+        .and_then(|()| fs::rename(&temp, path))
+        .map_err(|e| format!("{path}: {e}"))
+}
+
 /// The new root, mounted in a directory made under a name nobody could
 /// foresee, so no planted link redirects the mount, and that only uid 0 may
-/// search, so the session, which owns a kept root's `/usr/local`, cannot turn
+/// search, so the session, which owns a kept root's `/src`, cannot turn
 /// a directory the install writes through into a link. Unmounted on drop.
 pub struct Mounted {
     private: String,
@@ -210,7 +249,7 @@ pub fn lay_out(root: &Mounted, new: bool) -> Result<Owners, String> {
     for dir in ROOT_LAYOUT.iter().filter(|dir| dir.path != "/") {
         root.owned_dir(dir.path, owners.owner(dir.path), dir.mode)?;
     }
-    if let Some(home) = owners.home() {
+    if let Some(home) = owners.home(new || crate::root_layout::alone(top)) {
         root.owned_dir(home.path, (home.uid, home.gid), home.mode)?;
     }
     for dir in slopos_abi::fs::BASE_DIRS {

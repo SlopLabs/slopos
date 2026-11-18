@@ -69,10 +69,10 @@ names the evidence that would lift it.
 ### SLOPOS-2026-0065
 - Title: What `priv` makes is the requester's, so their later session code rewrites what they placed in shared directories
 - Status: `open`
-- Confidence: 35 — evidence 25 (`org.slopos.priv` runs as the requester, so a file it makes in a uid-0 directory is theirs), exploitability 5 (an administrator must first make the file with `priv`), reproducibility 5. Raised by: a utest on a two-person root that rewrites a file `priv` made in `/usr/local/bin`.
-- Impact: once an administrator makes a file in `/usr/local/bin` or `/etc` with `priv`, any code of their session rewrites it unasked, and other people run or read it.
-- Evidence: `assets/privd/actions:381-392` (`uid requester`); `userland/src/apps/privd/mod.rs:1216-1240` (the requester's ids); `userland/src/apps/priv.rs:264-274` (`priv` itself trusts only what uid 0 alone changes, which such a file is not).
-- Repro: with a second person added, `priv cp tool /usr/local/bin/tool`; `ls -l` names the administrator; their shell rewrites the file without a question, and the second person's `tool` runs the new bytes.
+- Confidence: 35 — evidence 25 (`org.slopos.priv` runs as the requester, so a file it makes in a uid-0 directory is theirs), exploitability 5 (an administrator must first make the file with `priv`), reproducibility 5. Raised by: a utest on a two-person root that rewrites a file `priv` made in `/opt/bin`.
+- Impact: once an administrator makes a file in `/opt/bin` or `/etc` with `priv`, any code of their session rewrites it unasked, and other people run or read it.
+- Evidence: `assets/privd/actions:478-489` (`uid requester`); `userland/src/apps/privd/mod.rs:1216-1240` (the requester's ids); `userland/src/apps/priv.rs:262-270` (`priv` itself trusts only what uid 0 alone changes, which such a file is not).
+- Repro: with a second person added, `priv cp tool /opt/bin/tool`; `ls -l` names the administrator; their shell rewrites the file without a question, and the second person's `tool` runs the new bytes.
 - Remediation: a file `priv` makes in a directory only uid 0 may change is uid 0's.
 
 ### SLOPOS-2026-0066
@@ -83,15 +83,6 @@ names the evidence that would lift it.
 - Evidence: `userland/src/apps/privd/mod.rs:74-80` (the limits); `userland/src/apps/privd/mod.rs:285-307` (`Admitted::take` keyed on uid and program path); `userland/src/apps/privd/mod.rs:428-433` (`Other` has no path, one key); `userland/src/apps/privd/mod.rs:688-718` (a connection lives until its requester closes it).
 - Repro: as uid 1000, hold eight idle connections from a program outside the base, then start `bootctl status`, `keymap` and `users passwd` eight times each with stdout and stderr a full pipe; the person's next `priv` is refused as crowded.
 - Remediation: count only connections with a request in flight and close idle ones after a bound, or keep a share for the programs the person's desktop starts.
-
-### SLOPOS-2026-0067
-- Title: Until the next boot, a descriptor the first person opened in `/usr/local` before the hand-over still writes what later people run
-- Status: `open`
-- Confidence: 35 — evidence 25 (the hand-over changes owners in place; only `priv` waits for a settled boot; `users add` only advises a restart), exploitability 5, reproducibility 5. Raised by: a utest that keeps a writable descriptor across `users add` and changes what the new person runs.
-- Impact: code of the first person's that opened `/usr/local/bin/tool` for writing before `users add` keeps changing it while the second person runs it, until a restart.
-- Evidence: `userland/src/root_layout.rs:15-22` (`settled`); `userland/src/apps/users.rs:340-346` (the advice); `userland/src/apps/priv.rs:268-269`.
-- Repro: as the first person, open `/usr/local/bin/tool` for writing and keep it; `users add bob`; write through the descriptor; bob's `tool` runs the new bytes.
-- Remediation: revoke writable descriptors under `/usr/local` at the hand-over, or keep the new person off `/usr/local` until a settled boot.
 
 ### SLOPOS-2026-0068
 - Title: A rename's permission checks and the rename look the names up separately, with no lock across both
@@ -240,20 +231,11 @@ names the evidence that would lift it.
 ### SLOPOS-2026-0086
 - Title: An extension's program keeps its extension's label with a library that maps nothing executable, where its own run path, `/usr/lib` or a relative needed name leads
 - Status: `open`
-- Confidence: 20 — evidence 15 (an extension's program starts `AT_SECURE`, which leaves an absolute `DT_RPATH` or `DT_RUNPATH` entry, `/usr/lib` and a needed name holding a slash searched as written; extctl reads neither a run path nor a slash in a needed name), exploitability 5 (an installed image must carry such a run path or name, or the attacker runs as uid 0, whose `/usr` it is, or holds `DacOverride`, to make `/usr/lib`), reproducibility 0. Raised by: an image whose program carries `DT_RUNPATH /usr/local/lib` asking privd as its extension with a data-only library there.
-- Impact: where an extension's program was linked with a run path a person can write — `/usr/local/lib`, a build tree — or needs `sub/libx.so`, session code places a library there, or under the directory it starts the program in, that maps only data; the program loads it ahead of its image's own and still asks privd as that extension's `program` principal. A uid-0 process or a `DacOverride` holder does the same through `/usr/lib`, which is no base directory. An extension's script keeps the label on the base's static shell, which takes its starter's environment, `PATH` among it.
+- Confidence: 20 — evidence 15 (an extension's program starts `AT_SECURE`, which leaves an absolute `DT_RPATH` or `DT_RUNPATH` entry, `/usr/lib` and a needed name holding a slash searched as written; extctl reads neither a run path nor a slash in a needed name), exploitability 5 (an installed image must carry such a run path or name, or the attacker runs as uid 0, whose `/usr` it is, or holds `DacOverride`, to make `/usr/lib`), reproducibility 0. Raised by: an image whose program carries `DT_RUNPATH /home/user/.local/lib` asking privd as its extension with a data-only library there.
+- Impact: where an extension's program was linked with a run path a person can write — their `~/.local/lib`, a build tree — or needs `sub/libx.so`, session code places a library there, or under the directory it starts the program in, that maps only data; the program loads it ahead of its image's own and still asks privd as that extension's `program` principal. A uid-0 process or a `DacOverride` holder does the same through `/usr/lib`, which is no base directory. An extension's script keeps the label on the base's static shell, which takes its starter's environment, `PATH` among it.
 - Evidence: `slibc/src/ld_so/mod.rs:57` (`SEARCH_DIRS`); `slibc/src/ld_so/mod.rs:708-720` (a name with a slash as written; run paths ahead of every directory); `extension-core/src/elf.rs:218-219` (only `DT_NEEDED` and `DT_SONAME` are read); `abi/src/fs.rs:167-174` (`BASE_DIRS` without `/usr/lib`); `userland/src/apps/shell/env.rs:106-114` (the shell imports its environment).
-- Repro: pack an extension whose program is linked `-rpath /usr/local/lib` against a library also in its `lib/`; as the first person put a data-only library of that soname in `/usr/local/lib` and start the program: `SO_PEEREXTENSION` on its privd connection still names the activation.
+- Repro: pack an extension whose program is linked `-rpath /home/user/.local/lib` against a library also in its `lib/`; as the first person put a data-only library of that soname in `/home/user/.local/lib` and start the program: `SO_PEEREXTENSION` on its privd connection still names the activation.
 - Remediation: extctl refuses an ELF file that carries a run path or a needed name holding a slash, and `/usr/lib` becomes a base directory or leaves an `AT_SECURE` program's search.
-
-### SLOPOS-2026-0087
-- Title: `tree-install` run with `DacOverride` by a uid other than 0 reads the tree by path
-- Status: `open`
-- Confidence: 20 — evidence 15 (the copy `tree::stage` makes is taken for uid 0 and privd's runs alone; `tree::scan` and the install open by path and follow links), exploitability 5 (an administrator must run `priv tree-install` on a tree another person can change, while that person races it), reproducibility 0. Raised by: a utest that swaps a link into a tree `priv tree-install` reads.
-- Impact: while an administrator installs another person's tree with `priv tree-install`, that person swaps a file for a link and a file only uid 0 may read lands at the destination with the mode the scan read, as any `priv cp` of a tree its owner can change does.
-- Evidence: `userland/src/apps/tree_install.rs:62` (staged for uid 0 and privd alone); `userland/src/tree.rs:96` and `:478` (`scan` and `copy` by path); `assets/privd/actions:430-438` (`uid requester`, `DacOverride`).
-- Repro: as an administrator, `priv tree-install x /home/bob/tree /opt/x` while bob loops replacing a file in the tree with a link to `/etc/shadow`.
-- Remediation: stage the copy whenever the caller holds `DacOverride`, in a directory and under a lock of its own uid, or read every tree through descriptors that follow no link.
 
 ## Cadence
 

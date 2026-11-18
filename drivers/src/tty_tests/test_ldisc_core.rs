@@ -1652,7 +1652,7 @@ pub fn test_word_erase_path_boundary() -> TestResult {
     t.c_lflag |= LocalFlags::IEXTEN;
     ld.set_termios(&t);
 
-    for &c in b"/usr/local/bin" {
+    for &c in b"/opt/tools/bin" {
         ld.input_char(c);
     }
 
@@ -1661,7 +1661,7 @@ pub fn test_word_erase_path_boundary() -> TestResult {
     ld.input_char(b'\n');
     let mut buf = [0u8; 64];
     let n = ld.read(&mut buf);
-    if n != 12 || &buf[..11] != b"/usr/local/" {
+    if n != 12 || &buf[..11] != b"/opt/tools/" {
         klog_info!(
             "TTY_TEST: BUG - word erase path boundary mismatch (n={}, data={:?})",
             n,

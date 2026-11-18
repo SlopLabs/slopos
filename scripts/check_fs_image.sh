@@ -24,9 +24,8 @@
 # With `--map`, and for the tests image when no image is named, a third: the
 # image carries an owners record, every directory of the ownership map
 # (scripts/lib/root_layout.sh) has the mode the map gives and the owner the
-# record does, each tree the first person holds is theirs, `/src` where there
-# is one, and a `/usr/local` they do not hold is the system's to its last
-# entry, none of which anyone but uid 0 may write.
+# record does, and each tree the first person holds is theirs, `/src` where
+# there is one.
 #
 # The verity trailer needs no special handling: `e2fsck` objects when the
 # superblock claims *more* blocks than the device holds, never fewer, and an
@@ -71,9 +70,8 @@ for tool in e2fsck dumpe2fs; do
 done
 
 # Each way `image` departs from the map, one line apiece: a directory whose
-# owner is not the record's or whose mode is not the map's, a missing one but
-# `/src`, which only a seeded root has, and below a `/usr/local` that is the
-# system's, an entry another uid holds or may write.
+# owner is not the record's or whose mode is not the map's, and a missing one
+# but `/src`, which only a seeded root has.
 map_departures() {
     local image="$1" record spec path want stat got mode tree
     local status=0
@@ -110,20 +108,6 @@ map_departures() {
         fi
         [ "$got" = "$want" ] || echo "$path is $got, the map says $want"
     done
-    root_layout_holds /usr/local && return 0
-    local walked
-    if ! walked="$(python3 "$SCRIPT_DIR/fs_tree.py" walk "$image" /usr/local 2>&1)"; then
-        echo "/usr/local could not be walked: $walked"
-        return
-    fi
-    while read -r mode got path; do
-        [ -n "$path" ] || continue
-        if [ "$got" != 0:0 ]; then
-            echo "$path is $got in a /usr/local that is the system's"
-        elif [ "$(( 8#$mode & 0170000 ))" != "$(( 0120000 ))" ] && [ "$(( 8#$mode & 022 ))" != 0 ]; then
-            echo "$path has mode $(printf '%o' "$(( 8#$mode & 07777 ))"), which others may write"
-        fi
-    done <<<"$walked" | head -n 20
 }
 
 # ---------------------------------------------------------------------------
@@ -259,7 +243,7 @@ if [ "$SELF_TEST" = 1 ]; then
     expect 1 "an image without the map's directories is rejected" "$tmp/clean.img" 1
     expect 0 "an image laid out as the map says passes" "$tmp/mapped.img" 1
     for departure in "sif /etc uid 1000" "sif /home/user uid 0" "sif /var/tmp mode 040755" \
-        "mkdir /src" "sif /usr/local uid 0" "rm $OWNERS_RECORD"; do
+        "mkdir /src" "rm $OWNERS_RECORD"; do
         cp "$tmp/mapped.img" "$tmp/departed.img"
         debugfs -w -R "$departure" "$tmp/departed.img" >/dev/null 2>&1
         expect 1 "the map refuses \`$departure\`" "$tmp/departed.img" 1
@@ -269,22 +253,6 @@ if [ "$SELF_TEST" = 1 ]; then
         debugfs -w -f - "$tmp/seeded.img" >/dev/null 2>&1
     expect 0 "a seeded /src that is the first person's passes" "$tmp/seeded.img" 1
 
-    cp "$tmp/mapped.img" "$tmp/handed.img"
-    grep -v ' /usr/local$' "$tmp/owners" > "$tmp/handed-owners"
-    : > "$tmp/empty"
-    printf '%s\n' "rm $OWNERS_RECORD" "write $tmp/handed-owners $OWNERS_RECORD" \
-        "sif /usr/local uid 0" "sif /usr/local gid 0" "mkdir /usr/local/bin" \
-        "write $tmp/empty /usr/local/bin/tool" "sif /usr/local/bin/tool mode 0100755" \
-        "symlink /usr/local/bin/alias tool" |
-        debugfs -w -f - "$tmp/handed.img" >/dev/null 2>&1
-    expect 0 "a /usr/local handed to the system passes" "$tmp/handed.img" 1
-    for departure in "sif /usr/local/bin/tool uid 1000" "sif /usr/local/bin/tool mode 0100775" \
-        "sif /usr/local/bin mode 040757" "sif /usr/local uid 1000"; do
-        cp "$tmp/handed.img" "$tmp/departed.img"
-        debugfs -w -R "$departure" "$tmp/departed.img" >/dev/null 2>&1
-        expect 1 "a system /usr/local refuses \`$departure\`" "$tmp/departed.img" 1
-    done
-
     : > "$tmp/empty.img"
     expect 2 "an empty image is refused, not reported OK" "$tmp/empty.img"
 
@@ -292,7 +260,7 @@ if [ "$SELF_TEST" = 1 ]; then
         echo "check_fs_image --self-test: $failures check(s) failed" >&2
         exit 1
     fi
-    echo "check_fs_image: self-test OK — 22 checks, both directions"
+    echo "check_fs_image: self-test OK — 16 checks, both directions"
     exit 0
 fi
 

@@ -2,17 +2,17 @@
 name: slopos-base-software
 description: >
   The base (the read-only userland every kernel boots), its live generations
-  and interface number, and the software installed outside it in trees.
-  Use when a task touches fs/src/basefs, boot/src/base.rs, boot-core base or
-  newc, abi base_interface, tools/initramfs, tree-core, userland tree.rs,
-  tree_install, root_layout, app_entry, apps/, or mentions base_activate,
-  BASE_INTERFACE, libc.so exports, app entries, /usr/local or ~/.local.
+  and interface number, and how software outside it is found: images under
+  /opt and a person's ~/.local. Use when a task touches fs/src/basefs,
+  boot/src/base.rs, boot-core base or newc, abi base_interface,
+  tools/initramfs, root_layout, app_entry, apps/, or mentions base_activate,
+  BASE_INTERFACE, libc.so exports, app entries, search paths or ~/.local.
 ---
 
 ## Read first
 
 - `docs/architecture/base`: what a base holds, how one is chosen and switched
-- `docs/architecture/software`: trees, manifests, who writes `/usr/local`, the apps
+- `docs/architecture/software`: where installed software lives, the apps
 - `docs/abi/interfaces`: each interface between separately built parts, and its check
 - `docs/verification/toolchain-gates`: the base-interface and libc-exports gates
 
@@ -33,18 +33,16 @@ description: >
 - A generation's lifetime is read from the open-file, page-set and process
   tables, not counted. Code keeping a base inode past one syscall must show
   in one of them (`basefs::Hold`). The booted generation is never freed.
-- Believe a tree manifest only if uid 0 or the installing uid wrote it and it
-  parses; anything else is an unfinished install of the new tree.
-- uid 0 installs a tree only from the copy `tree::stage` makes, never from
-  the tree in place: its owner can swap a file for a link while it is read.
+- Software for everyone is an image; no directory a person can write is on
+  anyone's default search path, for commands, libraries, app entries or
+  completions.
 - Nothing with power searches what a person can write: the loader skips
-  `~/.local/lib` and `/usr/local/lib` for `AT_SECURE` or uid 0, and `priv`
-  takes `/usr/local/bin` only when `root_layout::settled`.
-- The second `users add` hands `/usr/local` to uid 0 first, or adds nobody.
+  `~/.local/lib` for `AT_SECURE` or uid 0, and `priv` takes a program only
+  from a directory only uid 0 can change.
 
 ## Checks
 
-- `just test-host`: `boot-core`, `tree-core` and the packer's host tests
+- `just test-host`: `boot-core` and the packer's host tests
 - `just base-interface`: the private surface against its number
 - `just libc-exports`: exports and layouts only grew
 - `cargo run -p slopos-xtask -- lint app-deps`: what a crate under `apps/` depends on

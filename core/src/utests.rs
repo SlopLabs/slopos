@@ -82,17 +82,11 @@ crate::utest!(
     uid = 1000
 );
 crate::utest!(
-    name = utest_apps_trees,
-    bin = "/bin/apps_test",
-    argv = &["apps_test", "--trees"]
-);
-crate::utest!(
     name = utest_dock,
     bin = "/bin/dock_test",
     caps = none,
     uid = 1000
 );
-crate::utest!(name = utest_tree_install, bin = "/bin/tree_install_test");
 crate::utest!(name = utest_editor, bin = "/bin/editor_test");
 crate::utest!(
     name = utest_spawn_privilege,

@@ -56,12 +56,9 @@ impl DlError {
 /// Where a bare `DT_NEEDED`/`dlopen` name is looked for last, in order.
 const SEARCH_DIRS: [&[u8]; 2] = [b"/lib", b"/usr/lib"];
 
-/// Searched after [`SEARCH_DIRS`] only by a process that is neither
-/// `AT_SECURE` nor uid 0's, after its person's own [`HOME_LIB`]: a library a
+/// Below `HOME`, the person's own libraries, searched after [`SEARCH_DIRS`]
+/// only by a process that is neither `AT_SECURE` nor uid 0's: a library a
 /// person put there must never reach a program holding more than they do.
-const LOCAL_DIR: &[u8] = b"/usr/local/lib";
-
-/// Below `HOME`, the person's own libraries, searched as [`LOCAL_DIR`] is.
 const HOME_LIB: &[u8] = b"/.local/lib";
 
 /// `/opt/<name>/lib`, the longest an extension's name makes it.
@@ -85,8 +82,6 @@ pub struct Loader {
     library_path: *const u8,
     /// `AT_SECURE`: no `$ORIGIN` and no relative directory is searched.
     secure: bool,
-    /// [`LOCAL_DIR`] is searched.
-    local: bool,
     /// `HOME` as the process started with it where [`HOME_LIB`] below it is
     /// searched, or null.
     home: *const u8,
@@ -106,7 +101,6 @@ static LOADER: SyncUnsafeCell<Loader> = SyncUnsafeCell::new(Loader {
     global_count: 0,
     library_path: ptr::null(),
     secure: false,
-    local: false,
     home: ptr::null(),
     own_lib: Cell::new(None),
 });
@@ -662,8 +656,8 @@ impl Loader {
         self.objects[EXE as usize].path = execfn as *mut u8;
         self.library_path = if secure { ptr::null() } else { library_path };
         self.secure = secure;
-        self.local = !secure && Sys::geteuid() != 0;
-        self.home = match self.local && !home.is_null() && cstr_bytes(home).first() == Some(&b'/') {
+        let own = !secure && Sys::geteuid() != 0;
+        self.home = match own && !home.is_null() && cstr_bytes(home).first() == Some(&b'/') {
             true => home,
             false => ptr::null(),
         };
@@ -689,8 +683,7 @@ impl Loader {
     /// up its `loader` chain and of the executable (glibc's order); otherwise
     /// in `requester`'s `DT_RUNPATH` alone; then in [`SEARCH_DIRS`], the
     /// program's own activation's `lib` when it is an extension's, and
-    /// [`HOME_LIB`] and [`LOCAL_DIR`] last where the process may take what
-    /// it holds.
+    /// [`HOME_LIB`] last where the process may take what it holds.
     fn resolve_path(
         &self,
         name: *const u8,
@@ -724,8 +717,7 @@ impl Loader {
                 let (dir, len) = self.own_lib();
                 len > 0 && self.compose(&dir[..len], EXE, bare, out) && exists(out)
             }
-            || (!self.home.is_null() && self.compose_home(bare, out) && exists(out))
-            || (self.local && self.compose(LOCAL_DIR, EXE, bare, out) && exists(out));
+            || (!self.home.is_null() && self.compose_home(bare, out) && exists(out));
         if found {
             Ok(out.as_ptr())
         } else {

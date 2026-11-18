@@ -152,7 +152,7 @@ fn what_names_the_app_is_held_to_its_shape() {
     }
     for bad in [
         "usr/share/slopos/icons/a.png",
-        "/usr/local/share/slopos/icons/a.png",
+        "/var/tmp/share/slopos/icons/a.png",
         "/home/user/.local/share/slopos/icons/a.png",
         "/usr/share/slopos/icons/../../../etc/shadow.png",
         "/usr/share/slopos/icons//a.png",

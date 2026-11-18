@@ -778,7 +778,7 @@ fn values_outside_their_grammar_refuse() {
 #[test]
 fn the_shipped_policy_speaks_to_the_person() {
     let policy = Policy::parse(SHIPPED).unwrap();
-    assert_eq!(policy.actions().len(), 41);
+    assert_eq!(policy.actions().len(), 40);
     for action in policy.actions() {
         let name = &action.name;
         assert_eq!(crate::words::describe(&action.describe), Ok(()), "{name}");
@@ -801,7 +801,7 @@ fn the_shipped_policy_speaks_to_the_person() {
         .collect();
     said.sort_unstable();
     said.dedup();
-    assert_eq!(said.len(), 41, "two actions say the same");
+    assert_eq!(said.len(), 40, "two actions say the same");
 }
 
 #[test]
@@ -906,7 +906,6 @@ fn the_shipped_policy_says_what_the_access_model_does() {
         "org.slopos.prof",
         "org.slopos.console.keymap",
         "org.slopos.extension.",
-        "org.slopos.software.install",
     ];
     let login = policy.action("org.slopos.login").unwrap();
     let greeter = Requester::new(slopos_abi::fs::GREETER_UID, Some("/bin/compositor"), false);
@@ -1066,7 +1065,6 @@ fn the_shipped_policy_says_what_the_access_model_does() {
         "org.slopos.boot.set-default",
         "org.slopos.net.configure",
         "org.slopos.network.settings",
-        "org.slopos.software.install",
         "org.slopos.accounts.manage",
         "org.slopos.accounts.password",
     ] {
@@ -1090,18 +1088,6 @@ fn the_shipped_policy_says_what_the_access_model_does() {
     assert!(asks(rescue.admits(&session, &people)).is_some());
     assert!(rescue.accepts(&args_of(&["--rescue"])));
     assert!(!rescue.accepts(&args_of(&["--rescue", "-c", "id"])));
-}
-
-#[test]
-fn the_software_action_installs_as_uid_0_holding_nothing() {
-    let policy = Policy::parse(SHIPPED).unwrap();
-    let action = policy.action("org.slopos.software.install").unwrap();
-    assert_eq!(action.program, "/bin/tree-install");
-    assert_eq!(action.caps, 0);
-    assert_eq!(action.runs_as, RunsAs::Uid(0));
-    assert!(action.cwd);
-    assert!(action.exclusive_group().is_some());
-    assert!(action.accepts(&args_of(&["apps", "builddir/apps", "/usr/local"])));
 }
 
 #[test]

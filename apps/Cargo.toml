@@ -3,7 +3,7 @@ name = "slopos-apps"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The apps SlopOS ships outside its base: built against the target's std, linked dynamically against libc.so, installed at /usr/local"
+description = "The apps SlopOS ships outside its base: built against the target's std, linked dynamically against libc.so, shipped as the image slopos-essentials"
 
 [lints]
 workspace = true

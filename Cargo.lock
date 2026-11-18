@@ -765,10 +765,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "slopos-tree-core"
-version = "0.1.0"
-
-[[package]]
 name = "slopos-usb-core"
 version = "0.1.0"
 
@@ -807,7 +803,6 @@ dependencies = [
  "slopos-terminal-core",
  "slopos-theme-core",
  "slopos-tls-core",
- "slopos-tree-core",
  "slopos-verity-core",
  "slopos-vt",
  "slopos-windowing",

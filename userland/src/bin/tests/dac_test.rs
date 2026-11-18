@@ -427,7 +427,7 @@ fn owner_in_staged(rel: &str) -> Option<(u32, u32)> {
 /// changes owner, no directory of the map is made and no record is written.
 fn a_root_without_a_record_is_left_as_it_is() -> bool {
     let _ = fs::remove_dir_all(STAGED_ROOT);
-    let staged_ok = ["home/user/notes", "usr/local/bin/tool"].iter().all(|rel| {
+    let staged_ok = ["home/user/notes", "src/notes"].iter().all(|rel| {
         let path = staged(rel);
         Path::new(&path)
             .parent()
@@ -438,223 +438,52 @@ fn a_root_without_a_record_is_left_as_it_is() -> bool {
         say("could not stage a root without a record");
         return false;
     }
-    let owners = root_layout::lay_out(Path::new(STAGED_ROOT));
-    let granted = slopos_abi::fs::PERSON_TREES
-        .iter()
-        .any(|tree| owners.holds(tree));
+    root_layout::lay_out(Path::new(STAGED_ROOT));
     let notes = owner_in_staged("home/user/notes");
-    let tool = owner_in_staged("usr/local/bin/tool");
+    let source = owner_in_staged("src/notes");
     let made = Path::new(&staged("root")).exists();
     let recorded = Path::new(&staged("var/lib/slopos/owners")).exists();
     let _ = fs::remove_dir_all(STAGED_ROOT);
-    !granted && notes == Some((0, 0)) && tool == Some((0, 0)) && !made && !recorded || {
+    notes == Some((0, 0)) && source == Some((0, 0)) && !made && !recorded || {
         say(&format!(
-            "laid out: granted {granted}, a file of the home {notes:?}, one of /usr/local \
-             {tool:?}, /root made {made}, a record written {recorded}"
+            "laid out: a file of the home {notes:?}, one of /src {source:?}, /root made \
+             {made}, a record written {recorded}"
         ));
         false
     }
 }
 
-/// The record a root made for one person carries.
-const ONE_PERSON_RECORD: &str = "1000:1000 /home/user\n1000:1000 /src\n1000:1000 /usr/local\n";
-
-/// A root whose `/usr/local` is the first person's, with what a person may
-/// have left there: their file group-writable, a directory anyone writes, a
-/// name for another uid's file, links in and out and one through a link of
-/// theirs, and the apps' manifest.
-fn stage_shared_root() -> bool {
+/// The first person's home is made open to others while they are alone on
+/// the root, and a second person closes it, once.
+fn the_first_home_closes_for_a_second_person() -> bool {
     let _ = fs::remove_dir_all(STAGED_ROOT);
-    let made = [
-        "usr/local/bin",
-        "usr/local/open",
-        "home/user",
-        "var/tmp",
-        "var/lib/slopos/trees",
-    ]
-    .iter()
-    .all(|rel| fs::create_dir_all(staged(rel)).is_ok());
-    let manifest = |at: &str| format!("identity {}\nat {at}\n", "0".repeat(64));
-    let written = [
-        ("usr/local/bin/tool", "#!/bin/shell\n".to_owned()),
-        ("home/user/build", "#!/bin/shell\n".to_owned()),
-        ("var/tmp/theirs", "another's\n".to_owned()),
-        ("var/lib/slopos/trees/apps", manifest("/usr/local")),
-        ("var/lib/slopos/owners", ONE_PERSON_RECORD.to_owned()),
-    ]
-    .iter()
-    .all(|(rel, text)| fs::write(staged(rel), text).is_ok());
-    let theirs =
-        |rel: &str, uid: u32| std::os::unix::fs::lchown(staged(rel), Some(uid), Some(uid)).is_ok();
-    made && written
-        && symlink("tool", staged("usr/local/bin/kept")).is_ok()
-        && symlink("/home/user/build", staged("usr/local/bin/away")).is_ok()
-        && symlink("/usr/local/bin/tool", staged("usr/local/bin/fixed")).is_ok()
-        && symlink("/home", staged("usr/local/homes")).is_ok()
-        && symlink("../../../home/user/relay", staged("usr/local/bin/chain")).is_ok()
-        && symlink("../../usr/local/bin/tool", staged("home/user/relay")).is_ok()
-        && fs::hard_link(staged("var/tmp/theirs"), staged("usr/local/open/theirs")).is_ok()
-        && [
-            ("usr/local", USER),
-            ("usr/local/bin", USER),
-            ("usr/local/bin/tool", USER),
-            ("usr/local/bin/kept", USER),
-            ("usr/local/bin/away", USER),
-            ("usr/local/bin/chain", USER),
-            ("usr/local/bin/fixed", USER),
-            ("usr/local/homes", USER),
-            ("usr/local/open", USER),
-            ("home/user", USER),
-            ("home/user/build", USER),
-            ("home/user/relay", USER),
-            ("var/tmp/theirs", USER + 1),
-            ("var/lib/slopos/trees/apps", USER),
-        ]
-        .iter()
-        .all(|(rel, uid)| theirs(rel, *uid))
-        && fs::set_permissions(
-            staged("usr/local/bin/tool"),
-            fs::Permissions::from_mode(0o775),
+    let root = Path::new(STAGED_ROOT);
+    let staged_ok = fs::create_dir_all(staged("var/lib/slopos")).is_ok()
+        && fs::write(
+            staged("var/lib/slopos/owners"),
+            "1000:1000 /home/user\n1000:1000 /src\n",
         )
-        .is_ok()
-        && fs::set_permissions(staged("usr/local/open"), fs::Permissions::from_mode(0o777)).is_ok()
-}
-
-/// A root shared with a second person has `/usr/local` uid 0's and writable
-/// by uid 0 alone to its last entry; another uid's file loses only its name
-/// there, a link that leads through what another uid may change goes, as
-/// does one to a directory outside it, and one within it stays, named from
-/// the root or from its directory. The first person's files stay theirs,
-/// their home closed
-/// to others, and so does the apps' manifest they wrote, which uid 0 does not
-/// believe.
-fn usr_local_is_handed_to_the_system_whole() -> bool {
-    if !stage_shared_root() {
-        say("could not stage a root whose /usr/local is the first person's");
+        .is_ok();
+    if !staged_ok {
+        say("could not stage a root for one person");
         return false;
     }
-    let handed = root_layout::share(Path::new(STAGED_ROOT));
-    let held = |rel: &str| {
-        fs::symlink_metadata(staged(rel))
-            .ok()
-            .map(|meta| (meta.uid(), meta.mode() & 0o7777))
-    };
-    let record = fs::read_to_string(staged("var/lib/slopos/owners")).unwrap_or_default();
-    let checks = [
-        (handed.is_ok(), format!("the hand-over: {handed:?}")),
-        (held("usr/local") == Some((0, 0o755)), "/usr/local".into()),
-        (
-            held("usr/local/bin/tool") == Some((0, 0o755)),
-            "a group-writable file".into(),
-        ),
-        (
-            held("usr/local/open") == Some((0, 0o755)),
-            "a directory anyone wrote".into(),
-        ),
-        (
-            held("usr/local/open/theirs").is_none(),
-            "a name for another uid's file".into(),
-        ),
-        (
-            held("var/tmp/theirs").map(|h| h.0) == Some(USER + 1),
-            "another uid's file".into(),
-        ),
-        (
-            held("usr/local/bin/kept").map(|h| h.0) == Some(0),
-            "a link within it".into(),
-        ),
-        (
-            held("usr/local/bin/away").is_none(),
-            "a link to a person's file".into(),
-        ),
-        (
-            held("usr/local/bin/chain").is_none(),
-            "a link through a person's link".into(),
-        ),
-        (
-            !root_layout::sharing(Path::new(STAGED_ROOT)),
-            "the mark of a hand-over begun".into(),
-        ),
-        (
-            held("usr/local/bin/fixed").map(|h| h.0) == Some(0),
-            "a link within it named from the root".into(),
-        ),
-        (
-            held("usr/local/homes").is_none(),
-            "a link to a directory outside it".into(),
-        ),
-        (held("home/user") == Some((USER, 0o700)), "the home".into()),
-        (
-            held("home/user/build").map(|h| h.0) == Some(USER),
-            "the person's own file".into(),
-        ),
-        (
-            held("var/lib/slopos/trees/apps").map(|h| h.0) == Some(USER),
-            "the apps' manifest".into(),
-        ),
-        (
-            record == "1000:1000 /home/user\n1000:1000 /src\n",
-            format!("the record reads {record:?}"),
-        ),
-    ];
+    root_layout::lay_out(root);
+    let made = stat_of(&staged("home/user"));
+    let closed = root_layout::close_home(root);
+    let after = stat_of(&staged("home/user"));
+    let again = root_layout::close_home(root);
     let _ = fs::remove_dir_all(STAGED_ROOT);
-    match checks.iter().find(|(ok, _)| !ok) {
-        Some((_, what)) => {
-            say(&format!("handed to the system: {what}"));
-            false
-        }
-        None => true,
-    }
-}
-
-/// A hand-over cut short leaves its mark; a boot finishes it.
-fn a_hand_over_cut_short_is_finished_at_boot() -> bool {
-    let begun = staged(root_layout::SHARING.trim_start_matches('/'));
-    if !stage_shared_root() || fs::write(&begun, b"").is_err() {
-        say("could not stage a root whose hand-over began");
-        return false;
-    }
-    root_layout::lay_out(Path::new(STAGED_ROOT));
-    let record = fs::read_to_string(staged("var/lib/slopos/owners")).unwrap_or_default();
-    let local = owner_in_staged("usr/local/bin/tool");
-    let home = stat_of(&staged("home/user")).map(|(.., mode)| mode);
-    let marked = Path::new(&begun).exists();
-    let _ = fs::remove_dir_all(STAGED_ROOT);
-    record == "1000:1000 /home/user\n1000:1000 /src\n"
-        && local == Some((0, 0))
-        && home == Some(0o700)
-        && !marked
+    made == Some((USER, USER, 0o755))
+        && closed == Ok(true)
+        && after == Some((USER, USER, 0o700))
+        && again == Ok(false)
         || {
             say(&format!(
-                "after a boot: the record {record:?}, a file of /usr/local {local:?}, \
-                 the home's mode {home:?}, the mark left {marked}"
+                "the home made {made:?}, closed {closed:?} to {after:?}, closed again {again:?}"
             ));
             false
         }
-}
-
-/// A mark a hand-over left beside a record already without `/usr/local` is
-/// taken away, and nothing moves.
-fn a_stale_mark_is_taken_away() -> bool {
-    let begun = staged(root_layout::SHARING.trim_start_matches('/'));
-    let shared = "1000:1000 /home/user\n1000:1000 /src\n";
-    if !stage_shared_root()
-        || fs::write(staged("var/lib/slopos/owners"), shared).is_err()
-        || fs::write(&begun, b"").is_err()
-    {
-        say("could not stage a root with a stale mark");
-        return false;
-    }
-    root_layout::lay_out(Path::new(STAGED_ROOT));
-    let local = owner_in_staged("usr/local/bin/tool");
-    let marked = Path::new(&begun).exists();
-    let _ = fs::remove_dir_all(STAGED_ROOT);
-    !marked && local == Some((USER, USER)) || {
-        say(&format!(
-            "after a boot: the mark left {marked}, a file of /usr/local {local:?}"
-        ));
-        false
-    }
 }
 
 fn session_is_the_person() -> bool {
@@ -772,14 +601,9 @@ fn main() {
             a_root_without_a_record_is_left_as_it_is,
         ),
         (
-            "usr_local_is_handed_to_the_system_whole",
-            usr_local_is_handed_to_the_system_whole,
+            "the_first_home_closes_for_a_second_person",
+            the_first_home_closes_for_a_second_person,
         ),
-        (
-            "a_hand_over_cut_short_is_finished_at_boot",
-            a_hand_over_cut_short_is_finished_at_boot,
-        ),
-        ("a_stale_mark_is_taken_away", a_stale_mark_is_taken_away),
         ("clean_up", clean_up),
     ]);
 }

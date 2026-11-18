@@ -135,23 +135,22 @@ fn execvp_runs_a_plain_file_under_sh() -> bool {
     true
 }
 
-const LOCAL_BIN: &str = "/usr/local/bin";
+const OPT_BIN: &str = "/opt/bin";
 const PROBE: &str = "slopos-path-probe";
 
 /// Every command search with no `PATH` — slibc's `execvp`, the shell, `which`,
 /// `env`, `xargs` and `find -exec` — walks the one default: it reaches
-/// `/usr/local/bin`, where nothing may shadow `/bin`. The shell's
+/// `/opt/bin`, where nothing may shadow `/bin`. The shell's
 /// `command -p` walks it past any `PATH`.
 fn every_search_takes_the_default_path_without_path() -> bool {
-    let probe = format!("{LOCAL_BIN}/{PROBE}");
-    let shadow = format!("{LOCAL_BIN}/cat");
-    let installed = fs::create_dir_all(LOCAL_BIN)
-        .and_then(|()| fs::write(&probe, "#!/bin/sh\necho probed \"$@\"\n"))
+    let probe = format!("{OPT_BIN}/{PROBE}");
+    let shadow = format!("{OPT_BIN}/cat");
+    let installed = fs::write(&probe, "#!/bin/sh\necho probed \"$@\"\n")
         .and_then(|()| fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)))
         .and_then(|()| fs::write(&shadow, "#!/bin/sh\necho decoy\n"))
         .and_then(|()| fs::set_permissions(&shadow, fs::Permissions::from_mode(0o755)));
     if let Err(e) = installed {
-        eprintln!("script_exec_test: installing the probes in {LOCAL_BIN}: {e}");
+        eprintln!("script_exec_test: installing the probes in {OPT_BIN}: {e}");
         return false;
     }
     let held = default_path_searches(&probe);

@@ -50,10 +50,6 @@ name = "terminal"
 path = "src/bin/terminal.rs"
 
 [[bin]]
-name = "tree-install"
-path = "src/bin/tree-install.rs"
-
-[[bin]]
 name = "extctl"
 path = "src/bin/extctl.rs"
 
@@ -287,10 +283,6 @@ name = "dock_test"
 path = "src/bin/tests/dock_test.rs"
 
 [[bin]]
-name = "tree_install_test"
-path = "src/bin/tests/tree_install_test.rs"
-
-[[bin]]
 name = "spawn_privilege_test"
 path = "src/bin/tests/spawn_privilege_test.rs"
 
@@ -486,7 +478,6 @@ slopos-boot-core = { workspace = true }
 slopos-ext4-core = { workspace = true }
 slopos-cpufreq-core = { workspace = true }
 slopos-fat-core = { workspace = true }
-slopos-tree-core = { workspace = true }
 slopos-extension-core = { workspace = true, features = ["std"] }
 slopos-fate-core = { workspace = true }
 slopos-keymap-core = { workspace = true }

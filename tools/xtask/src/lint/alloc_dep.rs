@@ -41,7 +41,6 @@ const CARVE_OUTS: &[&str] = &[
     "http-core",
     "tls-core",
     "fat-core",
-    "tree-core",
     "extension-core",
     "accounts-core",
     "settings-core",
