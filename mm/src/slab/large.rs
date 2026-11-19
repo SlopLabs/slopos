@@ -1,11 +1,12 @@
 //! Large-allocation tier (> 2048 bytes → direct frame allocation).
 //!
 //! Regions come from the buddy as contiguous pages whose first page carries a
-//! `LargeAllocHeader`; the free lists are threaded intrusively through it,
-//! one per region size up to [`EXACT_PAGES`] and one for everything larger,
-//! so a burst of one-page frees is never walked by a larger request. A freed
-//! region stays on its list; its pages go back to the buddy only when the
-//! slab itself is torn down.
+//! `LargeAllocHeader`. A freed region of up to [`EXACT_PAGES`] pages waits on
+//! the free list of its size, threaded intrusively through the header, for
+//! the next request of that size, while the lists hold no more than
+//! [`CACHE_PAGES`] together; any other goes back to the buddy. A request is
+//! never served a larger region: what it left unused would stay with the
+//! allocation for as long as that lives.
 //!
 //! There is no external tracking table: `kfree` discriminates on the page
 //! magic at the 4 KiB-aligned base (`super::page::page_kind_for`), which only
@@ -19,7 +20,8 @@ use slopos_ostd::lock_class;
 use slopos_ostd::sync::{LOCK_LEVEL_ALLOCATOR, RawLink, SpinLock};
 
 use super::page::{
-    LARGE_FREE_MAGIC, LARGE_MAGIC, LargeAllocHeader, alloc_large_pages, large_alloc_count_inc,
+    LARGE_FREE_MAGIC, LARGE_MAGIC, LargeAllocHeader, alloc_large_pages, free_large_pages,
+    large_alloc_count_inc,
 };
 use super::poison::{POISON_FREED, poison_object_body};
 use crate::paging_defs::PAGE_SIZE_4KB;
@@ -28,46 +30,36 @@ const SLAB_DEBUG: bool = false;
 
 const EXACT_PAGES: usize = 16;
 
+/// What the free lists hold together at most, 4 MiB: enough that a run of
+/// allocations and frees stays off the buddy, and all that a burst of frees
+/// keeps from every other user of memory.
+pub(crate) const CACHE_PAGES: u32 = 1024;
+
 pub(crate) struct LargeInner {
-    free_lists: [RawLink<LargeAllocHeader>; EXACT_PAGES + 1],
+    free_lists: [RawLink<LargeAllocHeader>; EXACT_PAGES],
+    cached_pages: u32,
 }
 
 impl LargeInner {
     pub(crate) const fn new() -> Self {
         Self {
-            free_lists: [const { RawLink::null() }; EXACT_PAGES + 1],
+            free_lists: [const { RawLink::null() }; EXACT_PAGES],
+            cached_pages: 0,
         }
     }
 
-    fn list_for(pages: u32) -> usize {
-        (pages as usize).min(EXACT_PAGES + 1) - 1
+    /// The list of regions of `pages`, when regions that size are kept.
+    fn list_for(&self, pages: u32) -> Option<&RawLink<LargeAllocHeader>> {
+        self.free_lists.get((pages as usize).checked_sub(1)?)
     }
 
-    fn take_first_fit(&self, pages: u32) -> Option<NonNull<LargeAllocHeader>> {
-        for list in &self.free_lists[Self::list_for(pages)..] {
-            let mut prev: Option<NonNull<LargeAllocHeader>> = None;
-            let mut current = list.load();
-            while let Some(curr) = current {
-                let (slab_pages, next) =
-                    RawLink::<LargeAllocHeader>::with_mut_at(Some(curr), |h| {
-                        (h.pages, h.next.load())
-                    })?;
-                if slab_pages >= pages {
-                    match prev {
-                        None => list.store(next),
-                        Some(p) => {
-                            RawLink::<LargeAllocHeader>::with_mut_at(Some(p), |h| {
-                                h.next.store(next)
-                            });
-                        }
-                    }
-                    return Some(curr);
-                }
-                prev = Some(curr);
-                current = next;
-            }
-        }
-        None
+    fn take(&mut self, pages: u32) -> Option<NonNull<LargeAllocHeader>> {
+        let list = self.list_for(pages)?;
+        let head = list.load()?;
+        let next = RawLink::<LargeAllocHeader>::with_mut_at(Some(head), |h| h.next.load())?;
+        list.store(next);
+        self.cached_pages = self.cached_pages.saturating_sub(pages);
+        Some(head)
     }
 }
 
@@ -97,7 +89,7 @@ impl LargeAlloc {
             return None;
         }
 
-        if let Some(curr) = self.inner.lock().take_first_fit(pages) {
+        if let Some(curr) = self.inner.lock().take(pages) {
             RawLink::<LargeAllocHeader>::with_mut_at(Some(curr), |h| {
                 h.magic = LARGE_MAGIC;
                 h.size = size as u32;
@@ -133,22 +125,35 @@ impl LargeAlloc {
             return;
         };
 
-        let state = self.inner.lock();
+        let mut state = self.inner.lock();
         let snap = RawLink::<LargeAllocHeader>::with_mut_at(Some(header_nn), |h| {
             if h.magic != LARGE_MAGIC {
                 return None;
             }
-            let list = &state.free_lists[LargeInner::list_for(h.pages)];
             h.magic = LARGE_FREE_MAGIC;
-            h.next.store(list.load());
-            list.store(Some(header_nn));
-            Some((h.pages, h.size as u64))
+            let list = state
+                .list_for(h.pages)
+                .filter(|_| state.cached_pages.saturating_add(h.pages) <= CACHE_PAGES);
+            let kept = list.is_some();
+            if let Some(list) = list {
+                h.next.store(list.load());
+                list.store(Some(header_nn));
+                state.cached_pages += h.pages;
+            }
+            Some((h.pages, h.size as u64, kept))
         })
         .flatten();
-        let Some((pages, size)) = snap else {
+        let Some((pages, size, kept)) = snap else {
             return;
         };
         self.total_bytes_freed.fetch_add(size, Ordering::Relaxed);
+        if !kept {
+            // Off the lists, so nothing else names it: the buddy is entered
+            // without the tier's lock.
+            drop(state);
+            free_large_pages(header_nn.cast(), pages);
+            return;
+        }
 
         if SLAB_DEBUG {
             let hdr_sz = LargeAllocHeader::body_offset();
@@ -161,4 +166,12 @@ impl LargeAlloc {
             }
         }
     }
+}
+
+/// How many pages the live region `ptr` was allocated from holds.
+#[cfg(feature = "test-hooks")]
+pub(crate) fn region_pages(ptr: NonNull<u8>) -> Option<u32> {
+    let base_addr = (ptr.as_ptr() as u64) & !(PAGE_SIZE_4KB - 1);
+    let header = NonNull::new(base_addr as *mut LargeAllocHeader);
+    RawLink::<LargeAllocHeader>::with_mut_at(header, |h| h.pages)
 }

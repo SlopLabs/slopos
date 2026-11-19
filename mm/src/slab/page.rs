@@ -275,6 +275,14 @@ pub(crate) fn free_kernel_page(base: NonNull<u8>) {
     HEAP_PAGES.shrink(1);
 }
 
+/// Free a large region of `pages` by HHDM-addressed base, returning it to the
+/// buddy and its charge to the root.
+#[inline]
+pub(crate) fn free_large_pages(base: NonNull<u8>, pages: u32) {
+    free_page_frame(paddr_for_page(base));
+    HEAP_PAGES.shrink(pages);
+}
+
 pub(crate) static SLAB_PAGE_COUNT: AtomicU32 = AtomicU32::new(0);
 
 pub(crate) static LARGE_ALLOC_COUNT: AtomicU32 = AtomicU32::new(0);

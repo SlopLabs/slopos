@@ -2027,6 +2027,8 @@ kernel	slopos_mm::tests::tests_pcid::test_pcid_reuse_always_flushes
 kernel	slopos_mm::tests::tests_pcid::test_stale_generation_forces_a_flush
 kernel	slopos_mm::tests::tests_quota_heap::test_quota_heap_backing_reconciles_with_the_buddy
 kernel	slopos_mm::tests::tests_quota_heap::test_quota_heap_large_alloc_is_charged
+kernel	slopos_mm::tests::tests_quota_heap::test_quota_heap_large_frees_go_back_to_the_buddy
+kernel	slopos_mm::tests::tests_quota_heap::test_quota_heap_large_request_takes_no_larger_region
 kernel	slopos_mm::tests::tests_quota_heap::test_quota_heap_slab_refill_moves_the_root_row
 kernel	slopos_mm::tests::tests_quota_pages::test_quota_keepalive_charge_outlives_its_pin
 kernel	slopos_mm::tests::tests_quota_pages::test_quota_keepalive_redup_charges_each_dma
