@@ -29,7 +29,7 @@ description: >
 
 ## Checks
 
-- `just test 'slopos_fs::tests::extensions::*'`: activation, the verifying device, the pool
+- `just test 'slopos_fs::tests::extensions::*'`: activation, the verifying device, the budget, a hundred shown
 - `just test '*utest_extension*'`: installs, services and actions end to end
 - `just test-host`: `extension-core`, `verity-core` and `tools/extension` unit tests
 

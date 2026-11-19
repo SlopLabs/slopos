@@ -75,3 +75,6 @@
   go; App, Owners record), `architecture/overview`, `architecture/filesystem`,
   `architecture/userland`, `architecture/processes`,
   `status/current-capabilities`, `status/known-limitations`.
+- `docs/abi/interfaces`, `docs/abi/syscalls`: interface 15 drops
+  `slopos_abi::extension::MAX_ACTIVATIONS`; `ext_activate`'s `EBUSY` is the
+  resident activations passing their budget, an eighth of usable memory.

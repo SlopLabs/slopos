@@ -23,3 +23,9 @@
   `max-image-cold-pct` (image over root, capped at twice the emitted
   observation) and `min-image-bytes`; warm both are page-set hits, reported
   only.
+- `docs/abi/ktap-test-output` (fsperf): `FSACT[<phase>]: images= heldbytes=
+  pages= reads= ns=`, from `test_a_hundred_images_are_shown_and_one_updated`:
+  a hundred small images shown at once, together. Graded per image as
+  `max-act-held-per-image` (heap held against the activations' budget),
+  `max-act-reads-per-image` (reads of the image file), and the floor
+  `min-act-images`; pages and time are reported only.

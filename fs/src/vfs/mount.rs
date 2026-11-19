@@ -1,11 +1,7 @@
 use crate::vfs::canon::canonicalise;
 use crate::vfs::traits::{FileSystem, InodeId, VfsError, VfsResult, same_filesystem};
-use slopos_ostd::lock_class;
-use slopos_ostd::sync::{IrqRwLock, LOCK_LEVEL_REGISTRY};
-
-use crate::MAX_PATH_LEN;
-
-pub const MAX_MOUNTS: usize = 32 + slopos_abi::extension::MAX_ACTIVATIONS;
+use slopos_ostd::sync::{IrqRwLock, IrqRwLockWriteGuard, LOCK_LEVEL_REGISTRY};
+use slopos_ostd::{KVec, lock_class};
 
 /// Directories held where they are: those pinned mount points' paths pass
 /// through, `/usr` and `/etc` for the base, `/media` for the install medium
@@ -44,32 +40,25 @@ impl Mounted {
 }
 
 pub struct MountPoint {
-    path: [u8; MAX_PATH_LEN],
-    path_len: usize,
-    fs: Option<&'static dyn FileSystem>,
+    path: KVec<u8>,
+    fs: &'static dyn FileSystem,
     root: InodeId,
     flags: u32,
     id: u32,
 }
 
 impl MountPoint {
-    const fn empty() -> Self {
-        Self {
-            path: [0; MAX_PATH_LEN],
-            path_len: 0,
-            fs: None,
-            root: 0,
-            flags: 0,
-            id: 0,
-        }
-    }
-
-    fn is_active(&self) -> bool {
-        self.fs.is_some()
-    }
-
     fn path_bytes(&self) -> &[u8] {
-        &self.path[..self.path_len]
+        &self.path
+    }
+
+    fn mounted(&self) -> Mounted {
+        Mounted {
+            fs: self.fs,
+            root: self.root,
+            flags: self.flags,
+            id: self.id,
+        }
     }
 }
 
@@ -80,16 +69,15 @@ struct PinnedDir {
 }
 
 pub struct MountTable {
-    mounts: [MountPoint; MAX_MOUNTS],
-    count: usize,
+    /// Sorted by path, so a walk finds a mount point by halving.
+    mounts: KVec<MountPoint>,
     next_id: u32,
     pinned_dirs: [Option<PinnedDir>; MAX_PINNED_DIRS],
 }
 
 impl MountTable {
     const EMPTY: Self = Self {
-        mounts: [const { MountPoint::empty() }; MAX_MOUNTS],
-        count: 0,
+        mounts: KVec::new(),
         next_id: 1,
         pinned_dirs: [None; MAX_PINNED_DIRS],
     };
@@ -103,7 +91,7 @@ impl MountTable {
 
     /// Monotonic within a boot and never reused, unlike a slot index, which
     /// the next mount takes the instant one is released. Exhaustion refuses
-    /// the mount rather than wrapping; id 0 is an empty slot's.
+    /// the mount rather than wrapping; id 0 is no mount's.
     fn alloc_id(&mut self) -> VfsResult<u32> {
         let id = self.next_id;
         if id == u32::MAX {
@@ -115,56 +103,51 @@ impl MountTable {
 
     /// `path` is canonical, so `/tmp/` and `/tmp` cannot both occupy the
     /// table while only one of them is matchable by the per-component walk.
+    /// Nothing here reaches the allocator: the table has room for it, and a
+    /// refused path is handed back to be freed once the lock is let go.
     fn insert(
         &mut self,
-        path: &[u8],
+        path: KVec<u8>,
         fs: &'static dyn FileSystem,
         root: InodeId,
         flags: u32,
-    ) -> VfsResult<()> {
-        if self.slot_at(path).is_some() {
-            return Err(VfsError::AlreadyExists);
+    ) -> Result<(), (VfsError, KVec<u8>)> {
+        let Err(at) = self.find(&path) else {
+            return Err((VfsError::AlreadyExists, path));
+        };
+        if self.mounts.len() == self.mounts.capacity() {
+            return Err((VfsError::NoSpace, path));
         }
-        let slot_idx = self
-            .mounts
-            .iter()
-            .position(|m| !m.is_active())
-            .ok_or(VfsError::NoSpace)?;
-        let id = self.alloc_id()?;
+        let id = match self.alloc_id() {
+            Ok(id) => id,
+            Err(e) => return Err((e, path)),
+        };
+        let point = MountPoint {
+            path,
+            fs,
+            root,
+            flags,
+            id,
+        };
+        self.mounts
+            .insert(at, point)
+            .map_err(|_| (VfsError::NoSpace, KVec::new()))
+    }
 
-        let slot = &mut self.mounts[slot_idx];
-        slot.path[..path.len()].copy_from_slice(path);
-        slot.path_len = path.len();
-        slot.fs = Some(fs);
-        slot.root = root;
-        slot.flags = flags;
-        slot.id = id;
-        self.count += 1;
-
-        Ok(())
+    fn find(&self, path: &[u8]) -> Result<usize, usize> {
+        self.mounts
+            .as_slice()
+            .binary_search_by(|mp| mp.path_bytes().cmp(path))
     }
 
     fn slot_at(&self, path: &[u8]) -> Option<usize> {
-        self.mounts
-            .iter()
-            .position(|mp| mp.is_active() && mp.path_bytes() == path)
-    }
-
-    fn release(&mut self, slot: usize) {
-        let mp = &mut self.mounts[slot];
-        mp.fs = None;
-        mp.path_len = 0;
-        mp.flags = 0;
-        mp.id = 0;
-        self.count -= 1;
+        self.find(path).ok()
     }
 
     /// Once per mount point, so a filesystem mounted twice is visited twice.
     pub fn for_each_mount(&self, callback: &mut dyn FnMut(&'static dyn FileSystem)) {
         for mp in self.mounts.iter() {
-            if let Some(fs) = mp.fs {
-                callback(fs);
-            }
+            callback(mp.fs);
         }
     }
 }
@@ -173,6 +156,38 @@ static MOUNT_TABLE: IrqRwLock<MountTable> = IrqRwLock::new(
     MountTable::EMPTY,
     lock_class!("MOUNT_TABLE", LOCK_LEVEL_REGISTRY),
 );
+
+/// `path` in memory of its own, made before the table is locked.
+fn owned(path: &[u8]) -> VfsResult<KVec<u8>> {
+    let mut owned = KVec::with_capacity(path.len()).map_err(|_| VfsError::NoSpace)?;
+    owned
+        .extend_from_slice(path)
+        .map_err(|_| VfsError::NoSpace)?;
+    Ok(owned)
+}
+
+/// The table, write-locked with room for one more mount: the lock disables
+/// interrupts, so nothing under it reaches the allocator, and the table grows
+/// outside it instead.
+fn table_with_room() -> VfsResult<IrqRwLockWriteGuard<'static, MountTable>> {
+    loop {
+        let table = MOUNT_TABLE.write();
+        if table.mounts.len() < table.mounts.capacity() {
+            return Ok(table);
+        }
+        let want = (table.mounts.capacity() * 2).max(16);
+        drop(table);
+        let mut fresh = KVec::with_capacity(want).map_err(|_| VfsError::NoSpace)?;
+        let mut table = MOUNT_TABLE.write();
+        if table.mounts.capacity() < want {
+            for point in table.mounts.drain(..) {
+                let _ = fresh.push(point);
+            }
+            core::mem::swap(&mut table.mounts, &mut fresh);
+        }
+        drop(table);
+    }
+}
 
 pub fn mount(path: &[u8], fs: &'static dyn FileSystem, flags: u32) -> VfsResult<()> {
     mount_subtree(path, fs, fs.root_inode(), flags)
@@ -187,80 +202,74 @@ pub fn mount_subtree(
     root: InodeId,
     flags: u32,
 ) -> VfsResult<()> {
-    let canon = canonicalise(path)?;
-    MOUNT_TABLE
-        .write()
-        .insert(canon.as_bytes(), fs, root, flags)
+    let path = owned(canonicalise(path)?.as_bytes())?;
+    let mut table = table_with_room()?;
+    let inserted = table.insert(path, fs, root, flags);
+    drop(table);
+    inserted.map_err(|(e, _path)| e)
 }
 
 /// Move each `(path, root)`'s mount of `fs` to show `root`, as one step: all
 /// of them, or `NotFound` and none when a path has no mount of `fs`.
 pub fn switch_roots(fs: &'static dyn FileSystem, roots: &[(&[u8], InodeId)]) -> VfsResult<()> {
-    let mut slots = [0usize; MAX_MOUNTS];
-    let slots = slots
-        .get_mut(..roots.len())
-        .ok_or(VfsError::InvalidArgument)?;
     let mut table = MOUNT_TABLE.write();
-    for (slot, (path, _)) in slots.iter_mut().zip(roots) {
-        *slot = table
-            .mounts
-            .iter()
-            .position(|mp| {
-                mp.is_active()
-                    && mp.path_bytes() == *path
-                    && mp.fs.is_some_and(|mine| same_filesystem(mine, fs))
-            })
-            .ok_or(VfsError::NotFound)?;
+    let slot_of = |table: &MountTable, path: &[u8]| {
+        table
+            .slot_at(path)
+            .filter(|&slot| same_filesystem(table.mounts[slot].fs, fs))
+            .ok_or(VfsError::NotFound)
+    };
+    for (path, _) in roots {
+        slot_of(&table, path)?;
     }
-    for (&slot, &(_, root)) in slots.iter().zip(roots) {
-        table.mounts[slot].root = root;
+    for &(path, root) in roots {
+        let slot = slot_of(&table, path)?;
+        table.mounts.as_mut_slice()[slot].root = root;
     }
     Ok(())
 }
 
 /// Show `root` of `fs` at `path` with `flags` in place of the mount there,
 /// as one step, when `replaces` takes the filesystem it shows: `Busy` when it
-/// does not. Answers the filesystem replaced, `None` for a new mount.
+/// does not. Answers the mount replaced, `None` for a new mount.
 pub fn mount_replacing(
     path: &[u8],
     fs: &'static dyn FileSystem,
     root: InodeId,
     flags: u32,
     replaces: impl Fn(&dyn FileSystem) -> bool,
-) -> VfsResult<Option<&'static dyn FileSystem>> {
-    let canon = canonicalise(path)?;
-    let mut table = MOUNT_TABLE.write();
-    let Some(slot) = table.slot_at(canon.as_bytes()) else {
-        return table
-            .insert(canon.as_bytes(), fs, root, flags)
-            .map(|()| None);
+) -> VfsResult<Option<Mounted>> {
+    let path = owned(canonicalise(path)?.as_bytes())?;
+    let mut table = table_with_room()?;
+    let Some(slot) = table.slot_at(&path) else {
+        let inserted = table.insert(path, fs, root, flags);
+        drop(table);
+        return inserted.map(|()| None).map_err(|(e, _path)| e);
     };
-    let mp = &mut table.mounts[slot];
-    let shown = mp.fs.ok_or(VfsError::NotFound)?;
-    if !replaces(shown) {
+    let mp = &mut table.mounts.as_mut_slice()[slot];
+    let shown = mp.mounted();
+    if !replaces(shown.fs) {
         return Err(VfsError::Busy);
     }
-    mp.fs = Some(fs);
+    mp.fs = fs;
     mp.root = root;
     mp.flags = flags;
+    drop(table);
     Ok(Some(shown))
 }
 
 /// Take away the mount at `path` when `takes` takes the filesystem it shows,
-/// and answer that filesystem; `NotFound` when there is none it takes.
-pub fn unmount_where(
-    path: &[u8],
-    takes: impl Fn(&dyn FileSystem) -> bool,
-) -> VfsResult<&'static dyn FileSystem> {
+/// and answer that mount; `NotFound` when there is none it takes.
+pub fn unmount_where(path: &[u8], takes: impl Fn(&dyn FileSystem) -> bool) -> VfsResult<Mounted> {
     let canon = canonicalise(path)?;
     let mut table = MOUNT_TABLE.write();
-    let (slot, shown) = table
+    let slot = table
         .slot_at(canon.as_bytes())
-        .and_then(|slot| Some((slot, table.mounts[slot].fs?)))
-        .filter(|&(_, shown)| takes(shown))
+        .filter(|&slot| takes(table.mounts[slot].fs))
         .ok_or(VfsError::NotFound)?;
-    table.release(slot);
-    Ok(shown)
+    let taken = table.mounts.remove(slot);
+    drop(table);
+    Ok(taken.mounted())
 }
 
 /// Hold the directory `inode` of `fs`, which a pinned mount point's path
@@ -291,8 +300,7 @@ pub fn leads_to_pinned_mount(path: &[u8]) -> bool {
     let guard = MOUNT_TABLE.read();
     guard.mounts.iter().any(|mp| {
         let mount = mp.path_bytes();
-        mp.is_active()
-            && mp.flags & MOUNT_PINNED != 0
+        mp.flags & MOUNT_PINNED != 0
             && mount.starts_with(path)
             && (mount.len() == path.len() || path == b"/" || mount[path.len()] == b'/')
     })
@@ -315,8 +323,7 @@ pub fn under_pinned_mount(path: &[u8]) -> bool {
     let guard = MOUNT_TABLE.read();
     guard.mounts.iter().any(|mp| {
         let mount = mp.path_bytes();
-        mp.is_active()
-            && mp.flags & MOUNT_PINNED != 0
+        mp.flags & MOUNT_PINNED != 0
             && path.starts_with(mount)
             && (path.len() == mount.len() || path[mount.len()] == b'/')
     })
@@ -326,7 +333,9 @@ pub fn unmount(path: &[u8]) -> VfsResult<()> {
     let canon = canonicalise(path)?;
     let mut table = MOUNT_TABLE.write();
     let slot = table.slot_at(canon.as_bytes()).ok_or(VfsError::NotFound)?;
-    table.release(slot);
+    let taken = table.mounts.remove(slot);
+    drop(table);
+    drop(taken);
     Ok(())
 }
 
@@ -335,22 +344,25 @@ pub fn with_mount_table<R>(f: impl FnOnce(&MountTable) -> R) -> R {
     f(&guard)
 }
 
+/// The mount with the least id above `after`: a walk from 0 meets each
+/// mount present throughout it once, whatever is mounted or taken away
+/// meanwhile, and holds the table only for each step.
+pub fn mount_after(after: u32) -> Option<Mounted> {
+    let guard = MOUNT_TABLE.read();
+    guard
+        .mounts
+        .iter()
+        .filter(|mp| mp.id > after)
+        .min_by_key(|mp| mp.id)
+        .map(MountPoint::mounted)
+}
+
 /// The filesystem mounted **exactly** at `path`, if one is.
 ///
 /// A per-component walk asks this at each step, so a mount crossed mid-path is
 /// honoured rather than resolved inside the filesystem underneath it.
 pub fn mount_at(path: &[u8]) -> Option<Mounted> {
     let guard = MOUNT_TABLE.read();
-    guard
-        .mounts
-        .iter()
-        .find(|mp| mp.is_active() && mp.path_bytes() == path)
-        .and_then(|mp| {
-            mp.fs.map(|fs| Mounted {
-                fs,
-                root: mp.root,
-                flags: mp.flags,
-                id: mp.id,
-            })
-        })
+    let slot = guard.slot_at(path)?;
+    Some(guard.mounts[slot].mounted())
 }

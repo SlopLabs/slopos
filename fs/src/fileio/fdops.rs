@@ -1407,7 +1407,7 @@ fn fd_owned_vnode(
 ) -> Result<(&'static dyn crate::vfs::FileSystem, InodeId, InodePerm), Errno> {
     let snap = snapshot(table, fd)?;
     let (fs, inode) = fd_vnode(&snap)?;
-    fd_writable_fs(fs)?;
+    fd_writable_fs(fs, inode)?;
     let stat = fs.stat(inode).map_err(VfsError::to_errno)?;
     if stat.sealed {
         return Err(Errno::EACCES);
@@ -1432,7 +1432,7 @@ pub fn file_set_inode_flags_fd(
     seal: Option<&Cap<'_, Seal>>,
 ) -> Result<(), Errno> {
     let (fs, inode) = flags_vnode(table, fd)?;
-    fd_writable_fs(fs)?;
+    fd_writable_fs(fs, inode)?;
     let stat = fs.stat(inode).map_err(VfsError::to_errno)?;
     InodePerm::of(&stat)
         .check_owner(who)
@@ -1483,8 +1483,8 @@ fn flags_vnode(
 /// A read-only *mount* is not reachable from a descriptor — it records
 /// `(filesystem, inode)` — and an `O_RDONLY` open never checked one either, so
 /// the filesystem's own flag is what is enforced here.
-fn fd_writable_fs(fs: &'static dyn crate::vfs::FileSystem) -> Result<(), Errno> {
-    if fs.statfs().map(|s| s.read_only).unwrap_or(false) {
+fn fd_writable_fs(fs: &'static dyn crate::vfs::FileSystem, inode: InodeId) -> Result<(), Errno> {
+    if fs.statfs(inode).map(|s| s.read_only).unwrap_or(false) {
         return Err(Errno::EROFS);
     }
     Ok(())
@@ -1504,7 +1504,7 @@ pub fn file_ftruncate_fd(table: FdTable, fd: c_int, length: u64) -> c_int {
         Ok(v) => v,
         Err(e) => return e.raw() as _,
     };
-    let read_only = fs.statfs().map(|s| s.read_only).unwrap_or(false);
+    let read_only = fs.statfs(inode).map(|s| s.read_only).unwrap_or(false);
     truncate_resolved(fs, inode, read_only, length)
 }
 
@@ -1525,7 +1525,7 @@ pub fn file_set_times_fd(
         Ok(v) => v,
         Err(e) => return e.raw() as _,
     };
-    if let Err(e) = fd_writable_fs(fs) {
+    if let Err(e) = fd_writable_fs(fs, inode) {
         return e.raw() as _;
     }
     errno_of(crate::vfs::vfs_set_times(

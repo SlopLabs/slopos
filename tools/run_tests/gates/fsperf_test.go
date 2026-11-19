@@ -36,6 +36,14 @@ max-image-cold-pct	tests	150
 min-image-bytes	tests	524288
 `
 
+const fsactLine = "FSACT[post-kernel-tests]: images=100 heldbytes=2048000 pages=9000 reads=1500 ns=300000000\n"
+
+const fsactGate = `min-bytes	tests	1048576
+max-act-held-per-image	post-kernel-tests	25600
+max-act-reads-per-image	post-kernel-tests	19
+min-act-images	post-kernel-tests	75
+`
+
 func TestFsperfSelfTestCases(t *testing.T) {
 	f := newFixture(t)
 	good := f.log("good.log", fsperfGood)
@@ -67,6 +75,11 @@ func TestFsperfSelfTestCases(t *testing.T) {
 		{"an image read at five times the root's", fsimgGate, f.log("img-slow.log", fsperfGood+strings.Replace(fsimgLine, "coldimage=4400000", "coldimage=20000000", 1)), 1, nil},
 		{"an image row with no FSIMG line", fsimgGate, good, 1, nil},
 		{"an image read of 4 KiB", fsimgGate, f.log("img-thin.log", fsperfGood+strings.Replace(fsimgLine, "bytes=786432", "bytes=4096", 1)), 1, nil},
+		{"many images inside their caps", fsactGate, f.log("act.log", fsperfGood+fsactLine), 0, nil},
+		{"an image holding twice its heap", fsactGate, f.log("act-fat.log", fsperfGood+strings.Replace(fsactLine, "heldbytes=2048000", "heldbytes=4096000", 1)), 1, nil},
+		{"an image read twice to show it", fsactGate, f.log("act-reads.log", fsperfGood+strings.Replace(fsactLine, "reads=1500", "reads=3000", 1)), 1, nil},
+		{"a run showing 32 images", fsactGate, f.log("act-few.log", fsperfGood+strings.Replace(fsactLine, "images=100", "images=32", 1)), 1, nil},
+		{"an activation row with no FSACT line", fsactGate, good, 1, nil},
 	}
 	for _, c := range cases {
 		f.gateFile("fsperf", "tests", c.gate)
@@ -94,6 +107,14 @@ func TestFsperfSelfTestCases(t *testing.T) {
 		}
 	}
 	expect(t, "an emitted image row accepts its own measurement", f.run("fsperf", []string{imgLog}), 0)
+	actLog := f.log("act-rt.log", fsperfGood+fsactLine)
+	actOut := f.emitInto("fsperf", "tests", []string{actLog})
+	for _, want := range []string{"max-act-held-per-image\tpost-kernel-tests\t25601\n", "max-act-reads-per-image\tpost-kernel-tests\t20\n", "min-act-images\tpost-kernel-tests\t75\n"} {
+		if !strings.Contains(actOut, want) {
+			t.Errorf("emit missing %q:\n%s", want, actOut)
+		}
+	}
+	expect(t, "an emitted activation row accepts its own measurement", f.run("fsperf", []string{actLog}), 0)
 
 	f.removeGateFile("fsperf", "tests")
 	expect(t, "no gate data", f.run("fsperf", []string{good}), 2, "no gate data")

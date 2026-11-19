@@ -13,8 +13,11 @@ package gates
 // A file read through an image is graded as a quotient too: its time over
 // the time of the same file read from the root in the same run, cold. Warm,
 // both are the page sets' hits and the same code, so that pair is only
-// reported. Every floor (min-bytes, min-volume-gib, min-dirents, min-files,
-// min-treebytes, min-image-bytes) exists because a measurement that stopped
+// reported. Many small images shown at once are graded per image in the
+// kernel heap they hold and the reads of their file it took to show them,
+// both countable; their time and pages are only reported. Every floor
+// (min-bytes, min-volume-gib, min-dirents, min-files, min-treebytes,
+// min-image-bytes, min-act-images) exists because a measurement that stopped
 // happening looks exactly like one that got free.
 //
 // Several logs are several whole runs: each row is graded against the worst
@@ -31,7 +34,7 @@ import (
 func init() {
 	register(Gate{
 		Name:    "fsperf",
-		Summary: "filesystem per-MiB costs under caps, fs/raw write-rate and image/root read-time ratios and volume floors met",
+		Summary: "filesystem per-MiB and per-image costs under caps, fs/raw write-rate and image/root read-time ratios and volume floors met",
 		Run:     runFsperf,
 	})
 }
@@ -39,10 +42,11 @@ func init() {
 const mib = 1 << 20
 
 var (
-	fsperfMarker = regexp.MustCompile(`FS(PERF|CAP|IMG)\[`)
+	fsperfMarker = regexp.MustCompile(`FS(PERF|CAP|IMG|ACT)\[`)
 	fsperfRE     = regexp.MustCompile(`^FSPERF\[([a-z0-9-]+)\]: bytes=(\d+) txns=(\d+) commits=(\d+) devwrites=(\d+) devblocks=(\d+) barriers=(\d+) ns=(\d+) rawbytes=(\d+) rawns=(\d+)`)
 	fscapRE      = regexp.MustCompile(`^FSCAP\[([a-z0-9-]+)\]: blocks=(\d+) blocksize=(\d+) groups=(\d+) cacheentries=(\d+) mountreads=(\d+) mountns=(\d+) dirents=(\d+) lookupreads=(\d+) bytes=(\d+) ns=(\d+) files=(\d+) treebytes=(\d+)`)
 	fsimgRE      = regexp.MustCompile(`^FSIMG\[([a-z0-9-]+)\]: bytes=(\d+) coldroot=(\d+) coldimage=(\d+) warmroot=(\d+) warmimage=(\d+)`)
+	fsactRE      = regexp.MustCompile(`^FSACT\[([a-z0-9-]+)\]: images=(\d+) heldbytes=(\d+) pages=(\d+) reads=(\d+) ns=(\d+)`)
 )
 
 type fsWrite struct {
@@ -76,6 +80,33 @@ func (m fsImage) value(key string) int64 {
 		return overPct(m.coldImage, m.coldRoot)
 	}
 	return m.bytes
+}
+
+// fsActivation is many small images shown at once: the kernel heap they hold
+// against the activations' budget, the pages allocated meanwhile, the reads
+// of their file and the time, all of them together.
+type fsActivation struct {
+	log                            string
+	images, held, pages, reads, ns int64
+}
+
+// perImage rounds up, so a cost never reads cheaper than it was; no images
+// is no measurement and reads as unbounded.
+func perImage(total, images int64) int64 {
+	if images <= 0 {
+		return 1 << 62
+	}
+	return (total + images - 1) / images
+}
+
+func (a fsActivation) value(key string) int64 {
+	switch key {
+	case "max-act-held-per-image":
+		return perImage(a.held, a.images)
+	case "max-act-reads-per-image":
+		return perImage(a.reads, a.images)
+	}
+	return a.images
 }
 
 // gib is the volume size in whole GiB, never below 1 so a per-GiB cost of a
@@ -112,23 +143,25 @@ func padDown(v int64) int64 { return v * 3 / 4 }
 
 // fsLog is one run's report lines, keyed by phase.
 type fsLog struct {
-	path     string
-	write    map[string]fsWrite
-	capacity map[string]fsCapacity
-	image    map[string]fsImage
+	path       string
+	write      map[string]fsWrite
+	capacity   map[string]fsCapacity
+	image      map[string]fsImage
+	activation map[string]fsActivation
 }
 
 // fsRun is every log, each one whole run, with the phases in the order the
 // logs first reported them.
 type fsRun struct {
-	logs                             []fsLog
-	writeOrder, capOrder, imageOrder []string
+	logs                                       []fsLog
+	writeOrder, capOrder, imageOrder, actOrder []string
 }
 
 var (
 	fsWriteKeys = []string{"max-txns-per-mib", "max-commits-per-mib", "max-devwrites-per-mib", "max-devblocks-per-mib", "max-barriers-per-mib", "min-fs-over-raw-pct", "min-bytes"}
 	fsCapKeys   = []string{"max-mount-reads-per-gib", "max-lookup-reads", "min-volume-gib", "min-dirents", "min-files", "min-treebytes"}
 	fsImageKeys = []string{"max-image-cold-pct", "min-image-bytes"}
+	fsActKeys   = []string{"max-act-held-per-image", "max-act-reads-per-image", "min-act-images"}
 )
 
 func (w fsWrite) value(key string) int64 {
@@ -175,9 +208,9 @@ func worse(key string, a, b int64) int64 {
 
 func parseFsperf(caps []capture) (*fsRun, error) {
 	r := &fsRun{}
-	seenWrite, seenCap, seenImage := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	seenWrite, seenCap, seenImage, seenAct := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, c := range caps {
-		l := fsLog{path: c.path, write: map[string]fsWrite{}, capacity: map[string]fsCapacity{}, image: map[string]fsImage{}}
+		l := fsLog{path: c.path, write: map[string]fsWrite{}, capacity: map[string]fsCapacity{}, image: map[string]fsImage{}, activation: map[string]fsActivation{}}
 		for _, line := range c.lines {
 			text, ok := reportAt(line, fsperfMarker)
 			if !ok {
@@ -201,6 +234,12 @@ func parseFsperf(caps []capture) (*fsRun, error) {
 					r.imageOrder = append(r.imageOrder, m[1])
 				}
 				l.image[m[1]] = fsImage{c.path, num(m[2]), num(m[3]), num(m[4]), num(m[5]), num(m[6])}
+			} else if m := fsactRE.FindStringSubmatch(text); m != nil {
+				if !seenAct[m[1]] {
+					seenAct[m[1]] = true
+					r.actOrder = append(r.actOrder, m[1])
+				}
+				l.activation[m[1]] = fsActivation{c.path, num(m[2]), num(m[3]), num(m[4]), num(m[5]), num(m[6])}
 			}
 		}
 		r.logs = append(r.logs, l)
@@ -232,6 +271,12 @@ func (r *fsRun) observed(key, phase string) (int64, bool) {
 				continue
 			}
 			v = m.value(key)
+		case slices.Contains(fsActKeys, key):
+			a, ok := l.activation[phase]
+			if !ok {
+				continue
+			}
+			v = a.value(key)
 		default:
 			c, ok := l.capacity[phase]
 			if !ok {
@@ -290,7 +335,8 @@ func runFsperf(cfg Config) error {
 		}
 		key, phase := f[0], f[1]
 		isWrite, isImage := slices.Contains(fsWriteKeys, key), slices.Contains(fsImageKeys, key)
-		if !isWrite && !isImage && !slices.Contains(fsCapKeys, key) {
+		isAct := slices.Contains(fsActKeys, key)
+		if !isWrite && !isImage && !isAct && !slices.Contains(fsCapKeys, key) {
 			return gateFileErrorf("%s:%d: unknown gate key '%s'", rel, l.no, key)
 		}
 		got, ok := run.observed(key, phase)
@@ -300,6 +346,8 @@ func runFsperf(cfg Config) error {
 				fail.add("%s names phase '%s', which reported no FSPERF line (dead entry)", key, phase)
 			case isImage:
 				fail.add("%s names phase '%s', which reported no FSIMG line (dead entry)", key, phase)
+			case isAct:
+				fail.add("%s names phase '%s', which reported no FSACT line (dead entry)", key, phase)
 			case cfg.RequireCapacity:
 				fail.add("%s names phase '%s', which reported no FSCAP line", key, phase)
 			case !skipped[phase]:
@@ -416,6 +464,22 @@ func emitFsperf(cfg Config, run *fsRun) {
 			break
 		}
 		for _, key := range fsImageKeys {
+			v, _ := run.observed(key, phase)
+			fmt.Fprintf(out, "%s\t%s\t%d\n", key, phase, fsPad(key, v))
+		}
+	}
+	for _, phase := range run.actOrder {
+		for _, l := range run.logs {
+			a, ok := l.activation[phase]
+			if !ok {
+				continue
+			}
+			fmt.Fprintf(out, "\n# %s (%s): %d images shown in %dns, holding\n", phase, l.path, a.images, a.ns)
+			fmt.Fprintf(out, "# %d bytes against their budget, %d pages allocated\n", a.held, a.pages)
+			fmt.Fprintf(out, "# meanwhile, %d reads of their file.\n", a.reads)
+			break
+		}
+		for _, key := range fsActKeys {
 			v, _ := run.observed(key, phase)
 			fmt.Fprintf(out, "%s\t%s\t%d\n", key, phase, fsPad(key, v))
 		}

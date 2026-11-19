@@ -974,6 +974,8 @@ fn disable(name: &str) -> Result<String, String> {
 
 /// Its directories go even when init does not answer: only uid 0 makes
 /// entries where they are, so a running service cannot redirect the removal.
+/// Its uids are given back once nothing runs as them and nothing they own is
+/// left; until then they stay retired.
 fn remove(name: &str) -> Result<String, String> {
     let store = Store::open(true)?;
     let mut record = record_of(&store, name)?;
@@ -987,7 +989,8 @@ fn remove(name: &str) -> Result<String, String> {
     }
     let mut said =
         format!("{name} removed; any publisher's image of it goes in as a first install");
-    if let Err(why) = told_init() {
+    let stopped = told_init();
+    if let Err(why) = &stopped {
         said.push_str(&format!("\n{why}"));
     }
     // A name the system takes names the system's directories.
@@ -1003,12 +1006,34 @@ fn remove(name: &str) -> Result<String, String> {
             left.push_str(&format!("\n{dir} was not taken away: {e}"));
         }
     }
-    match left.is_empty() {
-        true => Ok(said),
-        false => Err(format!(
+    if !left.is_empty() {
+        return Err(format!(
             "{said}{left}\nno first install of {name} goes in until `extctl remove {name}` takes it away"
+        ));
+    }
+    if stopped.is_err() || record.retired.is_empty() {
+        return Ok(said);
+    }
+    let mut kept = String::new();
+    if runs_as(&record.retired) {
+        kept.push_str("\na program still runs as one of them");
+    }
+    for shared in SHARED_DIRS {
+        sweep(Path::new(shared), &record.retired, true, &mut kept);
+    }
+    if kept.is_empty() {
+        record.retired.clear();
+        if let Err(why) = store.edit(name, |edit| edit.put_record(&record)) {
+            kept.push_str(&format!("\n{why}"));
+        }
+    }
+    match kept.is_empty() {
+        true => said.push_str("; its uids are free again"),
+        false => said.push_str(&format!(
+            "\nits uids stay retired until `extctl remove {name}` finds nothing of theirs:{kept}"
         )),
     }
+    Ok(said)
 }
 
 /// `name`'s state, log and runtime directories a uid of `record` owns.
@@ -1022,6 +1047,70 @@ fn owned_dirs(name: &str, record: &Record) -> Vec<String> {
                 .is_ok_and(|meta| meta.is_dir() && owners.contains(&meta.uid()))
         })
         .collect()
+}
+
+/// The directories every user may write, uid 0's and sticky, where a
+/// program may leave files.
+const SHARED_DIRS: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
+
+/// Take away what `owners` own directly in `dir` when `take`, and note in
+/// `kept` what they own deeper, or what could not be looked at. Deeper lies
+/// in a directory another uid owns, which could put a link under the walk,
+/// so nothing there is taken away.
+fn sweep(dir: &Path, owners: &[u32], take: bool, kept: &mut String) {
+    let note = |kept: &mut String, path: &Path, why: &dyn std::fmt::Display| {
+        kept.push_str(&format!("\n{}: {why}", path.display()))
+    };
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => return note(kept, dir, &e),
+    };
+    for entry in entries {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(e) => {
+                note(kept, dir, &e);
+                continue;
+            }
+        };
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                note(kept, &path, &e);
+                continue;
+            }
+        };
+        if owners.contains(&meta.uid()) {
+            let gone = match (take, meta.is_dir()) {
+                (false, _) => Err(std::io::Error::other("owned by a uid given up")),
+                (true, true) => std::fs::remove_dir_all(&path),
+                (true, false) => std::fs::remove_file(&path),
+            };
+            if let Err(e) = gone {
+                note(kept, &path, &e);
+            }
+        } else if meta.is_dir() {
+            sweep(&path, owners, false, kept);
+        }
+    }
+}
+
+/// Whether a task runs as one of `uids`, or the tasks cannot be listed, once
+/// init's logger, which ends on its services' last output, has had a moment
+/// to. Checked before the sweep: nothing starts as them after it.
+fn runs_as(uids: &[u32]) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if !init_control::Tasks::try_read().is_none_or(|tasks| tasks.runs_as(uids)) {
+            return false;
+        }
+        if std::time::Instant::now() >= deadline {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 fn floor_of(record: &Record) -> String {

@@ -1433,7 +1433,7 @@ fn specs(record: &Record, ceiling: u64) -> Result<Vec<(Spec, String)>, String> {
         declaration,
         manifest,
     } = activation::shown(record)?;
-    let number = record.number().ok_or("its record gives it no number")?;
+    let number = record.number();
     let uid = |user: &str| {
         record
             .uid(user)
@@ -1446,7 +1446,9 @@ fn specs(record: &Record, ceiling: u64) -> Result<Vec<(Spec, String)>, String> {
         .transpose()?;
     let mut out = Vec::new();
     for (slot, service) in declaration.services.iter().enumerate() {
-        let tag = service_tag(number, slot).ok_or("its number makes no login tag")?;
+        let tag = number
+            .and_then(|number| service_tag(number, slot))
+            .ok_or("its record gives it no number for a login tag")?;
         let owner = first.ok_or("it declares no user")?;
         let (user, ids) = match (&service.user, service.session) {
             (Some(user), false) => {

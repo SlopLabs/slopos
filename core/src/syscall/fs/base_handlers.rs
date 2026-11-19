@@ -67,7 +67,7 @@ define_syscall!(syscall_ext_activate
     let digest = UserPtr::<[u8; DIGEST_LEN]>::try_new(digest).map_err(|_| Errno::EFAULT)?;
     let digest = copy_from_user(digest).map_err(|_| Errno::EFAULT)?;
     slopos_fs::with_file_image_fd(pid, fd.raw(), |fs, inode| {
-        extension::activate(name.as_bytes(), digest, fs, inode)
+        extension::activate(name.as_bytes(), digest, fs, inode, extension::budget())
     })?
     .map(u64::from)
     .map_err(ext_errno)

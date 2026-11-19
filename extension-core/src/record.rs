@@ -47,7 +47,7 @@ pub struct Record {
     pub refused: Vec<u64>,
     /// The uids given it, by name: [`crate::accounts`].
     pub uids: Vec<(String, u32)>,
-    /// Uids a removal took, never given again.
+    /// Uids a removal took, given back by one that left nothing they own.
     pub retired: Vec<u32>,
     /// The serial of the last configuration a key signed for it,
     /// [`crate::config`], kept for good so none older goes in again.

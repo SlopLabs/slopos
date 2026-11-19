@@ -17,6 +17,6 @@ pub fn vfs_statfs(path: &[u8]) -> VfsResult<(FsStats, u32)> {
 
 pub fn vfs_statfs_at(path: &[u8], cwd: &[u8], who: &Subject) -> VfsResult<(FsStats, u32)> {
     let resolved = resolve_path_at(path, cwd, RESOLVE_FOLLOW, who)?;
-    let stats = resolved.fs.statfs()?;
+    let stats = resolved.fs.statfs(resolved.inode)?;
     Ok((stats, resolved.mount_flags))
 }

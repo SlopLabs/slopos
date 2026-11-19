@@ -18,7 +18,8 @@ fn records(store: &Store) -> Result<Vec<Record>, String> {
     Ok(out)
 }
 
-/// Give `record` each uid its name and its images' users lack.
+/// Give `record` each uid its name and its images' users lack, when its
+/// images are granted any user.
 pub fn give_uids(store: &Store, record: &mut Record) -> Result<(), String> {
     let others: Vec<Record> = records(store)?
         .into_iter()

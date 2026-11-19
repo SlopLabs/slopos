@@ -164,11 +164,12 @@ frame is not known.
 
 **Status**: Open
 **Severity**: Low (memory; only an `ExtensionUpdate` holder makes an activation)
-**Component**: `fs/src/extension/index.rs:168`
+**Component**: `fs/src/extension/index.rs`
 
 An activation's index holds up to `MAX_ENTRIES` (65 536) names of up to 255
-bytes and each one's `stat`, about 24 MB of kernel heap, and 32 activations
-about 770 MB.
+bytes and each one's `stat`, about 24 MB of kernel heap. The activations'
+budget, an eighth of usable memory, bounds them together, so a few such
+images refuse the next activation (`EBUSY`) where their files would fit.
 
 ---
 

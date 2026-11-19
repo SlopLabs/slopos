@@ -863,8 +863,9 @@ pub const SYSCALL_BASE_MONITOR: u64 = SYSCALL_PRIVATE_BASE + 37;
 /// at two names, or anything but directories, regular files and symlinks —
 /// `EIO` for one whose first block fails its tree under `digest` or that
 /// cannot be read, `ENFILE` when no further file can be held open, `EBUSY`
-/// while [`crate::extension::MAX_ACTIVATIONS`] are resident or while
-/// `/opt/<name>` holds a mount that is no activation, `EPERM` on a boot with
+/// when the resident activations would hold more than an eighth of usable
+/// memory with it or while `/opt/<name>` holds a mount that is no
+/// activation, `EPERM` on a boot with
 /// [`crate::syscall::BOOT_FLAG_EXTENSIONS_OFF`], what making `/opt` answers
 /// (`ENOTDIR` for one that is no directory, `EROFS`), `EFAULT`, `ENOMEM` and
 /// `EINTR`. Gated on `Capability::ExtensionUpdate`.

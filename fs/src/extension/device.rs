@@ -16,6 +16,8 @@
 //! activation takes its own lock and then that filesystem's, never the other
 //! way round: nothing below a disk's filesystem reads an activation.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use slopos_ostd::sync::{LOCK_LEVEL_RESOURCE, SpinLock};
 use slopos_ostd::{KBox, KVec, klog_warn_ratelimited, lock_class};
 use slopos_verity_core::{self as verity, BLOCK, Digest, Fault, Geometry};
@@ -31,6 +33,14 @@ const KEPT: usize = 64;
 const RESIDENT_MAX: u64 = 256;
 
 type Block = KBox<[u8; BLOCK]>;
+
+/// Reads every device has asked of the file it is, since boot.
+static READS: AtomicU64 = AtomicU64::new(0);
+
+/// Reads every activation's device has asked of its image file, since boot.
+pub fn reads() -> u64 {
+    READS.load(Ordering::Relaxed)
+}
 
 /// Why a file is no image the device serves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +66,7 @@ struct File {
 impl File {
     /// The bytes of the file from `at`, filling `out`.
     fn read(&self, at: u64, out: &mut [u8]) -> Result<(), BlockDeviceError> {
+        READS.fetch_add(1, Ordering::Relaxed);
         let Some(direct) = &self.direct else {
             return self.read_through(at, out);
         };
@@ -220,6 +231,22 @@ impl VerityFile {
 
     pub(super) fn data_blocks(&self) -> u64 {
         self.geometry.data_blocks()
+    }
+
+    /// What it holds for its life: itself, the map of the file's runs, the
+    /// tree blocks above the leaves, and as many leaves as it keeps once read.
+    pub(super) fn held_bytes(&self) -> u64 {
+        let leaves = self.geometry.level(0).map_or(0, |(_, count)| count);
+        let kept = leaves.min(KEPT as u64);
+        let blocks = (self.resident.len() as u64 + kept) * BLOCK as u64;
+        let runs = self.file.direct.as_ref().map_or(0, |direct| {
+            direct.runs.capacity() * size_of::<crate::vfs::FileRun>()
+        });
+        let lists = self.resident.capacity() * size_of::<Block>()
+            + KEPT * size_of::<(u64, Block)>()
+            + size_of::<Self>()
+            + runs;
+        blocks + lists as u64
     }
 
     /// Whether the image is read straight off its filesystem's device.

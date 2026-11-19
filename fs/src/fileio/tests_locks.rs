@@ -930,7 +930,7 @@ impl FileSystem for StubFs {
         Ok(())
     }
 
-    fn statfs(&self) -> VfsResult<FsStats> {
+    fn statfs(&self, _inode: InodeId) -> VfsResult<FsStats> {
         Ok(FsStats {
             magic: 0,
             block_size: 4096,

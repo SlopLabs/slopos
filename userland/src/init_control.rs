@@ -116,6 +116,11 @@ impl Tasks {
         }))
     }
 
+    /// Whether a live task runs as one of `uids`.
+    pub fn runs_as(&self, uids: &[u32]) -> bool {
+        self.0.iter().any(|task| uids.contains(&task.uid))
+    }
+
     /// The login tag of the live process `pid` names by its leader.
     pub fn login_of(&self, pid: u32) -> Option<u32> {
         self.0

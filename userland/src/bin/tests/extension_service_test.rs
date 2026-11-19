@@ -498,12 +498,12 @@ fn it_stops_with_its_extension() -> bool {
     {
         return fail(format!("{left} outlived the removal"));
     }
-    let Some(own) = own else {
+    if own.is_none() {
         return fail("it had no uid");
-    };
-    record().is_some_and(|r| r.uids.is_empty() && r.retired.contains(&own))
+    }
+    record().is_some_and(|r| r.uids.is_empty() && r.retired.is_empty())
         || fail(format!(
-            "the record does not retire uid {own}: {:?}",
+            "the record keeps uids its stopped services left nothing of: {:?}",
             record()
         ))
 }

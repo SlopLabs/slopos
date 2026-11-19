@@ -1586,10 +1586,11 @@ kernel	slopos_fs::tests::ext4::test_ext4_replay_rereads_the_superblock
 kernel	slopos_fs::tests::ext4::test_ext4_times_carry_nanoseconds
 kernel	slopos_fs::tests::extensions::test_a_file_that_is_no_image_is_refused
 kernel	slopos_fs::tests::extensions::test_a_flipped_bit_fails_the_read_that_meets_it
+kernel	slopos_fs::tests::extensions::test_a_hundred_images_are_shown_and_one_updated
 kernel	slopos_fs::tests::extensions::test_a_name_outside_the_grammar_is_refused
 kernel	slopos_fs::tests::extensions::test_a_replacement_switches_the_mount_in_one_step
 kernel	slopos_fs::tests::extensions::test_a_running_extension_program_holds_its_activation
-kernel	slopos_fs::tests::extensions::test_activations_stay_within_the_pool
+kernel	slopos_fs::tests::extensions::test_activations_stay_within_their_budget
 kernel	slopos_fs::tests::extensions::test_an_activation_is_shown_at_its_name_and_attests_its_files
 kernel	slopos_fs::tests::filemap::test_filemap_a_seal_holds_against_the_page_set
 kernel	slopos_fs::tests::filemap::test_filemap_exec_fault_reads_the_window_around_it

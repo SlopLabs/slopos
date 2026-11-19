@@ -384,12 +384,12 @@ fn install_leaving_state(name: &str, path: &str) -> Option<u32> {
     }
 }
 
-/// Refused until a removal, then in under `signer` with a fresh uid and no state.
+/// Refused until a removal, which gives its uids back, then in under
+/// `signer` with no state.
 fn another_publisher_s_waits_for_the_removal(
     name: &str,
     path: &str,
     signer: Option<&SigningKey>,
-    uids: &mut Vec<u32>,
 ) -> bool {
     let theirs = "another publisher's image of ";
     let asked = extctl(ROOT, &["install", path]);
@@ -408,30 +408,24 @@ fn another_publisher_s_waits_for_the_removal(
             return fail(format!("{gone} outlived the removal: {}", removed.shown()));
         }
     }
-    let held = record(name).filter(|r| {
+    let given_back = record(name).filter(|r| {
         r.removed()
             && r.signer.is_none()
             && r.floor.is_none()
-            && uids.iter().all(|uid| r.retired.contains(uid))
+            && r.uids.is_empty()
+            && r.retired.is_empty()
     });
-    if held.is_none() {
+    if given_back.is_none() {
         return fail(format!("the removal left {:?}", record(name)));
     }
     if signer.is_some() && !refused(&extctl(USER, &["install-signed", path]), "it was removed") {
         return false;
     }
-    let Some(uid) = install_leaving_state(name, path) else {
+    if install_leaving_state(name, path).is_none() {
         return false;
-    };
+    }
     let named = record(name).and_then(|r| r.signer);
-    if named != signer.map(fingerprint) {
-        return fail(format!("{name} is signed by {named:?}"));
-    }
-    if uids.contains(&uid) {
-        return fail(format!("{name} was given uid {uid} again"));
-    }
-    uids.push(uid);
-    true
+    named == signer.map(fingerprint) || fail(format!("{name} is signed by {named:?}"))
 }
 
 fn a_name_is_its_publisher_s_until_removed() -> bool {
@@ -449,10 +443,9 @@ fn a_name_is_its_publisher_s_until_removed() -> bool {
     if !sign(&first, &images[1]) || !sign(&second, &images[2]) {
         return false;
     }
-    let Some(uid) = install_leaving_state(name, &images[0]) else {
+    if install_leaving_state(name, &images[0]).is_none() {
         return false;
-    };
-    let mut uids = vec![uid];
+    }
     let Ok(bytes) = std::fs::read(&images[1]) else {
         return fail(format!("{} is gone", images[1]));
     };
@@ -471,31 +464,42 @@ fn a_name_is_its_publisher_s_until_removed() -> bool {
     misnamed.extend(signed.declaration.grant().words());
     let misnamed: Vec<&str> = misnamed.iter().map(String::as_str).collect();
     let ok = refused(&extctl(ROOT, &misnamed), "as was approved")
-        && another_publisher_s_waits_for_the_removal(name, &images[1], Some(&first), &mut uids)
-        && another_publisher_s_waits_for_the_removal(name, &images[2], Some(&second), &mut uids)
-        && another_publisher_s_waits_for_the_removal(name, &images[3], None, &mut uids);
-    let removed = extctl(ROOT, &["remove", name]);
+        && another_publisher_s_waits_for_the_removal(name, &images[1], Some(&first))
+        && another_publisher_s_waits_for_the_removal(name, &images[2], Some(&second))
+        && another_publisher_s_waits_for_the_removal(name, &images[3], None);
+    let left = ok && what_a_removal_left_stops_a_first_install(name, &images[0]);
     for owner in [&first, &second] {
         let _ = extctl(ROOT, &["key", "remove", &fingerprint(owner)]);
     }
-    ok && (removed.ok() || fail(format!("remove {name}: {}", removed.shown())))
-        && what_a_removal_left_stops_a_first_install(name, &images[0], &uids)
+    left
 }
 
-fn what_a_removal_left_stops_a_first_install(name: &str, path: &str, uids: &[u32]) -> bool {
+/// What a removal cannot take away keeps the uids retired and stops a first
+/// install, until a removal takes it away and gives them back.
+fn what_a_removal_left_stops_a_first_install(name: &str, path: &str) -> bool {
     let state = format!("/var/lib/{name}");
-    let Some(&retired) = uids.last() else {
-        return fail("no uid was retired");
+    let left = format!("{state}/left");
+    let Some(uid) = record(name).and_then(|r| r.number()) else {
+        return fail(format!("{name} has no uid"));
     };
-    let left = std::fs::create_dir(&state)
-        .and_then(|()| std::os::unix::fs::chown(&state, Some(retired), Some(retired)));
-    if let Err(e) = left {
-        return fail(format!("{state}: {e}"));
+    if !set_sealed(&left, true) {
+        return fail(format!("{left} could not be sealed"));
     }
+    let first = extctl(ROOT, &["remove", name]);
+    let retired = record(name).is_some_and(|r| r.removed() && r.retired.contains(&uid));
     let stopped = refused(&extctl(ROOT, &["install", path]), &format!("left {state}"));
+    let unsealed = set_sealed(&left, false);
     let again = extctl(ROOT, &["remove", name]);
-    stopped
-        && (again.ok() && !Path::new(&state).exists()
+    let freed = record(name).is_some_and(|r| r.retired.is_empty());
+    (!first.ok()
+        || fail(format!(
+            "remove {name} took a sealed file: {}",
+            first.shown()
+        )))
+        && (retired || fail(format!("{name} gave uid {uid} back while {left} stayed")))
+        && stopped
+        && (unsealed || fail(format!("{left} could not be unsealed")))
+        && (again.ok() && freed && !Path::new(&state).exists()
             || fail(format!("removing {name} again: {}", again.shown())))
 }
 
@@ -921,8 +925,9 @@ fn cleanup() -> bool {
         .iter()
         .all(|n| !shown(n))
         && !Path::new("/opt/ext-large/share/large").exists();
-    let kept = record("ext-signed")
-        .is_some_and(|r| r.removed() && r.floor.is_none() && !r.retired.is_empty());
+    let kept = record("ext-signed").is_some_and(|r| {
+        r.removed() && r.floor.is_none() && r.uids.is_empty() && r.retired.is_empty()
+    });
     let forged = Path::new(&format!("{STORE}/ext-signed/{RECORD}.999999")).exists();
     if !refused(&back, "it was removed") {
         return false;

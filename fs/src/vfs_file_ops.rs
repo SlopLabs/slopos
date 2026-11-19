@@ -62,8 +62,8 @@ fn resolve(handle: usize) -> Option<(&'static dyn FileSystem, InodeId)> {
 /// `None` when the handle names no live vnode, which the caller reports as
 /// `EBADF`.
 pub fn vfs_file_statfs(handle: usize) -> Option<crate::vfs::VfsResult<crate::vfs::FsStats>> {
-    let (fs, _) = resolve(handle)?;
-    Some(fs.statfs())
+    let (fs, inode) = resolve(handle)?;
+    Some(fs.statfs(inode))
 }
 
 /// The `(filesystem, inode)` an open vnode handle names, for `mmap(2)`: a

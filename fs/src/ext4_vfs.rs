@@ -657,6 +657,14 @@ impl Ext4Mount {
             .map_or(0, |cached| cached.cache.reclaimable())
     }
 
+    /// The heap the attached volume's state holds that no reclaim gives back.
+    pub(crate) fn held_bytes(&self) -> VfsResult<u64> {
+        let guard = self.lock_cached().map_err(|_| VfsError::Interrupted)?;
+        Ok(guard
+            .as_ref()
+            .map_or(0, |cached| cached.cache.metadata_bytes()))
+    }
+
     fn reclaim_clean(&self, want: u32) -> u32 {
         let Some(mut guard) = self.cached.try_lock() else {
             return 0;
@@ -1058,7 +1066,7 @@ impl<T: Ext4VfsBackend + Send + Sync> FileSystem for T {
         self.ext4_sync()
     }
 
-    fn statfs(&self) -> VfsResult<FsStats> {
+    fn statfs(&self, _inode: InodeId) -> VfsResult<FsStats> {
         self.ext4_statfs()
     }
 
@@ -2022,7 +2030,7 @@ impl slopos_ostd::mm::reclaim::Reclaimable for Ext4CacheReclaim {
 
     fn reclaimable_pages(&self) -> u32 {
         let mut total = 0u32;
-        let mut count = |mount: &'static Ext4Mount| {
+        let mut count = |mount: &Ext4Mount| {
             total = total.saturating_add(mount.reclaimable_pages());
         };
         crate::vfs::init::ext4_pool_for_each_bound(&mut count);
@@ -2032,7 +2040,7 @@ impl slopos_ostd::mm::reclaim::Reclaimable for Ext4CacheReclaim {
 
     fn reclaim(&self, want: u32) -> u32 {
         let mut freed = 0u32;
-        let mut shrink = |mount: &'static Ext4Mount| {
+        let mut shrink = |mount: &Ext4Mount| {
             let left = want.saturating_sub(freed);
             if left > 0 {
                 freed = freed.saturating_add(mount.reclaim_clean(left));

@@ -1408,7 +1408,7 @@ impl FileSystem for RamFs {
     /// to report — Linux's ramfs reports zeros too. `block_size` stays the
     /// page size so a byte count computed from it is zero, not a division by
     /// zero.
-    fn statfs(&self) -> VfsResult<FsStats> {
+    fn statfs(&self, _inode: InodeId) -> VfsResult<FsStats> {
         let used = self.with_inner(|inner| inner.inodes.iter().filter(|i| i.in_use).count() as u64);
         // Slot 0 is a sentinel, so it is not one of the inodes on offer.
         let total = (ramfs_max_inodes() - ROOT_SLOT) as u64;

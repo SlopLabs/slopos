@@ -1,10 +1,11 @@
 //! Extension activations: an image, a file of another filesystem, shown
 //! read-only and pinned at `/opt/<name>` and attesting its files as its own,
 //! every block read verified against its tree, replaced in one step, freed
-//! once nothing holds it, held to the pool, and refused a name the grammar
-//! does not admit or a file that is no image the kernel serves.
+//! once nothing holds it, held to a budget of memory, shown by the hundred,
+//! and refused a name the grammar does not admit or a file that is no image
+//! the kernel serves.
 
-use slopos_abi::extension::{DIGEST_LEN, Label, MAX_ACTIVATIONS};
+use slopos_abi::extension::{DIGEST_LEN, Label};
 use slopos_abi::fs::{S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
 use slopos_ext4_core::bytes::{le32, put_le32};
 use slopos_ext4_core::superblock::{self as sbk, off as soff, ro_compat};
@@ -18,7 +19,7 @@ use crate::blockdev::MemoryBlockDevice;
 use crate::ext4::cache::{BlockCache, CACHE_ENTRIES_MIN};
 use crate::ext4::{Ext4Fs, NewInode};
 use crate::extension::{
-    self, ActivateError, IndexError, OpenError, POOL, deactivate, is_activation, label_of,
+    self, ActivateError, IndexError, OpenError, deactivate, is_activation, label_of, resident,
 };
 use crate::vfs::mount::{mount_at, mount_subtree, unmount};
 use crate::vfs::path::{RESOLVE_FOLLOW, resolve_path_at};
@@ -167,6 +168,17 @@ pub fn activate_bytes(
     bytes: &[u8],
     root: [u8; DIGEST_LEN],
 ) -> Result<u32, ActivateError> {
+    activate_within(name, bytes, root, extension::budget())
+}
+
+/// [`activate_bytes`] when the resident activations hold no more than
+/// `budget` with it.
+fn activate_within(
+    name: &[u8],
+    bytes: &[u8],
+    root: [u8; DIGEST_LEN],
+    budget: u64,
+) -> Result<u32, ActivateError> {
     let mut buf = [0; 64];
     let len = image_path(name, &mut buf).ok_or(ActivateError::Name)?;
     let path = &buf[..len];
@@ -177,7 +189,7 @@ pub fn activate_bytes(
     }
     let activated = resolve(path)
         .map_err(|e| ActivateError::Image(OpenError::Read(e)))
-        .and_then(|(fs, inode)| extension::activate(name, root, fs, inode));
+        .and_then(|(fs, inode)| extension::activate(name, root, fs, inode, budget));
     let _ = vfs_unlink(path);
     activated
 }
@@ -209,8 +221,10 @@ fn reap_all() {
     }
 }
 
-fn vacant() -> usize {
-    POOL.iter().filter(|a| a.root_inode() >> 32 == 0).count()
+/// Activations resident once what nothing holds is freed.
+fn settled() -> usize {
+    reap_all();
+    resident()
 }
 
 /// An activation shows its image at `/opt/<name>`, read-only and pinned;
@@ -330,7 +344,7 @@ pub fn test_a_flipped_bit_fails_the_read_that_meets_it() -> TestResult {
         Ok(())
     })();
     let _ = deactivate(b"ext-bent");
-    reap_all();
+    let before = settled();
     if let Err(why) = outcome {
         return slopos_testing::fail!("{}", why);
     }
@@ -347,8 +361,8 @@ pub fn test_a_flipped_bit_fails_the_read_that_meets_it() -> TestResult {
     if refused != Err(ActivateError::Image(OpenError::Root)) {
         return slopos_testing::fail!("a flip in the tree's top was not refused: {:?}", refused);
     }
-    if vacant() < POOL.len() - 1 {
-        return slopos_testing::fail!("a refused activation kept its instance");
+    if resident() != before {
+        return slopos_testing::fail!("a refused activation stayed resident");
     }
     TestResult::Pass
 }
@@ -402,7 +416,9 @@ pub fn test_a_file_that_is_no_image_is_refused() -> TestResult {
     };
     let nested = resolve(b"/opt/ext-inner/share/image")
         .map_err(|e| ActivateError::Image(OpenError::Read(e)))
-        .and_then(|(fs, inode)| extension::activate(b"ext-nested", built.root, fs, inode));
+        .and_then(|(fs, inode)| {
+            extension::activate(b"ext-nested", built.root, fs, inode, extension::budget())
+        });
     let _ = deactivate(b"ext-inner");
     reap_all();
     if nested != Err(ActivateError::Image(OpenError::NotImage)) || inner == 0 {
@@ -530,6 +546,7 @@ fn a_mount_that_is_no_activation_stays() -> TestResult {
     let Some(built) = image(&[("bin/tool", EXEC, b"one")]) else {
         return slopos_testing::fail!("no room for the image");
     };
+    let before = settled();
     if FOREIGN.install(&super::BASE_SAMPLE, &[]).is_err()
         || mount_subtree(b"/opt/ext-foreign", &FOREIGN, FOREIGN.root_inode(), 0).is_err()
     {
@@ -546,65 +563,167 @@ fn a_mount_that_is_no_activation_stays() -> TestResult {
     if taken != Err(ActivateError::Mounts(VfsError::NotFound)) || !stays {
         return slopos_testing::fail!("deactivating took another filesystem's mount");
     }
-    if vacant() < POOL.len() {
-        return slopos_testing::fail!("a refused activation kept its instance");
+    if resident() != before {
+        return slopos_testing::fail!("a refused activation stayed resident");
     }
     TestResult::Pass
 }
 
-/// The pool holds at most its number of activations at once, a deactivated
-/// one held open among them, and empties again once nothing holds them.
-/// What an earlier test left resident counts too.
-pub fn test_activations_stay_within_the_pool() -> TestResult {
+/// The resident activations hold no more than their budget: one taken away
+/// but held open still counts, the one that would pass it is refused, and
+/// all are freed once nothing holds them.
+pub fn test_activations_stay_within_their_budget() -> TestResult {
     if vfs_init_builtin_filesystems().is_err() {
         return slopos_testing::fail!("no VFS");
     }
     let Some(built) = image(&[("bin/tool", EXEC, b"t")]) else {
         return slopos_testing::fail!("no room for the image");
     };
-    reap_all();
-    let available = vacant();
+    let before = settled();
+    let unheld = extension::held_bytes();
     let held = activate_bytes(b"ext-held", &built.bytes, built.root)
         .ok()
         .and_then(|_| resolve(b"/opt/ext-held/bin/tool").ok())
         .filter(|&(fs, inode)| crate::vfs::orphan::open_ref(fs, inode).is_ok());
     let _ = deactivate(b"ext-held");
-    let mut name = *b"ext-pool-00";
-    let mut shown = 0;
-    let mut refused = false;
-    for i in 0..=MAX_ACTIVATIONS {
-        name[9] = b'0' + (i / 10) as u8;
-        name[10] = b'0' + (i % 10) as u8;
-        match activate_bytes(&name, &built.bytes, built.root) {
-            Ok(_) => shown += 1,
-            Err(ActivateError::Busy) => {
-                refused = true;
-                break;
-            }
-            Err(e) => return slopos_testing::fail!("activation {} failed: {:?}", i, e),
-        }
-    }
-    for i in 0..shown {
-        name[9] = b'0' + (i / 10) as u8;
-        name[10] = b'0' + (i % 10) as u8;
-        let _ = deactivate(&name);
+    reap_all();
+    let one = extension::held_bytes().saturating_sub(unheld);
+    let budget = extension::held_bytes() + 2 * one;
+    let outcome = [&b"ext-budget-0"[..], b"ext-budget-1", b"ext-budget-2"]
+        .map(|name| activate_within(name, &built.bytes, built.root, budget));
+    for name in [&b"ext-budget-0"[..], b"ext-budget-1"] {
+        let _ = deactivate(name);
     }
     if let Some((fs, inode)) = held {
         crate::vfs::orphan::close_ref(fs, inode);
     }
-    reap_all();
-    if held.is_none() || !refused || shown + 1 != available {
-        return slopos_testing::fail!(
-            "{} shown of {} vacant beside one held before the pool refused one: {}",
-            shown,
-            available,
-            refused
-        );
+    let after = settled();
+    if held.is_none() || one == 0 {
+        return slopos_testing::fail!("the held activation was freed or holds nothing");
     }
-    if vacant() < available {
-        return slopos_testing::fail!("the pool did not empty again: {} vacant", vacant());
+    if !matches!(outcome, [Ok(_), Ok(_), Err(ActivateError::Busy)]) {
+        return slopos_testing::fail!("{:?} within room for two of {} bytes", outcome, one);
+    }
+    if after != before {
+        return slopos_testing::fail!("{} resident, not the {} before", after, before);
     }
     TestResult::Pass
+}
+
+/// Images shown at once, more than the 32 a fixed pool once held.
+const MANY: usize = 100;
+
+fn many_name(i: usize) -> [u8; 12] {
+    let mut name = *b"ext-many-000";
+    name[9] = b'0' + (i / 100 % 10) as u8;
+    name[10] = b'0' + (i / 10 % 10) as u8;
+    name[11] = b'0' + (i % 10) as u8;
+    name
+}
+
+fn allocated_pages() -> u64 {
+    u64::from(slopos_mm::page_alloc::get_page_allocator_stats().allocated)
+}
+
+/// A hundred small images are shown at once within the budget, each at its
+/// name and its own, and one of them updated in place; what each cost to
+/// show and costs at rest is reported for `run_tests gate fsperf`.
+pub fn test_a_hundred_images_are_shown_and_one_updated() -> TestResult {
+    if vfs_init_builtin_filesystems().is_err() {
+        return slopos_testing::fail!("no VFS");
+    }
+    let (Some(built), Some(next)) = (
+        image(&[("bin/tool", EXEC, b"many"), ("share/doc", FILE, b"doc")]),
+        image(&[("bin/tool", EXEC, b"next")]),
+    ) else {
+        return slopos_testing::fail!("no room for the images");
+    };
+    let before = settled();
+    let path = b"/tmp/ext-many-image";
+    let _ = vfs_unlink(path);
+    let written =
+        vfs_open(path, true).is_ok_and(|file| file.write(0, &built.bytes) == Ok(built.bytes.len()));
+    let Some((fs, inode)) = resolve(path).ok().filter(|_| written) else {
+        return slopos_testing::fail!("the image could not be written");
+    };
+    let (held, pages, reads) = (
+        extension::held_bytes(),
+        allocated_pages(),
+        extension::reads(),
+    );
+    let began = slopos_kernel_services::clock::monotonic_ns();
+    let mut shown = 0;
+    let mut refused = None;
+    for i in 0..MANY {
+        match extension::activate(&many_name(i), built.root, fs, inode, extension::budget()) {
+            Ok(_) => shown += 1,
+            Err(e) => {
+                refused = Some(e);
+                break;
+            }
+        }
+    }
+    let ns = slopos_kernel_services::clock::monotonic_ns().saturating_sub(began);
+    let cost = crate::fsreport::ActivationCost {
+        images: shown as u64,
+        heldbytes: extension::held_bytes().saturating_sub(held),
+        pages: allocated_pages().saturating_sub(pages),
+        reads: extension::reads().saturating_sub(reads),
+        ns,
+    };
+    let _ = vfs_unlink(path);
+    let outcome = many_shown(shown, &next);
+    for i in 0..shown {
+        let _ = deactivate(&many_name(i));
+    }
+    let after = settled();
+    if let Some(e) = refused {
+        return slopos_testing::fail!("image {} of {} was refused: {:?}", shown, MANY, e);
+    }
+    if let Err(why) = outcome {
+        return slopos_testing::fail!("{}", why);
+    }
+    if after != before {
+        return slopos_testing::fail!("{} resident, not the {} before", after, before);
+    }
+    crate::fsreport::record_activation_cost(&cost);
+    TestResult::Pass
+}
+
+/// Each of the `shown` images reads its own file under its own number, and
+/// the middle one, updated to `next`, reads the update.
+#[inline(never)]
+fn many_shown(shown: usize, next: &Built) -> Result<(), &'static str> {
+    let mut numbers = KVec::new();
+    for i in 0..shown {
+        let mut path = *b"/opt/ext-many-000/bin/tool";
+        path[5..17].copy_from_slice(&many_name(i));
+        let (fs, tool) = resolve(&path).map_err(|_| "an image is not shown at its name")?;
+        let mut buf = [0u8; 8];
+        if read_all(fs, tool, &mut buf) != Some(4) || &buf[..4] != b"many" {
+            return Err("an image's tool reads other than its bytes");
+        }
+        numbers
+            .push(generation_of(tool))
+            .map_err(|_| "no room for the numbers")?;
+    }
+    if numbers.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err("two names show one activation");
+    }
+    let middle = many_name(shown / 2);
+    let updated = activate_bytes(&middle, &next.bytes, next.root)
+        .map_err(|_| "the update did not activate")?;
+    let mut path = *b"/opt/ext-many-000/bin/tool";
+    path[5..17].copy_from_slice(&middle);
+    let (fs, tool) = resolve(&path).map_err(|_| "the updated image is not shown")?;
+    let mut buf = [0u8; 8];
+    if generation_of(tool) != updated || read_all(fs, tool, &mut buf) != Some(4) {
+        return Err("the name does not show the update");
+    }
+    if &buf[..4] != b"next" {
+        return Err("the update reads other than its bytes");
+    }
+    Ok(())
 }
 
 /// A name the grammar refuses is neither activated nor deactivated, and a
@@ -628,7 +747,9 @@ pub fn test_a_name_outside_the_grammar_is_refused() -> TestResult {
     ] {
         let named = resolve(b"/")
             .map_err(|e| ActivateError::Image(OpenError::Read(e)))
-            .and_then(|(fs, inode)| extension::activate(name, built.root, fs, inode));
+            .and_then(|(fs, inode)| {
+                extension::activate(name, built.root, fs, inode, extension::budget())
+            });
         if named != Err(ActivateError::Name) {
             return slopos_testing::fail!("an activation named {:?} was not refused", name);
         }
@@ -646,7 +767,8 @@ slopos_testing::stest!(name = test_an_activation_is_shown_at_its_name_and_attest
 slopos_testing::stest!(name = test_a_flipped_bit_fails_the_read_that_meets_it);
 slopos_testing::stest!(name = test_a_file_that_is_no_image_is_refused);
 slopos_testing::stest!(name = test_a_replacement_switches_the_mount_in_one_step);
-slopos_testing::stest!(name = test_activations_stay_within_the_pool);
+slopos_testing::stest!(name = test_activations_stay_within_their_budget);
+slopos_testing::stest!(name = test_a_hundred_images_are_shown_and_one_updated);
 slopos_testing::stest!(name = test_a_name_outside_the_grammar_is_refused);
 
 /// A live process running an activation's program holds that activation, as

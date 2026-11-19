@@ -110,9 +110,34 @@
   `<stem>.meta.sig` beside the image, trusted or not; the command line names
   `signer <fingerprint>|nobody` (term *Signed by*) and the mechanism holds the
   signature to it. `remove` is `org.slopos.extension.remove` (`DacOverride`,
-  destructive): the record keeps its name, `retired <uids>` (never given
-  again) and its `config` serial, kept for good. `/etc/<name>` if `extctl`'s
+  destructive): the record keeps its name, `retired <uids>` and its `config`
+  serial, kept for good. `/etc/<name>` if `extctl`'s
   and `/var/lib`, `/var/log`, `/run/<name>` if a retired uid's go, after init
   stops the services if it answers; a first install waits while any is left.
   Any image then goes in as a first install, never unasked. `config apply`
   needs the current image's key.
+- `docs/architecture/extensions` (activation, reference), `docs/abi/syscalls`:
+  no pool and no `MAX_ACTIVATIONS`. One filesystem, `extension::ACTIVATIONS`,
+  serves every activation at a mount of its own; a call finds its activation
+  by the number in the inode's high half (the resident ones sorted by number),
+  and `is_activation` is one identity compare. An activation's `Ext4Mount`,
+  index and device are kernel heap made at `ext_activate` and freed by the
+  reaper. The resident activations hold at most `extension::budget()`, an
+  eighth of usable memory, counted as the index, the tree blocks the device
+  keeps (the levels above the leaves and up to 64 leaves) and the structs; the
+  volume's block cache is reclaimable and not counted. `EBUSY` past it. The
+  mount table is a heap vector sorted by path (`mount_at` halves it), grown
+  outside its IRQ lock; `MAX_MOUNTS` is gone. `FileSystem::statfs` takes the
+  inode it answers for. The reclaimer only `try_lock`s the activations.
+- `docs/architecture/extensions`, `docs/architecture/users` (uids): an
+  extension whose images grant no user takes no uid and has no number;
+  `users add` still refuses an installed extension's name. A complete
+  `extctl remove`, once init answered, takes away what the retired uids own
+  directly in `/tmp`, `/var/tmp` and `/dev/shm`, and gives them back when
+  nothing they own is found deeper (that is only reported: another uid's
+  directory could put a link under the walk) and no task runs as one within
+  2 s. Until then they stay `retired`, and a later `remove` tries again.
+- `docs/status/roadmap` (the installed-software plan, phase 8): on the dev
+  tests kernel a small image took 1.6 to 2.7 ms and 12 reads of its file to
+  show, and holds 13 KiB against the budget of 270 KiB of pages, the rest
+  its volume's block cache (`FSACT`). Images stay shown at boot.

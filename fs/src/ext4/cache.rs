@@ -2364,6 +2364,18 @@ impl BlockCache {
         self.drop_entry(slot);
     }
 
+    /// The heap its bookkeeping holds for the mount's life, the frames
+    /// [`Self::shrink_clean`] gives back aside.
+    pub fn metadata_bytes(&self) -> u64 {
+        fn held<T>(v: &KVec<T>) -> usize {
+            v.capacity() * size_of::<T>()
+        }
+        let slots: usize = self.entries.chunks.iter().map(held).sum();
+        let records = held(&self.scratch) + held(&self.op_touched_slots) + held(&self.group_hints);
+        let inflight = held(&self.inflight.runs) + held(&self.undo);
+        (size_of::<Self>() + held(&self.entries.chunks) + slots + records + inflight) as u64
+    }
+
     /// Frames holding a clean, unpinned block — what [`Self::shrink_clean`]
     /// could give back right now.
     pub fn reclaimable(&self) -> u32 {

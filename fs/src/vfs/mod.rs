@@ -16,8 +16,8 @@ pub use init::{
     vfs_is_initialized, vfs_register_block_layer, vfs_reread_partitions,
 };
 pub use mount::{
-    MAX_MOUNTS, MOUNT_PINNED, MOUNT_RDONLY, Mounted, mount, mount_at, mount_subtree,
-    under_pinned_mount, unmount, with_mount_table,
+    MOUNT_PINNED, MOUNT_RDONLY, Mounted, mount, mount_at, mount_subtree, under_pinned_mount,
+    unmount, with_mount_table,
 };
 pub use ops::{
     SocketName, SocketNode, TimesChange, VfsHandle, VfsOpenFlags, vfs_link, vfs_link_at,

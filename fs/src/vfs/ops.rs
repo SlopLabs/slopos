@@ -1,5 +1,5 @@
 use crate::vfs::canon::CanonPath;
-use crate::vfs::mount::{MAX_MOUNTS, with_mount_table};
+use crate::vfs::mount::mount_after;
 use crate::vfs::path::{
     RESOLVE_FOLLOW, RESOLVE_NOFOLLOW_FINAL, ResolvedPath, resolve_parent_at, resolve_path,
     resolve_path_at, resolve_path_canon_at,
@@ -852,28 +852,18 @@ fn rename_resolved(
     result.map(|_| ())
 }
 
-/// Commits every mount, returning the first error. Snapshots the table and
-/// drops its `IrqRwLock` before the first `sync`: ext4's takes a sleeping
-/// mutex, which must not be acquired under it.
+/// Commits every mount, returning the first error. Takes each mount from the
+/// table in turn and lets its `IrqRwLock` go before that mount's `sync`:
+/// ext4's takes a sleeping mutex, which must not be acquired under it.
 pub fn vfs_sync_all() -> VfsResult<()> {
     // Before the mounts: page-set writeback reaches a filesystem through
     // `write`, so it must land before that filesystem's `sync`.
     crate::filemap::flush_all();
-    let mut snapshot: [Option<&'static dyn crate::vfs::FileSystem>; MAX_MOUNTS] =
-        [None; MAX_MOUNTS];
-    let mut n = 0usize;
-    with_mount_table(|table| {
-        table.for_each_mount(&mut |fs| {
-            if n < snapshot.len() {
-                snapshot[n] = Some(fs);
-                n += 1;
-            }
-        });
-    });
-
     let mut first_err = None;
-    for fs in snapshot.iter().take(n).flatten() {
-        if let Err(e) = fs.sync() {
+    let mut after = 0;
+    while let Some(mounted) = mount_after(after) {
+        after = mounted.id;
+        if let Err(e) = mounted.fs.sync() {
             first_err.get_or_insert(e);
         }
     }

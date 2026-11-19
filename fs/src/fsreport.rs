@@ -1,5 +1,5 @@
-//! The `FSPERF[<phase>]` / `FSCAP[<phase>]` / `FSIMG[<phase>]` report lines
-//! `run_tests gate fsperf` parses.
+//! The `FSPERF[<phase>]` / `FSCAP[<phase>]` / `FSIMG[<phase>]` /
+//! `FSACT[<phase>]` report lines `run_tests gate fsperf` parses.
 //!
 //! Emitted at a phase boundary rather than from inside the measuring test: at
 //! the default `tests.verbosity=summary` a passing test's klog capture is
@@ -54,9 +54,22 @@ pub struct ImageCost {
     pub warmimage: u64,
 }
 
+/// What showing many small images cost: the kernel heap they hold against
+/// the activations' budget, the pages allocated meanwhile, the reads of
+/// their image file and the time, all of them together.
+#[derive(Debug, Copy, Clone, Default)]
+pub struct ActivationCost {
+    pub images: u64,
+    pub heldbytes: u64,
+    pub pages: u64,
+    pub reads: u64,
+    pub ns: u64,
+}
+
 const WRITE_FIELDS: usize = 9;
 const CAP_FIELDS: usize = 12;
 const IMAGE_FIELDS: usize = 5;
+const ACTIVATION_FIELDS: usize = 5;
 
 static WRITE_RECORDED: AtomicBool = AtomicBool::new(false);
 static WRITE_SLOTS: [AtomicU64; WRITE_FIELDS] = [const { AtomicU64::new(0) }; WRITE_FIELDS];
@@ -64,6 +77,18 @@ static CAP_RECORDED: AtomicBool = AtomicBool::new(false);
 static CAP_SLOTS: [AtomicU64; CAP_FIELDS] = [const { AtomicU64::new(0) }; CAP_FIELDS];
 static IMAGE_RECORDED: AtomicBool = AtomicBool::new(false);
 static IMAGE_SLOTS: [AtomicU64; IMAGE_FIELDS] = [const { AtomicU64::new(0) }; IMAGE_FIELDS];
+static ACTIVATION_RECORDED: AtomicBool = AtomicBool::new(false);
+static ACTIVATION_SLOTS: [AtomicU64; ACTIVATION_FIELDS] =
+    [const { AtomicU64::new(0) }; ACTIVATION_FIELDS];
+
+#[cfg(feature = "tests")]
+pub fn record_activation_cost(cost: &ActivationCost) {
+    let values = [cost.images, cost.heldbytes, cost.pages, cost.reads, cost.ns];
+    for (slot, value) in ACTIVATION_SLOTS.iter().zip(values) {
+        slot.store(value, Ordering::Relaxed);
+    }
+    ACTIVATION_RECORDED.store(true, Ordering::Release);
+}
 
 #[cfg(feature = "tests")]
 pub fn record_image_cost(cost: &ImageCost) {
@@ -163,6 +188,18 @@ pub fn fs_cost_report(phase: &str) {
         let v = |i: usize| IMAGE_SLOTS[i].load(Ordering::Relaxed);
         slopos_ostd::klog_info!(
             "FSIMG[{}]: bytes={} coldroot={} coldimage={} warmroot={} warmimage={}",
+            phase,
+            v(0),
+            v(1),
+            v(2),
+            v(3),
+            v(4)
+        );
+    }
+    if ACTIVATION_RECORDED.load(Ordering::Acquire) {
+        let v = |i: usize| ACTIVATION_SLOTS[i].load(Ordering::Relaxed);
+        slopos_ostd::klog_info!(
+            "FSACT[{}]: images={} heldbytes={} pages={} reads={} ns={}",
             phase,
             v(0),
             v(1),

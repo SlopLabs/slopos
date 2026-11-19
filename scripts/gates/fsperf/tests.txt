@@ -60,3 +60,10 @@ min-treebytes	post-kernel-tests	829039257
 # 13136504ns cold and 1152543ns warm.
 max-image-cold-pct	post-kernel-tests	340
 min-image-bytes	post-kernel-tests	589824
+
+# post-kernel-tests (builddir/ci-test.log): 100 images shown in 271692130ns, holding
+# 1311200 bytes against their budget, 6741 pages allocated
+# meanwhile, 1200 reads of their file.
+max-act-held-per-image	post-kernel-tests	16391
+max-act-reads-per-image	post-kernel-tests	16
+min-act-images	post-kernel-tests	75

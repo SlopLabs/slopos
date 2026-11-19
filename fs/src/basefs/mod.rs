@@ -569,8 +569,8 @@ impl FileSystem for BaseFs {
         Ok(())
     }
 
-    fn statfs(&self) -> VfsResult<FsStats> {
-        let generation = self.generation(self.current_generation())?;
+    fn statfs(&self, inode: InodeId) -> VfsResult<FsStats> {
+        let generation = self.of(inode)?;
         Ok(FsStats {
             magic: BASEFS_MAGIC,
             block_size: 4096,

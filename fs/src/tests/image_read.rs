@@ -150,7 +150,7 @@ fn measure(bytes: &[u8]) -> Result<[u64; 4], &'static str> {
 #[inline(never)]
 fn activated(root: [u8; DIGEST_LEN], bytes: &[u8]) -> Result<[u64; 4], &'static str> {
     let image = resolve_path(IMAGE).map_err(|_| "the image did not resolve")?;
-    extension::activate(NAME, root, image.fs, image.inode)
+    extension::activate(NAME, root, image.fs, image.inode, extension::budget())
         .map_err(|_| "the image did not activate")?;
     let measured = measure(bytes);
     let _ = deactivate(NAME);

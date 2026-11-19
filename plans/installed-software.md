@@ -205,44 +205,22 @@ configuration serial, and `/etc`, `/var/lib`, `/var/log` and
 `/run/<name>` go, a first install waiting while any is left. Another
 publisher's image then goes in as a first install, as `extension_test` shows.
 
-## Phase 8: as many images as a machine holds
+## Phase 8: as many images as a machine holds — done
 
-**For:** one image per piece of software to be possible, which a pool of
-32 is not.
+The pool of 32 and the mount table's fixed slots went. One filesystem
+serves every activation at a mount of its own, each made from the kernel
+heap and found from the number its inodes carry; the mount table is a
+vector sorted by path. What the resident activations hold that no reclaim
+gives back is bounded by an eighth of usable memory (`extension::budget`).
+An image granted no user takes no uid, and a removal that leaves nothing
+its uids own gives them back.
 
-The numbers were sized for a few system add-ons:
-
-- `MAX_ACTIVATIONS = 32` (`abi/src/extension.rs`) sizes a static pool
-  (`fs/src/extension/mod.rs`, `POOL`), searched from the front on every
-  exec and every executable mapping (`is_activation`). A replaced image
-  holds its slot until nothing uses it, so with 32 in use none can be
-  updated.
-- `MAX_MOUNTS = 32 + MAX_ACTIVATIONS` sizes the mount table and two arrays
-  on the kernel stack (`fs/src/vfs/mount.rs`, `fs/src/vfs/ops.rs`), which
-  the 2 KiB frame rule bounds.
-- Every image name ever installed takes one of 900 uids for good, whether
-  or not it declares a user (`extension-core/src/accounts.rs`).
-- Each activation walks its whole volume into a kernel index at
-  `ext_activate`.
-
-Build:
-
-1. The pool and the mount table grown from the kernel heap as images are
-   shown, with no array of either on a stack, and an activation found from
-   the number its inodes carry, not by a search.
-2. An image that declares no user taking no uid, and a uid given back when
-   an image's record is removed for good.
-3. A bound that is a budget of memory, as base generations have one, in
-   place of a count.
-4. A measurement of what one more image costs at boot and at rest, with a
-   hundred small ones shown, and a cap on it in the suite.
-
-Find out first: whether an image is better shown at its first use than at
-boot. Showing all at boot is what a hundred images pay for; showing on
-demand moves the cost to the first program started.
-
-Done when a test shows more images than 32, updates one of them, and the
-measured cost of each is in the plan's place in the docs.
+`test_a_hundred_images_are_shown_and_one_updated` shows a hundred and
+updates one. On the dev tests kernel each took 1.6 to 2.7 ms and 12 reads
+of its file to show, and holds 13 KiB against the budget of 270 KiB of
+pages, the rest its volume's cache; the `fsperf` gate caps the heap and the
+reads (`FSACT`). Images stay shown at boot: a hundred cost the kernel under
+0.3 s, and showing one at first use would have a walk wait on userland.
 
 ## Phase 9: the word extension goes
 
@@ -265,12 +243,6 @@ not read. Before v1 neither is kept for.
 
 Done when nothing in the tree, the docs or the skills says extension for
 an installed image.
-
-## Order
-
-Phase 8 is needed before software
-from elsewhere arrives one image at a time, not before. Phase 9 comes last,
-so that no other phase is written against names that move under it.
 
 ## Later
 

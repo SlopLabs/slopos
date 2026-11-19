@@ -15,10 +15,6 @@ pub const DIGEST_LEN: usize = 32;
 /// to name an activation's programs.
 pub const MAX_ENTRIES: usize = 1 << 16;
 
-/// Activations resident at once: those mounted and those still held after
-/// being replaced or deactivated.
-pub const MAX_ACTIVATIONS: usize = 32;
-
 /// Names no extension may take: the system's own and the base's directories.
 pub const RESERVED: [&str; 11] = [
     "slopos", "base", "bin", "sbin", "lib", "usr", "share", "etc", "ssl", "root", "user",

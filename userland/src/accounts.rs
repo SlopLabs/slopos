@@ -337,11 +337,17 @@ fn extension_records(top: &Path) -> Result<Vec<slopos_extension_core::record::Re
     Ok(out)
 }
 
-/// Every name an extension's record keeps a uid for, which no person takes.
+/// Every installed extension's name and each name its record keeps a uid
+/// for, which no person takes.
 pub fn extension_users(top: &Path) -> Result<Vec<String>, String> {
     Ok(extension_records(top)?
         .into_iter()
-        .flat_map(|record| record.uids.into_iter().map(|(name, _)| name))
+        .flat_map(|record| {
+            let installed = record.current.is_some().then(|| record.name.clone());
+            installed
+                .into_iter()
+                .chain(record.uids.into_iter().map(|(name, _)| name))
+        })
         .collect())
 }
 

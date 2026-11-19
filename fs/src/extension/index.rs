@@ -145,6 +145,18 @@ impl Index {
         Ok(index)
     }
 
+    /// The kernel heap it holds.
+    pub(super) fn bytes(&self) -> u64 {
+        fn held<T>(v: &KVec<T>) -> usize {
+            v.capacity() * size_of::<T>()
+        }
+        let nodes: usize = self.nodes.iter().map(held).sum();
+        let names: usize = self.names.iter().map(held).sum();
+        let stats: usize = self.stats.iter().map(held).sum();
+        let outer = held(&self.nodes) + held(&self.names) + held(&self.stats);
+        (nodes + names + stats + outer + held(&self.by_ino) + held(&self.by_name)) as u64
+    }
+
     fn len(&self) -> usize {
         self.nodes.iter().map(KVec::len).sum()
     }

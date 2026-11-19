@@ -1,7 +1,8 @@
 //! Extensions' users as the user database lists them, with the uids their
-//! records keep. A record keeps a uid for its extension's own name whether
-//! or not it declares that user: the extension's number, which init's login
-//! tags for its services are made from.
+//! records keep. An extension granted any user keeps a uid for its own name
+//! too, whether or not it declares that user: the extension's number, which
+//! init's login tags for its services are made from. One granted no user
+//! takes no uid.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -12,28 +13,28 @@ use slopos_accounts_core::Entry;
 use crate::record::Record;
 
 /// The uids extensions' users take, Debian's range for dynamically allocated
-/// system users. One is never given again, even once its extension is gone.
+/// system users. A removal gives one back only once nothing it owns is left.
 pub const FIRST_UID: u32 = *slopos_abi::fs::EXTENSION_UIDS.start();
 pub const LAST_UID: u32 = *slopos_abi::fs::EXTENSION_UIDS.end();
 
 /// Give `record`'s own name and each user its images are granted the lowest
-/// uid that neither it nor `others` holds.
+/// uid that neither it nor `others` holds, when its images are granted any.
 pub fn allocate<'a>(
     record: &mut Record,
     others: impl IntoIterator<Item = &'a Record>,
 ) -> Result<(), &'static str> {
+    let users: Vec<String> = record
+        .current
+        .iter()
+        .chain(&record.previous)
+        .flat_map(|image| image.grant.users.iter().cloned())
+        .collect();
+    if users.is_empty() {
+        return Ok(());
+    }
     let mut held: Vec<u32> = others.into_iter().flat_map(Record::held_uids).collect();
     held.extend(record.held_uids());
-    let wanted: Vec<String> = core::iter::once(record.name.clone())
-        .chain(
-            record
-                .current
-                .iter()
-                .chain(&record.previous)
-                .flat_map(|image| image.grant.users.iter().cloned()),
-        )
-        .collect();
-    for user in wanted {
+    for user in core::iter::once(record.name.clone()).chain(users) {
         if record.uid(&user).is_some() {
             continue;
         }
@@ -105,16 +106,16 @@ mod tests {
         assert_eq!(hello.uids, given);
         let mut tool = installed("tool", &[]);
         assert_eq!(allocate(&mut tool, [&hello]), Ok(()));
-        assert_eq!(tool.uids, vec![("tool".into(), 102)]);
+        assert!(tool.uids.is_empty());
         hello.remove();
         assert_eq!((hello.uids.len(), &hello.retired[..]), (0, &[100, 101][..]));
         let mut late = installed("late", &["late"]);
         assert_eq!(allocate(&mut late, [&hello, &tool]), Ok(()));
-        assert_eq!(late.uid("late"), Some(103));
+        assert_eq!(late.uid("late"), Some(102));
         hello.install(late.current.clone().unwrap(), None);
         hello.current.as_mut().unwrap().grant.users = vec!["hello".into()];
         assert_eq!(allocate(&mut hello, [&tool, &late]), Ok(()));
-        assert_eq!(hello.uids, vec![("hello".into(), 104)]);
+        assert_eq!(hello.uids, vec![("hello".into(), 103)]);
     }
 
     #[test]
@@ -123,7 +124,7 @@ mod tests {
         full.uids = (FIRST_UID..=LAST_UID)
             .map(|uid| (format!("u{uid}"), uid))
             .collect();
-        let mut next = installed("next", &[]);
+        let mut next = installed("next", &["next"]);
         assert!(allocate(&mut next, [&full]).is_err());
     }
 

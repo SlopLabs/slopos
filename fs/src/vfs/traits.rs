@@ -648,12 +648,14 @@ pub trait FileSystem: Send + Sync {
         }
     }
 
-    /// This filesystem's own capacity, for `statfs(2)`.
+    /// The capacity of the volume holding `inode`, for `statfs(2)`: one
+    /// instance may serve several, as the base's generations and the
+    /// activations are.
     ///
     /// Refuses rather than reporting zeros, which would claim a filesystem
     /// with no space, no inodes and no name limit; devfs deliberately keeps
     /// this default.
-    fn statfs(&self) -> VfsResult<FsStats> {
+    fn statfs(&self, _inode: InodeId) -> VfsResult<FsStats> {
         Err(VfsError::NotSupported)
     }
 

@@ -11,7 +11,7 @@ use crate::devfs::{
 };
 use crate::ext4_vfs::{Ext4Mount, Ext4MountInfo};
 use crate::ramfs::RamFs;
-use crate::vfs::mount::{MOUNT_RDONLY, mount, mount_at, unmount, with_mount_table};
+use crate::vfs::mount::{MOUNT_RDONLY, mount, mount_after, mount_at, unmount};
 use crate::vfs::orphan::{drain_releasable, forget_filesystem, has_open_refs};
 use crate::vfs::traits::{FileSystem, same_filesystem};
 use crate::vfs::{InodeId, VfsError, VfsResult};
@@ -56,8 +56,8 @@ static RAMFS_POOL_STATE: [AtomicU8; RAMFS_POOL_LEN] =
 
 /// How many ext4 instances may be attached at once.
 ///
-/// At or below both [`crate::vfs::MAX_MOUNTS`] and the block layer's device
-/// ceiling: a slot with no device to put in it buys nothing.
+/// At or below the block layer's device ceiling: a slot with no device to
+/// put in it buys nothing.
 pub const EXT4_POOL_LEN: usize = 4;
 
 /// One `lock_class!` site per instance `mount(2)` hands out for `fstype`
@@ -260,17 +260,16 @@ pub fn vfs_ext4_pool_release(fs: &'static dyn FileSystem, retire: bool) -> bool 
 
 /// The ext4 instance already in the mount table, which is what `mount(2)`
 /// with an empty `source` means by "the one this boot attached" — whether
-/// boot put it at `/` or demoted it to `/mnt`.
+/// boot put it at `/` or demoted it to `/mnt`: the one mounted first.
 pub fn vfs_ext4_mounted_instance() -> Option<&'static Ext4Mount> {
-    let mut found: Option<usize> = None;
-    with_mount_table(|table| {
-        table.for_each_mount(&mut |mounted| {
-            if found.is_none() {
-                found = ext4_pool_slot_of(mounted);
-            }
-        });
-    });
-    found.map(|idx| &EXT4_POOL[idx])
+    let mut after = 0;
+    while let Some(mounted) = mount_after(after) {
+        if let Some(idx) = ext4_pool_slot_of(mounted.fs) {
+            return Some(&EXT4_POOL[idx]);
+        }
+        after = mounted.id;
+    }
+    None
 }
 
 /// What the block layer does for devfs and `mount(2)`. `slopos-fs` cannot
