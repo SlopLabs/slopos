@@ -1,7 +1,7 @@
 //! Init re-executing itself: what it knows goes into a pipe whose read end,
 //! like the descriptors that state names, survives the exec, and the new
 //! image reads it back. systemd's `daemon-reexec` carries its state across the
-//! same way, in a file descriptor. Extensions' services go in as many more
+//! same way, in a file descriptor. Packages' services go in as many more
 //! pipes as they fill, named after it, for an image that reads them.
 
 use std::ffi::CString;
@@ -11,7 +11,7 @@ use slopos_slibc::pal::{Pal, Sys};
 
 use slopos_priv_core::sessions::Class;
 
-use super::extensions::{CARRIED, Carried as Units};
+use super::packages::{CARRIED, Carried as Units};
 use crate::syscall::{OwnedFd, RawFd, SyscallError, fs, process};
 
 pub const RESUME: &str = "--resume";
@@ -305,7 +305,7 @@ fn handed_lines(text: &str) -> Result<Vec<OwnedFd>, String> {
 /// What the image at `/sbin/init` reads of what a re-execution hands on, its
 /// text holding the header each is written under.
 pub struct Reads {
-    /// The extensions' services.
+    /// The packages' services.
     pub units: bool,
     /// The rest of init's state: its services, sessions and links.
     pub state: bool,
@@ -401,7 +401,7 @@ pub fn resume(fd: &str) -> Result<State, Vec<RawFd>> {
     Ok(state)
 }
 
-/// The extensions' services the pipes `fds` names, `,` between, hold in
+/// The packages' services the pipes `fds` names, `,` between, hold in
 /// turn, each descriptor they name closed when the rest cannot be read.
 pub fn resume_units(fds: Option<&str>) -> Units {
     let Some(fds) = fds else {

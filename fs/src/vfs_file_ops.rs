@@ -282,8 +282,7 @@ pub fn vfs_dir_handle_still_names(handle: usize, path: &[u8]) -> bool {
         .is_ok_and(|again| {
             matches!(
                 (attested, crate::basefs::program_of(again.fs, again.inode)),
-                (Program::Base(_), Program::Base(_))
-                    | (Program::Extension(_), Program::Extension(_))
+                (Program::Base(_), Program::Base(_)) | (Program::Package(_), Program::Package(_))
             )
         });
     }

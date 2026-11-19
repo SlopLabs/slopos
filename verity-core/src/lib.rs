@@ -2,7 +2,7 @@
 //! tree of SHA-256 digests, in the layout `veritysetup format` writes with
 //! `--no-superblock --salt=-` and 4 KiB data and hash blocks, and the digest
 //! of the tree's top block is the image's root. Free of `alloc`, `unsafe` and
-//! I/O, so the kernel, which reads an extension's image verified block by
+//! I/O, so the kernel, which reads a package's image verified block by
 //! block, and the tools that build and check one share it.
 //!
 //! The levels lie after the data, the top first; level `i` holds the

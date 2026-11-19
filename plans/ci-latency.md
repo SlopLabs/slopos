@@ -47,8 +47,8 @@ The rules that keep it there:
 
 A KVM capture's tests take ~350 s: all 3031 kernel tests ~44 s, the userland
 phase ~306 s, and eleven utests ~263 s of it — `priv` 56 s, `privd` 53 s,
-`sessions` 31 s, `apps_trees`, `extension_service`, `accounts`,
-`extension_action` and `live_base` ~16 s each, `extension` 15 s, `rename` 12 s,
+`sessions` 31 s, `apps_trees`, `package_service`, `accounts`,
+`package_action` and `live_base` ~16 s each, `package` 15 s, `rename` 12 s,
 `shell_script` 10 s. Where each waits — a consent or password timeout, a
 drain, a backoff — is the next thing to measure; it is most of the suite's
 wall clock and none of it is the kernel's.

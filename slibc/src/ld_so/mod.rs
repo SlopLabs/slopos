@@ -61,9 +61,8 @@ const SEARCH_DIRS: [&[u8]; 2] = [b"/lib", b"/usr/lib"];
 /// person put there must never reach a program holding more than they do.
 const HOME_LIB: &[u8] = b"/.local/lib";
 
-/// `/opt/<name>/lib`, the longest an extension's name makes it.
-const OWN_LIB_MAX: usize =
-    slopos_abi::extension::DIR.len() + 1 + slopos_abi::extension::NAME_MAX + 4;
+/// `/opt/<name>/lib`, the longest a package's name makes it.
+const OWN_LIB_MAX: usize = slopos_abi::package::DIR.len() + 1 + slopos_abi::package::NAME_MAX + 4;
 
 /// Longest path the loader will build. Matches the kernel's `PATH_MAX`.
 const DL_PATH_MAX: usize = 4096;
@@ -682,7 +681,7 @@ impl Loader {
     /// has no `DT_RUNPATH`, in the `DT_RPATH` of `requester`, of each object
     /// up its `loader` chain and of the executable (glibc's order); otherwise
     /// in `requester`'s `DT_RUNPATH` alone; then in [`SEARCH_DIRS`], the
-    /// program's own activation's `lib` when it is an extension's, and
+    /// program's own activation's `lib` when it is a package's, and
     /// [`HOME_LIB`] last where the process may take what it holds.
     fn resolve_path(
         &self,
@@ -829,8 +828,8 @@ impl Loader {
 /// this process: a path the program was started by can name anything. The
 /// length written, 0 for none; `None` when the kernel could not be asked.
 fn own_lib(out: &mut [u8; OWN_LIB_MAX]) -> Option<usize> {
-    use slopos_abi::extension::{DIR, Label};
-    use slopos_abi::syscall::{SO_PEEREXTENSION, SOL_SLOPOS};
+    use slopos_abi::package::{DIR, Label};
+    use slopos_abi::syscall::{SO_PEERPACKAGE, SOL_SLOPOS};
     let mut pair = [-1i32; 2];
     let kind = i32::from(slopos_abi::net::SOCK_STREAM) | crate::ffi::O_CLOEXEC;
     if Sys::socketpair(
@@ -848,7 +847,7 @@ fn own_lib(out: &mut [u8; OWN_LIB_MAX]) -> Option<usize> {
     let asked = Sys::getsockopt(
         pair[0],
         SOL_SLOPOS,
-        SO_PEEREXTENSION,
+        SO_PEERPACKAGE,
         raw.as_mut_ptr(),
         &mut len,
     );

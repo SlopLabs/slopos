@@ -215,7 +215,7 @@ impl Sessions {
             .map(|s| s.tag)
     }
 
-    /// Whether the first person's desktop runs, which an extension's session
+    /// Whether the first person's desktop runs, which a package's session
     /// services run beside.
     pub fn first_person_runs(&self) -> bool {
         self.list.iter().any(|s| {

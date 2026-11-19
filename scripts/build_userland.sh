@@ -251,10 +251,10 @@ if [ "$TEST_MODE" = "--test" ]; then
         --bin privd_test \
         --bin accounts_test \
         --bin priv_test \
-        --bin extension_test \
-        --bin extension_action_test \
+        --bin package_test \
+        --bin package_action_test \
         --bin supervision_test \
-        --bin extension_service_test \
+        --bin package_service_test \
         --bin live_base_test \
         --bin fifo_test \
         --bin session_smoke_test \
@@ -451,17 +451,17 @@ if [ "$TEST_MODE" = "--test" ]; then
     if [ -f "$RELEASE_DIR/priv_test" ]; then
         cp "$RELEASE_DIR/priv_test" "$BUILD_DIR/priv_test.elf"
     fi
-    if [ -f "$RELEASE_DIR/extension_test" ]; then
-        cp "$RELEASE_DIR/extension_test" "$BUILD_DIR/extension_test.elf"
+    if [ -f "$RELEASE_DIR/package_test" ]; then
+        cp "$RELEASE_DIR/package_test" "$BUILD_DIR/package_test.elf"
     fi
-    if [ -f "$RELEASE_DIR/extension_action_test" ]; then
-        cp "$RELEASE_DIR/extension_action_test" "$BUILD_DIR/extension_action_test.elf"
+    if [ -f "$RELEASE_DIR/package_action_test" ]; then
+        cp "$RELEASE_DIR/package_action_test" "$BUILD_DIR/package_action_test.elf"
     fi
     if [ -f "$RELEASE_DIR/supervision_test" ]; then
         cp "$RELEASE_DIR/supervision_test" "$BUILD_DIR/supervision_test.elf"
     fi
-    if [ -f "$RELEASE_DIR/extension_service_test" ]; then
-        cp "$RELEASE_DIR/extension_service_test" "$BUILD_DIR/extension_service_test.elf"
+    if [ -f "$RELEASE_DIR/package_service_test" ]; then
+        cp "$RELEASE_DIR/package_service_test" "$BUILD_DIR/package_service_test.elf"
     fi
     if [ -f "$RELEASE_DIR/live_base_test" ]; then
         cp "$RELEASE_DIR/live_base_test" "$BUILD_DIR/live_base_test.elf"
@@ -628,8 +628,8 @@ staged="$(
         entry="${entry##*/}"
         printf 'app %s\n' "${entry%.app}"
     done >>"$BUILD_DIR/essentials.declare"
-    stage "$BUILD_DIR/essentials.declare" .extension/declare
-    printf '%s\n' .extension/release
+    stage "$BUILD_DIR/essentials.declare" .package/declare
+    printf '%s\n' .package/release
 )"
 rm -f "$BUILD_DIR/essentials.declare"
 (cd "$APPS_TREE" && find . -type f -o -type l) | sed 's|^\./||' | while IFS= read -r rel; do
@@ -639,14 +639,14 @@ find "$APPS_TREE" -mindepth 1 -type d -empty -delete
 # The version moves only with the files, so a root holding this build passes
 # it over.
 ESSENTIALS_STAMP="$BUILD_DIR/slopos-essentials.version"
-held="$(cd "$APPS_TREE" && find . -path ./.extension/release -prune -o \( -type f -o -type l \) -print0 |
+held="$(cd "$APPS_TREE" && find . -path ./.package/release -prune -o \( -type f -o -type l \) -print0 |
     LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
 read -r last_held version 2>/dev/null <"$ESSENTIALS_STAMP" || version=0
-if [ "${last_held:-}" != "$held" ] || [ ! -f "$APPS_TREE/.extension/release" ]; then
+if [ "${last_held:-}" != "$held" ] || [ ! -f "$APPS_TREE/.package/release" ]; then
     now="$(date -u +%Y%m%d%H%M%S)"
     version=$(( now > version ? now : version + 1 ))
     printf 'name slopos-essentials\nversion %s\nsummary The apps SlopOS ships outside its base\n' "$version" \
-        >"$APPS_TREE/.extension/release"
+        >"$APPS_TREE/.package/release"
     printf '%s %s\n' "$held" "$version" >"$ESSENTIALS_STAMP"
 fi
 echo "Apps built: $APPS_TREE (slopos-essentials $version)"
@@ -724,17 +724,17 @@ if [ "$TEST_MODE" = "--test" ]; then
         --enable-new-dtags -rpath '$ORIGIN/../tmp/dl_secure:/tmp/dl_secure_abs'
     echo "Search probes built: dl_search_{origin,rpath,runpath} dl_secure_probe"
 
-    # The test extension's service and the library its image carries in its
-    # own lib/, staged as `libexttest-fixture.so` so that no search of the
+    # The test package's service and the library its image carries in its
+    # own lib/, staged as `libpkgtest-fixture.so` so that no search of the
     # base's directories finds it by its soname.
-    "${DLS_CC[@]}" -fPIC -c "${REPO_ROOT}/userland/exttest/greeting.c" -o "$BUILD_DIR/exttest-greeting.o"
-    "${DLS_CC[@]}" -c "${REPO_ROOT}/userland/exttest/daemon.c" -o "$BUILD_DIR/exttest-daemon.o"
-    "$LD_LLD" -shared -znow -o "$BUILD_DIR/libexttest-fixture.so" "$BUILD_DIR/exttest-greeting.o" \
-        --soname=libexttest.so
-    "$LD_LLD" -o "$BUILD_DIR/ext_daemon.elf" "$CRT0_OBJ" "$BUILD_DIR/exttest-daemon.o" --eh-frame-hdr -znow \
+    "${DLS_CC[@]}" -fPIC -c "${REPO_ROOT}/userland/pkgtest/greeting.c" -o "$BUILD_DIR/pkgtest-greeting.o"
+    "${DLS_CC[@]}" -c "${REPO_ROOT}/userland/pkgtest/daemon.c" -o "$BUILD_DIR/pkgtest-daemon.o"
+    "$LD_LLD" -shared -znow -o "$BUILD_DIR/libpkgtest-fixture.so" "$BUILD_DIR/pkgtest-greeting.o" \
+        --soname=libpkgtest.so
+    "$LD_LLD" -o "$BUILD_DIR/pkg_daemon.elf" "$CRT0_OBJ" "$BUILD_DIR/pkgtest-daemon.o" --eh-frame-hdr -znow \
         --image-base=0x400000 --dynamic-linker=/lib/ld-slopos.so.1 \
-        -L "$RELEASE_DIR" -lc "$BUILD_DIR/libexttest-fixture.so" "$RELEASE_DIR/libbuiltins.a"
-    echo "Extension service built: ext_daemon libexttest-fixture.so"
+        -L "$RELEASE_DIR" -lc "$BUILD_DIR/libpkgtest-fixture.so" "$RELEASE_DIR/libbuiltins.a"
+    echo "Package service built: pkg_daemon libpkgtest-fixture.so"
 
     # The C library's own surface, compiled from C against the generated
     # headers, so a header that disagrees with its export fails here at

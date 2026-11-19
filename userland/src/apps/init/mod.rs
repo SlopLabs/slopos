@@ -1,29 +1,29 @@
 //! `/sbin/init`: lays out the root, starts the services and starts them again
-//! when they crash, extensions' among them, keeps the sessions people log in
+//! when they crash, packages' among them, keeps the sessions people log in
 //! to — which desktop is in front, which are behind, the login screen and the
 //! shells console logins start — and re-executes itself keeping all of that.
 //! When a new base comes in live it starts again each service the switch
 //! changed, itself included.
 
 mod control;
-mod extensions;
 mod network;
+mod packages;
 mod reexec;
 mod service;
 mod session;
 
-use slopos_abi::caps::{EXTENSION_UPDATE, POWER, RAW_BLOCK, SEAL};
+use slopos_abi::caps::{PACKAGE_UPDATE, POWER, RAW_BLOCK, SEAL};
 use slopos_abi::fs::{GREETER_UID, SESSION_UID};
 use slopos_abi::net::{SOCK_CLOEXEC, SOCK_NONBLOCK};
 use slopos_abi::syscall::{
-    BOOT_FLAG_EXTENSIONS_OFF, BOOT_FLAG_ROULETTE_SKIP, BOOT_FLAG_TESTS_ENABLED, MSG_NOSIGNAL,
-    POLLIN, UserPollFd,
+    BOOT_FLAG_PACKAGES_OFF, BOOT_FLAG_ROULETTE_SKIP, BOOT_FLAG_TESTS_ENABLED, MSG_NOSIGNAL, POLLIN,
+    UserPollFd,
 };
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
 use slopos_priv_core::sessions::{Class, LINKS};
 
 use self::control::{Control, Request, answer};
-use self::extensions::Units;
+use self::packages::Units;
 use self::reexec::{RESUME, State};
 use self::service::{
     Budget, Child, Identity, LOGIN, PRIVD, REMOTED, ROULETTE, RUN_TESTS, Supervised, TESTS,
@@ -89,21 +89,21 @@ fn sync_accounts() {
     run_holding(b"/bin/users", &[c"users", c"sync"], SEAL);
 }
 
-/// The store's enabled extensions shown at `/opt`, each held again to its
+/// The store's enabled packages shown at `/opt`, each held again to its
 /// record, its key and the base's ceiling, and the user database written
 /// from the records, before privd and the services start.
-fn activate_extensions() {
-    use crate::apps::extctl::store::Store;
+fn activate_packages() {
+    use crate::apps::pkgctl::store::Store;
     let any = Store::open(false)
         .and_then(|store| store.names())
         .is_ok_and(|names| !names.is_empty());
-    if !any || sys_core::boot_flag(BOOT_FLAG_EXTENSIONS_OFF) {
+    if !any || sys_core::boot_flag(BOOT_FLAG_PACKAGES_OFF) {
         return;
     }
     run_holding(
-        b"/bin/extctl",
-        &[c"extctl", c"activate-all"],
-        EXTENSION_UPDATE | SEAL,
+        b"/bin/pkgctl",
+        &[c"pkgctl", c"activate-all"],
+        PACKAGE_UPDATE | SEAL,
     );
 }
 
@@ -126,18 +126,18 @@ fn install_offered() {
     use slopos_boot_core::layout::{MEDIUM_DIR, MEDIUM_IMAGES};
     let dir = match live() {
         true => std::path::Path::new(MEDIUM_DIR).join(MEDIUM_IMAGES),
-        false => std::path::PathBuf::from(slopos_extension_core::OFFERED),
+        false => std::path::PathBuf::from(slopos_package_core::OFFERED),
     };
-    if !dir.is_dir() || sys_core::boot_flag(BOOT_FLAG_EXTENSIONS_OFF) {
+    if !dir.is_dir() || sys_core::boot_flag(BOOT_FLAG_PACKAGES_OFF) {
         return;
     }
     let Ok(dir) = std::ffi::CString::new(dir.into_os_string().into_encoded_bytes()) else {
         return;
     };
     run_holding(
-        b"/bin/extctl",
-        &[c"extctl", c"install-offered", &dir],
-        EXTENSION_UPDATE | SEAL,
+        b"/bin/pkgctl",
+        &[c"pkgctl", c"install-offered", &dir],
+        PACKAGE_UPDATE | SEAL,
     );
 }
 
@@ -149,7 +149,7 @@ pub fn init_user_main() {
             let rc = sys_core::run_userland_tests();
             sys_core::exit_with_code(i32::from(rc != 0));
         }
-        Some(extensions::LOG) => extensions::keep_log(arg(2).unwrap_or_default()),
+        Some(packages::LOG) => packages::keep_log(arg(2).unwrap_or_default()),
         Some(RESUME) => match reexec::resume(arg(2).unwrap_or_default()) {
             Ok(state) => Init::resume(state, reexec::resume_units(arg(3))).run(),
             Err(kept) => {
@@ -182,11 +182,11 @@ fn boot() -> ! {
     crate::root_layout::lay_out(root);
     sync_accounts();
     install_offered();
-    activate_extensions();
+    activate_packages();
 
     let consent = Consent::make();
     let tests = tests_enabled();
-    let mut init = Init::serving(consent, extensions::Carried::default(), !tests);
+    let mut init = Init::serving(consent, packages::Carried::default(), !tests);
     let _ = init.follow_keymap(false);
 
     if tests {
@@ -269,7 +269,7 @@ struct Init {
     /// `/sbin/init`.
     reexec_due: Option<u64>,
     privd: Supervised,
-    /// The extensions' actions privd read last, as `activation::Actions::from`
+    /// The packages' actions privd read last, as `activation::Actions::from`
     /// names them, unknown while a privd started since reads its own.
     privd_actions: Option<String>,
     /// Readable once a privd started since serving began is ready, before
@@ -306,7 +306,7 @@ impl Init {
     /// Init with privd started and waited for, and remoted started where the
     /// base is paired; no session started yet, the screen to show one when
     /// `wanted`.
-    fn serving(consent: Option<Consent>, units: extensions::Carried, wanted: bool) -> Init {
+    fn serving(consent: Option<Consent>, units: packages::Carried, wanted: bool) -> Init {
         let control = Control::bind()
             .map_err(|why| eprintln!("init: {SOCKET}: {why}"))
             .ok();
@@ -317,7 +317,7 @@ impl Init {
             base: watch_base(),
             reexec_due: None,
             privd: Supervised::new(&PRIVD, None),
-            privd_actions: extension_actions().ok(),
+            privd_actions: package_actions().ok(),
             privd_ready: None,
             retired: Vec::new(),
             remote_ending: None,
@@ -359,7 +359,7 @@ impl Init {
         init
     }
 
-    fn resume(state: State, units: extensions::Carried) -> Init {
+    fn resume(state: State, units: packages::Carried) -> Init {
         // SAFETY: the earlier image kept these descriptors for this one alone.
         let adopt = |fd: RawFd| unsafe { OwnedFd::from_raw(fd) };
         let control = match state.control {
@@ -435,7 +435,7 @@ impl Init {
             base: watch_base(),
             reexec_due: None,
             privd: supervised(&PRIVD, None, state.privd),
-            privd_actions: extension_actions().ok(),
+            privd_actions: package_actions().ok(),
             privd_ready: None,
             retired: Vec::new(),
             remote_ending: None,
@@ -669,7 +669,7 @@ impl Init {
 
     /// Start again what a new base changed: privd, which drains first, and
     /// remoted, or start or stop remoted as the base is paired or not, and
-    /// the extensions' services a new ceiling changes; and re-execute init
+    /// the packages' services a new ceiling changes; and re-execute init
     /// once it may. The sessions stay, and each compositor offers its
     /// person the restart.
     fn step_base(&mut self, now: u64) {
@@ -691,7 +691,7 @@ impl Init {
             if switch.changed(&[slopos_priv_core::INIT]) {
                 self.reexec_due = Some(now);
             }
-            if switch.changed(&[slopos_extension_core::CEILING]) {
+            if switch.changed(&[slopos_package_core::CEILING]) {
                 let session = self.sessions.first_person_runs();
                 self.units.reload(None, now, session);
             }
@@ -711,7 +711,7 @@ impl Init {
         }
     }
 
-    /// [`follow_actions`](Self::follow_actions) once the extensions' services
+    /// [`follow_actions`](Self::follow_actions) once the packages' services
     /// followed the store.
     fn follow_units(&mut self, now: u64) {
         if self.units.take_reread() {
@@ -719,7 +719,7 @@ impl Init {
         }
     }
 
-    /// End the mechanisms of each extension read whose actions no longer run,
+    /// End the mechanisms of each package read whose actions no longer run,
     /// and have privd read the actions again when those it read are not those
     /// that run. One draining, not running or not yet ready reads them as it
     /// starts or once it is.
@@ -747,7 +747,7 @@ impl Init {
             return;
         };
         if self.privd_actions.as_ref() != Some(&actions.from) {
-            println!("init: privd reads the extensions' actions again");
+            println!("init: privd reads the packages' actions again");
             let _ = process::kill(child.pid, slopos_abi::signal::SIGHUP);
             self.privd_actions = Some(actions.from);
         }
@@ -872,7 +872,7 @@ impl Init {
             Command::Reexec => {
                 self.reexec(Some(reply), now);
             }
-            Command::Extensions => {
+            Command::Packages => {
                 let session = self.sessions.first_person_runs();
                 self.units.reload(Some(reply), now, session);
                 self.follow_units(now);
@@ -1067,13 +1067,13 @@ impl Init {
             return true;
         }
         if !reads.units && !self.units.is_empty() {
-            eprintln!("init: the new init cannot read the extensions' services; they end first");
+            eprintln!("init: the new init cannot read the packages' services; they end first");
             self.units.retire(now);
             self.reexec_due = Some(now);
             if let Some(reply) = reply {
                 answer(
                     reply,
-                    "refused: extensions' services end first, then init re-executes",
+                    "refused: packages' services end first, then init re-executes",
                 );
             }
             return true;
@@ -1282,8 +1282,8 @@ fn remote_person() -> Option<Identity> {
     Some(who)
 }
 
-/// What the running extensions' actions were read from.
-fn extension_actions() -> Result<String, String> {
+/// What the running packages' actions were read from.
+fn package_actions() -> Result<String, String> {
     crate::activation::actions().map(|actions| actions.from)
 }
 

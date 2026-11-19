@@ -713,10 +713,10 @@ install_base() {
     done
 
     mkdir_p /usr/share/slopos/privd
-    for file in actions extensions; do
+    for file in actions packages; do
         install_file "${REPO_ROOT}/assets/privd/$file" "/usr/share/slopos/privd/$file"
     done
-    echo "Installed privd policy and extension ceiling: /usr/share/slopos/privd/"
+    echo "Installed privd policy and package ceiling: /usr/share/slopos/privd/"
 
     if [ -f "${REPO_ROOT}/assets/logo.png" ]; then
         install_file "${REPO_ROOT}/assets/logo.png" /usr/share/slopos/wallpapers/default.png

@@ -1,7 +1,7 @@
 //! `/run/init`, where init takes requests to log people in, end, restart,
-//! lock and switch their sessions, to take a change of the extensions and to
+//! lock and switch their sessions, to take a change of the packages and to
 //! re-execute itself; the login tags it gives each session, remoted, privd
-//! and extensions' services and mechanisms, by which their processes are
+//! and packages' services and mechanisms, by which their processes are
 //! found; and the descriptors it hands what it starts.
 
 use slopos_abi::net::{AF_UNIX, SOCK_CLOEXEC, SOCK_STREAM};
@@ -22,7 +22,7 @@ pub const REMOTE: u32 = 1;
 /// The login tag of privd and the mechanisms it runs, which outlive it: a
 /// privd started again takes no exclusive group while its predecessor's run.
 pub const PRIVD: u32 = 2;
-/// The login tag of the copies of init that keep extensions' services' logs.
+/// The login tag of the copies of init that keep packages' services' logs.
 pub const LOGGER: u32 = 3;
 
 /// A paired base's pairing, which remoted dials with and privd's `paired`
@@ -35,31 +35,31 @@ pub fn paired() -> bool {
     std::path::Path::new(PAIRING_CONF).is_file()
 }
 
-/// The login tags of extensions' services: one each, made from its
-/// extension's number and its place among the services it declares, so init
+/// The login tags of packages' services: one each, made from its
+/// package's number and its place among the services it declares, so init
 /// finds a service's processes again once it has re-executed.
 const SERVICE_TAGS: u32 = 0x1_0000;
 
 pub fn service_tag(number: u32, slot: usize) -> Option<u32> {
-    use slopos_extension_core::accounts::{FIRST_UID, LAST_UID};
-    use slopos_extension_core::declare::MAX_SERVICES;
+    use slopos_package_core::accounts::{FIRST_UID, LAST_UID};
+    use slopos_package_core::declare::MAX_SERVICES;
     if !(FIRST_UID..=LAST_UID).contains(&number) || slot >= MAX_SERVICES {
         return None;
     }
     Some(SERVICE_TAGS + (number - FIRST_UID) * MAX_SERVICES as u32 + slot as u32)
 }
 
-/// The login tags of the mechanisms privd runs for extensions' actions, one
-/// per extension, by which init ends them once their extension stops.
+/// The login tags of the mechanisms privd runs for packages' actions, one
+/// per package, by which init ends them once their package stops.
 const ACTION_TAGS: u32 = 0x2_0000;
 
 fn action_tags() -> std::ops::Range<u32> {
-    use slopos_extension_core::accounts::{FIRST_UID, LAST_UID};
+    use slopos_package_core::accounts::{FIRST_UID, LAST_UID};
     ACTION_TAGS..ACTION_TAGS + LAST_UID - FIRST_UID + 1
 }
 
 pub fn action_tag(number: u32) -> Option<u32> {
-    use slopos_extension_core::accounts::FIRST_UID;
+    use slopos_package_core::accounts::FIRST_UID;
     let tag = ACTION_TAGS + number.checked_sub(FIRST_UID)?;
     action_tags().contains(&tag).then_some(tag)
 }
@@ -166,12 +166,12 @@ impl Tasks {
 
     /// Every service's tag some process carries.
     pub fn service_tags(&self) -> Vec<u32> {
-        use slopos_extension_core::accounts::{FIRST_UID, LAST_UID};
-        use slopos_extension_core::declare::MAX_SERVICES;
+        use slopos_package_core::accounts::{FIRST_UID, LAST_UID};
+        use slopos_package_core::declare::MAX_SERVICES;
         self.tags_in(SERVICE_TAGS..SERVICE_TAGS + (LAST_UID - FIRST_UID + 1) * MAX_SERVICES as u32)
     }
 
-    /// Every extension mechanism's tag some process carries.
+    /// Every package mechanism's tag some process carries.
     pub fn action_tags(&self) -> Vec<u32> {
         self.tags_in(action_tags())
     }
@@ -201,7 +201,7 @@ pub mod fds {
     use crate::syscall::RawFd;
     use slopos_priv_core::sessions::LINKS;
 
-    /// Where an extension's service finds the sockets init keeps for it, in
+    /// Where a package's service finds the sockets init keeps for it, in
     /// the order its declaration lists them: `LISTEN_FDS` of them from this
     /// descriptor on, named in `LISTEN_FDNAMES`, `:` between, `tcp-<port>`,
     /// `udp-<port>` or a socket's own name.
@@ -277,9 +277,9 @@ pub enum Command {
     End(u32),
     /// Re-execute `/sbin/init`, keeping its services: uid 0.
     Reexec,
-    /// Start, stop and restart extensions' services as the store and the
+    /// Start, stop and restart packages' services as the store and the
     /// activations now say: uid 0.
-    Extensions,
+    Packages,
     /// Bring the login screen in front, starting it: uid 0, or a person from
     /// their desktop in front.
     Greeter,
@@ -302,7 +302,7 @@ impl Command {
             Command::RestartSession | Command::Restart(_) => "restart-session",
             Command::EndSession | Command::End(_) => "end-session",
             Command::Reexec => "reexec",
-            Command::Extensions => "extensions",
+            Command::Packages => "packages",
             Command::Greeter => "greeter",
             Command::Switch(_) => "switch",
             Command::Login(..) => "login",
@@ -340,7 +340,7 @@ impl Command {
             ["restart-session", t] => Command::Restart(tag(t)?),
             ["end-session", t] => Command::End(tag(t)?),
             ["reexec"] => Command::Reexec,
-            ["extensions"] => Command::Extensions,
+            ["packages"] => Command::Packages,
             ["greeter"] => Command::Greeter,
             ["switch", t] => Command::Switch(tag(t)?),
             ["login", "desktop", name] => Command::Login(At::Desktop, Name::new(name)?),
@@ -434,7 +434,7 @@ fn leaders<'a>(tasks: impl Iterator<Item = &'a UserTaskEntry>) -> Vec<u32> {
 }
 
 /// Every live thread of a mechanism a privd started, carrying [`PRIVD`] or
-/// an extension mechanism's tag, by its never-reused id: an earlier privd,
+/// a package mechanism's tag, by its never-reused id: an earlier privd,
 /// which init started as it did the caller and which starts nothing once it
 /// drains, is none.
 pub fn privd_threads_elsewhere() -> Vec<u32> {

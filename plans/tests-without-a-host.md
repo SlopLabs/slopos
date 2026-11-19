@@ -69,7 +69,7 @@ from.
    a `tests=on` boot of the running kernel, which costs a reboot?
 9. What becomes of the five kernel tests that run in the userland phase?
 10. With the tests base tried live, what of the machine do the tests change
-    (accounts, the extension store, `~/.local`, sessions, the network),
+    (accounts, the package store, `~/.local`, sessions, the network),
     and how is it put back: a RAM root for the run, or a root of their own?
 
 ## How

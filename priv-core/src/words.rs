@@ -13,7 +13,7 @@ pub const ADMIN_NEEDED: &str = "This needs an administrator's password.";
 pub const ASKED_BY: &str = "Asked by";
 pub const RUNS: &str = "Runs";
 pub const IN: &str = "In";
-pub const EXTENSION: &str = "Extension";
+pub const PACKAGE: &str = "Package";
 pub const NONE: &str = "None";
 
 // The dialog's own controls, which no verb may say: what has focus is found by
@@ -112,7 +112,7 @@ pub fn term(text: &str) -> Result<(), &'static str> {
     if text.ends_with(|c: char| c.is_ascii_punctuation()) {
         return Err("a term ends without punctuation");
     }
-    if [ASKED_BY, RUNS, IN, EXTENSION].contains(&text) {
+    if [ASKED_BY, RUNS, IN, PACKAGE].contains(&text) {
         return Err("a term is none of the details' own");
     }
     plain(text)
@@ -162,7 +162,7 @@ pub mod privd {
     pub const ANSWERED_ELSEWHERE: &str =
         "Who can allow this changed while you were asked. Try again.";
     pub const NO_ACCOUNT: &str = "The account that asked no longer exists.";
-    pub const EXTENSION_CHANGED: &str = "The extension that runs this has changed. Try again.";
+    pub const PACKAGE_CHANGED: &str = "The package that runs this has changed. Try again.";
     pub const FAULT: &str = "Something went wrong. Try again in a moment.";
 }
 

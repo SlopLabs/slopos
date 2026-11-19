@@ -280,7 +280,7 @@ fn an_action_run_as_its_requester_stays_under_the_ceiling() {
         "Seal",
         "BootEntry",
         "BaseUpdate",
-        "ExtensionUpdate",
+        "PackageUpdate",
     ] {
         assert_eq!(
             refusal(&text(&format!("Mount {beyond}"), "  allow root\n")).msg,
@@ -298,14 +298,14 @@ fn an_action_run_as_its_requester_stays_under_the_ceiling() {
 }
 
 #[test]
-fn the_ceiling_reaches_no_disk_base_extension_seal_boot_variable_or_identity() {
+fn the_ceiling_reaches_no_disk_base_package_seal_boot_variable_or_identity() {
     use crate::REQUESTER_CEILING;
     assert_eq!(REQUESTER_CEILING & !DELEGABLE, 0);
     for never in [
         caps::POWER,
         caps::RAW_BLOCK,
         caps::BASE_UPDATE,
-        caps::EXTENSION_UPDATE,
+        caps::PACKAGE_UPDATE,
         caps::SEAL,
         caps::BOOT_ENTRY,
         caps::SET_ID,
@@ -528,31 +528,31 @@ fn only_remoted_on_a_paired_base_is_paired() {
 }
 
 #[test]
-fn an_extension_s_program_is_a_principal_only_of_its_own_activation() {
-    use slopos_abi::extension::Label;
+fn a_package_s_program_is_a_principal_only_of_its_own_activation() {
+    use slopos_abi::package::Label;
     let client = "/opt/hello/bin/client";
     let label = Label::new(b"hello", [7; 32]).unwrap();
     let mut policy = Policy::parse(EXAMPLE).unwrap();
     let mut greet = policy.action("org.slopos.net.toggle").unwrap().clone();
-    greet.name = "ext.hello.greet".into();
+    greet.name = "pkg.hello.greet".into();
     greet.allows = vec![Allow {
-        principal: Principal::Extension(client.into(), label),
+        principal: Principal::Package(client.into(), label),
         level: Level::None,
     }];
     assert!(policy.add(greet.clone()));
     assert!(!policy.add(greet), "one name is one action");
-    let greet = policy.action("ext.hello.greet").unwrap();
+    let greet = policy.action("pkg.hello.greet").unwrap();
     let people = one_person();
     for uid in [SESSION_UID, 0, 4242] {
         assert_eq!(
-            greet.admits(&Requester::extension(uid, client, label), &people),
+            greet.admits(&Requester::package(uid, client, label), &people),
             Verdict::Run
         );
     }
     for other in [
-        Requester::extension(SESSION_UID, client, Label::new(b"hello", [8; 32]).unwrap()),
-        Requester::extension(SESSION_UID, client, Label::new(b"other", [7; 32]).unwrap()),
-        Requester::extension(SESSION_UID, "/opt/hello/bin/x", label),
+        Requester::package(SESSION_UID, client, Label::new(b"hello", [8; 32]).unwrap()),
+        Requester::package(SESSION_UID, client, Label::new(b"other", [7; 32]).unwrap()),
+        Requester::package(SESSION_UID, "/opt/hello/bin/x", label),
         Requester::new(SESSION_UID, Some(client), false),
         Requester::new(SESSION_UID, None, false),
     ] {
@@ -560,23 +560,20 @@ fn an_extension_s_program_is_a_principal_only_of_its_own_activation() {
     }
     let install = policy.action("org.slopos.boot.install").unwrap();
     assert_eq!(
-        install.admits(&Requester::extension(0, client, label), &people),
+        install.admits(&Requester::package(0, client, label), &people),
         NO,
-        "uid 0 running an extension's program is no root"
+        "uid 0 running a package's program is no root"
     );
     assert_eq!(
-        asks(
-            install.admits(
-                &Requester::extension(SESSION_UID, client, label)
-                    .reached(Reach::Screen { theirs: true }),
-                &people
-            )
-        )
+        asks(install.admits(
+            &Requester::package(SESSION_UID, client, label).reached(Reach::Screen { theirs: true }),
+            &people
+        ))
         .map(|(k, ..)| k),
         Some(Kind::Confirm),
-        "a person running an extension's program is that person"
+        "a person running a package's program is that person"
     );
-    assert!(!Requester::extension(SESSION_UID, REMOTED, label).is_paired());
+    assert!(!Requester::package(SESSION_UID, REMOTED, label).is_paired());
 }
 
 fn refusal(text: &str) -> PolicyError {
@@ -795,7 +792,7 @@ fn the_shipped_policy_speaks_to_the_person() {
         .collect();
     assert_eq!(
         destructive,
-        ["org.slopos.extension.remove", "org.slopos.install"]
+        ["org.slopos.package.remove", "org.slopos.install"]
     );
     let mut said: Vec<&str> = policy
         .actions()
@@ -908,7 +905,7 @@ fn the_shipped_policy_says_what_the_access_model_does() {
         "org.slopos.kconsole",
         "org.slopos.prof",
         "org.slopos.console.keymap",
-        "org.slopos.extension.",
+        "org.slopos.package.",
     ];
     let login = policy.action("org.slopos.login").unwrap();
     let greeter = Requester::new(slopos_abi::fs::GREETER_UID, Some("/bin/compositor"), false);
@@ -1155,39 +1152,39 @@ fn the_shipped_policy_reads_a_standard_user_s_requests_as_an_administrator_s_to_
 }
 
 #[test]
-fn the_extension_actions_hold_the_store_and_nothing_wider() {
+fn the_package_actions_hold_the_store_and_nothing_wider() {
     let policy = Policy::parse(SHIPPED).unwrap();
     let people = one_person();
     let session = shell(USER);
     let asked = |verdict: Verdict| asks(verdict).is_some();
     let names = [
-        ("org.slopos.extension.install", true, &INSTALL[..]),
+        ("org.slopos.package.install", true, &INSTALL[..]),
         (
-            "org.slopos.extension.install-signed",
+            "org.slopos.package.install-signed",
             false,
-            &["install-signed", "/x.ext"],
+            &["install-signed", "/x.pkg"],
         ),
         (
-            "org.slopos.extension.trust",
+            "org.slopos.package.trust",
             true,
             &["key", "remove", "SHA256:x"],
         ),
-        ("org.slopos.extension.manage", true, &["rollback", "x"]),
+        ("org.slopos.package.manage", true, &["rollback", "x"]),
     ];
-    let removing = [("org.slopos.extension.remove", true, &["remove", "x"][..])];
+    let removing = [("org.slopos.package.remove", true, &["remove", "x"][..])];
     let config = [
         (
-            "org.slopos.extension.config",
+            "org.slopos.package.config",
             true,
             &["config", "install", "x", "x.conf", "/x"][..],
         ),
         (
-            "org.slopos.extension.config-signed",
+            "org.slopos.package.config-signed",
             false,
             &["config", "apply", "/x"],
         ),
     ];
-    let store = caps::EXTENSION_UPDATE | caps::SEAL;
+    let store = caps::PACKAGE_UPDATE | caps::SEAL;
     for (caps, (name, for_session, args)) in names
         .map(|n| (store, n))
         .into_iter()
@@ -1195,20 +1192,20 @@ fn the_extension_actions_hold_the_store_and_nothing_wider() {
         .chain(removing.map(|n| (store | caps::DAC_OVERRIDE, n)))
     {
         let action = policy.action(name).unwrap();
-        assert_eq!(action.program, "/bin/extctl", "{name}");
+        assert_eq!(action.program, "/bin/pkgctl", "{name}");
         assert_eq!(action.caps, caps, "{name}");
         assert_eq!(
             asked(action.admits(&session, &people)),
             for_session,
             "{name}"
         );
-        assert_eq!(action.exclusive_group(), Some("extensions"), "{name}");
+        assert_eq!(action.exclusive_group(), Some("packages"), "{name}");
         assert!(action.accepts(&args_of(args)), "{name}");
     }
-    let manage = policy.action("org.slopos.extension.manage").unwrap();
+    let manage = policy.action("org.slopos.package.manage").unwrap();
     assert!(!manage.accepts(&args_of(&["install", "x"])));
     assert!(!manage.accepts(&args_of(&["remove", "x"])));
-    let remove = policy.action("org.slopos.extension.remove").unwrap();
+    let remove = policy.action("org.slopos.package.remove").unwrap();
     assert!(!remove.accepts(&args_of(&["remove", "x", "y"])));
     assert!(!remove.accepts(&args_of(&["--root", "/mnt", "remove", "x"])));
     assert_eq!(
@@ -1216,28 +1213,28 @@ fn the_extension_actions_hold_the_store_and_nothing_wider() {
         [("Removes".to_string(), b"x".to_vec())]
     );
     for name in [
-        "org.slopos.extension.config",
-        "org.slopos.extension.config-signed",
+        "org.slopos.package.config",
+        "org.slopos.package.config-signed",
     ] {
         let action = policy.action(name).unwrap();
         assert!(!action.accepts(&args_of(&["config", "edit", "x", "x.conf"])));
         assert!(!action.accepts(&args_of(&["--root", "/mnt", "disable", "x"])));
     }
     assert_eq!(
-        policy.action("org.slopos.rescue").unwrap().caps & caps::EXTENSION_UPDATE,
-        caps::EXTENSION_UPDATE
+        policy.action("org.slopos.rescue").unwrap().caps & caps::PACKAGE_UPDATE,
+        caps::PACKAGE_UPDATE
     );
 }
 
 const INSTALL: [&str; 15] = [
-    "install", "/x.ext", "3f9c", "name", "commands", "signer", "nobody", "grant", "Power",
+    "install", "/x.pkg", "3f9c", "name", "commands", "signer", "nobody", "grant", "Power",
     "unasked", "-", "users", "x", "commands", "x,y",
 ];
 
 #[test]
 fn an_install_names_what_it_grants_by_position_and_takes_only_its_line() {
     let policy = Policy::parse(SHIPPED).unwrap();
-    let install = policy.action("org.slopos.extension.install").unwrap();
+    let install = policy.action("org.slopos.package.install").unwrap();
     let terms: Vec<(String, Vec<u8>)> = install.terms_of(&args_of(&INSTALL));
     let shown: Vec<(&str, &[u8])> = terms
         .iter()
@@ -1261,7 +1258,7 @@ fn an_install_names_what_it_grants_by_position_and_takes_only_its_line() {
         .filter(|w| !["signer", "nobody"].contains(w))
         .collect();
     assert!(!install.accepts(&args_of(&unsigned)));
-    assert!(!install.accepts(&args_of(&["install", "/x.ext"])));
+    assert!(!install.accepts(&args_of(&["install", "/x.pkg"])));
     let mut more = INSTALL.to_vec();
     more.push("x");
     assert!(!install.accepts(&args_of(&more)));

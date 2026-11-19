@@ -1,7 +1,7 @@
 use slopos_userland as _;
 
 use slopos_abi::fs::DEFAULT_PATH;
-use slopos_extension_core::OFFERED;
+use slopos_package_core::OFFERED;
 use slopos_slibc::test_harness::note;
 use slopos_tls_core::pem;
 use slopos_tls_core::server::{Server, ServerConfig};

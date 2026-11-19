@@ -11,7 +11,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
-use slopos_abi::fs::{BASEFS_MAGIC, EXTENSION_MAGIC, O_NOFOLLOW, ST_RDONLY, UserStatfs};
+use slopos_abi::fs::{BASEFS_MAGIC, O_NOFOLLOW, PACKAGE_MAGIC, ST_RDONLY, UserStatfs};
 use slopos_abi::syscall::posix::{O_NOCTTY, O_NONBLOCK};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,8 +19,8 @@ pub enum Refusal {
     /// One of the system's own files, which nothing changes while it runs:
     /// the base's, or the install medium's, which the kernel serves alike.
     System,
-    /// One of an extension's files, which change only with the extension.
-    Extension,
+    /// One of a package's files, which change only with the package.
+    Package,
     /// On a disk mounted read-only, or one that is write-protected.
     ReadOnlyDisk,
     /// Sealed, which a person reads as locked against changes.
@@ -32,7 +32,7 @@ pub enum Refusal {
 impl Refusal {
     pub const ALL: [Refusal; 5] = [
         Refusal::System,
-        Refusal::Extension,
+        Refusal::Package,
         Refusal::ReadOnlyDisk,
         Refusal::Sealed,
         Refusal::Denied,
@@ -47,12 +47,12 @@ impl Refusal {
     }
 
     /// Why opening `path` to read it was refused. Only permissions refuse a
-    /// read; the system's and an extension's files are told apart because
+    /// read; the system's and a package's files are told apart because
     /// no one changes theirs.
     pub fn reading(path: &Path) -> Refusal {
         match filesystem(path).map(|fs| fs.f_type) {
             Some(BASEFS_MAGIC) => Refusal::System,
-            Some(EXTENSION_MAGIC) => Refusal::Extension,
+            Some(PACKAGE_MAGIC) => Refusal::Package,
             _ => Refusal::Denied,
         }
     }
@@ -69,7 +69,7 @@ impl Refusal {
         };
         match fs.f_type {
             BASEFS_MAGIC => Refusal::System,
-            EXTENSION_MAGIC => Refusal::Extension,
+            PACKAGE_MAGIC => Refusal::Package,
             _ if fs.f_flags & ST_RDONLY != 0 => Refusal::ReadOnlyDisk,
             _ if sealed(path) => Refusal::Sealed,
             _ => Refusal::Denied,

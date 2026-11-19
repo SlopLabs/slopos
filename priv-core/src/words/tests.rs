@@ -112,9 +112,9 @@ fn the_dialog_s_own_words_hold_to_the_rules() {
         ASKED_BY,
         RUNS,
         IN,
-        EXTENSION,
+        PACKAGE,
         crate::consent::UNIDENTIFIED,
-        &crate::consent::named_extension("hello"),
+        &crate::consent::named_package("hello"),
         &crate::consent::password_for("alice"),
     ] {
         assert_eq!(label(said), Ok(()), "{said}");
@@ -195,7 +195,7 @@ fn every_refusal_speaks_to_the_person() {
         privd::UNCHECKED,
         privd::ANSWERED_ELSEWHERE,
         privd::NO_ACCOUNT,
-        privd::EXTENSION_CHANGED,
+        privd::PACKAGE_CHANGED,
         privd::FAULT,
         crate::consent::WRONG_PASSWORD,
     ]

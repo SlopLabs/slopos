@@ -1,6 +1,6 @@
 //! The people a machine knows, as data: the accounts record the store at
 //! [`slopos_abi::fs::ACCOUNTS_STORE`] keeps, the user database rendered from
-//! it and from extensions' users — `/etc/passwd`, `/etc/group` and
+//! it and from packages' users — `/etc/passwd`, `/etc/group` and
 //! `/etc/shadow` — and passwords as Argon2id hashes. `/bin/users`,
 //! `/sbin/authcheck`, the installer and init do the I/O.
 //!
@@ -49,7 +49,7 @@ pub fn valid_name(name: &str) -> bool {
         && !RESERVED.contains(&name)
 }
 
-/// A system user the database lists beside the people: an extension's.
+/// A system user the database lists beside the people: a package's.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Entry {
     pub name: String,

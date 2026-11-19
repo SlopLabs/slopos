@@ -20,7 +20,7 @@ pub const SET_ID: u64 = 1 << 15;
 pub const DAC_OVERRIDE: u64 = 1 << 16;
 pub const SCHED_HIGH: u64 = 1 << 17;
 pub const BASE_UPDATE: u64 = 1 << 18;
-pub const EXTENSION_UPDATE: u64 = 1 << 19;
+pub const PACKAGE_UPDATE: u64 = 1 << 19;
 pub const SEAT_SWITCH: u64 = 1 << 20;
 
 /// What every program holds.

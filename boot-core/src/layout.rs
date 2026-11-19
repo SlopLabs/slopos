@@ -79,7 +79,7 @@ pub const MEDIUM_NOTICE: &str = "boot/NOTICE.md";
 /// The GPT disk GUID the medium's image was built with, spelled out: the
 /// disk the installer never offers, however the loader was started.
 pub const MEDIUM_DISK_GUID: &str = "boot/disk-guid";
-/// The images the medium offers, `<name>.ext` beside its sidecar: the apps'
+/// The images the medium offers, `<name>.pkg` beside its sidecar: the apps'
 /// in the archive, the toolchain's on the payload.
 pub const MEDIUM_IMAGES: &str = "images";
 

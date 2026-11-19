@@ -99,7 +99,7 @@ impl Medium {
                 return Err(format!("{} is missing", medium.path(file).display()));
             }
         }
-        let toolchain = format!("{}/{}.ext", layout::MEDIUM_IMAGES, root::TOOLCHAIN);
+        let toolchain = format!("{}/{}.pkg", layout::MEDIUM_IMAGES, root::TOOLCHAIN);
         let sidecar = format!("{}/{}.meta", layout::MEDIUM_IMAGES, root::TOOLCHAIN);
         for (tree, needs) in [
             (toolchain.as_str(), sidecar.as_str()),

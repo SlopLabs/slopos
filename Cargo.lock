@@ -369,27 +369,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "slopos-extension"
-version = "0.1.0"
-dependencies = [
- "slopos-extension-core",
-]
-
-[[package]]
-name = "slopos-extension-core"
-version = "0.1.0"
-dependencies = [
- "slopos-abi",
- "slopos-accounts-core",
- "slopos-boot-core",
- "slopos-ext4-core",
- "slopos-priv-core",
- "slopos-slibc-core",
- "slopos-tls-core",
- "slopos-verity-core",
-]
-
-[[package]]
 name = "slopos-fat-core"
 version = "0.1.0"
 
@@ -560,6 +539,27 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "slopos-package"
+version = "0.1.0"
+dependencies = [
+ "slopos-package-core",
+]
+
+[[package]]
+name = "slopos-package-core"
+version = "0.1.0"
+dependencies = [
+ "slopos-abi",
+ "slopos-accounts-core",
+ "slopos-boot-core",
+ "slopos-ext4-core",
+ "slopos-priv-core",
+ "slopos-slibc-core",
+ "slopos-tls-core",
+ "slopos-verity-core",
 ]
 
 [[package]]
@@ -781,7 +781,6 @@ dependencies = [
  "slopos-cpufreq-core",
  "slopos-editor-core",
  "slopos-ext4-core",
- "slopos-extension-core",
  "slopos-fat-core",
  "slopos-fate-core",
  "slopos-font",
@@ -791,6 +790,7 @@ dependencies = [
  "slopos-installer-core",
  "slopos-keymap-core",
  "slopos-net-core",
+ "slopos-package-core",
  "slopos-priv-core",
  "slopos-protocol",
  "slopos-remote-core",

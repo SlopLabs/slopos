@@ -9,8 +9,8 @@ pub fn to_open(what: &str, refusal: Refusal) -> String {
         Refusal::System => {
             format!("You don't have permission to open {what}, which is part of the system.")
         }
-        Refusal::Extension => {
-            format!("You don't have permission to open {what}, which is part of an extension.")
+        Refusal::Package => {
+            format!("You don't have permission to open {what}, which is part of a package.")
         }
         Refusal::ReadOnlyDisk | Refusal::Sealed | Refusal::Denied => {
             format!("You don't have permission to open {what}.")

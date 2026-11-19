@@ -7,8 +7,8 @@
 //! A generation is numbered from 1 and never renumbered within a boot, and
 //! its number is the high half of every inode it serves, so an inode names
 //! its generation for good: a file, a mapping or a program identity of one
-//! generation never reads another's bytes. An extension's activation
-//! ([`crate::extension`]) numbers its inodes the same way.
+//! generation never reads another's bytes. A package's activation
+//! ([`crate::package`]) numbers its inodes the same way.
 
 pub(crate) mod activate;
 mod index;
@@ -135,7 +135,7 @@ pub fn is_base(fs: &dyn FileSystem) -> bool {
 pub fn program_of(fs: &dyn FileSystem, inode: InodeId) -> Program {
     match core::num::NonZeroU64::new(inode) {
         Some(inode) if is_base(fs) => Program::Base(inode),
-        Some(inode) if crate::extension::is_activation(fs) => Program::Extension(inode),
+        Some(inode) if crate::package::is_activation(fs) => Program::Package(inode),
         _ => Program::Other,
     }
 }
@@ -147,8 +147,8 @@ pub fn program_of(fs: &dyn FileSystem, inode: InodeId) -> Program {
 pub fn program_path(program: Program, buf: &mut [u8]) -> VfsResult<usize> {
     match program {
         Program::Base(inode) => BASE_FS.path_of(inode.get(), buf),
-        Program::Extension(inode) => {
-            crate::extension::path_of(generation_of(inode.get()), inode.get(), buf)
+        Program::Package(inode) => {
+            crate::package::path_of(generation_of(inode.get()), inode.get(), buf)
         }
         Program::Other => Err(VfsError::NotFound),
     }

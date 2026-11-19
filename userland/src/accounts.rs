@@ -1,7 +1,7 @@
 //! The accounts store on a root and the user database written from it. The
 //! record of the people goes in as sealed generations in a directory only uid
 //! 0 reads ([`crate::sealed`]); `/etc/passwd`, `/etc/group` and `/etc/shadow`
-//! are rendered from it and from the extensions' users, sealed too. A writer
+//! are rendered from it and from the packages' users, sealed too. A writer
 //! holds the store's lock across reading the record and writing the
 //! database, so the last one written is the newest of both; a reader takes
 //! nothing, since nothing it can see is half made.
@@ -11,7 +11,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use slopos_abi::fs::{ACCOUNTS_STORE, EXTENSION_STORE, O_RDWR, PERSON_UIDS, RAMFS_MAGIC};
+use slopos_abi::fs::{ACCOUNTS_STORE, O_RDWR, PACKAGE_STORE, PERSON_UIDS, RAMFS_MAGIC};
 use slopos_abi::signal::{SIGHUP, SIGINT, SIGKILL, SIGQUIT, SIGTERM, UserSigaction};
 use slopos_abi::syscall::{O_CLOEXEC, POLLHUP, POLLIN, UserPollFd};
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
@@ -19,7 +19,7 @@ use slopos_accounts_core::{Accounts, Entry};
 use slopos_slibc_core::passwd::{BASE_GROUP, BASE_PASSWD, Group, Passwd, lines};
 use slopos_tls_core::ct::wipe;
 
-use crate::apps::extctl::store::Store as Extensions;
+use crate::apps::pkgctl::store::Store as Packages;
 use crate::sealed::{
     SMALL_MAX, lock, newest, open_dir, replace_sealed, set_sealed, shown, unsealed,
 };
@@ -174,9 +174,9 @@ impl Store {
         }
     }
 
-    /// Write the user database the record and the extensions' records
+    /// Write the user database the record and the packages' records
     /// describe: `/etc/shadow` first and from the record alone, so no
-    /// extension's record keeps a changed password's old hash in place.
+    /// package's record keeps a changed password's old hash in place.
     pub fn sync(&self) -> Result<(), String> {
         debug_assert!(self._lock.is_some(), "a writer's store");
         let accounts = self.accounts()?;
@@ -184,7 +184,7 @@ impl Store {
             replace_sealed(&self.top.join(path), text.as_bytes(), mode)
         };
         let shadow = write(SHADOW, slopos_accounts_core::shadow(&accounts), 0o600);
-        let listed = extension_entries(&self.top).and_then(|others| {
+        let listed = package_entries(&self.top).and_then(|others| {
             write(
                 PASSWD,
                 slopos_accounts_core::passwd(&accounts, &others),
@@ -318,18 +318,18 @@ pub fn database(path: &str, base: &str) -> Vec<u8> {
         .unwrap_or_else(|| base.as_bytes().to_vec())
 }
 
-/// The installed extensions' users, none on a root without the store.
-fn extension_entries(top: &Path) -> Result<Vec<Entry>, String> {
-    Ok(slopos_extension_core::accounts::entries(
-        &extension_records(top)?,
-    ))
+/// The installed packages' users, none on a root without the store.
+fn package_entries(top: &Path) -> Result<Vec<Entry>, String> {
+    Ok(slopos_package_core::accounts::entries(&package_records(
+        top,
+    )?))
 }
 
-fn extension_records(top: &Path) -> Result<Vec<slopos_extension_core::record::Record>, String> {
-    if !under(top, EXTENSION_STORE).is_dir() {
+fn package_records(top: &Path) -> Result<Vec<slopos_package_core::record::Record>, String> {
+    if !under(top, PACKAGE_STORE).is_dir() {
         return Ok(Vec::new());
     }
-    let store = Extensions::open_at(top, false)?;
+    let store = Packages::open_at(top, false)?;
     let mut out = Vec::new();
     for name in store.names()? {
         out.extend(store.record(&name)?);
@@ -337,10 +337,10 @@ fn extension_records(top: &Path) -> Result<Vec<slopos_extension_core::record::Re
     Ok(out)
 }
 
-/// Every installed extension's name and each name its record keeps a uid
+/// Every installed package's name and each name its record keeps a uid
 /// for, which no person takes.
-pub fn extension_users(top: &Path) -> Result<Vec<String>, String> {
-    Ok(extension_records(top)?
+pub fn package_users(top: &Path) -> Result<Vec<String>, String> {
+    Ok(package_records(top)?
         .into_iter()
         .flat_map(|record| {
             let installed = record.current.is_some().then(|| record.name.clone());

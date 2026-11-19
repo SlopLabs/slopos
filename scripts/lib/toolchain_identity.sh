@@ -20,7 +20,7 @@ tp_toolchain_identity() {
 # needs. The host's owned sysroot, which `make_slopos_sysroot.sh` stamps,
 # passes; anything else carries no identity to hold.
 tp_hold_toolchain() {
-    local release="$2/.extension/release" have="" want key value
+    local release="$2/.package/release" have="" want key value
     want="$(tp_toolchain_identity "$1")"
     if [ ! -f "$release" ]; then
         [ ! -f "$2/$TP_STAMP_NAME" ] || return 0

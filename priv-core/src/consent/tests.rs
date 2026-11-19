@@ -21,7 +21,7 @@ fn ask() -> Ask {
         detail: Some("The kernel that starts by default stays.".into()),
         verb: "Install".into(),
         destructive: false,
-        extension: None,
+        package: None,
         terms: vec![],
     }
 }
@@ -101,7 +101,7 @@ fn a_question_and_its_answer_round_trip() {
 fn every_field_a_question_names_round_trips_and_ready_names_a_version() {
     let full = Ask {
         destructive: true,
-        extension: Some("act".into()),
+        package: Some("act".into()),
         icon: Some("/opt/act/share/slopos/icons/act.png".into()),
         terms: vec![
             ("Installs".into(), b"act".to_vec()),
@@ -186,7 +186,7 @@ fn what_names_the_app_is_held_to_its_shape() {
             ..ask()
         },
         Ask {
-            extension: Some("Act".into()),
+            package: Some("Act".into()),
             ..ask()
         },
         Ask {

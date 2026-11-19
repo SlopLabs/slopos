@@ -1,8 +1,8 @@
 //! `/sbin/privd` — runs a named action's mechanism, the base program the
-//! sealed policy names or an enabled extension's program its activation
+//! sealed policy names or an enabled package's program its activation
 //! declares, as a fresh child holding what the action names and nothing of
-//! its requester's but the descriptors it sent. An extension's mechanism runs
-//! as the extension's first user.
+//! its requester's but the descriptors it sent. A package's mechanism runs
+//! as the package's first user.
 //!
 //! Who asks is what the kernel recorded when the connection was made: the
 //! uid, a pidfd and the program; who that uid is, the accounts record says
@@ -10,7 +10,7 @@
 //! requester whose process has exited is refused, before consent and after.
 //! A password is checked by `/sbin/authcheck`, never here.
 //!
-//! `SIGHUP` has it read the extensions' actions again, as init asks when they
+//! `SIGHUP` has it read the packages' actions again, as init asks when they
 //! change; a request reads the policy as it stands when the request comes.
 //!
 //! `SIGTERM` drains it, as init asks when a new base changes privd, its
@@ -38,18 +38,18 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
-use slopos_abi::extension::Label;
 use slopos_abi::fs::UserFsStat;
 use slopos_abi::net::{AF_UNIX, SOCK_CLOEXEC, SOCK_STREAM};
+use slopos_abi::package::Label;
 use slopos_abi::signal::{SIGHUP, SIGINT, SIGPIPE, SIGQUIT, SIGTERM, sig_bit};
 use slopos_abi::syscall::{
     F_GETFD, MSG_NOSIGNAL, O_CLOEXEC, O_NONBLOCK, POLLHUP, POLLIN, POLLOUT, UserPollFd,
 };
 use slopos_abi::task::{TASK_FLAG_USER_MODE, TaskPriority};
-use slopos_extension_core::declare::mount_point;
+use slopos_package_core::declare::mount_point;
 use slopos_priv_core::consent::{
-    Ask, EXPIRY_MS, Kind, Refusal, Secret, WRONG_PASSWORD, icon_path, named_extension,
-    password_for, valid_app,
+    Ask, EXPIRY_MS, Kind, Refusal, Secret, WRONG_PASSWORD, icon_path, named_package, password_for,
+    valid_app,
 };
 use slopos_priv_core::policy::{Principal, REMOTED};
 use slopos_priv_core::sessions::LINKS;
@@ -98,7 +98,7 @@ struct Admitted {
 
 struct Origin {
     action: String,
-    extension: String,
+    package: String,
     generation: u64,
     login: u32,
 }
@@ -136,16 +136,13 @@ impl Daemon {
     }
 
     fn reload(&self) {
-        let fresh = self
-            .base
-            .clone()
-            .map(|base| Arc::new(with_extensions(base)));
+        let fresh = self.base.clone().map(|base| Arc::new(with_packages(base)));
         *self
             .loaded
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = fresh;
         self.kept.clear();
-        log!("privd: read the extensions' actions again");
+        log!("privd: read the packages' actions again");
     }
 
     fn inherited_runs(&self) -> bool {
@@ -197,7 +194,7 @@ pub fn privd_main() -> ! {
         log!("privd: {why}; every request will be refused");
     }
     let daemon = Daemon {
-        loaded: Mutex::new(base.clone().map(|base| Arc::new(with_extensions(base)))),
+        loaded: Mutex::new(base.clone().map(|base| Arc::new(with_packages(base)))),
         base,
         paired: init_control::paired(),
         consent,
@@ -343,12 +340,12 @@ fn base_policy() -> Result<Policy, String> {
     Ok(policy.for_boot(crate::privd::on_the_medium()))
 }
 
-/// An extension's own program needs no check here: it stands as a principal
+/// A package's own program needs no check here: it stands as a principal
 /// only while it maps nothing from outside the base and its activation.
-fn with_extensions(mut policy: Policy) -> Loaded {
+fn with_packages(mut policy: Policy) -> Loaded {
     let mut origins = Vec::new();
     let actions = crate::activation::actions().unwrap_or_else(|why| {
-        log!("privd: no extension's actions: {why}");
+        log!("privd: no package's actions: {why}");
         Default::default()
     });
     for skipped in actions.skipped {
@@ -357,13 +354,13 @@ fn with_extensions(mut policy: Policy) -> Loaded {
     for loaded in actions.loaded {
         let name = loaded.action.name.clone();
         if let Err(why) = static_principals(&loaded.action) {
-            log!("privd: {}: {why}", loaded.extension);
+            log!("privd: {}: {why}", loaded.package);
         } else if !policy.add(loaded.action) {
-            log!("privd: {}: {name} is an action already", loaded.extension);
+            log!("privd: {}: {name} is an action already", loaded.package);
         } else {
             origins.push(Origin {
                 action: name,
-                extension: loaded.extension,
+                package: loaded.package,
                 generation: loaded.generation,
                 login: loaded.login,
             });
@@ -381,7 +378,7 @@ fn static_principals(action: &Action) -> Result<(), String> {
             | Principal::Greeter
             | Principal::User
             | Principal::Admin
-            | Principal::Extension(..) => continue,
+            | Principal::Package(..) => continue,
         };
         let image = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
         if elf_interpreted(&image) != Some(false) {
@@ -419,15 +416,15 @@ struct Peer {
 #[derive(Clone, PartialEq, Eq)]
 enum Attested {
     Base(String),
-    /// A program of an extension's activation, by its path at `/opt/<name>`.
-    Extension(String, Label),
+    /// A program of a package's activation, by its path at `/opt/<name>`.
+    Package(String, Label),
     Other,
 }
 
 impl Attested {
     fn path(&self) -> Option<&str> {
         match self {
-            Attested::Base(path) | Attested::Extension(path, _) => Some(path),
+            Attested::Base(path) | Attested::Package(path, _) => Some(path),
             Attested::Other => None,
         }
     }
@@ -441,14 +438,14 @@ fn fault(said: &str, why: impl std::fmt::Display) -> Reply {
 fn attested(fd: &OwnedFd) -> Result<Attested, String> {
     // Label first: a program that stops holding never holds again, so one
     // that lapses between the two reads answers no path.
-    let label = net::peer_extension(fd.raw()).map_err(|e| format!("SO_PEEREXTENSION: {e}"))?;
+    let label = net::peer_package(fd.raw()).map_err(|e| format!("SO_PEERPACKAGE: {e}"))?;
     let Some(path) = net::peer_program(fd.raw()).map_err(|e| format!("SO_PEERPROGRAM: {e}"))?
     else {
         return Ok(Attested::Other);
     };
     let path = String::from_utf8(path).map_err(|_| "SO_PEERPROGRAM: not UTF-8".to_owned())?;
     Ok(match label {
-        Some(label) => Attested::Extension(path, label),
+        Some(label) => Attested::Package(path, label),
         None => Attested::Base(path),
     })
 }
@@ -480,7 +477,7 @@ impl Peer {
 
     fn requester(&self, paired: bool) -> Requester<'_> {
         match &self.program {
-            Attested::Extension(path, label) => Requester::extension(self.uid, path, *label),
+            Attested::Package(path, label) => Requester::package(self.uid, path, *label),
             _ => Requester::new(self.uid, self.base(), paired),
         }
     }
@@ -903,7 +900,7 @@ fn run(
                 session,
                 parent,
                 action: action.name.clone(),
-                origin: origin.map(|o| (o.extension.clone(), o.generation)),
+                origin: origin.map(|o| (o.package.clone(), o.generation)),
                 kind: question.kind,
                 command: command.clone(),
                 cwd: cwd.clone(),
@@ -919,7 +916,7 @@ fn run(
             let by = match (reach, link) {
                 (Reach::Terminal, _) => {
                     let runs_it = origin
-                        .map(|o| named_extension(&o.extension))
+                        .map(|o| named_package(&o.package))
                         .filter(|runs_it| ask.app.as_ref() != Some(runs_it));
                     let headline = ask.headline();
                     let about = match runs_it {
@@ -943,8 +940,8 @@ fn run(
     let _claim = claim(daemon, action)?;
     still_wanted(peer, conn, request.id)?;
     if let Some(origin) = origin {
-        crate::activation::holds(&origin.extension, origin.generation, &action.program)
-            .map_err(|why| fault(said::EXTENSION_CHANGED, why))?;
+        crate::activation::holds(&origin.package, origin.generation, &action.program)
+            .map_err(|why| fault(said::PACKAGE_CHANGED, why))?;
     }
     let runs_as = match action.runs_as {
         RunsAs::Uid(uid) => Identity {
@@ -1006,12 +1003,12 @@ fn ask_about(
         detail: action.detail.clone(),
         verb: action.verb().to_owned(),
         destructive: action.destructive,
-        extension: origin.map(|o| o.extension.clone()),
+        package: origin.map(|o| o.package.clone()),
         terms,
     }
 }
 
-/// An extension's program is named as its extension, with neither a name nor
+/// A package's program is named as its package, with neither a name nor
 /// an icon its own entries could borrow from another app.
 fn named(program: &Attested) -> (Option<String>, Option<String>) {
     match program {
@@ -1028,9 +1025,9 @@ fn named(program: &Attested) -> (Option<String>, Option<String>) {
                 (file.map(str::to_owned), None)
             }
         },
-        Attested::Extension(_, label) => {
-            let extension = String::from_utf8_lossy(label.name());
-            (Some(named_extension(&extension)), None)
+        Attested::Package(_, label) => {
+            let package = String::from_utf8_lossy(label.name());
+            (Some(named_package(&package)), None)
         }
         Attested::Other => (None, None),
     }
@@ -1247,7 +1244,7 @@ fn requester_identity(
 
 fn spawn(
     action: &Action,
-    extension: Option<&Origin>,
+    package: Option<&Origin>,
     uid: u32,
     runs_as: &Identity,
     args: &[Vec<u8>],
@@ -1260,8 +1257,8 @@ fn spawn(
     for arg in args {
         argv.push(CString::new(arg.as_slice()).map_err(|_| Reply::denied(said::NOT_THAT_WAY))?);
     }
-    let path = match extension {
-        Some(origin) => format!("{MECHANISM_PATH}:{}/bin", mount_point(&origin.extension)),
+    let path = match package {
+        Some(origin) => format!("{MECHANISM_PATH}:{}/bin", mount_point(&origin.package)),
         None => MECHANISM_PATH.to_owned(),
     };
     let env = [

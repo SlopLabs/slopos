@@ -175,7 +175,7 @@ impl Identity {
         }
     }
 
-    /// The first person, whom an extension's session service and the wheel
+    /// The first person, whom a package's session service and the wheel
     /// run as, as the record names them.
     pub fn first_person() -> Identity {
         let record = crate::accounts::Store::read(std::path::Path::new("/")).accounts();
@@ -214,7 +214,7 @@ impl Identity {
     }
 }
 
-/// What an extension's session service finds in its environment beside its
+/// What a package's session service finds in its environment beside its
 /// own, the first person's.
 pub fn session_env() -> Vec<String> {
     let mut env = Identity::first_person().env();

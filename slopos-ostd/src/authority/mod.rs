@@ -136,13 +136,13 @@ pub enum Capability {
     /// is as much as writing the base. Deletion condition: dies when a base
     /// is activated only from a signed image the kernel checks itself.
     BaseUpdate,
-    /// Activating and deactivating an extension: `ext_activate` and
-    /// `ext_deactivate`. The kernel takes the caller's word for an image's
+    /// Activating and deactivating a package: `pkg_activate` and
+    /// `pkg_deactivate`. The kernel takes the caller's word for an image's
     /// digest and attests its programs by it, so this is as much as writing
     /// what privd's program identity names under `/opt`. Its holder stores
     /// whole images, so no per-process `DiskBlocks` ceiling binds it.
     /// Deletion condition: as `BaseUpdate`'s.
-    ExtensionUpdate,
+    PackageUpdate,
     /// Handing the screen and input seats from the session in front to
     /// another: `seat_switch`. The seats otherwise refuse an equal rank, so
     /// this is init's choice of whose desktop the person at the machine sees
@@ -181,7 +181,7 @@ impl Capability {
             Self::DacOverride => caps::DAC_OVERRIDE,
             Self::SchedHigh => caps::SCHED_HIGH,
             Self::BaseUpdate => caps::BASE_UPDATE,
-            Self::ExtensionUpdate => caps::EXTENSION_UPDATE,
+            Self::PackageUpdate => caps::PACKAGE_UPDATE,
             Self::SeatSwitch => caps::SEAT_SWITCH,
         }
     }
@@ -219,7 +219,7 @@ impl Capability {
             Self::DacOverride => "DacOverride",
             Self::SchedHigh => "SchedHigh",
             Self::BaseUpdate => "BaseUpdate",
-            Self::ExtensionUpdate => "ExtensionUpdate",
+            Self::PackageUpdate => "PackageUpdate",
             Self::SeatSwitch => "SeatSwitch",
         }
     }
@@ -250,7 +250,7 @@ impl Capability {
         Self::DacOverride,
         Self::SchedHigh,
         Self::BaseUpdate,
-        Self::ExtensionUpdate,
+        Self::PackageUpdate,
         Self::SeatSwitch,
     ];
 }

@@ -1,1 +1,0 @@
-../../../.agents/skills/slopos-extensions/SKILL.md

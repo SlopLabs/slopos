@@ -53,7 +53,7 @@ members = [
   "accounts-core",
   "settings-core",
   "settings-app",
-  "extension-core",
+  "package-core",
   "verity-core",
   "shell-core",
   "editor-core",
@@ -68,7 +68,7 @@ members = [
   "hermetic",
   "verification",
   "tools/bootdisk",
-  "tools/extension",
+  "tools/package",
   "tools/icons",
   "tools/initramfs",
   "tools/kallsyms",
@@ -174,7 +174,7 @@ slopos-boot-core = { path = "boot-core" }
 slopos-accounts-core = { path = "accounts-core" }
 slopos-settings-core = { path = "settings-core" }
 slopos-settings-app = { path = "settings-app" }
-slopos-extension-core = { path = "extension-core" }
+slopos-package-core = { path = "package-core" }
 slopos-shell-core = { path = "shell-core" }
 slopos-editor-core = { path = "editor-core" }
 slopos-shooter-core = { path = "shooter-core" }

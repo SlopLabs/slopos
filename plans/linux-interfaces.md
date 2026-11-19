@@ -164,7 +164,7 @@ Both exist only because the tests kernel starts the userland tests.
 | `caps_drop`, `caps_get` | One 64-bit mask per process, 21 bits, dropped for good with no privilege. `capset` and `capget` carry three sets per thread with Linux's bit meanings; SlopOS's mask at 125 and 126 is another operation at a Linux number, and a `CapEff:` line in `status` misleads the same way |
 | `base_activate` | The source is an archive in memory, every base mount moves in one step, the interface is checked and a generation comes back. `mount(2)` takes one target |
 | `base_monitor` | Linux's nearest, `poll` on `/proc/mounts`, wakes for every mount and keeps no mark per reader |
-| `ext_activate`, `ext_deactivate` | A descriptor and a digest, a pinned mount replaced in one step, and the label `SO_PEEREXTENSION` answers |
+| `pkg_activate`, `pkg_deactivate` | A descriptor and a digest, a pinned mount replaced in one step, and the label `SO_PEERPACKAGE` answers |
 | `sys_info`, shrunk | The boot's flags as the kernel decided them, the base-interface range it serves, the W/L balance and the last OOM victim. Its counters leave in phase 3 |
 | `display_stats`, shrunk | Frames, bytes copied and the time copying and presenting took, which Linux keeps in a driver's debugfs. Its geometry leaves in phase 6 |
 | `font_set` | 8-bit coverage for 1190 glyphs and a replacement cell. `KDFONTOP` carries one bit per pixel and 512 glyphs |
@@ -177,7 +177,7 @@ Both exist only because the tests kernel starts the userland tests.
 | `test_panic` | It panics in a syscall for the recovery smoke, under a boot flag |
 
 The rest of the private surface stays as it is. `SO_PEERPROGRAM` and
-`SO_PEEREXTENSION` are on Linux's `getsockopt` at a level of SlopOS's own;
+`SO_PEERPACKAGE` are on Linux's `getsockopt` at a level of SlopOS's own;
 `SO_PEERSEC` has their shape, but its context is fixed when the peer
 connects and a program identity lapses when the peer changes program. The
 two `statfs` magics are `f_type` values, which Linux gives each filesystem
@@ -269,7 +269,7 @@ Checked by: a `proc-core` crate's host tests against lines captured from
 Linux; stests in place of `process_list`'s and `process_memory`'s in
 `core/src/syscall/tests.rs`; `sessions_test` (init ends a session by its
 tag), `privd_test` (`endtask`), `installer_test`, `script_exec_test`,
-`extension_service_test`, and `libc_abi_test` for `getlogin`.
+`package_service_test`, and `libc_abi_test` for `getlogin`.
 
 Beyond the base: procps and busybox read `/proc/<pid>/cmdline`,
 `/proc/uptime` and `/proc/loadavg` before anything; a compiler or a
@@ -372,7 +372,7 @@ registers a waiter.
 
 Checked by: host tests of the key table against `input-event-codes.h`;
 `seat_test`, `sessions_test` (a switched-away compositor reads nothing),
-`priv_test`, `privd_test`, `extension_action_test` and `apps_test`
+`priv_test`, `privd_test`, `package_action_test` and `apps_test`
 through uinput; `just test-usb` for a keyboard that arrives; an event
 queued between two ticks reaching a client before the next.
 

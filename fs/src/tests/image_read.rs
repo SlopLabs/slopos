@@ -12,19 +12,19 @@
 //! started again does. Both are taken on the same disk in the same run, so
 //! their quotient describes the image's read path rather than the host.
 
-use slopos_abi::extension::DIGEST_LEN;
 use slopos_abi::fs::S_IFREG;
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
+use slopos_abi::package::DIGEST_LEN;
 use slopos_kernel_services::clock::monotonic_ns;
 use slopos_ostd::KVec;
 use slopos_ostd::authority::{Capability, Seal, check_mask};
 use slopos_ostd::process::AccountId;
 use slopos_testing::{TestResult, fail};
 
-use super::extensions::image_parts;
+use super::packages::image_parts;
 use super::suite_disks::{TestDisk, suite_disk};
-use crate::extension::{self, deactivate};
 use crate::filemap;
+use crate::package::{self, deactivate};
 use crate::vfs::{
     resolve_path, vfs_ext4_mount_named, vfs_ext4_unmount_named, vfs_mkdir, vfs_open, vfs_rmdir,
     vfs_set_sealed, vfs_stat, vfs_unlink,
@@ -32,7 +32,7 @@ use crate::vfs::{
 
 const MOUNT: &[u8] = b"/fsimgroot";
 const DATA: &[u8] = b"/fsimgroot/fsimg.dat";
-const IMAGE: &[u8] = b"/fsimgroot/fsimg.ext";
+const IMAGE: &[u8] = b"/fsimgroot/fsimg.pkg";
 const NAME: &[u8] = b"fsimg";
 const SHOWN: &[u8] = b"/opt/fsimg/data";
 
@@ -150,12 +150,12 @@ fn measure(bytes: &[u8]) -> Result<[u64; 4], &'static str> {
 #[inline(never)]
 fn activated(root: [u8; DIGEST_LEN], bytes: &[u8]) -> Result<[u64; 4], &'static str> {
     let image = resolve_path(IMAGE).map_err(|_| "the image did not resolve")?;
-    extension::activate(NAME, root, image.fs, image.inode, extension::budget())
+    package::activate(NAME, root, image.fs, image.inode, package::budget())
         .map_err(|_| "the image did not activate")?;
     let measured = measure(bytes);
     let _ = deactivate(NAME);
     for _ in 0..2 {
-        extension::pass();
+        package::pass();
     }
     measured
 }

@@ -667,8 +667,8 @@ pub fn resolve_program(path: &[u8], cwd: &[u8], who: &Subject) -> Result<CanonPa
 /// against `/`. Answers the identity of what it loaded.
 ///
 /// `execve`'s road: it confers nothing, so the image runs `AT_SECURE` only
-/// when the caller's effective ids are not its real ones or the image is an
-/// extension's. `reexec` is [`may_keep_authority`]'s answer for it.
+/// when the caller's effective ids are not its real ones or the image is a
+/// package's. `reexec` is [`may_keep_authority`]'s answer for it.
 #[allow(clippy::too_many_arguments)]
 pub fn do_exec(
     table: FdTable,
@@ -801,8 +801,8 @@ pub fn drop_authority_for_exec(task: &slopos_sched::task_struct::Task, task_id: 
     }
 }
 
-/// The image finds `AT_SECURE` set when `secure` is, and whenever it is an
-/// extension's program: that speaks as its extension, which whoever started
+/// The image finds `AT_SECURE` set when `secure` is, and whenever it is a
+/// package's program: that speaks as its package, which whoever started
 /// it does not, so it takes no library from where its starter points. `who`
 /// must be able to execute the image and its interpreter. Answers the
 /// identity of what it loaded: `program`'s, unless a file it mapped was one
@@ -835,7 +835,7 @@ fn exec_image(
     } else {
         Program::Other
     };
-    let secure = secure || matches!(loaded, Program::Extension(_));
+    let secure = secure || matches!(loaded, Program::Package(_));
     let stack_top = setup_user_stack(table, argv, envp, &exec_info, image, secure)?;
     *stack_ptr_out = stack_top;
     *tls_tp_out = exec_info.tls_tp;

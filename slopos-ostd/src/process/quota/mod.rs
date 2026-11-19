@@ -110,7 +110,7 @@ mod tests {
         assert_eq!(used(root(), ResourceKind::FdSlot), 0);
     }
 
-    /// `RawBlock` and `ExtensionUpdate` free a principal of the block
+    /// `RawBlock` and `PackageUpdate` free a principal of the block
     /// ceiling, `Mount` does not, and losing them restores the default.
     #[test]
     fn the_block_ceiling_follows_the_raw_device_right() {
@@ -126,7 +126,7 @@ mod tests {
         assert_eq!(limit(installer), Some(NO_LIMIT));
         fit_disk_blocks(installer, CAP_UNIVERSAL);
         assert_eq!(limit(installer), Some(default));
-        fit_disk_blocks(installer, CAP_UNIVERSAL | Capability::ExtensionUpdate.bit());
+        fit_disk_blocks(installer, CAP_UNIVERSAL | Capability::PackageUpdate.bit());
         assert_eq!(limit(installer), Some(NO_LIMIT));
         fit_disk_blocks(installer, CAP_UNIVERSAL);
         assert_eq!(limit(installer), Some(default));

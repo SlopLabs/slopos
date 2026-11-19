@@ -169,14 +169,14 @@ crate::utest!(name = utest_peer, bin = "/bin/peer_test");
 crate::utest!(name = utest_privd, bin = "/bin/privd_test");
 crate::utest!(name = utest_accounts, bin = "/bin/accounts_test");
 crate::utest!(name = utest_priv, bin = "/bin/priv_test");
-crate::utest!(name = utest_extension, bin = "/bin/extension_test");
+crate::utest!(name = utest_package, bin = "/bin/package_test");
 crate::utest!(
-    name = utest_extension_action,
-    bin = "/bin/extension_action_test"
+    name = utest_package_action,
+    bin = "/bin/package_action_test"
 );
 crate::utest!(
-    name = utest_extension_service,
-    bin = "/bin/extension_service_test"
+    name = utest_package_service,
+    bin = "/bin/package_service_test"
 );
 crate::utest!(name = utest_supervision, bin = "/bin/supervision_test");
 crate::utest!(name = utest_live_base, bin = "/bin/live_base_test");

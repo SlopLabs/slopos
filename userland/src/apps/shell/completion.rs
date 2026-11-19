@@ -337,7 +337,7 @@ fn image_completions(command: &[u8]) -> Option<Vec<u8>> {
     let link = join(COMMANDS, command);
     let program = std::fs::read_link(std::ffi::OsStr::from_bytes(&link)).ok()?;
     let image = program.parent()?.parent()?;
-    let opt = Path::new(slopos_abi::extension::DIR);
+    let opt = Path::new(slopos_abi::package::DIR);
     (image.parent() == Some(opt) && program.parent()?.file_name()? == "bin")
         .then(|| image.join(IMAGE_COMPLETIONS).into_os_string().into_vec())
 }

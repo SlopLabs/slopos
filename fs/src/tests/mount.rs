@@ -1024,8 +1024,8 @@ pub fn test_a_kept_directory_stays_where_it_is() -> TestResult {
 
 /// A kept directory or one on the way to it that a rename or removal moved.
 fn kept_dirs_stay_put() -> Option<&'static [u8]> {
-    use slopos_abi::fs::{ACCOUNTS_STORE, EXTENSION_STORE};
-    let stores = [EXTENSION_STORE.as_bytes(), ACCOUNTS_STORE.as_bytes()];
+    use slopos_abi::fs::{ACCOUNTS_STORE, PACKAGE_STORE};
+    let stores = [PACKAGE_STORE.as_bytes(), ACCOUNTS_STORE.as_bytes()];
     let on_the_way = [&b"/etc"[..], b"/var", b"/var/lib", b"/var/lib/slopos"];
     let renamed = on_the_way
         .into_iter()
@@ -1050,7 +1050,7 @@ fn kept_dirs_refuse_mounts() -> Option<&'static [u8]> {
         b"/var/lib/slopos",
         b"/var/lib/slopos/slots",
         b"/var/lib/slopos/accounts",
-        b"/var/lib/slopos/extensions/hello",
+        b"/var/lib/slopos/packages/hello",
     ];
     let beside = [
         &b"/var/log"[..],

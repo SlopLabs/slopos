@@ -11,7 +11,7 @@ use slopos_abi::fs::{AT_FDCWD, O_RDONLY};
 use slopos_abi::net::{AF_INET, AF_UNIX, SOCK_CLOEXEC, SOCK_DGRAM, SOCK_STREAM};
 use slopos_abi::syscall::{
     F_GETFD, FD_CLOEXEC, IPPROTO_TCP, MAP_ANONYMOUS, MAP_PRIVATE, MAP_SHARED, POLLIN, PROT_EXEC,
-    PROT_READ, PROT_WRITE, SO_ERROR, SO_PEERCRED, SO_PEEREXTENSION, SO_PEERPIDFD, SO_PEERPROGRAM,
+    PROT_READ, PROT_WRITE, SO_ERROR, SO_PEERCRED, SO_PEERPACKAGE, SO_PEERPIDFD, SO_PEERPROGRAM,
     SOL_SLOPOS, SOL_SOCKET, UCred,
 };
 use slopos_fs::fileio::fileio_get_handle_and_ops;
@@ -917,16 +917,16 @@ slopos_testing::stest!(
 );
 
 /// An image of `records` activated as `name`; answers its root.
-fn activate_extension(name: &[u8], records: &[(&str, u32, &[u8])]) -> Option<[u8; 32]> {
-    use slopos_fs::tests::extensions::{activate_bytes, image};
+fn activate_package(name: &[u8], records: &[(&str, u32, &[u8])]) -> Option<[u8; 32]> {
+    use slopos_fs::tests::packages::{activate_bytes, image};
     slopos_fs::vfs::vfs_init_builtin_filesystems().ok()?;
     let built = image(records)?;
     activate_bytes(name, &built.bytes, built.root).ok()?;
     Some(built.root)
 }
 
-fn deactivate_extension(name: &[u8]) {
-    let _ = slopos_fs::extension::deactivate(name);
+fn deactivate_package(name: &[u8]) {
+    let _ = slopos_fs::package::deactivate(name);
 }
 
 /// The program a file of the VFS at `path` attests as.
@@ -938,25 +938,25 @@ fn file_program(path: &[u8]) -> Program {
         })
 }
 
-/// `SO_PEERPROGRAM` and `SO_PEEREXTENSION` on `fd`: the path and the label's
+/// `SO_PEERPROGRAM` and `SO_PEERPACKAGE` on `fd`: the path and the label's
 /// name, each empty for none.
-fn peer_program_and_extension(who: &Principal, fd: i64) -> Option<([u8; 64], u32, [u8; 64], u32)> {
+fn peer_program_and_package(who: &Principal, fd: i64) -> Option<([u8; 64], u32, [u8; 64], u32)> {
     let (rc, len, path) = getsockopt(who, fd, SOL_SLOPOS, SO_PEERPROGRAM, 64)?;
-    let (rc2, label_len, label) = getsockopt(who, fd, SOL_SLOPOS, SO_PEEREXTENSION, 64)?;
+    let (rc2, label_len, label) = getsockopt(who, fd, SOL_SLOPOS, SO_PEERPACKAGE, 64)?;
     (rc == 0 && rc2 == 0).then_some((path, len, label, label_len))
 }
 
-fn names(who: &Principal, fd: i64, path: &[u8], extension: &[u8], root: [u8; 32]) -> bool {
-    let expected = slopos_abi::extension::Label::new(extension, root);
-    peer_program_and_extension(who, fd).is_some_and(|(p, len, label, label_len)| {
+fn names(who: &Principal, fd: i64, path: &[u8], package: &[u8], root: [u8; 32]) -> bool {
+    let expected = slopos_abi::package::Label::new(package, root);
+    peer_program_and_package(who, fd).is_some_and(|(p, len, label, label_len)| {
         p.get(..len as usize) == Some(path)
-            && label_len as usize == slopos_abi::extension::Label::LEN
-            && slopos_abi::extension::Label::from_bytes(&label[..label_len as usize]) == expected
+            && label_len as usize == slopos_abi::package::Label::LEN
+            && slopos_abi::package::Label::from_bytes(&label[..label_len as usize]) == expected
     })
 }
 
 fn names_nothing(who: &Principal, fd: i64) -> bool {
-    peer_program_and_extension(who, fd)
+    peer_program_and_package(who, fd)
         .is_some_and(|(_, len, _, label_len)| len == 0 && label_len == 0)
 }
 
@@ -969,34 +969,34 @@ const LIB: u32 = slopos_abi::fs::S_IFREG | 0o644;
 pub fn test_exec_attests_an_activation_s_files_as_its_own() -> TestResult {
     use crate::exec::resolve_exec;
     use slopos_fs::vfs::Subject;
-    const OUTSIDE: &[u8] = b"/tmp/ext-outside";
+    const OUTSIDE: &[u8] = b"/tmp/pkg-outside";
     let _fixture = KernelTestScope::enter();
-    let shown = activate_extension(
-        b"ext-exec",
+    let shown = activate_package(
+        b"pkg-exec",
         &[
             ("bin/tool", TOOL, b"\x7fELF tool"),
-            ("bin/script", TOOL, b"#!/opt/ext-exec/bin/tool\n"),
-            ("bin/stray", TOOL, b"#!/opt/ext-other/bin/tool\n"),
+            ("bin/script", TOOL, b"#!/opt/pkg-exec/bin/tool\n"),
+            ("bin/stray", TOOL, b"#!/opt/pkg-other/bin/tool\n"),
         ],
     )
     .is_some()
-        && activate_extension(b"ext-other", &[("bin/tool", TOOL, b"\x7fELF other")]).is_some()
-        && stage_executable(OUTSIDE, b"#!/opt/ext-exec/bin/tool\n");
+        && activate_package(b"pkg-other", &[("bin/tool", TOOL, b"\x7fELF other")]).is_some()
+        && stage_executable(OUTSIDE, b"#!/opt/pkg-exec/bin/tool\n");
     let attested = |path: &[u8]| resolve_exec(path, b"/", &Subject::KERNEL).map(|p| p.program);
-    let tool = file_program(b"/opt/ext-exec/bin/tool");
-    let script = file_program(b"/opt/ext-exec/bin/script");
+    let tool = file_program(b"/opt/pkg-exec/bin/tool");
+    let script = file_program(b"/opt/pkg-exec/bin/script");
     let (as_tool, as_script, as_stray, as_outside) = (
-        attested(b"/opt/ext-exec/bin/tool"),
-        attested(b"/opt/ext-exec/bin/script"),
-        attested(b"/opt/ext-exec/bin/stray"),
+        attested(b"/opt/pkg-exec/bin/tool"),
+        attested(b"/opt/pkg-exec/bin/script"),
+        attested(b"/opt/pkg-exec/bin/stray"),
         attested(OUTSIDE),
     );
     let _ = slopos_fs::vfs::vfs_unlink(OUTSIDE);
-    deactivate_extension(b"ext-exec");
-    deactivate_extension(b"ext-other");
+    deactivate_package(b"pkg-exec");
+    deactivate_package(b"pkg-other");
     assert_test!(shown, "could not show the two activations and the script");
     assert_test!(
-        matches!(tool, Program::Extension(_)),
+        matches!(tool, Program::Package(_)),
         "the tool is an activation's"
     );
     assert_eq_test!(as_tool, Ok(tool), "the tool attests as itself");
@@ -1015,31 +1015,31 @@ slopos_testing::stest!(
     suite = peer
 );
 
-/// An extension program keeps its identity mapping its own activation's code
+/// A package program keeps its identity mapping its own activation's code
 /// and the base's, and loses it, with what its sockets attest, mapping
 /// another activation's.
-pub fn test_code_of_another_activation_ends_an_extension_program() -> TestResult {
+pub fn test_code_of_another_activation_ends_a_package_program() -> TestResult {
     let _fixture = KernelTestScope::enter();
     let _registry = PageSetRegistry::publish();
     let page = [0xc3u8; 64];
-    let root = activate_extension(
-        b"ext-map",
+    let root = activate_package(
+        b"pkg-map",
         &[
             ("bin/tool", TOOL, b"\x7fELF tool"),
             ("lib/libown.so", LIB, &page),
         ],
     );
-    let shown = activate_extension(b"ext-alien", &[("lib/libalien.so", LIB, &page)]).is_some();
+    let shown = activate_package(b"pkg-alien", &[("lib/libalien.so", LIB, &page)]).is_some();
     let outcome = (|| {
         let Some(root) = root.filter(|_| shown) else {
             return Err("could not show the two activations");
         };
         let user = Principal::user(USER, CAP_UNIVERSAL).ok_or("no principal")?;
-        let tool = file_program(b"/opt/ext-map/bin/tool");
+        let tool = file_program(b"/opt/pkg-map/bin/tool");
         set_program(&user, tool);
         let (rc, [a, _b]) = socketpair(&user, 0).ok_or("no socketpair")?;
-        if rc != 0 || !names(&user, a.into(), b"/opt/ext-map/bin/tool", b"ext-map", root) {
-            return Err("the pair does not name the extension program");
+        if rc != 0 || !names(&user, a.into(), b"/opt/pkg-map/bin/tool", b"pkg-map", root) {
+            return Err("the pair does not name the package program");
         }
         let map = |path: &[u8]| {
             stage_cstr(user.table, user.page + DATA, path)
@@ -1068,13 +1068,13 @@ pub fn test_code_of_another_activation_ends_an_extension_program() -> TestResult
                 })
                 .is_some_and(|addr| addr > 0)
         };
-        if !map(b"/opt/ext-map/lib/libown.so") || program_of(&user) != tool {
+        if !map(b"/opt/pkg-map/lib/libown.so") || program_of(&user) != tool {
             return Err("its own activation's code ended the program");
         }
-        if !names(&user, a.into(), b"/opt/ext-map/bin/tool", b"ext-map", root) {
+        if !names(&user, a.into(), b"/opt/pkg-map/bin/tool", b"pkg-map", root) {
             return Err("its own activation's code ended what the pair attests");
         }
-        if !map(b"/opt/ext-alien/lib/libalien.so") || program_of(&user) != Program::Other {
+        if !map(b"/opt/pkg-alien/lib/libalien.so") || program_of(&user) != Program::Other {
             return Err("another activation's code did not end the program");
         }
         if !names_nothing(&user, a.into()) {
@@ -1082,8 +1082,8 @@ pub fn test_code_of_another_activation_ends_an_extension_program() -> TestResult
         }
         Ok(())
     })();
-    deactivate_extension(b"ext-map");
-    deactivate_extension(b"ext-alien");
+    deactivate_package(b"pkg-map");
+    deactivate_package(b"pkg-alien");
     match outcome {
         Ok(()) => pass!(),
         Err(why) => fail!("{}", why),
@@ -1091,7 +1091,7 @@ pub fn test_code_of_another_activation_ends_an_extension_program() -> TestResult
 }
 
 slopos_testing::stest!(
-    name = test_code_of_another_activation_ends_an_extension_program,
+    name = test_code_of_another_activation_ends_a_package_program,
     suite = peer
 );
 
@@ -1101,8 +1101,8 @@ slopos_testing::stest!(
 pub fn test_an_exec_or_an_exit_ends_what_a_socket_attests() -> TestResult {
     use slopos_ostd::process::{Cred, Identity, process_retire, process_spawn, root_account};
     let _fixture = KernelTestScope::enter();
-    let root = activate_extension(b"ext-life", &[("bin/tool", TOOL, b"\x7fELF tool")]);
-    let tool = file_program(b"/opt/ext-life/bin/tool");
+    let root = activate_package(b"pkg-life", &[("bin/tool", TOOL, b"\x7fELF tool")]);
+    let tool = file_program(b"/opt/pkg-life/bin/tool");
     let outcome = (|| {
         let Some(root) = root else {
             return Err("could not show the activation");
@@ -1113,8 +1113,8 @@ pub fn test_an_exec_or_an_exit_ends_what_a_socket_attests() -> TestResult {
         if !names(
             &user,
             before.into(),
-            b"/opt/ext-life/bin/tool",
-            b"ext-life",
+            b"/opt/pkg-life/bin/tool",
+            b"pkg-life",
             root,
         ) {
             return Err("the pair does not name the program");
@@ -1123,8 +1123,8 @@ pub fn test_an_exec_or_an_exit_ends_what_a_socket_attests() -> TestResult {
         if !names(
             &user,
             before.into(),
-            b"/opt/ext-life/bin/tool",
-            b"ext-life",
+            b"/opt/pkg-life/bin/tool",
+            b"pkg-life",
             root,
         ) {
             return Err("an exec that keeps its authority ended the pair's program");
@@ -1137,8 +1137,8 @@ pub fn test_an_exec_or_an_exit_ends_what_a_socket_attests() -> TestResult {
         if !names(
             &user,
             after.into(),
-            b"/opt/ext-life/bin/tool",
-            b"ext-life",
+            b"/opt/pkg-life/bin/tool",
+            b"pkg-life",
             root,
         ) {
             return Err("a pair after the exec does not name the program");
@@ -1167,7 +1167,7 @@ pub fn test_an_exec_or_an_exit_ends_what_a_socket_attests() -> TestResult {
         }
         Ok(())
     })();
-    deactivate_extension(b"ext-life");
+    deactivate_package(b"pkg-life");
     match outcome {
         Ok(()) => pass!(),
         Err(why) => fail!("{}", why),
@@ -1179,25 +1179,25 @@ slopos_testing::stest!(
     suite = peer
 );
 
-/// `ext_activate` of a descriptor that names no file is refused before
+/// `pkg_activate` of a descriptor that names no file is refused before
 /// anything is read.
-pub fn test_an_extension_of_no_file_is_refused() -> TestResult {
-    use crate::syscall::fs::syscall_ext_activate;
+pub fn test_a_package_of_no_file_is_refused() -> TestResult {
+    use crate::syscall::fs::syscall_pkg_activate;
     let _fixture = KernelTestScope::enter();
     let Some(holder) = Principal::user(0, slopos_ostd::authority::CAP_MASK_ALL) else {
         return fail!("could not build the principal");
     };
     assert_test!(
-        stage_cstr(holder.table, holder.page + DATA, b"ext-none"),
+        stage_cstr(holder.table, holder.page + DATA, b"pkg-none"),
         "could not stage the name"
     );
     let refused = call(
         &holder,
-        syscall_ext_activate,
+        syscall_pkg_activate,
         [holder.page + DATA, 999, holder.page + OPTVAL, 0, 0, 0],
     );
     assert_eq_test!(refused, errno(Errno::EBADF), "a descriptor of nothing");
     pass!()
 }
 
-slopos_testing::stest!(name = test_an_extension_of_no_file_is_refused, suite = peer);
+slopos_testing::stest!(name = test_a_package_of_no_file_is_refused, suite = peer);

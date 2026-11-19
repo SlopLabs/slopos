@@ -425,23 +425,23 @@ fn a_program_outside_the_base_is_other() -> bool {
     ok
 }
 
-const EXTENSION: &str = "peer-test";
-const EXTENSION_SELF: &str = "/opt/peer-test/bin/peer_test";
+const PACKAGE: &str = "peer-test";
+const PACKAGE_SELF: &str = "/opt/peer-test/bin/peer_test";
 
-/// This program, activated as an extension, connects as that extension's:
+/// This program, activated as a package, connects as that package's:
 /// its path under `/opt` and the name and digest it was activated as. Taken
 /// away again, the path shows nothing.
-fn an_extension_program_names_its_activation() -> bool {
-    const NAME: &str = "/tmp/peer-e2e-extension";
-    let image = match std::fs::read("/bin/peer_test").map(|program| extension_of(&program)) {
+fn a_package_program_names_its_activation() -> bool {
+    const NAME: &str = "/tmp/peer-e2e-package";
+    let image = match std::fs::read("/bin/peer_test").map(|program| package_of(&program)) {
         Ok(Some(image)) => image,
         other => {
             eprintln!("peer_test: could not pack this program: {:?}", other.err());
             return false;
         }
     };
-    const IMAGE: &str = "/tmp/peer-e2e-extension.ext";
-    let Ok(digest) = slopos_extension_core::image::root_of(&mut &image[..]).map(|(_, root)| root)
+    const IMAGE: &str = "/tmp/peer-e2e-package.pkg";
+    let Ok(digest) = slopos_package_core::image::root_of(&mut &image[..]).map(|(_, root)| root)
     else {
         eprintln!("peer_test: the packed image has no root");
         return false;
@@ -450,67 +450,61 @@ fn an_extension_program_names_its_activation() -> bool {
     let _ = std::fs::remove_file(IMAGE);
     let activated = file.map_err(|e| e.to_string()).and_then(|file| {
         use std::os::fd::AsRawFd;
-        base::ext_activate(EXTENSION.as_bytes(), file.as_raw_fd(), &digest)
-            .map_err(|e| e.to_string())
+        base::pkg_activate(PACKAGE.as_bytes(), file.as_raw_fd(), &digest).map_err(|e| e.to_string())
     });
     if let Err(e) = activated {
-        eprintln!("peer_test: ext_activate: {e}");
+        eprintln!("peer_test: pkg_activate: {e}");
         return false;
     }
     let outcome = (|| {
         let listener = listen(NAME).ok_or("could not listen")?;
-        let child = spawn(
-            EXTENSION_SELF.as_bytes(),
-            &["peer_test", CONNECT, NAME],
-            None,
-        );
+        let child = spawn(PACKAGE_SELF.as_bytes(), &["peer_test", CONNECT, NAME], None);
         if child <= 0 {
-            return Err(format!("spawning the extension's program returned {child}"));
+            return Err(format!("spawning the package's program returned {child}"));
         }
-        let conn =
-            accept_from(&listener, child).ok_or("the extension's program did not connect")?;
+        let conn = accept_from(&listener, child).ok_or("the package's program did not connect")?;
         let program = net::peer_program(conn.raw());
-        let extension = net::peer_extension(conn.raw());
+        let package = net::peer_package(conn.raw());
         let base = net::peer_base_program(conn.raw());
         let _ = read_report(conn.raw());
         let _ = send_all(conn.raw(), b"x");
         let code = process::wait_exit_code(child as u32);
         let named = program
             .as_ref()
-            .is_ok_and(|p| p.as_deref() == Some(EXTENSION_SELF.as_bytes()));
-        let labelled = extension.as_ref().is_ok_and(|label| {
-            label.is_some_and(|l| l.name() == EXTENSION.as_bytes() && l.digest == digest)
+            .is_ok_and(|p| p.as_deref() == Some(PACKAGE_SELF.as_bytes()));
+        let labelled = package.as_ref().is_ok_and(|label| {
+            label.is_some_and(|l| l.name() == PACKAGE.as_bytes() && l.digest == digest)
         });
         if !named || !labelled || !matches!(base, Ok(None)) || code != 0 {
             return Err(format!(
-                "connected as {program:?} of {extension:?}, base {base:?}, exited {code}"
+                "connected as {program:?} of {package:?}, base {base:?}, exited {code}"
             ));
         }
         Ok(())
     })();
-    let taken = base::ext_deactivate(EXTENSION.as_bytes());
-    let gone = std::fs::metadata(EXTENSION_SELF).is_err();
+    let taken = base::pkg_deactivate(PACKAGE.as_bytes());
+    let gone = std::fs::metadata(PACKAGE_SELF).is_err();
     if let Err(why) = outcome {
         eprintln!("peer_test: {why}");
         return false;
     }
     if taken.is_err() || !gone {
-        eprintln!("peer_test: the extension stayed: {taken:?}");
+        eprintln!("peer_test: the package stayed: {taken:?}");
         return false;
     }
     true
 }
 
-/// `program` as an extension's `bin/peer_test`.
-fn extension_of(program: &[u8]) -> Option<Vec<u8>> {
-    let mut packer = slopos_extension_core::image::Packer::default();
+/// `program` as a package's `bin/peer_test`.
+fn package_of(program: &[u8]) -> Option<Vec<u8>> {
+    let mut packer = slopos_package_core::image::Packer::default();
     packer.add(
         "/bin/peer_test",
         slopos_abi::fs::S_IFREG | 0o755,
         program.to_vec(),
     );
     packer
-        .finish(&format!("name {EXTENSION}\nversion 1\n"), "")
+        .finish(&format!("name {PACKAGE}\nversion 1\n"), "")
         .ok()
 }
 
@@ -787,8 +781,8 @@ const CASES: &[(&str, fn() -> bool)] = &[
     ),
     ("a_forfeit_follows_fork_order", a_forfeit_follows_fork_order),
     (
-        "an_extension_program_names_its_activation",
-        an_extension_program_names_its_activation,
+        "a_package_program_names_its_activation",
+        a_package_program_names_its_activation,
     ),
     ("pidfd_open_takes_any_leader", pidfd_open_takes_any_leader),
 ];

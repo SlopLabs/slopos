@@ -29,8 +29,8 @@ set -euo pipefail
 # the recipes.
 #
 # The result is the image `slopos-toolchain`, laid out in `<out>/install` as
-# `/opt/slopos-toolchain` shows it and packed by `scripts/build_extension.sh`
-# into `<out>/image/slopos-toolchain.ext` and its sidecar, so a toolchain an
+# `/opt/slopos-toolchain` shows it and packed by `scripts/build_package.sh`
+# into `<out>/image/slopos-toolchain.pkg` and its sidecar, so a toolchain an
 # install would refuse never leaves the host. Its release's `display` is the
 # identity of the pins it was built from (`tp_toolchain_identity`), which a
 # userland build holds it to, and its `version` the time of the build; its
@@ -495,21 +495,21 @@ SAFESTACK="$PREFIX/lib/rustlib/x86_64-slos/lib/librustc-nightly_rt.safestack.a"
 mkdir -p "$(dirname "$SAFESTACK")"
 printf '!<arch>\n' >"$SAFESTACK"
 
-mkdir -p "$PREFIX/.extension"
+mkdir -p "$PREFIX/.package"
 {
     printf 'name slopos-toolchain\n'
     printf 'version %s\n' "$(date -u +%Y%m%d%H%M%S)"
     printf 'display %s\n' "$IDENTITY"
     printf 'summary The compilers and tools that build SlopOS on SlopOS\n'
-} >"$PREFIX/.extension/release"
+} >"$PREFIX/.package/release"
 for program in "$PREFIX"/bin/*; do
     if [ -f "$program" ] && [ -x "$program" ]; then
         printf 'command %s\n' "${program##*/}"
     fi
-done >"$PREFIX/.extension/declare"
+done >"$PREFIX/.package/declare"
 
 rm -rf "$OUT/image.partial"
-env -u RUSTC_WRAPPER "$SCRIPT_DIR/build_extension.sh" "$PREFIX" "$OUT/image.partial" "$BUILD_DIR/libc.so" ||
+env -u RUSTC_WRAPPER "$SCRIPT_DIR/build_package.sh" "$PREFIX" "$OUT/image.partial" "$BUILD_DIR/libc.so" ||
     die "the toolchain does not check out as an image — see above"
 rm -rf "$OUT/install" "$OUT/image"
 mv "$PREFIX" "$OUT/install"

@@ -11,19 +11,19 @@ use super::*;
 use crate::ed25519::SigningKey;
 use crate::tests::unhex;
 
-const NAMESPACE: &str = "extension@slopos";
+const NAMESPACE: &str = "package@slopos";
 
 /// RFC 8032's TEST 1 key, which signed `abc` here with `ssh-keygen -Y sign
-/// -n extension@slopos -O hashalg=sha512` (OpenSSH 9.6p1).
+/// -n package@slopos -O hashalg=sha512` (OpenSSH 9.6p1).
 const TEST1_SEED: &str = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
 const TEST1_LINE: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINdamAGCsQq31Uv+08lkBzoO4XLz2qYjJa8CGmj3B1Ea";
 const TEST1_FINGERPRINT: &str = "SHA256:bbXpuKG6zhzdmnxq256TlqzFBzRl2f6OOg722cYNbU8";
 const TEST1_ABC: &str = "-----BEGIN SSH SIGNATURE-----
 U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAg11qYAYKxCrfVS/7TyWQHOg7hcv
-PapiMlrwIaaPcHURoAAAAQZXh0ZW5zaW9uQHNsb3BvcwAAAAAAAAAGc2hhNTEyAAAAUwAA
-AAtzc2gtZWQyNTUxOQAAAEDQ/kAMtIFPKjxhZ9X7jxEP4XHEd8RthFxcpJBteRSSv/vYKl
-5UvFvJVOKj/4KZAxBH4J2DyMubNC2kbITob0AO
+PapiMlrwIaaPcHURoAAAAOcGFja2FnZUBzbG9wb3MAAAAAAAAABnNoYTUxMgAAAFMAAAAL
+c3NoLWVkMjU1MTkAAABAYTV7Fi49siYTPIWMN0NTceElLCwjsBBdszfVaR++YDNEVcNTYd
+y2IOlFE2b2oIG8L6Rz8ih9cOIidrN/HJIEDA==
 -----END SSH SIGNATURE-----
 ";
 

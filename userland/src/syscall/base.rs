@@ -1,5 +1,5 @@
 //! The base: replacing it while the system runs, and hearing that it was.
-//! Extensions: showing one beside it, and taking one away.
+//! Packages: showing one beside it, and taking one away.
 
 use super::error::{SyscallError, SyscallResult};
 use super::numbers::*;
@@ -51,13 +51,13 @@ fn nul_terminated(name: &[u8]) -> SyscallResult<Vec<u8>> {
     Ok(owned)
 }
 
-/// Activate the extension image `fd` reads, whose tree's root the caller
+/// Activate the package image `fd` reads, whose tree's root the caller
 /// vouches is `digest`, and show it at `/opt/<name>`; answers its activation.
-pub fn ext_activate(name: &[u8], fd: RawFd, digest: &[u8; 32]) -> SyscallResult<u32> {
+pub fn pkg_activate(name: &[u8], fd: RawFd, digest: &[u8; 32]) -> SyscallResult<u32> {
     let name = nul_terminated(name)?;
     let raw = unsafe {
         syscall3(
-            SYSCALL_EXT_ACTIVATE,
+            SYSCALL_PKG_ACTIVATE,
             name.as_ptr() as u64,
             fd as u64,
             digest.as_ptr() as u64,
@@ -66,9 +66,9 @@ pub fn ext_activate(name: &[u8], fd: RawFd, digest: &[u8; 32]) -> SyscallResult<
     checked(raw).map(|activation| activation as u32)
 }
 
-/// Take away the extension shown at `/opt/<name>`.
-pub fn ext_deactivate(name: &[u8]) -> SyscallResult<()> {
+/// Take away the package shown at `/opt/<name>`.
+pub fn pkg_deactivate(name: &[u8]) -> SyscallResult<()> {
     let name = nul_terminated(name)?;
-    let raw = unsafe { syscall1(SYSCALL_EXT_DEACTIVATE, name.as_ptr() as u64) as i64 };
+    let raw = unsafe { syscall1(SYSCALL_PKG_DEACTIVATE, name.as_ptr() as u64) as i64 };
     checked(raw).map(drop)
 }

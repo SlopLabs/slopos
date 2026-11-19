@@ -86,15 +86,15 @@ const _: () = assert!(core::mem::size_of::<UCred>() == 12);
 pub const SOL_SLOPOS: i32 = 1024;
 /// The `AF_UNIX` peer's program, as of its `connect`, `listen` or
 /// `socketpair` and for as long as that process runs it: the base path of a
-/// base program or `/opt/<name>/<path>` of an extension's, and no bytes for
+/// base program or `/opt/<name>/<path>` of a package's, and no bytes for
 /// any other, or once the peer has exec'd, mapped code from elsewhere or
 /// exited. `ERANGE`, with the length needed in `optlen`, when the buffer is
 /// shorter.
 pub const SO_PEERPROGRAM: i32 = 1;
 /// The activation [`SO_PEERPROGRAM`]'s program is of, as long as that holds:
-/// a [`crate::extension::Label`], or no bytes for a base program or none.
+/// a [`crate::package::Label`], or no bytes for a base program or none.
 /// `ERANGE`, with the length needed in `optlen`, when the buffer is shorter.
-pub const SO_PEEREXTENSION: i32 = 2;
+pub const SO_PEERPACKAGE: i32 = 2;
 
 /// POSIX `struct timeval` — the wire format for `SO_RCVTIMEO` / `SO_SNDTIMEO`.
 /// Every layer (kernel, slibc, std) must use this layout.

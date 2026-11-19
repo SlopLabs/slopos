@@ -15,30 +15,30 @@ pub enum Program {
     /// the base's, and no code from outside the base has been mapped
     /// executable since.
     Base(NonZeroU64),
-    /// The file with this inode of the extension activation it names: the
+    /// The file with this inode of the package activation it names: the
     /// image is that activation's, every other link of its chain is the
     /// base's or that activation's, and no code from elsewhere has been
     /// mapped executable since.
-    Extension(NonZeroU64),
+    Package(NonZeroU64),
     Other,
 }
 
-/// The bit an extension's program carries in its word: activation numbers,
+/// The bit a package's program carries in its word: activation numbers,
 /// an inode's high half, stay below 2^31.
-const EXTENSION_BIT: u64 = 1 << 63;
+const PACKAGE_BIT: u64 = 1 << 63;
 
 impl Program {
     pub(super) const fn to_raw(self) -> u64 {
         match self {
-            Self::Base(inode) => inode.get() & !EXTENSION_BIT,
-            Self::Extension(inode) => inode.get() | EXTENSION_BIT,
+            Self::Base(inode) => inode.get() & !PACKAGE_BIT,
+            Self::Package(inode) => inode.get() | PACKAGE_BIT,
             Self::Other => 0,
         }
     }
 
     pub(super) const fn from_raw(raw: u64) -> Self {
-        match NonZeroU64::new(raw & !EXTENSION_BIT) {
-            Some(inode) if raw & EXTENSION_BIT != 0 => Self::Extension(inode),
+        match NonZeroU64::new(raw & !PACKAGE_BIT) {
+            Some(inode) if raw & PACKAGE_BIT != 0 => Self::Package(inode),
             Some(inode) => Self::Base(inode),
             None => Self::Other,
         }
@@ -51,10 +51,8 @@ impl Program {
         match (self, file) {
             (Self::Other, _) | (_, Self::Other) => false,
             (_, Self::Base(_)) => true,
-            (Self::Extension(mine), Self::Extension(theirs)) => {
-                mine.get() >> 32 == theirs.get() >> 32
-            }
-            (Self::Base(_), Self::Extension(_)) => false,
+            (Self::Package(mine), Self::Package(theirs)) => mine.get() >> 32 == theirs.get() >> 32,
+            (Self::Base(_), Self::Package(_)) => false,
         }
     }
 }
@@ -112,16 +110,16 @@ mod tests {
     #[test]
     fn a_program_round_trips_through_its_word_and_zero_is_other() {
         assert_eq!(Program::from_raw(0), Program::Other);
-        assert_eq!(Program::from_raw(EXTENSION_BIT), Program::Other);
+        assert_eq!(Program::from_raw(PACKAGE_BIT), Program::Other);
         assert_eq!(Program::Other.to_raw(), 0);
         for raw in [1u64, 2, (0x7fff_ffff << 32) | 7] {
             assert_eq!(Program::from_raw(raw).to_raw(), raw);
             assert!(matches!(Program::from_raw(raw), Program::Base(_)));
-            let extension = raw | EXTENSION_BIT;
-            assert_eq!(Program::from_raw(extension).to_raw(), extension);
+            let package = raw | PACKAGE_BIT;
+            assert_eq!(Program::from_raw(package).to_raw(), package);
             assert!(matches!(
-                Program::from_raw(extension),
-                Program::Extension(i) if i.get() == raw
+                Program::from_raw(package),
+                Program::Package(i) if i.get() == raw
             ));
         }
     }
@@ -130,12 +128,12 @@ mod tests {
     fn a_program_admits_the_base_and_its_own_activation_only() {
         let inode = |activation: u64, at: u64| NonZeroU64::new((activation << 32) | at).unwrap();
         let base = Program::Base(inode(1, 1));
-        let ext = Program::Extension(inode(5, 1));
+        let pkg = Program::Package(inode(5, 1));
         assert!(base.admits(Program::Base(inode(2, 9))));
-        assert!(!base.admits(Program::Extension(inode(5, 2))));
-        assert!(ext.admits(Program::Base(inode(1, 3))));
-        assert!(ext.admits(Program::Extension(inode(5, 2))));
-        assert!(!ext.admits(Program::Extension(inode(6, 1))));
+        assert!(!base.admits(Program::Package(inode(5, 2))));
+        assert!(pkg.admits(Program::Base(inode(1, 3))));
+        assert!(pkg.admits(Program::Package(inode(5, 2))));
+        assert!(!pkg.admits(Program::Package(inode(6, 1))));
         assert!(!Program::Other.admits(Program::Base(inode(1, 1))));
         assert!(!base.admits(Program::Other));
     }

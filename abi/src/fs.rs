@@ -4,7 +4,7 @@ use core::ffi::CStr;
 
 /// The command search path of a program whose environment names none: the
 /// system's directories first, then the commands the owner granted
-/// extensions, which shadow neither.
+/// packages, which shadow neither.
 pub const DEFAULT_PATH: &CStr = c"/bin:/sbin:/opt/bin";
 
 /// Longest path a syscall accepts, NUL included. Linux's `PATH_MAX`. Too
@@ -29,9 +29,9 @@ pub const EXT2_SUPER_MAGIC: u64 = 0xEF53;
 pub const RAMFS_MAGIC: u64 = 0x8584_58F6;
 /// The base and the install medium's, a filesystem Linux has no name for.
 pub const BASEFS_MAGIC: u64 = 0x534c_4253;
-/// An extension's activation at `/opt/<name>`: its image's volume, served
+/// A package's activation at `/opt/<name>`: its image's volume, served
 /// only as the kernel verifies it.
-pub const EXTENSION_MAGIC: u64 = 0x534c_4558;
+pub const PACKAGE_MAGIC: u64 = 0x534c_504b;
 
 /// POSIX file open flags (access mode in low 2 bits, modifiers above).
 pub const O_RDONLY: u32 = 0;
@@ -179,9 +179,9 @@ pub const SESSION_GID: u32 = 1000;
 pub const SESSION_HOME: &str = "/home/user";
 
 /// The uids the user database gives, as Debian's policy divides them: 1 to
-/// 99 are the base's own system users, then extensions' users, then people,
+/// 99 are the base's own system users, then packages' users, then people,
 /// each with a group of their own whose gid is their uid.
-pub const EXTENSION_UIDS: core::ops::RangeInclusive<u32> = 100..=999;
+pub const PACKAGE_UIDS: core::ops::RangeInclusive<u32> = 100..=999;
 pub const PERSON_UIDS: core::ops::RangeInclusive<u32> = SESSION_UID..=59_999;
 pub const NOBODY_UID: u32 = 65_534;
 
@@ -237,9 +237,9 @@ pub const PERSON_TREES: [&str; 2] = [SESSION_HOME, "/src"];
 /// `<uid>:<gid> <tree>` for each of [`PERSON_TREES`] the first person holds.
 pub const OWNERS_RECORD: &str = "/var/lib/slopos/owners";
 
-/// The keys the owner trusts with extensions and what each one installed
+/// The keys the owner trusts with packages and what each one installed
 /// keeps, uid 0's and sealed by the mechanisms that write it.
-pub const EXTENSION_STORE: &str = "/var/lib/slopos/extensions";
+pub const PACKAGE_STORE: &str = "/var/lib/slopos/packages";
 
 /// The people the machine knows, which administer it and their passwords'
 /// hashes, uid 0's alone and sealed by the mechanisms that write it.
@@ -249,7 +249,7 @@ pub const ACCOUNTS_STORE: &str = "/var/lib/slopos/accounts";
 /// directory on the way to one is renamed or removed, and no mount covers
 /// one, one on the way to it or anything beneath it. `/etc` holds the user
 /// database and `/var/lib/slopos` the system's records.
-pub const KEPT_DIRS: [&str; 4] = ["/etc", "/var/lib/slopos", EXTENSION_STORE, ACCOUNTS_STORE];
+pub const KEPT_DIRS: [&str; 4] = ["/etc", "/var/lib/slopos", PACKAGE_STORE, ACCOUNTS_STORE];
 
 /// The kernel log's node. A read streams the log; a write adds one record,
 /// `<prio>text` or bare text, as Linux's `/dev/kmsg` takes one.

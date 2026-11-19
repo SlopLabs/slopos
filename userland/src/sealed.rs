@@ -15,7 +15,7 @@ use std::path::Path;
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
 use slopos_abi::fs::{O_DIRECTORY, O_NOFOLLOW};
 use slopos_abi::syscall::posix::{LOCK_EX, O_CLOEXEC, O_NONBLOCK};
-use slopos_extension_core::generation;
+use slopos_package_core::generation;
 
 use crate::syscall::{core as sys_core, fs as sys_fs, process};
 

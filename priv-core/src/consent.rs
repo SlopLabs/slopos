@@ -31,8 +31,8 @@ pub const UNIDENTIFIED: &str = "An unidentified app";
 pub const APP_MAX: usize = 64;
 const ICON_PATH_MAX: usize = 255;
 
-pub fn named_extension(name: &str) -> String {
-    format!("The {name} extension")
+pub fn named_package(name: &str) -> String {
+    format!("The {name} package")
 }
 
 pub fn password_for(name: &str) -> String {
@@ -235,8 +235,8 @@ fn decode_epoch(payload: &[u8]) -> Result<u64, Malformed> {
 }
 
 /// One question. Of what is in it, the requester sent only the argv the policy
-/// matched and its directory; the rest comes from the sealed base, an
-/// extension's sealed declaration, the kernel's account of the requester and
+/// matched and its directory; the rest comes from the sealed base, a
+/// package's sealed declaration, the kernel's account of the requester and
 /// the accounts record.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Ask {
@@ -244,7 +244,7 @@ pub struct Ask {
     pub action: String,
     pub describe: String,
     /// The requester's program as the kernel attests it, a base program or
-    /// an extension's; `None` for any other.
+    /// a package's; `None` for any other.
     pub program: Option<String>,
     pub uid: u32,
     pub pid: u32,
@@ -258,7 +258,7 @@ pub struct Ask {
     /// Who may answer a [`Kind::Admin`] question.
     pub admins: Vec<String>,
     /// What the dialog names as asking: the base's app entry, the attested
-    /// program's file name or its extension; `None` for [`UNIDENTIFIED`].
+    /// program's file name or its package; `None` for [`UNIDENTIFIED`].
     pub app: Option<String>,
     /// That entry's icon, a PNG of the same share.
     pub icon: Option<String>,
@@ -266,7 +266,7 @@ pub struct Ask {
     /// What the allowing button says, one of [`crate::words::VERBS`].
     pub verb: String,
     pub destructive: bool,
-    pub extension: Option<String>,
+    pub package: Option<String>,
     pub terms: Vec<(String, Vec<u8>)>,
 }
 
@@ -296,7 +296,7 @@ impl Ask {
             ("app", &self.app),
             ("icon", &self.icon),
             ("detail", &self.detail),
-            ("extension", &self.extension),
+            ("package", &self.package),
         ];
         for (key, value) in optional {
             if let Some(value) = value {
@@ -334,7 +334,7 @@ impl Ask {
                 "detail",
                 "verb",
                 "destructive",
-                "extension",
+                "package",
                 "term",
                 "value",
             ],
@@ -387,8 +387,8 @@ impl Ask {
         if !printable(&describe, crate::words::DESCRIBE_MAX) {
             return Err(Malformed);
         }
-        let extension = optional(&fields, "extension", |t| {
-            slopos_abi::extension::valid_name(t.as_bytes())
+        let package = optional(&fields, "package", |t| {
+            slopos_abi::package::valid_name(t.as_bytes())
         })?;
         let destructive = match (fields.get("destructive"), fields.all("destructive").count()) {
             (None, _) => false,
@@ -426,7 +426,7 @@ impl Ask {
             detail,
             verb,
             destructive,
-            extension,
+            package,
             terms,
         };
         if !ask.fits() {
@@ -517,7 +517,7 @@ pub(crate) fn reads_as_written(text: &str) -> bool {
 }
 
 /// An icon's path in a share the person cannot write: the base's
-/// `/usr/share/slopos/icons/` or an extension's
+/// `/usr/share/slopos/icons/` or a package's
 /// `/opt/<name>/share/slopos/icons/`, a PNG by name.
 pub fn icon_path(path: &str) -> bool {
     let Some(rest) = path.strip_prefix('/') else {
@@ -533,7 +533,7 @@ pub fn icon_path(path: &str) -> bool {
     let share = match parts.as_slice() {
         ["usr", "share", "slopos", "icons", file] => Some(file),
         ["opt", name, "share", "slopos", "icons", file]
-            if slopos_abi::extension::valid_name(name.as_bytes()) =>
+            if slopos_abi::package::valid_name(name.as_bytes()) =>
         {
             Some(file)
         }

@@ -73,9 +73,9 @@ const OWNERS_RECORD: (&str, &str) = (
 const SBIN_PROGRAMS: [&str; 3] = ["init", "privd", "authcheck"];
 
 /// The action policy privd reads, packed at `/usr/share/slopos/privd`.
-/// privd's policy and the ceiling of what extensions may be granted, from
+/// privd's policy and the ceiling of what packages may be granted, from
 /// `assets/privd` to `/usr/share/slopos/privd`.
-const PRIVD_FILES: [&str; 2] = ["actions", "extensions"];
+const PRIVD_FILES: [&str; 2] = ["actions", "packages"];
 
 const SLIBC_LICENSES: [&str; 3] = ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE"];
 
@@ -723,7 +723,7 @@ mod tests {
                 "/sbin/privd",
                 "/bin/sh",
                 "/usr/share/slopos/privd/actions",
-                "/usr/share/slopos/privd/extensions",
+                "/usr/share/slopos/privd/packages",
                 INTERFACE_PATH,
                 MANIFEST_PATH,
             ]

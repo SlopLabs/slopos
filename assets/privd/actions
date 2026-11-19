@@ -222,17 +222,17 @@ action org.slopos.boot.reboot
   detail   "Anything that isn't saved will be lost."
   verb     "Restart"
 
-action org.slopos.extension.install
-  program  /bin/extctl
+action org.slopos.package.install
+  program  /bin/pkgctl
   args     install ? ? name ? signer ? grant ? unasked ? users ? commands ?
-  caps     ExtensionUpdate Seal
+  caps     PackageUpdate Seal
   uid      0
   cwd
-  exclusive extensions
+  exclusive packages
   allow    root
   allow    admin confirm
   allow    paired
-  describe "install an extension and give it what it asks for"
+  describe "install a package and give it what it asks for"
   detail   "If it asks for the disks or every file, it can take over the whole computer."
   verb     "Install"
   term     name "Installs"
@@ -242,87 +242,87 @@ action org.slopos.extension.install
   term     users "Adds users"
   term     commands "Adds commands"
 
-action org.slopos.extension.install-signed
-  program  /bin/extctl
+action org.slopos.package.install-signed
+  program  /bin/pkgctl
   args     install-signed *
-  caps     ExtensionUpdate Seal
+  caps     PackageUpdate Seal
   uid      0
   cwd
-  exclusive extensions
+  exclusive packages
   allow    root
   allow    admin
   allow    paired
-  describe "install or update an extension signed by a key you trust"
+  describe "install or update a package signed by a key you trust"
   detail   "It gets no more than that key is trusted to give."
   verb     "Install"
 
-action org.slopos.extension.trust
-  program  /bin/extctl
+action org.slopos.package.trust
+  program  /bin/pkgctl
   args     key add *
   args     key remove *
-  caps     ExtensionUpdate Seal
+  caps     PackageUpdate Seal
   uid      0
-  exclusive extensions
+  exclusive packages
   allow    root
   allow    admin confirm
   allow    paired
-  describe "change which keys may install extensions"
-  detail   "Extensions a trusted key signs go in without asking, within the limits shown."
+  describe "change which keys may install packages"
+  detail   "Packages a trusted key signs go in without asking, within the limits shown."
   verb     "Change"
 
-action org.slopos.extension.manage
-  program  /bin/extctl
+action org.slopos.package.manage
+  program  /bin/pkgctl
   args     enable *
   args     disable *
   args     rollback *
-  caps     ExtensionUpdate Seal
+  caps     PackageUpdate Seal
   uid      0
-  exclusive extensions
+  exclusive packages
   allow    root
   allow    admin confirm
   allow    paired
-  describe "turn an extension on or off or go back to its last version"
+  describe "turn a package on or off or go back to its last version"
 
-action org.slopos.extension.remove
-  program  /bin/extctl
+action org.slopos.package.remove
+  program  /bin/pkgctl
   args     remove ?
-  caps     ExtensionUpdate Seal DacOverride
+  caps     PackageUpdate Seal DacOverride
   uid      0
-  exclusive extensions
+  exclusive packages
   allow    root
   allow    admin confirm
   allow    paired
-  describe "remove an extension with everything it keeps"
+  describe "remove a package with everything it keeps"
   detail   "Its data, settings and log are deleted."
   verb     "Remove"
   term     remove "Removes"
   destructive
 
-action org.slopos.extension.config
-  program  /bin/extctl
+action org.slopos.package.config
+  program  /bin/pkgctl
   args     config install *
   caps     Seal
   uid      0
   cwd
-  exclusive extensions
+  exclusive packages
   allow    root
   allow    admin confirm
   allow    paired
-  describe "change an extension's settings"
+  describe "change a package's settings"
   detail   "What reads those settings restarts."
   verb     "Change"
 
-action org.slopos.extension.config-signed
-  program  /bin/extctl
+action org.slopos.package.config-signed
+  program  /bin/pkgctl
   args     config apply *
   caps     Seal
   uid      0
   cwd
-  exclusive extensions
+  exclusive packages
   allow    root
   allow    admin
   allow    paired
-  describe "change an extension's settings, signed by the key that installed it"
+  describe "change a package's settings, signed by the key that installed it"
   verb     "Change"
 
 action org.slopos.accounts.password
@@ -481,7 +481,7 @@ action org.slopos.install
 action org.slopos.rescue
   program  /bin/shell
   args     --rescue
-  caps     Power ProcSignal Mount RawBlock NetAdmin ConsoleConfig SysInspect Clock Seal BootEntry DacOverride BaseUpdate ExtensionUpdate
+  caps     Power ProcSignal Mount RawBlock NetAdmin ConsoleConfig SysInspect Clock Seal BootEntry DacOverride BaseUpdate PackageUpdate
   uid      0
   medium
   allow    root

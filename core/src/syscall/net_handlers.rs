@@ -6,7 +6,7 @@ use slopos_abi::net::{
     SOCK_STREAM, SOCK_TYPE_MASK, SockAddrIn,
 };
 use slopos_abi::syscall::{
-    IPPROTO_TCP, MSG_NOSIGNAL, MsgHdr, SCM_MAX_FDS, SO_ERROR, SO_PEERCRED, SO_PEEREXTENSION,
+    IPPROTO_TCP, MSG_NOSIGNAL, MsgHdr, SCM_MAX_FDS, SO_ERROR, SO_PEERCRED, SO_PEERPACKAGE,
     SO_PEERPIDFD, SO_PEERPROGRAM, SOL_SLOPOS, SOL_SOCKET, UCred,
 };
 use slopos_abi::unix::SockAddrUn;
@@ -713,8 +713,8 @@ fn unix_getsockopt(
             let path = program_path(peer.ok_or(Errno::ENOTCONN)?.program)?;
             whole_option(path.as_deref().unwrap_or_default(), len, optval, optlen)
         }
-        (SOL_SLOPOS, SO_PEEREXTENSION) => {
-            let label = slopos_fs::extension::label_of(peer.ok_or(Errno::ENOTCONN)?.program);
+        (SOL_SLOPOS, SO_PEERPACKAGE) => {
+            let label = slopos_fs::package::label_of(peer.ok_or(Errno::ENOTCONN)?.program);
             let bytes = label.map(|label| label.to_bytes());
             whole_option(
                 bytes.as_ref().map_or(&[][..], |b| &b[..]),

@@ -27,7 +27,7 @@
 //! agent READY{version}                  it can draw a dialog
 //! privd ASK{id, action, describe, program?, uid, pid, cwd, arg..,
 //!           kind, person?, admin.., app?, icon?, detail?, verb,
-//!           destructive?, extension?}
+//!           destructive?, package?}
 //!   agent SHOWN{id}                     on screen
 //!   agent ANSWER{id, allow, secret?, as?}
 //!   privd CANCEL{id}                    withdrawn, expired or hidden
@@ -68,7 +68,7 @@ pub const ENV_ACTION: &str = "PRIV_ACTION";
 /// The uid of the requester privd started a mechanism for, as its connection
 /// recorded it.
 pub const ENV_UID: &str = "PRIV_UID";
-/// The search path a base mechanism sees; an extension's sees its own `bin`
+/// The search path a base mechanism sees; a package's sees its own `bin`
 /// after it.
 pub const MECHANISM_PATH: &str = "/bin:/sbin";
 pub const MECHANISM_LANG: &str = "C.UTF-8";
@@ -86,11 +86,11 @@ pub const DELEGABLE: u64 = caps::POWER
     | caps::BOOT_ENTRY
     | caps::DAC_OVERRIDE
     | caps::BASE_UPDATE
-    | caps::EXTENSION_UPDATE;
+    | caps::PACKAGE_UPDATE;
 
 /// The most an action run as its requester may name: mounts, the network,
 /// the console and the clock, and every file but a sealed one. Nothing that
-/// writes a raw disk, the base, an extension, a seal, the firmware's or the
+/// writes a raw disk, the base, a package, a seal, the firmware's or the
 /// loader's variables or another identity.
 pub const REQUESTER_CEILING: u64 = caps::MOUNT
     | caps::NET_ADMIN
@@ -101,7 +101,7 @@ pub const REQUESTER_CEILING: u64 = caps::MOUNT
 
 /// What init hands privd: what an action may name, among it `ProcSignal`,
 /// which relays a requester's signals to a mechanism running as another uid,
-/// and what no action names: `SetId`, to start a mechanism as an extension's
+/// and what no action names: `SetId`, to start a mechanism as a package's
 /// user or as its requester.
 pub const PRIVD_CAPS: u64 = DELEGABLE | caps::SET_ID;
 
@@ -127,7 +127,7 @@ pub const CAPABILITIES: [(&str, u64); 21] = [
     ("DacOverride", caps::DAC_OVERRIDE),
     ("SchedHigh", caps::SCHED_HIGH),
     ("BaseUpdate", caps::BASE_UPDATE),
-    ("ExtensionUpdate", caps::EXTENSION_UPDATE),
+    ("PackageUpdate", caps::PACKAGE_UPDATE),
     ("SeatSwitch", caps::SEAT_SWITCH),
 ];
 

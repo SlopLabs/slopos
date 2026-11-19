@@ -12,7 +12,7 @@ use std::path::Path;
 use slopos_abi::fs::inode_flags::FS_IMMUTABLE_FL;
 use slopos_abi::fs::{OWNERS_RECORD, ROOT_LAYOUT, SESSION_GID, SESSION_UID};
 use slopos_boot_core::layout;
-use slopos_extension_core::OFFERED;
+use slopos_package_core::OFFERED;
 
 use super::engine::Events;
 use super::medium::Medium;
@@ -500,35 +500,35 @@ fn offer(root: &Mounted, from: &Path, events: &mut dyn Events) -> Result<(), Str
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
-            name.strip_suffix(".ext")
-                .filter(|name| slopos_extension_core::valid_name(name))
+            name.strip_suffix(".pkg")
+                .filter(|name| slopos_package_core::valid_name(name))
                 .map(str::to_owned)
         })
         .collect();
     names.sort();
     for name in names {
         let (image, sidecar) = (
-            from.join(format!("{name}.ext")),
+            from.join(format!("{name}.pkg")),
             from.join(format!("{name}.meta")),
         );
         let said = fs::read(&sidecar).map_err(|e| format!("{}: {e}", sidecar.display()))?;
         let len = fs::metadata(&image)
             .map_err(|e| format!("{}: {e}", image.display()))?
             .len();
-        let at = |ext: &str| root.path(&format!("{OFFERED}/{name}.{ext}"));
-        let held = fs::symlink_metadata(at("ext")).is_ok_and(|m| m.is_file() && m.len() == len)
+        let at = |suffix: &str| root.path(&format!("{OFFERED}/{name}.{suffix}"));
+        let held = fs::symlink_metadata(at("pkg")).is_ok_and(|m| m.is_file() && m.len() == len)
             && fs::read(at("meta")).is_ok_and(|held| held == said);
         if held {
             events.log(format!("{OFFERED} offers this medium's {name} already"));
             continue;
         }
-        for stale in [at("meta"), at("ext.partial")] {
+        for stale in [at("meta"), at("pkg.partial")] {
             match fs::remove_file(&stale) {
                 Err(e) if e.kind() != ErrorKind::NotFound => return Err(format!("{stale}: {e}")),
                 _ => {}
             }
         }
-        let partial = at("ext.partial");
+        let partial = at("pkg.partial");
         let mut copying = Copying {
             done: 0,
             total: len,
@@ -539,7 +539,7 @@ fn offer(root: &Mounted, from: &Path, events: &mut dyn Events) -> Result<(), Str
             .map_err(|e| format!("{partial}: {e}"))?;
         File::open(&partial)
             .and_then(|file| file.sync_all())
-            .and_then(|()| fs::rename(&partial, at("ext")))
+            .and_then(|()| fs::rename(&partial, at("pkg")))
             .map_err(|e| format!("{partial}: {e}"))?;
         write_durably(&at("meta"), &said)?;
         fs::set_permissions(at("meta"), fs::Permissions::from_mode(IMAGE_MODE))

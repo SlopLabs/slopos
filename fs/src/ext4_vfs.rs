@@ -2034,7 +2034,7 @@ impl slopos_ostd::mm::reclaim::Reclaimable for Ext4CacheReclaim {
             total = total.saturating_add(mount.reclaimable_pages());
         };
         crate::vfs::init::ext4_pool_for_each_bound(&mut count);
-        crate::extension::for_each_volume(&mut count);
+        crate::package::for_each_volume(&mut count);
         total
     }
 
@@ -2047,7 +2047,7 @@ impl slopos_ostd::mm::reclaim::Reclaimable for Ext4CacheReclaim {
             }
         };
         crate::vfs::init::ext4_pool_for_each_bound(&mut shrink);
-        crate::extension::for_each_volume(&mut shrink);
+        crate::package::for_each_volume(&mut shrink);
         freed
     }
 }

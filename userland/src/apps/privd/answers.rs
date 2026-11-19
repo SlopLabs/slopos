@@ -27,7 +27,7 @@ pub struct Asked {
     pub session: (u32, u32),
     pub parent: u32,
     pub action: String,
-    /// The extension and activation an extension's action was read from.
+    /// The package and activation a package's action was read from.
     pub origin: Option<(String, u64)>,
     pub kind: Kind,
     pub command: Vec<Vec<u8>>,

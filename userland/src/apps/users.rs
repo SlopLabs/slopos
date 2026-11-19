@@ -188,7 +188,7 @@ fn prove(person: &Person) -> Result<(), String> {
     Err(format!("that is not {}'s password", person.name))
 }
 
-/// A name nobody holds: no person, extension user or name of the base's.
+/// A name nobody holds: no person, package user or name of the base's.
 fn free(accounts: &Accounts, name: &str) -> Result<(), String> {
     if !slopos_accounts_core::valid_name(name) {
         return Err(format!(
@@ -197,7 +197,7 @@ fn free(accounts: &Accounts, name: &str) -> Result<(), String> {
         ));
     }
     if accounts.person(name).is_some()
-        || crate::accounts::extension_users(Path::new("/"))?
+        || crate::accounts::package_users(Path::new("/"))?
             .iter()
             .any(|n| n == name)
     {

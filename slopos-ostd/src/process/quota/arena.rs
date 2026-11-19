@@ -548,12 +548,12 @@ pub fn set_limit(id: AccountId, kind: ResourceKind, limit: u32) {
 
 /// Hold `id` to the per-process block ceiling unless `caps` carry `RawBlock`,
 /// whose holder may write any disk beneath every filesystem anyway, or
-/// `ExtensionUpdate`: the installer fills a whole root in one process, and
-/// an extension's mechanism stores a whole image.
+/// `PackageUpdate`: the installer fills a whole root in one process, and
+/// a package's mechanism stores a whole image.
 pub fn fit_disk_blocks(id: AccountId, caps: u64) {
     use crate::authority::{Capability, mask_permits};
     let unbounded =
-        mask_permits(caps, Capability::RawBlock) || mask_permits(caps, Capability::ExtensionUpdate);
+        mask_permits(caps, Capability::RawBlock) || mask_permits(caps, Capability::PackageUpdate);
     let limit = if unbounded {
         NO_LIMIT
     } else {

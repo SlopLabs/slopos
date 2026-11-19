@@ -146,14 +146,14 @@ enum Mark {
 }
 
 /// Whether a live process runs a program of generation `number`: of an
-/// activation when `extension`, of the base otherwise.
-pub(crate) fn runs_from(number: u32, extension: bool) -> bool {
+/// activation when `package`, of the base otherwise.
+pub(crate) fn runs_from(number: u32, package: bool) -> bool {
     with_process_registry(|table| {
         table.any(|process| {
             !process.has_exited()
                 && match process.program() {
-                    Program::Base(inode) => !extension && generation_of(inode.get()) == number,
-                    Program::Extension(inode) => extension && generation_of(inode.get()) == number,
+                    Program::Base(inode) => !package && generation_of(inode.get()) == number,
+                    Program::Package(inode) => package && generation_of(inode.get()) == number,
                     Program::Other => false,
                 }
         })
@@ -162,7 +162,7 @@ pub(crate) fn runs_from(number: u32, extension: bool) -> bool {
 }
 
 fn any_retired() -> bool {
-    BASE_FS.retired.load(Ordering::Acquire) || crate::extension::any_retired()
+    BASE_FS.retired.load(Ordering::Acquire) || crate::package::any_retired()
 }
 
 /// Have the base's generations and the activations reaped from now on, and
@@ -188,7 +188,7 @@ fn reaper(token: KernelIoToken<'static>) {
             return;
         }
         let switched = SWITCHED.swap(false, Ordering::AcqRel);
-        let pass = BASE_FS.pass().and(crate::extension::pass());
+        let pass = BASE_FS.pass().and(crate::package::pass());
         interval = if pass.freed > 0 || pass.marked || switched {
             PASS_MS
         } else {

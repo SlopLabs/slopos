@@ -846,36 +846,36 @@ pub const SYSCALL_BASE_ACTIVATE: u64 = SYSCALL_PRIVATE_BASE + 36;
 /// never blocks. Unprivileged.
 pub const SYSCALL_BASE_MONITOR: u64 = SYSCALL_PRIVATE_BASE + 37;
 
-/// `ext_activate(name: *const u8, fd, digest: *const [u8; 32]) -> activation`:
-/// activate the extension image `fd` reads — a regular file of any
+/// `pkg_activate(name: *const u8, fd, digest: *const [u8; 32]) -> activation`:
+/// activate the package image `fd` reads — a regular file of any
 /// filesystem but an activation's, an ext4 volume and then its SHA-256 tree
 /// — whose tree's root the caller vouches is `digest`, and show it, read-only
 /// and pinned, at `/opt/<name>`, replacing the activation shown there in one
 /// step; descriptors, mappings and programs of the one replaced keep it. The
 /// file is read where it lies, each block checked against `digest` as it is
 /// read, so a block the tree does not vouch for fails the read that meets it
-/// with `EIO`. `name` is NUL-terminated and [`crate::extension::valid_name`];
-/// the activation is labelled with it and `digest`, which `SO_PEEREXTENSION`
+/// with `EIO`. `name` is NUL-terminated and [`crate::package::valid_name`];
+/// the activation is labelled with it and `digest`, which `SO_PEERPACKAGE`
 /// answers. `EBADF` for an `fd` open for no reading, `EINVAL` for a name the
 /// grammar refuses or a file that is no image the kernel serves — a volume
 /// that is no read-only ext4 of 4 KiB blocks filling the image's data, or
-/// that holds more than [`crate::extension::MAX_ENTRIES`] entries, an inode
+/// that holds more than [`crate::package::MAX_ENTRIES`] entries, an inode
 /// at two names, or anything but directories, regular files and symlinks —
 /// `EIO` for one whose first block fails its tree under `digest` or that
 /// cannot be read, `ENFILE` when no further file can be held open, `EBUSY`
 /// when the resident activations would hold more than an eighth of usable
 /// memory with it or while `/opt/<name>` holds a mount that is no
 /// activation, `EPERM` on a boot with
-/// [`crate::syscall::BOOT_FLAG_EXTENSIONS_OFF`], what making `/opt` answers
+/// [`crate::syscall::BOOT_FLAG_PACKAGES_OFF`], what making `/opt` answers
 /// (`ENOTDIR` for one that is no directory, `EROFS`), `EFAULT`, `ENOMEM` and
-/// `EINTR`. Gated on `Capability::ExtensionUpdate`.
-pub const SYSCALL_EXT_ACTIVATE: u64 = SYSCALL_PRIVATE_BASE + 38;
+/// `EINTR`. Gated on `Capability::PackageUpdate`.
+pub const SYSCALL_PKG_ACTIVATE: u64 = SYSCALL_PRIVATE_BASE + 38;
 
-/// `ext_deactivate(name: *const u8)`: take the activation at `/opt/<name>`
+/// `pkg_deactivate(name: *const u8)`: take the activation at `/opt/<name>`
 /// away; what holds it keeps it. `ENOENT` when none is shown there, `EINVAL`
 /// for a name the grammar refuses, `EFAULT` and `EINTR`. Gated on
-/// `Capability::ExtensionUpdate`.
-pub const SYSCALL_EXT_DEACTIVATE: u64 = SYSCALL_PRIVATE_BASE + 39;
+/// `Capability::PackageUpdate`.
+pub const SYSCALL_PKG_DEACTIVATE: u64 = SYSCALL_PRIVATE_BASE + 39;
 
 /// `test_key(keycode, codepoint, pressed)`: deliver one key press or release,
 /// a [`crate::input::keycode`] and the text it types (0 for none), to the

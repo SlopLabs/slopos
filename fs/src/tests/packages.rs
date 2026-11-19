@@ -1,0 +1,802 @@
+//! Package activations: an image, a file of another filesystem, shown
+//! read-only and pinned at `/opt/<name>` and attesting its files as its own,
+//! every block read verified against its tree, replaced in one step, freed
+//! once nothing holds it, held to a budget of memory, shown by the hundred,
+//! and refused a name the grammar does not admit or a file that is no image
+//! the kernel serves.
+
+use slopos_abi::fs::{S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
+use slopos_abi::package::{DIGEST_LEN, Label};
+use slopos_ext4_core::bytes::{le32, put_le32};
+use slopos_ext4_core::superblock::{self as sbk, off as soff, ro_compat};
+use slopos_ostd::KVec;
+use slopos_ostd::process::Program;
+use slopos_testing::TestResult;
+use slopos_verity_core::{BLOCK, Builder, Geometry};
+
+use crate::basefs::{BaseFs, generation_of, program_of, program_path};
+use crate::blockdev::MemoryBlockDevice;
+use crate::ext4::cache::{BlockCache, CACHE_ENTRIES_MIN};
+use crate::ext4::{Ext4Fs, NewInode};
+use crate::package::{
+    self, ActivateError, IndexError, OpenError, deactivate, is_activation, label_of, resident,
+};
+use crate::vfs::mount::{mount_at, mount_subtree, unmount};
+use crate::vfs::path::{RESOLVE_FOLLOW, resolve_path_at};
+use crate::vfs::traits::{FileSystem, InodeId, Owner, same_filesystem};
+use crate::vfs::{Subject, VfsError, vfs_init_builtin_filesystems, vfs_open, vfs_unlink};
+use crate::vfs_file_ops::{
+    drop_vnode_for_tests, vfs_dir_handle_still_names, vnode_handle_for_tests,
+};
+
+const EXEC: u32 = S_IFREG | 0o755;
+const FILE: u32 = S_IFREG | 0o644;
+
+/// An image and the root of its tree.
+pub struct Built {
+    pub bytes: KVec<u8>,
+    pub root: [u8; DIGEST_LEN],
+}
+
+/// An image of `records` — paths below the mount point, modes and bytes, a
+/// symlink's its target — laid out by the kernel's own ext4 driver, marked
+/// read-only, its tree after it.
+pub fn image(records: &[(&str, u32, &[u8])]) -> Option<Built> {
+    let device = volume(records)?;
+    let mut bytes = KVec::new();
+    device.with_buffer_mut(|buf| bytes.extend_from_slice(buf).ok())?;
+    treed(bytes)
+}
+
+#[inline(never)]
+fn volume(records: &[(&str, u32, &[u8])]) -> Option<MemoryBlockDevice> {
+    let data: usize = records.iter().map(|r| r.2.len().div_ceil(BLOCK)).sum();
+    let blocks = u32::try_from(40 + data + 2 * records.len()).ok()?;
+    let spec = slopos_ext4_core::fixture::Spec {
+        block_size: BLOCK as u32,
+        blocks,
+        inodes: 64,
+        inode_size: 256,
+        extents: true,
+        bit64: true,
+        metadata_csum: true,
+        journal_blocks: 0,
+        uuid: *b"slopos-pkg-image",
+    };
+    let device =
+        MemoryBlockDevice::allocate_with_block_size(blocks as usize * BLOCK, BLOCK as u32)?;
+    device
+        .with_buffer_mut(|buf| slopos_ext4_core::fixture::format(buf, &spec))
+        .ok()?;
+    mounted(&device, &mut |fs| {
+        records
+            .iter()
+            .try_for_each(|&(path, mode, data)| put(fs, path, mode, data))
+    })?;
+    device.with_buffer_mut(|buf| mark_read_only(&mut buf[1024..2048]));
+    Some(device)
+}
+
+/// The volume `bytes` holds with its tree after it.
+#[inline(never)]
+fn treed(mut bytes: KVec<u8>) -> Option<Built> {
+    let (tree, root) = tree_of(&bytes)?;
+    bytes.extend_from_slice(&tree).ok()?;
+    Some(Built { bytes, root })
+}
+
+/// The tree of the volume `bytes` holds, and its root.
+#[inline(never)]
+fn tree_of(bytes: &[u8]) -> Option<(KVec<u8>, [u8; DIGEST_LEN])> {
+    let geometry = Geometry::new((bytes.len() / BLOCK) as u64)?;
+    let mut tree = KVec::zeroed(geometry.tree_blocks() as usize * BLOCK).ok()?;
+    let mut builder = Builder::new(geometry, &mut tree)?;
+    for block in bytes.chunks_exact(BLOCK) {
+        builder.push(block.try_into().ok()?);
+    }
+    let root = builder.finish()?;
+    Some((tree, root))
+}
+
+/// An image of `records` larger than one allocation holds whole: its volume,
+/// then its tree and root, for a caller to write one after the other.
+pub fn image_parts(
+    records: &[(&str, u32, &[u8])],
+) -> Option<(MemoryBlockDevice, KVec<u8>, [u8; DIGEST_LEN])> {
+    let device = volume(records)?;
+    let (tree, root) = device.with_buffer_mut(|buf| tree_of(buf))?;
+    Some((device, tree, root))
+}
+
+fn mark_read_only(sb: &mut [u8]) {
+    let features = le32(sb, soff::FEATURE_RO_COMPAT) | ro_compat::READONLY;
+    put_le32(sb, soff::FEATURE_RO_COMPAT, features);
+    sbk::seal(sb);
+}
+
+/// `device` mounted for `body`, in a frame of its own: the superblock, cache
+/// and `Ext4Fs` leave the body no room under the 2 KiB stack gate.
+#[inline(never)]
+fn mounted(
+    device: &MemoryBlockDevice,
+    body: &mut dyn FnMut(&mut Ext4Fs<'_>) -> Option<()>,
+) -> Option<()> {
+    let (sb, geom) = Ext4Fs::mount_params(device).ok()?;
+    let mut cache = BlockCache::new_boxed(geom.block_size(), CACHE_ENTRIES_MIN).ok()?;
+    let mut fs = Ext4Fs::new(device, &mut cache, sb, geom);
+    body(&mut fs)?;
+    fs.sync().ok()
+}
+
+#[inline(never)]
+fn put(fs: &mut Ext4Fs<'_>, path: &str, mode: u32, data: &[u8]) -> Option<()> {
+    let path = path.trim_start_matches('/');
+    let (dirs, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let mut parent = 2;
+    for dir in dirs.split('/').filter(|d| !d.is_empty()) {
+        parent = match fs.lookup_child(parent, dir.as_bytes()) {
+            Ok(found) => found.raw(),
+            Err(_) => fs.create_directory(parent, dir.as_bytes()).ok()?,
+        };
+    }
+    let kind = match mode & S_IFMT {
+        S_IFDIR => NewInode::Directory,
+        S_IFLNK => NewInode::Symlink(data),
+        _ => NewInode::File,
+    };
+    let perm = (mode & 0o7777) as u16;
+    let ino = fs
+        .create_owned(parent, name.as_bytes(), kind, Owner::ROOT, perm)
+        .ok()?;
+    let written = mode & S_IFMT != S_IFREG || fs.write_file(ino, 0, data).ok()? == data.len();
+    written.then_some(())
+}
+
+fn image_path(name: &[u8], buf: &mut [u8; 64]) -> Option<usize> {
+    let prefix = b"/tmp/pkg-image-";
+    let len = prefix.len() + name.len();
+    let out = buf.get_mut(..len)?;
+    out[..prefix.len()].copy_from_slice(prefix);
+    out[prefix.len()..].copy_from_slice(name);
+    Some(len)
+}
+
+/// `bytes` as a file of the RAM root, activated as `name` under `root`. The
+/// file's name is taken away after: the activation holds it open.
+pub fn activate_bytes(
+    name: &[u8],
+    bytes: &[u8],
+    root: [u8; DIGEST_LEN],
+) -> Result<u32, ActivateError> {
+    activate_within(name, bytes, root, package::budget())
+}
+
+/// [`activate_bytes`] when the resident activations hold no more than
+/// `budget` with it.
+fn activate_within(
+    name: &[u8],
+    bytes: &[u8],
+    root: [u8; DIGEST_LEN],
+    budget: u64,
+) -> Result<u32, ActivateError> {
+    let mut buf = [0; 64];
+    let len = image_path(name, &mut buf).ok_or(ActivateError::Name)?;
+    let path = &buf[..len];
+    let _ = vfs_unlink(path);
+    let written = vfs_open(path, true).is_ok_and(|file| file.write(0, bytes) == Ok(bytes.len()));
+    if !written {
+        return Err(ActivateError::NoMemory);
+    }
+    let activated = resolve(path)
+        .map_err(|e| ActivateError::Image(OpenError::Read(e)))
+        .and_then(|(fs, inode)| package::activate(name, root, fs, inode, budget));
+    let _ = vfs_unlink(path);
+    activated
+}
+
+/// An image of `records`, activated as `name`.
+pub fn activated(name: &[u8], records: &[(&str, u32, &[u8])]) -> Option<u32> {
+    vfs_init_builtin_filesystems().ok()?;
+    let built = image(records)?;
+    activate_bytes(name, &built.bytes, built.root).ok()
+}
+
+fn resolve(path: &[u8]) -> Result<(&'static dyn FileSystem, InodeId), VfsError> {
+    resolve_path_at(path, b"/", RESOLVE_FOLLOW, &Subject::KERNEL).map(|r| (r.fs, r.inode))
+}
+
+fn read_all(fs: &dyn FileSystem, inode: InodeId, buf: &mut [u8]) -> Option<usize> {
+    fs.read(inode, 0, buf).ok()
+}
+
+fn named(program: Program, expected: &[u8]) -> bool {
+    let mut buf = [0u8; 64];
+    program_path(program, &mut buf).is_ok_and(|len| buf.get(..len) == Some(expected))
+}
+
+/// Free what nothing holds: two passes, as the reaper's first and second.
+fn reap_all() {
+    for _ in 0..2 {
+        package::pass();
+    }
+}
+
+/// Activations resident once what nothing holds is freed.
+fn settled() -> usize {
+    reap_all();
+    resident()
+}
+
+/// An activation shows its image at `/opt/<name>`, read-only and pinned;
+/// each file attests as the activation's program, named by its path under
+/// the name and labelled with the name and digest it was activated as.
+/// Deactivated, the name shows nothing, and once reaped its programs name
+/// nothing either.
+pub fn test_an_activation_is_shown_at_its_name_and_attests_its_files() -> TestResult {
+    if vfs_init_builtin_filesystems().is_err() {
+        return slopos_testing::fail!("no VFS");
+    }
+    let Some(built) = image(&[
+        ("bin/tool", EXEC, b"tool one"),
+        ("lib/libx.so", FILE, b"library"),
+        ("share/link", S_IFLNK | 0o777, b"../bin/tool"),
+    ]) else {
+        return slopos_testing::fail!("no room for the image");
+    };
+    let number = match activate_bytes(b"pkg-shown", &built.bytes, built.root) {
+        Ok(number) => number,
+        Err(e) => return slopos_testing::fail!("the image did not activate: {:?}", e),
+    };
+    let outcome = (|| {
+        let (fs, tool) =
+            resolve(b"/opt/pkg-shown/bin/tool").map_err(|_| "the tool is not shown")?;
+        if !is_activation(fs) || generation_of(tool) != number {
+            return Err("the tool is not the activation's");
+        }
+        if resolve(b"/opt/pkg-shown/share/link").map(|(_, at)| at) != Ok(tool) {
+            return Err("a link inside the activation does not reach its file");
+        }
+        let mut buf = [0u8; 16];
+        if read_all(fs, tool, &mut buf) != Some(8) || &buf[..8] != b"tool one" {
+            return Err("the tool reads other than the image's bytes");
+        }
+        let stat = fs.stat(tool).map_err(|_| "no stat")?;
+        if !stat.sealed || stat.uid != 0 || stat.mode & 0o7777 != 0o755 {
+            return Err("the tool is not sealed, uid 0's and its mode");
+        }
+        let mounted = mount_at(b"/opt/pkg-shown").ok_or("nothing is mounted at the name")?;
+        if !mounted.read_only() || !mounted.pinned() {
+            return Err("the mount is not read-only and pinned");
+        }
+        if vfs_open(b"/opt/pkg-shown/bin/new", true).is_ok() {
+            return Err("a file was made inside the activation");
+        }
+        let program = program_of(fs, tool);
+        if !matches!(program, Program::Package(inode) if inode.get() == tool) {
+            return Err("the tool does not attest as the activation's program");
+        }
+        if !named(program, b"/opt/pkg-shown/bin/tool") {
+            return Err("the program is not named by its path under the name");
+        }
+        if label_of(program) != Label::new(b"pkg-shown", built.root) {
+            return Err("the program's label is not its activation's");
+        }
+        Ok(program)
+    })();
+    let taken = deactivate(b"pkg-shown");
+    let program = match outcome {
+        Ok(program) => program,
+        Err(why) => return slopos_testing::fail!("{}", why),
+    };
+    if taken.is_err() || resolve(b"/opt/pkg-shown/bin/tool").is_ok() {
+        return slopos_testing::fail!("the deactivated name still shows the activation");
+    }
+    reap_all();
+    if program_path(program, &mut []).is_ok() || label_of(program).is_some() {
+        return slopos_testing::fail!("the unheld activation was not freed with its names");
+    }
+    TestResult::Pass
+}
+
+/// A block the image's tree does not vouch for fails the read that meets it,
+/// and only that read; a tree whose top does not hash to the root named is
+/// refused before anything is shown.
+pub fn test_a_flipped_bit_fails_the_read_that_meets_it() -> TestResult {
+    if vfs_init_builtin_filesystems().is_err() {
+        return slopos_testing::fail!("no VFS");
+    }
+    let Some(built) = image(&[
+        ("bin/good", EXEC, &[b'g'; 5000]),
+        ("bin/bent", EXEC, &[b'b'; 5000]),
+    ]) else {
+        return slopos_testing::fail!("no room for the image");
+    };
+    let Some(at) = built
+        .bytes
+        .chunks_exact(BLOCK)
+        .position(|block| block.iter().all(|&b| b == b'b'))
+    else {
+        return slopos_testing::fail!("no block of the bent file");
+    };
+    let mut bent = match KVec::with_capacity(built.bytes.len()) {
+        Ok(bent) => bent,
+        Err(_) => return slopos_testing::fail!("no room for a copy"),
+    };
+    if bent.extend_from_slice(&built.bytes).is_err() {
+        return slopos_testing::fail!("no room for a copy");
+    }
+    bent[at * BLOCK + 99] ^= 0x04;
+    let shown = activate_bytes(b"pkg-bent", &bent, built.root);
+    let outcome = (|| {
+        shown.map_err(|_| "a flip in a file's data refused the activation")?;
+        let mut buf = [0u8; 8];
+        let (fs, good) = resolve(b"/opt/pkg-bent/bin/good").map_err(|_| "no good file")?;
+        if fs.read(good, 4096, &mut buf) != Ok(buf.len()) || buf != [b'g'; 8] {
+            return Err("a block the tree vouches for did not read");
+        }
+        let (_, bad) = resolve(b"/opt/pkg-bent/bin/bent").map_err(|_| "no bent file")?;
+        if fs.stat(bad).map(|s| s.size) != Ok(5000) {
+            return Err("the bent file's inode did not read");
+        }
+        if fs.read(bad, 0, &mut buf) != Err(VfsError::IoError) {
+            return Err("the flipped block read");
+        }
+        Ok(())
+    })();
+    let _ = deactivate(b"pkg-bent");
+    let before = settled();
+    if let Err(why) = outcome {
+        return slopos_testing::fail!("{}", why);
+    }
+    let mut wrong = built.root;
+    wrong[7] ^= 1;
+    let refused = activate_bytes(b"pkg-wrong", &built.bytes, wrong);
+    if refused != Err(ActivateError::Image(OpenError::Root)) {
+        return slopos_testing::fail!("an image under another root was not refused: {:?}", refused);
+    }
+    let mut torn = bent;
+    let last = torn.len() - 1;
+    torn[last] ^= 1;
+    let refused = activate_bytes(b"pkg-torn", &torn, built.root);
+    if refused != Err(ActivateError::Image(OpenError::Root)) {
+        return slopos_testing::fail!("a flip in the tree's top was not refused: {:?}", refused);
+    }
+    if resident() != before {
+        return slopos_testing::fail!("a refused activation stayed resident");
+    }
+    TestResult::Pass
+}
+
+/// A file that is no image the kernel serves is refused: a length no tree
+/// fits, one a block short, which another tree fits but not its root, a
+/// volume not marked read-only, an inode at two names, and a file of an
+/// activation.
+pub fn test_a_file_that_is_no_image_is_refused() -> TestResult {
+    if vfs_init_builtin_filesystems().is_err() {
+        return slopos_testing::fail!("no VFS");
+    }
+    let Some(built) = image(&[("bin/tool", EXEC, b"tool")]) else {
+        return slopos_testing::fail!("no room for the image");
+    };
+    let torn = &built.bytes[..built.bytes.len() - 100];
+    let refused = activate_bytes(b"pkg-torn", torn, built.root);
+    if refused != Err(ActivateError::Image(OpenError::NotImage)) {
+        return slopos_testing::fail!("a length no tree fits: {:?}", refused);
+    }
+    let short = &built.bytes[..built.bytes.len() - BLOCK];
+    let refused = activate_bytes(b"pkg-short", short, built.root);
+    if refused != Err(ActivateError::Image(OpenError::Root)) {
+        return slopos_testing::fail!("a block short of its tree: {:?}", refused);
+    }
+    let Some(writable) = rebuilt(&built, |volume| {
+        let sb = &mut volume[1024..2048];
+        let features = le32(sb, soff::FEATURE_RO_COMPAT) & !ro_compat::READONLY;
+        put_le32(sb, soff::FEATURE_RO_COMPAT, features);
+        sbk::seal(sb);
+    }) else {
+        return slopos_testing::fail!("no room for the image");
+    };
+    let refused = activate_bytes(b"pkg-writable", &writable.bytes, writable.root);
+    if !matches!(refused, Err(ActivateError::Volume(_))) {
+        return slopos_testing::fail!("a volume not marked read-only: {:?}", refused);
+    }
+    let Some(linked) = image_linked() else {
+        return slopos_testing::fail!("no room for the image");
+    };
+    let refused = activate_bytes(b"pkg-linked", &linked.bytes, linked.root);
+    if refused
+        != Err(ActivateError::Index(IndexError::Shape(
+            "an inode at two names",
+        )))
+    {
+        return slopos_testing::fail!("an inode at two names: {:?}", refused);
+    }
+    let Some(inner) = activated(b"pkg-inner", &[("share/image", FILE, &built.bytes)]) else {
+        return slopos_testing::fail!("the image holding an image did not activate");
+    };
+    let nested = resolve(b"/opt/pkg-inner/share/image")
+        .map_err(|e| ActivateError::Image(OpenError::Read(e)))
+        .and_then(|(fs, inode)| {
+            package::activate(b"pkg-nested", built.root, fs, inode, package::budget())
+        });
+    let _ = deactivate(b"pkg-inner");
+    reap_all();
+    if nested != Err(ActivateError::Image(OpenError::NotImage)) || inner == 0 {
+        return slopos_testing::fail!("an activation's file was activated: {:?}", nested);
+    }
+    TestResult::Pass
+}
+
+/// `built` with its volume changed by `change` and its tree built again.
+fn rebuilt(built: &Built, change: impl FnOnce(&mut [u8])) -> Option<Built> {
+    let geometry = Geometry::of_image(built.bytes.len() as u64)?;
+    let mut bytes = KVec::new();
+    let data = geometry.data_blocks() as usize * BLOCK;
+    bytes.extend_from_slice(&built.bytes[..data]).ok()?;
+    change(&mut bytes[..]);
+    treed(bytes)
+}
+
+/// An image whose one file has a second name.
+#[inline(never)]
+fn image_linked() -> Option<Built> {
+    let built = image(&[("bin/tool", EXEC, b"tool"), ("share/x", FILE, b"x")])?;
+    rebuilt(&built, |volume| {
+        if linked(volume).is_none() {
+            volume.fill(0);
+        }
+    })
+}
+
+#[inline(never)]
+fn linked(volume: &mut [u8]) -> Option<()> {
+    let device = MemoryBlockDevice::allocate_with_block_size(volume.len(), BLOCK as u32)?;
+    device.with_buffer_mut(|buf| {
+        buf.copy_from_slice(volume);
+        let sb = &mut buf[1024..2048];
+        let features = le32(sb, soff::FEATURE_RO_COMPAT) & !ro_compat::READONLY;
+        put_le32(sb, soff::FEATURE_RO_COMPAT, features);
+        sbk::seal(sb);
+    });
+    mounted(&device, &mut |fs| {
+        let bin = fs.lookup_child(2, b"bin").ok()?.raw();
+        let tool = fs.lookup_child(bin, b"tool").ok()?.raw();
+        fs.link_entry(bin, b"again", tool).ok()
+    })?;
+    device.with_buffer_mut(|buf| {
+        mark_read_only(&mut buf[1024..2048]);
+        volume.copy_from_slice(buf);
+    });
+    Some(())
+}
+
+/// A second activation of a name moves its mount, keeping its id, in one
+/// step, and a directory handle with it; a file of the first held open still
+/// reads the first's bytes, and the first is freed only once nothing holds
+/// it. A name another filesystem is mounted at is neither activated over nor
+/// deactivated.
+pub fn test_a_replacement_switches_the_mount_in_one_step() -> TestResult {
+    const BIN: &[u8] = b"/opt/pkg-swap/bin";
+    if vfs_init_builtin_filesystems().is_err() {
+        return slopos_testing::fail!("no VFS");
+    }
+    let Some(first) = activated(b"pkg-swap", &[("bin/tool", EXEC, b"one")]) else {
+        return slopos_testing::fail!("the first did not activate");
+    };
+    let held = resolve(b"/opt/pkg-swap/bin/tool");
+    let id = mount_at(b"/opt/pkg-swap").map(|m| m.id);
+    let opened = held.is_ok_and(|(fs, inode)| crate::vfs::orphan::open_ref(fs, inode).is_ok());
+    let dir = resolve(BIN)
+        .ok()
+        .and_then(|(fs, inode)| vnode_handle_for_tests(fs, inode));
+    let second = activated(
+        b"pkg-swap",
+        &[("bin/tool", EXEC, b"two"), ("bin/more", EXEC, b"more")],
+    );
+    let outcome = (|| {
+        let (fs, old) = held.map_err(|_| "the first's tool is not shown")?;
+        let second = second.ok_or("the second did not activate")?;
+        if !opened {
+            return Err("could not hold the first's tool open");
+        }
+        if !dir.is_some_and(|dir| vfs_dir_handle_still_names(dir, BIN)) {
+            return Err("a directory handle did not follow the replacement");
+        }
+        let shown = mount_at(b"/opt/pkg-swap").ok_or("the name shows nothing")?;
+        if Some(shown.id) != id || generation_of(shown.root) != second || second <= first {
+            return Err("the mount did not move to the second in place");
+        }
+        let (_, new) = resolve(b"/opt/pkg-swap/bin/tool").map_err(|_| "no tool now")?;
+        let mut buf = [0u8; 8];
+        if generation_of(new) != second
+            || read_all(fs, old, &mut buf) != Some(3)
+            || &buf[..3] != b"one"
+        {
+            return Err("the held file does not read the first's bytes");
+        }
+        reap_all();
+        if fs.stat(old).is_err() {
+            return Err("the first was freed while held");
+        }
+        crate::vfs::orphan::close_ref(fs, old);
+        reap_all();
+        if fs.stat(old).is_ok() {
+            return Err("the first was not freed once nothing held it");
+        }
+        Ok(())
+    })();
+    let _ = deactivate(b"pkg-swap");
+    let outlived = dir.is_some_and(|dir| vfs_dir_handle_still_names(dir, BIN));
+    if let Some(dir) = dir {
+        drop_vnode_for_tests(dir);
+    }
+    reap_all();
+    if let Err(why) = outcome {
+        return slopos_testing::fail!("{}", why);
+    }
+    if outlived {
+        return slopos_testing::fail!("a directory handle outlived the deactivation");
+    }
+    a_mount_that_is_no_activation_stays()
+}
+
+static FOREIGN: BaseFs = BaseFs::new();
+
+fn a_mount_that_is_no_activation_stays() -> TestResult {
+    let Some(built) = image(&[("bin/tool", EXEC, b"one")]) else {
+        return slopos_testing::fail!("no room for the image");
+    };
+    let before = settled();
+    if FOREIGN.install(&super::BASE_SAMPLE, &[]).is_err()
+        || mount_subtree(b"/opt/pkg-foreign", &FOREIGN, FOREIGN.root_inode(), 0).is_err()
+    {
+        return slopos_testing::fail!("could not mount another filesystem at the name");
+    }
+    let over = activate_bytes(b"pkg-foreign", &built.bytes, built.root);
+    let taken = deactivate(b"pkg-foreign");
+    let stays = mount_at(b"/opt/pkg-foreign").is_some_and(|m| same_filesystem(m.fs, &FOREIGN));
+    let _ = unmount(b"/opt/pkg-foreign");
+    reap_all();
+    if over != Err(ActivateError::Mounts(VfsError::Busy)) {
+        return slopos_testing::fail!("an activation went over another mount: {:?}", over);
+    }
+    if taken != Err(ActivateError::Mounts(VfsError::NotFound)) || !stays {
+        return slopos_testing::fail!("deactivating took another filesystem's mount");
+    }
+    if resident() != before {
+        return slopos_testing::fail!("a refused activation stayed resident");
+    }
+    TestResult::Pass
+}
+
+/// The resident activations hold no more than their budget: one taken away
+/// but held open still counts, the one that would pass it is refused, and
+/// all are freed once nothing holds them.
+pub fn test_activations_stay_within_their_budget() -> TestResult {
+    if vfs_init_builtin_filesystems().is_err() {
+        return slopos_testing::fail!("no VFS");
+    }
+    let Some(built) = image(&[("bin/tool", EXEC, b"t")]) else {
+        return slopos_testing::fail!("no room for the image");
+    };
+    let before = settled();
+    let unheld = package::held_bytes();
+    let held = activate_bytes(b"pkg-held", &built.bytes, built.root)
+        .ok()
+        .and_then(|_| resolve(b"/opt/pkg-held/bin/tool").ok())
+        .filter(|&(fs, inode)| crate::vfs::orphan::open_ref(fs, inode).is_ok());
+    let _ = deactivate(b"pkg-held");
+    reap_all();
+    let one = package::held_bytes().saturating_sub(unheld);
+    let budget = package::held_bytes() + 2 * one;
+    let outcome = [&b"pkg-budget-0"[..], b"pkg-budget-1", b"pkg-budget-2"]
+        .map(|name| activate_within(name, &built.bytes, built.root, budget));
+    for name in [&b"pkg-budget-0"[..], b"pkg-budget-1"] {
+        let _ = deactivate(name);
+    }
+    if let Some((fs, inode)) = held {
+        crate::vfs::orphan::close_ref(fs, inode);
+    }
+    let after = settled();
+    if held.is_none() || one == 0 {
+        return slopos_testing::fail!("the held activation was freed or holds nothing");
+    }
+    if !matches!(outcome, [Ok(_), Ok(_), Err(ActivateError::Busy)]) {
+        return slopos_testing::fail!("{:?} within room for two of {} bytes", outcome, one);
+    }
+    if after != before {
+        return slopos_testing::fail!("{} resident, not the {} before", after, before);
+    }
+    TestResult::Pass
+}
+
+/// Images shown at once, more than the 32 a fixed pool once held.
+const MANY: usize = 100;
+
+fn many_name(i: usize) -> [u8; 12] {
+    let mut name = *b"pkg-many-000";
+    name[9] = b'0' + (i / 100 % 10) as u8;
+    name[10] = b'0' + (i / 10 % 10) as u8;
+    name[11] = b'0' + (i % 10) as u8;
+    name
+}
+
+fn allocated_pages() -> u64 {
+    u64::from(slopos_mm::page_alloc::get_page_allocator_stats().allocated)
+}
+
+/// A hundred small images are shown at once within the budget, each at its
+/// name and its own, and one of them updated in place; what each cost to
+/// show and costs at rest is reported for `run_tests gate fsperf`.
+pub fn test_a_hundred_images_are_shown_and_one_updated() -> TestResult {
+    if vfs_init_builtin_filesystems().is_err() {
+        return slopos_testing::fail!("no VFS");
+    }
+    let (Some(built), Some(next)) = (
+        image(&[("bin/tool", EXEC, b"many"), ("share/doc", FILE, b"doc")]),
+        image(&[("bin/tool", EXEC, b"next")]),
+    ) else {
+        return slopos_testing::fail!("no room for the images");
+    };
+    let before = settled();
+    let path = b"/tmp/pkg-many-image";
+    let _ = vfs_unlink(path);
+    let written =
+        vfs_open(path, true).is_ok_and(|file| file.write(0, &built.bytes) == Ok(built.bytes.len()));
+    let Some((fs, inode)) = resolve(path).ok().filter(|_| written) else {
+        return slopos_testing::fail!("the image could not be written");
+    };
+    let (held, pages, reads) = (package::held_bytes(), allocated_pages(), package::reads());
+    let began = slopos_kernel_services::clock::monotonic_ns();
+    let mut shown = 0;
+    let mut refused = None;
+    for i in 0..MANY {
+        match package::activate(&many_name(i), built.root, fs, inode, package::budget()) {
+            Ok(_) => shown += 1,
+            Err(e) => {
+                refused = Some(e);
+                break;
+            }
+        }
+    }
+    let ns = slopos_kernel_services::clock::monotonic_ns().saturating_sub(began);
+    let cost = crate::fsreport::ActivationCost {
+        images: shown as u64,
+        heldbytes: package::held_bytes().saturating_sub(held),
+        pages: allocated_pages().saturating_sub(pages),
+        reads: package::reads().saturating_sub(reads),
+        ns,
+    };
+    let _ = vfs_unlink(path);
+    let outcome = many_shown(shown, &next);
+    for i in 0..shown {
+        let _ = deactivate(&many_name(i));
+    }
+    let after = settled();
+    if let Some(e) = refused {
+        return slopos_testing::fail!("image {} of {} was refused: {:?}", shown, MANY, e);
+    }
+    if let Err(why) = outcome {
+        return slopos_testing::fail!("{}", why);
+    }
+    if after != before {
+        return slopos_testing::fail!("{} resident, not the {} before", after, before);
+    }
+    crate::fsreport::record_activation_cost(&cost);
+    TestResult::Pass
+}
+
+/// Each of the `shown` images reads its own file under its own number, and
+/// the middle one, updated to `next`, reads the update.
+#[inline(never)]
+fn many_shown(shown: usize, next: &Built) -> Result<(), &'static str> {
+    let mut numbers = KVec::new();
+    for i in 0..shown {
+        let mut path = *b"/opt/pkg-many-000/bin/tool";
+        path[5..17].copy_from_slice(&many_name(i));
+        let (fs, tool) = resolve(&path).map_err(|_| "an image is not shown at its name")?;
+        let mut buf = [0u8; 8];
+        if read_all(fs, tool, &mut buf) != Some(4) || &buf[..4] != b"many" {
+            return Err("an image's tool reads other than its bytes");
+        }
+        numbers
+            .push(generation_of(tool))
+            .map_err(|_| "no room for the numbers")?;
+    }
+    if numbers.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err("two names show one activation");
+    }
+    let middle = many_name(shown / 2);
+    let updated = activate_bytes(&middle, &next.bytes, next.root)
+        .map_err(|_| "the update did not activate")?;
+    let mut path = *b"/opt/pkg-many-000/bin/tool";
+    path[5..17].copy_from_slice(&middle);
+    let (fs, tool) = resolve(&path).map_err(|_| "the updated image is not shown")?;
+    let mut buf = [0u8; 8];
+    if generation_of(tool) != updated || read_all(fs, tool, &mut buf) != Some(4) {
+        return Err("the name does not show the update");
+    }
+    if &buf[..4] != b"next" {
+        return Err("the update reads other than its bytes");
+    }
+    Ok(())
+}
+
+/// A name the grammar refuses is neither activated nor deactivated, and a
+/// name nothing is shown at has nothing to take away.
+pub fn test_a_name_outside_the_grammar_is_refused() -> TestResult {
+    if vfs_init_builtin_filesystems().is_err() {
+        return slopos_testing::fail!("no VFS");
+    }
+    let Some(built) = image(&[("bin/tool", EXEC, b"t")]) else {
+        return slopos_testing::fail!("no room for the image");
+    };
+    for name in [
+        &b"bin"[..],
+        b"etc",
+        b"Upper",
+        b"dot.ted",
+        b"sl/ash",
+        b"..",
+        b"",
+        b"abcdefghijklmnopqrstuvwxyz0123456",
+    ] {
+        let named = resolve(b"/")
+            .map_err(|e| ActivateError::Image(OpenError::Read(e)))
+            .and_then(|(fs, inode)| {
+                package::activate(name, built.root, fs, inode, package::budget())
+            });
+        if named != Err(ActivateError::Name) {
+            return slopos_testing::fail!("an activation named {:?} was not refused", name);
+        }
+        if deactivate(name) != Err(ActivateError::Name) {
+            return slopos_testing::fail!("deactivating {:?} was not refused", name);
+        }
+    }
+    if deactivate(b"pkg-never") != Err(ActivateError::Mounts(VfsError::NotFound)) {
+        return slopos_testing::fail!("a name nothing is shown at had something taken away");
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_an_activation_is_shown_at_its_name_and_attests_its_files);
+slopos_testing::stest!(name = test_a_flipped_bit_fails_the_read_that_meets_it);
+slopos_testing::stest!(name = test_a_file_that_is_no_image_is_refused);
+slopos_testing::stest!(name = test_a_replacement_switches_the_mount_in_one_step);
+slopos_testing::stest!(name = test_activations_stay_within_their_budget);
+slopos_testing::stest!(name = test_a_hundred_images_are_shown_and_one_updated);
+slopos_testing::stest!(name = test_a_name_outside_the_grammar_is_refused);
+
+/// A live process running an activation's program holds that activation, as
+/// one running a base program holds its generation, and an exited one does
+/// not; neither holds the base's generation of the same number.
+pub fn test_a_running_package_program_holds_its_activation() -> TestResult {
+    use crate::basefs::reap::runs_from;
+    use slopos_ostd::process::{Cred, process_retire, process_spawn, root_account};
+    const NUMBER: u32 = 0x7fff_fff1;
+    let Ok(process) = process_spawn(None, root_account(), Cred::ROOT) else {
+        return slopos_testing::fail!("could not spawn a process");
+    };
+    let inode = core::num::NonZeroU64::new((u64::from(NUMBER) << 32) | 1).expect("nonzero");
+    let before = runs_from(NUMBER, true);
+    process.set_program(Program::Package(inode));
+    let running = runs_from(NUMBER, true);
+    let as_base = runs_from(NUMBER, false);
+    process.mark_exited();
+    let exited = runs_from(NUMBER, true);
+    if let Some(handle) = process.handle() {
+        process_retire(handle);
+    }
+    if before || !running || as_base || exited {
+        return slopos_testing::fail!(
+            "held before {}, running {}, as the base's {}, after exiting {}",
+            before,
+            running,
+            as_base,
+            exited
+        );
+    }
+    TestResult::Pass
+}
+
+slopos_testing::stest!(name = test_a_running_package_program_holds_its_activation);

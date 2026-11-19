@@ -1,0 +1,111 @@
+//! `package <dir> <out-dir> <libc.so>` builds the package laid out in
+//! `<dir>` into `<out-dir>/<name>.pkg` and its sidecar `<name>.meta`, once it
+//! checks out as `pkgctl` checks an install, its programs against `<libc.so>`.
+//! Prints what it wrote, its root and the grant a first install asks for.
+
+use std::fs;
+use std::path::Path;
+use std::process::ExitCode;
+
+use slopos_package_core::source::{Packed, pack_into};
+use slopos_package_core::{hex, symbols};
+
+fn run(dir: &Path, out: &Path, libc: &Path) -> Result<String, String> {
+    let Packed {
+        mut image,
+        sidecar,
+        image_at,
+        sidecar_at,
+    } = pack_into(dir, out)?;
+    let checked = fs::read(libc)
+        .map_err(|e| format!("{}: {e}", libc.display()))
+        .and_then(|libc| symbols::check_image(&mut image, &libc).map_err(|e| e.to_string()));
+    if let Err(why) = checked {
+        let _ = fs::remove_file(&image_at);
+        let _ = fs::remove_file(&sidecar_at);
+        return Err(why);
+    }
+    Ok(format!(
+        "name {}\nversion {}\nimage {}\nroot {}\nsidecar {}\n{}\n",
+        sidecar.name,
+        sidecar.version,
+        image_at.display(),
+        hex(&sidecar.sha256),
+        sidecar_at.display(),
+        image.declaration.grant().words().join(" ")
+    ))
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let [dir, out, libc] = args.as_slice() else {
+        eprintln!("usage: package <dir> <out-dir> <libc.so>");
+        return ExitCode::from(2);
+    };
+    match run(Path::new(dir), Path::new(out), Path::new(libc)) {
+        Ok(said) => {
+            print!("{said}");
+            ExitCode::SUCCESS
+        }
+        Err(why) => {
+            eprintln!("package: {dir}: {why}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use slopos_package_core::elf::{Kind, build};
+    use slopos_package_core::image::Image;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_laid_out_package_packs_checked_against_the_libc_named() {
+        let dir = std::env::temp_dir().join(format!("slopos-package-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src/.package")).unwrap();
+        fs::create_dir_all(dir.join("src/bin")).unwrap();
+        fs::write(dir.join("src/.package/release"), "name hello\nversion 4\n").unwrap();
+        fs::write(dir.join("src/.package/declare"), "command hello\n").unwrap();
+        let program = |imports: &[&str]| {
+            build(
+                Kind::Executable,
+                Some("/lib/ld-slopos.so.1"),
+                &["libc.so"],
+                imports,
+                &[],
+            )
+        };
+        let hello = dir.join("src/bin/hello");
+        fs::write(&hello, program(&["puts"])).unwrap();
+        fs::set_permissions(&hello, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            dir.join("libc.so"),
+            build(Kind::Shared, None, &[], &[], &["puts"]),
+        )
+        .unwrap();
+        let said = run(&dir.join("src"), &dir.join("out"), &dir.join("libc.so")).unwrap();
+        assert!(said.starts_with("name hello\nversion 4\n"), "{said}");
+        assert!(
+            said.ends_with("grant - unasked - users - commands hello\n"),
+            "{said}"
+        );
+        let image = fs::File::open(dir.join("out/hello.pkg")).unwrap();
+        assert_eq!(Image::check(image).unwrap().release.version, 4);
+        assert!(
+            fs::read_to_string(dir.join("out/hello.meta"))
+                .unwrap()
+                .starts_with("name hello\n")
+        );
+        fs::write(&hello, program(&["puts", "absent"])).unwrap();
+        let why = run(&dir.join("src"), &dir.join("out"), &dir.join("libc.so")).unwrap_err();
+        assert!(why.contains("binds absent"), "{why}");
+        assert!(
+            !dir.join("out/hello.pkg").exists() && !dir.join("out/hello.meta").exists(),
+            "a refused image is not left behind"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

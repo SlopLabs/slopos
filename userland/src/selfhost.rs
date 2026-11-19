@@ -10,11 +10,11 @@ use std::process::{Command, Stdio};
 use std::sync::LazyLock;
 
 use slopos_abi::fs::{DEFAULT_PATH, SESSION_GID, SESSION_UID};
-use slopos_extension_core::OFFERED;
-use slopos_extension_core::declare::mount_point;
-use slopos_extension_core::sidecar::Sidecar;
+use slopos_package_core::OFFERED;
+use slopos_package_core::declare::mount_point;
+use slopos_package_core::sidecar::Sidecar;
 
-use crate::apps::extctl::store::Store;
+use crate::apps::pkgctl::store::Store;
 
 pub const SOURCE: &str = "/src/slopos";
 /// Room on the root disk; `/tmp` is memory.

@@ -18,7 +18,7 @@ one place remoted reads them from.
     sh [--timeout S] 'CMDLINE'          through /bin/shell -c
     push LOCAL REMOTE | pull REMOTE LOCAL   SHA-256 checked end to end
     klog [--follow]
-    install [--base IMG] [--extension EXT ...] [--kernel ELF --tag T] [--commit] [--timeout S]
+    install [--base IMG] [--package PKG ...] [--kernel ELF --tag T] [--commit] [--timeout S]
     kernel-changed --identity SHA256   prints `changed`, or `same` for that kernel
 
 Every command but `serve` and `provision` goes to the newest boot connected
@@ -1269,7 +1269,7 @@ def boot_armed(args, slot):
 
 
 def image_root(path):
-    """The root of the extension image at `path`, the digest of the top block
+    """The root of the package image at `path`, the digest of the top block
     of the SHA-256 tree that follows its volume, as its sidecar names it."""
     def tree(data):
         levels = 0
@@ -1286,34 +1286,34 @@ def image_root(path):
         else:
             high = mid
     if partial or not blocks or low + tree(low) != blocks:
-        die(f"{path} is no extension image: its length fits no SHA-256 tree")
+        die(f"{path} is no package image: its length fits no SHA-256 tree")
     with open(path, "rb") as f:
         f.seek((low if tree(low) else 0) * 4096)
         return hashlib.sha256(f.read(4096)).hexdigest()
 
 
-def install_extension(args, image):
-    """Install the extension `image` with extctl: under its key when its
-    sidecar and signature lie beside it as `just extension` leaves them, else
+def install_package(args, image):
+    """Install the package `image` with pkgctl: under its key when its
+    sidecar and signature lie beside it as `just package` leaves them, else
     as a first install. Both run unasked for the paired agent, and both
     install only the bytes pushed: the root the host sent, or the one its
     signed sidecar names."""
-    stem = image.name[:-len(".ext")] if image.name.endswith(".ext") else image.name
+    stem = image.name[:-len(".pkg")] if image.name.endswith(".pkg") else image.name
     sidecar, signature = image.with_name(f"{stem}.meta"), image.with_name(f"{stem}.meta.sig")
     signed = sidecar.is_file() and signature.is_file()
     root = image_root(image)
     if signed and f"sha256 {root}\n" not in sidecar.read_text(errors="replace"):
-        die(f"{sidecar} describes another image than {image}; run `just extension` again")
-    remote, size, sha = push(args, image, f"{SCRATCH}/{stem}.ext", INSTALL_MODE)
+        die(f"{sidecar} describes another image than {image}; run `just package` again")
+    remote, size, sha = push(args, image, f"{SCRATCH}/{stem}.pkg", INSTALL_MODE)
     log(f"pushed {image}: {size} bytes, sha256 {sha}, root {root}")
     pushed = [remote]
     if signed:
         for local in (sidecar, signature):
             pushed.append(push(args, local, f"{SCRATCH}/{local.name}", INSTALL_MODE)[0])
-        argv = ["extctl", "install-signed", *pushed]
+        argv = ["pkgctl", "install-signed", *pushed]
     else:
         log(f"{image} carries no signed sidecar beside it; installing it as a first install")
-        argv = ["extctl", "install", remote, root]
+        argv = ["pkgctl", "install", remote, root]
     try:
         sys.stdout.write(capture(args, argv, timeout=600))
     finally:
@@ -1323,10 +1323,10 @@ def install_extension(args, image):
 def cmd_install(args):
     kernel = Path(args.kernel) if args.kernel else None
     base = Path(args.base) if args.base else None
-    extensions = [Path(e) for e in args.extension]
-    if not (kernel or base or extensions):
-        die("install: name a --base, an --extension, a --kernel or several")
-    for path in filter(None, (kernel, base, *extensions)):
+    packages = [Path(e) for e in args.package]
+    if not (kernel or base or packages):
+        die("install: name a --base, a --package, a --kernel or several")
+    for path in filter(None, (kernel, base, *packages)):
         if not path.is_file():
             die(f"install: no file at {path}")
     before = wait_agent(args, timeout=args.connect_timeout)
@@ -1339,8 +1339,8 @@ def cmd_install(args):
     armed = install_base(args, base, pushed) if base else None
     # Before a kernel, whose boot would take them off until they are
     # activated again.
-    for extension in extensions:
-        install_extension(args, extension)
+    for package in packages:
+        install_package(args, package)
     if armed:
         boot_armed(args, armed)
     elif pushed:
@@ -1348,8 +1348,8 @@ def cmd_install(args):
     elif args.commit:
         sys.stdout.write(capture(args, ["bootctl", "commit"]))
     print(capture(args, ["bootctl", "status"]), end="")
-    if extensions:
-        print(capture(args, ["extctl", "status"]), end="")
+    if packages:
+        print(capture(args, ["pkgctl", "status"]), end="")
 
 
 def main():
@@ -1412,11 +1412,11 @@ def main():
     p.add_argument("--follow", "-f", action="store_true")
     p.set_defaults(func=cmd_klog)
 
-    p = sub.add_parser("install", help="try a base, keeping it once it answers, install extensions, and a kernel into the spare slot, booting it")
+    p = sub.add_parser("install", help="try a base, keeping it once it answers, install packages, and a kernel into the spare slot, booting it")
     p.add_argument("--kernel")
     p.add_argument("--base")
-    p.add_argument("--extension", action="append", default=[],
-                   help="an extension image `just extension` packed, signed when its .meta.sig lies beside it")
+    p.add_argument("--package", action="append", default=[],
+                   help="a package image `just package` packed, signed when its .meta.sig lies beside it")
     p.add_argument("--tag", help="the SLOPOS_BUILD_TAG the new kernel reports")
     p.add_argument("--identity", help="the kernel's sha256 built with no tag, recorded for kernel-changed")
     p.add_argument("--commit", action="store_true", help="make the new slot the default once it is up")

@@ -160,11 +160,11 @@ frame is not known.
 
 ---
 
-## An extension activation's index costs more than its image
+## A package activation's index costs more than its image
 
 **Status**: Open
-**Severity**: Low (memory; only an `ExtensionUpdate` holder makes an activation)
-**Component**: `fs/src/extension/index.rs`
+**Severity**: Low (memory; only a `PackageUpdate` holder makes an activation)
+**Component**: `fs/src/package/index.rs`
 
 An activation's index holds up to `MAX_ENTRIES` (65 536) names of up to 255
 bytes and each one's `stat`, about 24 MB of kernel heap. The activations'
@@ -173,17 +173,17 @@ images refuse the next activation (`EBUSY`) where their files would fit.
 
 ---
 
-## A port held by an extension init cannot read stops another extension's service
+## A port held by a package init cannot read stops another package's service
 
 **Status**: Open
 **Severity**: Low (robustness)
-**Component**: `userland/src/apps/init/extensions.rs:1349-1420` (`wanted`)
+**Component**: `userland/src/apps/init/packages.rs:1349-1420` (`wanted`)
 
-When init cannot read an extension's record or activation it leaves that
-extension's services running, holding their sockets, and counts only their
-descriptors. Another extension's service that listens on one of those ports is
+When init cannot read a package's record or activation it leaves that
+package's services running, holding their sockets, and counts only their
+descriptors. Another package's service that listens on one of those ports is
 not told apart from a free one: its bind fails, it spends its starts and gives
-up until the unreadable extension reads again.
+up until the unreadable package reads again.
 
 ---
 
@@ -265,7 +265,7 @@ privd reads the first.
   against the other, and input typed before an interrupt can arrive after it.
 - A remote command's timeout kills its requester, but remoted then waits for
   end of file on the command's output, which a mechanism ignoring `SIGTERM`
-  (`bootctl` while it writes, `extctl`) holds open past the timeout.
+  (`bootctl` while it writes, `pkgctl`) holds open past the timeout.
 
 ---
 
@@ -379,9 +379,9 @@ can add a second one.
 **Status**: Open
 **Severity**: Low (no current path; a hazard for a new trusting reader)
 **Component**: `slopos-ostd/src/process/identity.rs`, `mm/src/process_vm.rs:2924-2946`,
-`userland/src/apps/init/extensions.rs` (`bind`)
+`userland/src/apps/init/packages.rs` (`bind`)
 
-- A connector to an extension service's socket reads init's identity, recorded
+- A connector to a package service's socket reads init's identity, recorded
   at `listen`, through `SO_PEERCRED` and `SO_PEERPROGRAM`. privd and the
   compositor trust init's identity only on descriptors at fixed numbers init
   hands them at start.

@@ -5,7 +5,7 @@ use slopos_ostd::{KVec, lock_class};
 
 /// Directories held where they are: those pinned mount points' paths pass
 /// through, `/usr` and `/etc` for the base, `/media` for the install medium
-/// and `/opt` for the extensions, and the kept directories and those on the
+/// and `/opt` for the packages, and the kept directories and those on the
 /// way to them.
 const MAX_PINNED_DIRS: usize = 32;
 

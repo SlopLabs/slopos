@@ -20,7 +20,7 @@ fn ask(n: u32) -> Ask {
         detail: None,
         verb: "Allow".into(),
         destructive: false,
-        extension: None,
+        package: None,
         terms: vec![],
     }
 }

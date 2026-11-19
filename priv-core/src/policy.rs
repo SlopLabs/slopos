@@ -43,7 +43,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-use slopos_abi::extension::Label;
+use slopos_abi::package::Label;
 
 use crate::consent::Kind;
 use crate::{DELEGABLE, REQUESTER_CEILING, words};
@@ -93,7 +93,7 @@ pub struct Term {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RunsAs {
-    /// uid 0 for the base's actions, an extension's first user for its own.
+    /// uid 0 for the base's actions, a package's first user for its own.
     Uid(u32),
     /// Whoever asked, in their own groups and login session.
     Requester,
@@ -141,9 +141,9 @@ pub enum Principal {
     /// A requester running the base program at this path.
     Program(String),
     /// A requester running the program at this path of the activation the
-    /// label names: an extension's own program, which only that extension's
+    /// label names: a package's own program, which only that package's
     /// actions allow.
-    Extension(String, Label),
+    Package(String, Label),
 }
 
 /// What a person must do for their request to run.
@@ -190,31 +190,31 @@ pub enum Reach {
 pub struct Requester<'a> {
     uid: u32,
     program: Option<&'a str>,
-    extension: Option<(&'a str, Label)>,
+    package: Option<(&'a str, Label)>,
     paired: bool,
     reach: Reach,
 }
 
 impl<'a> Requester<'a> {
     /// `program` is the path of the base program the requester runs, `None`
-    /// for any other program, an extension's included; `base_paired` whether
+    /// for any other program, a package's included; `base_paired` whether
     /// the booted base carries a remote pairing.
     pub fn new(uid: u32, program: Option<&'a str>, base_paired: bool) -> Self {
         Self {
             uid,
             program,
-            extension: None,
+            package: None,
             paired: base_paired && program == Some(REMOTED),
             reach: Reach::Nowhere,
         }
     }
 
     /// A requester running `path` of the activation `label` names.
-    pub fn extension(uid: u32, path: &'a str, label: Label) -> Self {
+    pub fn package(uid: u32, path: &'a str, label: Label) -> Self {
         Self {
             uid,
             program: None,
-            extension: Some((path, label)),
+            package: Some((path, label)),
             paired: false,
             reach: Reach::Nowhere,
         }
@@ -236,7 +236,7 @@ impl<'a> Requester<'a> {
             Principal::Paired => self.paired,
             Principal::User | Principal::Admin => false,
             Principal::Program(path) => !self.paired && self.program == Some(path.as_str()),
-            Principal::Extension(path, label) => self.extension == Some((path.as_str(), *label)),
+            Principal::Package(path, label) => self.package == Some((path.as_str(), *label)),
         }
     }
 

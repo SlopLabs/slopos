@@ -25,7 +25,7 @@ base to what runs outside it.
 
 Rules every change keeps:
 
-- Only a kernel change needs a reboot. A base, an app, an extension, the
+- Only a kernel change needs a reboot. A base, an app, a package, the
   toolchain or a setting takes effect under the running kernel. A reset
   may be the way back from a trial, never the way forward.
 - Nothing writes the ESP after install, and `bootctl` never writes the
@@ -61,7 +61,7 @@ Before v1 none of this is promised. At v1, in one change:
   as glibc does. An older kernel under a newer base then loses a feature,
   where before v1 it is refused.
 - Each interface `docs/abi/interfaces` lists as *Unversioned* gets a
-  version or a rule: tree manifests, the accounts record and the extension
+  version or a rule: tree manifests, the accounts record and the package
   store, the base manifest, `limine.conf`, the disk layout, the kernel
   command line. A base rolled back has to read what the newer one wrote on
   the root, and nothing checks that today.

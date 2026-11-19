@@ -1,0 +1,159 @@
+//! Packages' users as the user database lists them, with the uids their
+//! records keep. A package granted any user keeps a uid for its own name
+//! too, whether or not it declares that user: the package's number, which
+//! init's login tags for its services are made from. One granted no user
+//! takes no uid.
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use slopos_accounts_core::Entry;
+
+use crate::record::Record;
+
+/// The uids packages' users take, Debian's range for dynamically allocated
+/// system users. A removal gives one back only once nothing it owns is left.
+pub const FIRST_UID: u32 = *slopos_abi::fs::PACKAGE_UIDS.start();
+pub const LAST_UID: u32 = *slopos_abi::fs::PACKAGE_UIDS.end();
+
+/// Give `record`'s own name and each user its images are granted the lowest
+/// uid that neither it nor `others` holds, when its images are granted any.
+pub fn allocate<'a>(
+    record: &mut Record,
+    others: impl IntoIterator<Item = &'a Record>,
+) -> Result<(), &'static str> {
+    let users: Vec<String> = record
+        .current
+        .iter()
+        .chain(&record.previous)
+        .flat_map(|image| image.grant.users.iter().cloned())
+        .collect();
+    if users.is_empty() {
+        return Ok(());
+    }
+    let mut held: Vec<u32> = others.into_iter().flat_map(Record::held_uids).collect();
+    held.extend(record.held_uids());
+    for user in core::iter::once(record.name.clone()).chain(users) {
+        if record.uid(&user).is_some() {
+            continue;
+        }
+        let uid = (FIRST_UID..=LAST_UID)
+            .find(|uid| !held.contains(uid))
+            .ok_or("every uid for packages' users is taken")?;
+        held.push(uid);
+        record.uids.push((user, uid));
+    }
+    Ok(())
+}
+
+/// Each installed package's users, whose home is its state directory, as
+/// the user database lists them beside the people.
+pub fn entries(records: &[Record]) -> Vec<Entry> {
+    let mut out: Vec<Entry> = Vec::new();
+    for record in records {
+        let Some(current) = &record.current else {
+            continue;
+        };
+        for user in &current.grant.users {
+            let Some(uid) = record.uid(user) else {
+                continue;
+            };
+            let name = &record.name;
+            out.push(Entry {
+                name: user.to_string(),
+                uid,
+                gecos: format!("{name} package"),
+                home: format!("/var/lib/{name}"),
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grant::Grant;
+    use crate::record::Installed;
+    use alloc::vec;
+    use slopos_slibc_core::passwd::{Group, Passwd, lines};
+
+    fn installed(name: &str, users: &[&str]) -> Record {
+        let mut record = Record::new(name);
+        record.install(
+            Installed {
+                version: 1,
+                sha256: [1; 32],
+                signer: None,
+                grant: Grant {
+                    users: users.iter().map(|u| u.to_string()).collect(),
+                    ..Grant::default()
+                },
+            },
+            None,
+        );
+        record
+    }
+
+    #[test]
+    fn a_uid_is_the_lowest_free_and_is_kept() {
+        let mut hello = installed("hello", &["hello", "hello-worker"]);
+        assert_eq!(allocate(&mut hello, []), Ok(()));
+        let given = vec![("hello".into(), 100), ("hello-worker".into(), 101)];
+        assert_eq!(hello.uids, given);
+        assert_eq!(allocate(&mut hello, []), Ok(()));
+        assert_eq!(hello.uids, given);
+        let mut tool = installed("tool", &[]);
+        assert_eq!(allocate(&mut tool, [&hello]), Ok(()));
+        assert!(tool.uids.is_empty());
+        hello.remove();
+        assert_eq!((hello.uids.len(), &hello.retired[..]), (0, &[100, 101][..]));
+        let mut late = installed("late", &["late"]);
+        assert_eq!(allocate(&mut late, [&hello, &tool]), Ok(()));
+        assert_eq!(late.uid("late"), Some(102));
+        hello.install(late.current.clone().unwrap(), None);
+        hello.current.as_mut().unwrap().grant.users = vec!["hello".into()];
+        assert_eq!(allocate(&mut hello, [&tool, &late]), Ok(()));
+        assert_eq!(hello.uids, vec![("hello".into(), 103)]);
+    }
+
+    #[test]
+    fn the_range_runs_out() {
+        let mut full = installed("full", &[]);
+        full.uids = (FIRST_UID..=LAST_UID)
+            .map(|uid| (format!("u{uid}"), uid))
+            .collect();
+        let mut next = installed("next", &["next"]);
+        assert!(allocate(&mut next, [&full]).is_err());
+    }
+
+    #[test]
+    fn the_database_lists_installed_users_after_the_people() {
+        use slopos_accounts_core::{Accounts, group, passwd};
+        let mut hello = installed("hello", &["hello", "hello-worker"]);
+        allocate(&mut hello, []).unwrap();
+        let mut gone = installed("gone", &["gone"]);
+        allocate(&mut gone, [&hello]).unwrap();
+        gone.remove();
+        let records = [hello, gone];
+        let entries = entries(&records);
+        assert_eq!(entries.len(), 2);
+        let people = Accounts::one_person();
+        let passwd = passwd(&people, &entries);
+        let rows: Vec<Passwd<'_>> = lines(passwd.as_bytes())
+            .map(|line| Passwd::parse(line).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 6);
+        assert_eq!(rows[4].name, b"hello-worker");
+        assert_eq!((rows[4].uid, rows[4].gid), (101, 101));
+        assert_eq!(rows[4].dir, b"/var/lib/hello");
+        assert_eq!(rows[4].gecos, b"hello package");
+        let group = group(&people, &entries);
+        let groups: Vec<Group<'_>> = lines(group.as_bytes())
+            .map(|line| Group::parse(line).unwrap())
+            .collect();
+        assert_eq!(groups.len(), 7);
+        assert_eq!((groups[4].name, groups[4].gid), (&b"hello"[..], 100));
+    }
+}

@@ -47,12 +47,12 @@ root slopos_abi::fs::USER_PATH_MAX
 # The directories the kernel keeps where they are, against moves, mounts and
 # unmounts, which the base's sealed stores and user database rest on.
 root slopos_abi::fs::KEPT_DIRS
-root slopos_abi::fs::EXTENSION_STORE
+root slopos_abi::fs::PACKAGE_STORE
 root slopos_abi::fs::ACCOUNTS_STORE
 # Linux's statfs f_type for what only SlopOS serves: the base and the medium,
-# and an extension's activation, which init and privd tell from a directory.
+# and a package's activation, which init and privd tell from a directory.
 root slopos_abi::fs::BASEFS_MAGIC
-root slopos_abi::fs::EXTENSION_MAGIC
+root slopos_abi::fs::PACKAGE_MAGIC
 # A write to /dev/kmsg: the node, a record's bound, the rate limit.
 root slopos_abi::fs::KMSG_*
 # efivar_get / efivar_set.
@@ -60,9 +60,9 @@ root slopos_abi::syscall::numbers::EFIVAR_DATA_MAX
 # The SlopOS-only socket options on Linux's getsockopt.
 root slopos_abi::syscall::posix::SOL_SLOPOS
 root slopos_abi::syscall::posix::SO_PEERPROGRAM
-root slopos_abi::syscall::posix::SO_PEEREXTENSION
-# ext_activate's name grammar, digest and pool; SO_PEEREXTENSION's label.
-root slopos_abi::extension::*
+root slopos_abi::syscall::posix::SO_PEERPACKAGE
+# pkg_activate's name grammar, digest and pool; SO_PEERPACKAGE's label.
+root slopos_abi::package::*
 # test_report's status and bounds.
 root slopos_abi::syscall::test_report::*
 # sys_info's boot_flags; cpu_perf's flags and policies, cpu_perf_ctl's ops;
@@ -101,3 +101,4 @@ interface 12 6e24dbac1b584a2a56930c0a37da392544ce594af3744e1a5e4ef79353678010
 interface 13 d1cef7c29028038296011a5951051aced415f16b0d190e9fcb85ca3b7cd02928
 interface 14 cc90e386fdc5bb8868f48da3f23da71814dc357c7f9d8a86f9df5617b6e5821a
 interface 15 7768b74561cdbf6cca6f9f4ff5cc90cf82b8409bdefa152832583c0f23f1d283
+interface 16 2539f289257466c406cbb6f56b0e409c9fb2fcb4615ad3a0fefb1caedc0beff0

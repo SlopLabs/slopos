@@ -100,7 +100,7 @@ pub fn unsaved(path: &str, kind: ErrorKind) -> String {
 pub fn refused_save(path: &str, refusal: Refusal) -> String {
     let because = match refusal {
         Refusal::System => "its folder is part of the system",
-        Refusal::Extension => "its folder is part of an extension",
+        Refusal::Package => "its folder is part of a package",
         Refusal::ReadOnlyDisk => "its folder is on a disk that can't be written to",
         Refusal::Sealed => "it's locked against changes",
         Refusal::Denied => "you don't have permission to save it in its folder",

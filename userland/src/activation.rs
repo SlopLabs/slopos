@@ -1,5 +1,5 @@
-//! The activations shown at `/opt/<name>`, read as init and privd hold an
-//! extension to its record: the one shown now, by the generation its inodes
+//! The activations shown at `/opt/<name>`, read as init and privd hold a
+//! package to its record: the one shown now, by the generation its inodes
 //! name, and its release, declaration and manifest, read from that
 //! generation alone.
 
@@ -8,18 +8,18 @@ use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
-use slopos_abi::extension::Label;
-use slopos_abi::fs::{EXTENSION_MAGIC, O_DIRECTORY, O_NOFOLLOW};
+use slopos_abi::fs::{O_DIRECTORY, O_NOFOLLOW, PACKAGE_MAGIC};
+use slopos_abi::package::Label;
 use slopos_abi::syscall::O_CLOEXEC;
-use slopos_extension_core::ceiling::{self, NEVER};
-use slopos_extension_core::declare::{Declaration, mount_point};
-use slopos_extension_core::image::{DECLARE, MANIFEST, RELEASE};
-use slopos_extension_core::record::Record;
-use slopos_extension_core::release::Release;
+use slopos_package_core::ceiling::{self, NEVER};
+use slopos_package_core::declare::{Declaration, mount_point};
+use slopos_package_core::image::{DECLARE, MANIFEST, RELEASE};
+use slopos_package_core::record::Record;
+use slopos_package_core::release::Release;
 use slopos_priv_core::Action;
 use slopos_priv_core::DELEGABLE;
 
-use crate::apps::extctl::store::Store;
+use crate::apps::pkgctl::store::Store;
 use crate::syscall::fs as sys_fs;
 
 fn open_dir(path: &str) -> std::io::Result<File> {
@@ -35,7 +35,7 @@ pub fn open(name: &str) -> Result<File, String> {
     let mount = mount_point(name);
     let dir = open_dir(&mount).map_err(|e| format!("{mount}: {e}"))?;
     match sys_fs::fstatfs(dir.as_raw_fd()) {
-        Ok(stats) if stats.f_type == EXTENSION_MAGIC => Ok(dir),
+        Ok(stats) if stats.f_type == PACKAGE_MAGIC => Ok(dir),
         _ => Err(format!("nothing is shown at {mount}")),
     }
 }
@@ -43,7 +43,7 @@ pub fn open(name: &str) -> Result<File, String> {
 /// Which activation `file` is of, the high half of its inode, when it is a
 /// file of one.
 pub fn generation(file: &File) -> Option<u64> {
-    let on_one = sys_fs::fstatfs(file.as_raw_fd()).is_ok_and(|s| s.f_type == EXTENSION_MAGIC);
+    let on_one = sys_fs::fstatfs(file.as_raw_fd()).is_ok_and(|s| s.f_type == PACKAGE_MAGIC);
     on_one
         .then(|| file.metadata().ok().map(|meta| meta.ino() >> 32))
         .flatten()
@@ -80,7 +80,7 @@ pub fn holds(name: &str, generation: u64, path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The extensions the store keeps that are shown now, by name: a mount at
+/// The packages the store keeps that are shown now, by name: a mount at
 /// `/opt/<name>` lists in no directory.
 pub fn names() -> Vec<String> {
     let names = Store::open(false).and_then(|store| store.names());
@@ -91,7 +91,7 @@ pub fn names() -> Vec<String> {
         .collect()
 }
 
-/// Each shown extension's name and the apps it declares, by name.
+/// Each shown package's name and the apps it declares, by name.
 pub fn apps() -> Vec<(String, Vec<String>)> {
     let Ok(store) = Store::open(false) else {
         return Vec::new();
@@ -106,7 +106,7 @@ pub fn apps() -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-/// An extension's current image as the activation shown for it holds it.
+/// A package's current image as the activation shown for it holds it.
 pub struct Shown {
     pub generation: u64,
     pub declaration: Declaration,
@@ -114,7 +114,7 @@ pub struct Shown {
 }
 
 /// `record`'s current image as shown at `/opt/<name>`, once its release
-/// names the record's extension and version and its declaration asks for
+/// names the record's package and version and its declaration asks for
 /// what the record grants.
 pub fn shown(record: &Record) -> Result<Shown, String> {
     let name = &record.name;
@@ -141,32 +141,32 @@ pub fn shown(record: &Record) -> Result<Shown, String> {
 
 /// The base's ceiling.
 pub fn ceiling() -> Result<u64, String> {
-    std::fs::read_to_string(slopos_extension_core::CEILING)
+    std::fs::read_to_string(slopos_package_core::CEILING)
         .map_err(|e| e.to_string())
         .and_then(|text| ceiling::parse(&text).map_err(|e| e.to_string()))
-        .map_err(|why| format!("{}: {why}", slopos_extension_core::CEILING))
+        .map_err(|why| format!("{}: {why}", slopos_package_core::CEILING))
 }
 
-/// An action of an extension's, as privd runs it.
+/// An action of a package's, as privd runs it.
 pub struct Loaded {
     pub action: Action,
-    pub extension: String,
+    pub package: String,
     /// The activation it was read from, which its program must be a file of.
     pub generation: u64,
     /// The login tag its mechanism runs under.
     pub login: u32,
 }
 
-/// Every running extension's actions as privd runs them.
+/// Every running package's actions as privd runs them.
 #[derive(Default)]
 pub struct Actions {
     pub loaded: Vec<Loaded>,
     /// What they were read from, a `<name> <sha256> <generation>` line for
-    /// each extension with actions: while it stands, so do they.
+    /// each package with actions: while it stands, so do they.
     pub from: String,
-    /// The extensions left out, and why.
+    /// The packages left out, and why.
     pub skipped: Vec<String>,
-    /// The login tags of the extensions read whose actions do not run.
+    /// The login tags of the packages read whose actions do not run.
     pub stopped: Vec<u32>,
     /// One was left out because its record or activation could not be read,
     /// not because it does not run.
@@ -174,10 +174,10 @@ pub struct Actions {
 }
 
 pub fn actions() -> Result<Actions, String> {
-    let store = Store::open(false).map_err(|why| format!("the extension store: {why}"))?;
+    let store = Store::open(false).map_err(|why| format!("the package store: {why}"))?;
     let names = store
         .names()
-        .map_err(|why| format!("the extension store: {why}"))?;
+        .map_err(|why| format!("the package store: {why}"))?;
     let mut out = Actions::default();
     if names.is_empty() {
         return Ok(out);
@@ -203,7 +203,7 @@ pub fn actions() -> Result<Actions, String> {
         let uids: Vec<u32> = record.uids.iter().map(|&(_, uid)| uid).collect();
         if uids.iter().any(|uid| taken.contains(uid)) {
             out.skipped
-                .push(format!("{name}: it holds a uid another extension holds"));
+                .push(format!("{name}: it holds a uid another package holds"));
             stopped(&mut out);
             continue;
         }
@@ -240,14 +240,14 @@ pub fn actions() -> Result<Actions, String> {
         for action in &shown.declaration.actions {
             out.loaded.push(Loaded {
                 action: action.for_privd(uid, held, label),
-                extension: name.clone(),
+                package: name.clone(),
                 generation: shown.generation,
                 login,
             });
         }
         out.from.push_str(&format!(
             "{name} {} {}\n",
-            slopos_extension_core::hex(&current.sha256),
+            slopos_package_core::hex(&current.sha256),
             shown.generation
         ));
     }

@@ -1305,12 +1305,12 @@ fn every_question_reads_whole_at_every_width() -> bool {
         detail: Some("It can delete everything on the disk you choose.".into()),
         verb: "Install".into(),
         destructive: true,
-        extension: None,
+        package: None,
         terms: Vec::new(),
     };
     let long = vec![b"/bin/bootctl".to_vec(), vec![b'x'; 300]];
     let commands: Vec<String> = (0..60).map(|n| format!("command-{n}")).collect();
-    let longest = vec![b"/bin/extctl".to_vec(), vec![b'x'; MAX_SHOWN - 12]];
+    let longest = vec![b"/bin/pkgctl".to_vec(), vec![b'x'; MAX_SHOWN - 12]];
     let shapes = [
         ask.clone(),
         Ask {
@@ -1325,7 +1325,7 @@ fn every_question_reads_whole_at_every_width() -> bool {
             kind: Kind::Admin,
             person: Some(BOB.into()),
             admins: vec![ALICE.into(), "carol".into(), "dave".into()],
-            extension: Some("act".into()),
+            package: Some("act".into()),
             command: long.clone(),
             ..ask.clone()
         },

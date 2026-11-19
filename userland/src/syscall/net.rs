@@ -194,7 +194,7 @@ pub fn peer_pidfd(fd: RawFd) -> SyscallResult<super::OwnedFd> {
 }
 
 /// The path of the program the peer ran when it connected, as long as it
-/// still runs it: a base path, or `/opt/<name>/…` for an extension's; `None`
+/// still runs it: a base path, or `/opt/<name>/…` for a package's; `None`
 /// for any other.
 pub fn peer_program(fd: RawFd) -> SyscallResult<Option<Vec<u8>>> {
     let mut need = 0u32;
@@ -223,28 +223,28 @@ pub fn peer_program(fd: RawFd) -> SyscallResult<Option<Vec<u8>>> {
 
 /// The activation the peer's program is of, as long as it still runs it;
 /// `None` for a base program or any other.
-pub fn peer_extension(fd: RawFd) -> SyscallResult<Option<slopos_abi::extension::Label>> {
-    let mut raw = [0u8; slopos_abi::extension::Label::LEN];
+pub fn peer_package(fd: RawFd) -> SyscallResult<Option<slopos_abi::package::Label>> {
+    let mut raw = [0u8; slopos_abi::package::Label::LEN];
     let len = getsockopt(
         fd,
         slopos_abi::syscall::SOL_SLOPOS,
-        slopos_abi::syscall::SO_PEEREXTENSION,
+        slopos_abi::syscall::SO_PEERPACKAGE,
         &mut raw,
     )?;
     match len {
         0 => Ok(None),
-        _ => slopos_abi::extension::Label::from_bytes(&raw[..len])
+        _ => slopos_abi::package::Label::from_bytes(&raw[..len])
             .map(Some)
             .ok_or(slopos_slibc::errno::EIO.into()),
     }
 }
 
 /// The base path of the program the peer runs, `None` once it runs anything
-/// else: code from outside the base, an extension's among it.
+/// else: code from outside the base, a package's among it.
 pub fn peer_base_program(fd: RawFd) -> SyscallResult<Option<Vec<u8>>> {
-    // In this order: a program that stops holding never holds again, so an
-    // extension's that lapses between the two reads answers no path.
-    if peer_extension(fd)?.is_some() {
+    // In this order: a program that stops holding never holds again, so a
+    // package's that lapses between the two reads answers no path.
+    if peer_package(fd)?.is_some() {
         return Ok(None);
     }
     peer_program(fd)

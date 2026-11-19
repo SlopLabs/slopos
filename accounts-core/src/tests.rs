@@ -10,11 +10,11 @@ use crate::record::{DESKTOP_PERSON, LAST_ADMIN, NAME_HELD, NO_SUCH_PERSON, NO_UI
 const HASH: &str =
     "$argon2id$v=19$m=256,t=2,p=1$c29tZXNhbHQ$nf65EOgLrQMR/uIPnA4rEsF5h7TKyQwu9U1bMCHGi/4";
 
-fn extension(name: &str, uid: u32) -> Entry {
+fn package(name: &str, uid: u32) -> Entry {
     Entry {
         name: name.to_string(),
         uid,
-        gecos: "hello extension".to_string(),
+        gecos: "hello package".to_string(),
         home: "/var/lib/hello".to_string(),
     }
 }
@@ -218,14 +218,14 @@ fn the_database_lists_people_then_system_users() {
     let mut accounts = Accounts::one_person();
     accounts.add("bob", true).unwrap();
     let others = [
-        extension("hello", 100),
-        extension("bob", 101),
-        extension("hello-worker", 1001),
-        extension("admin", 102),
-        extension("nobody", 103),
-        extension("tool", 104),
-        extension("greeter", 105),
-        extension("logind", GREETER_UID),
+        package("hello", 100),
+        package("bob", 101),
+        package("hello-worker", 1001),
+        package("admin", 102),
+        package("nobody", 103),
+        package("tool", 104),
+        package("greeter", 105),
+        package("logind", GREETER_UID),
     ];
     let passwd = passwd(&accounts, &others);
     let rows: Vec<Passwd<'_>> = lines(passwd.as_bytes())

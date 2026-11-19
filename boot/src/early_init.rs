@@ -559,13 +559,13 @@ fn apply_mem_commit_option(cmdline: &str) {
     }
 }
 
-/// `extensions=off`, which no later `extensions=on` takes back. Out of line
+/// `packages=off`, which no later `packages=on` takes back. Out of line
 /// so the boot-config step's frame stays under the 2 KiB gate.
 #[inline(never)]
-fn apply_extension_options(cmdline: &str) {
-    if switch_values(cmdline, "extensions").fold(false, |off, on| off | !on) {
-        slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_EXTENSIONS_OFF);
-        boot_info("Boot option: extensions=off (none is activated)");
+fn apply_package_options(cmdline: &str) {
+    if switch_values(cmdline, "packages").fold(false, |off, on| off | !on) {
+        slopos_ostd::boot_flags::set_flag(slopos_ostd::boot_flags::BOOT_FLAG_PACKAGES_OFF);
+        boot_info("Boot option: packages=off (none is activated)");
     }
 }
 
@@ -805,7 +805,7 @@ fn boot_step_boot_config_fn(_ctx: &mut BootCtx<'_, BspInit>) {
 
     apply_mem_commit_option(cmdline);
     apply_cpufreq_option(cmdline);
-    apply_extension_options(cmdline);
+    apply_package_options(cmdline);
 
     apply_kconsole_options(cmdline);
 }

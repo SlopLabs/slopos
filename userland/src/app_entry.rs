@@ -1,5 +1,5 @@
 //! App entries, which the dock launches: `share/slopos/apps/<id>.app`, as
-//! the XDG data directories rank them, an extension's replacing none.
+//! the XDG data directories rank them, a package's replacing none.
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 
 use slopos_abi::fs::O_NOFOLLOW;
 use slopos_abi::syscall::posix::{O_NOCTTY, O_NONBLOCK};
-use slopos_extension_core::declare::mount_point;
+use slopos_package_core::declare::mount_point;
 
 #[derive(Debug)]
 pub struct Share {
     pub dir: PathBuf,
-    /// An extension's declared apps, the only ids it shows.
+    /// A package's declared apps, the only ids it shows.
     pub only: Option<Vec<String>>,
 }
 
@@ -27,7 +27,7 @@ impl Share {
     }
 }
 
-/// Each extension's share by name, the base's, then the person's: a later
+/// Each package's share by name, the base's, then the person's: a later
 /// one's entry replaces an earlier's with its id.
 pub fn shares(home: Option<&str>) -> Vec<Share> {
     let mut shares: Vec<Share> = crate::activation::apps()

@@ -3,23 +3,23 @@
 ## The goal
 
 Software reaches a SlopOS machine in one form. What someone distributes is
-an image, verified on every read, shown at `/opt/<name>`, with a version
-and a previous image to go back to. What a person builds themselves is a
+a package: an image, verified on every read, shown at `/opt/<name>`, with a
+version and a previous image to go back to. What a person builds themselves is a
 file in their home, and no directory a person can write is shared.
 
 | Place | Holds | Changed by |
 |-------|-------|------------|
 | The base | The system | `bootctl`, whole |
-| `/opt/<name>` | Every installed program: extensions, the apps outside the base, the toolchain | `extctl`, one image each |
+| `/opt/<name>` | Every package: the apps outside the base, the toolchain | `pkgctl`, one image each |
 | `~/.local` | A person's own builds | That person, with `cp` |
 
-An extension is already this image. The work is to make it the only form.
+The image came first, for system services. The work made it the only form.
 
 ## What stands today
 
-Software outside the base is an image: one ext4 image with a verity tree,
-installed by `extctl` and shown at `/opt/<name>`. The toolchain and the
-apps are two, which every root is offered. Only what an image's signer
+Software outside the base is a package: one ext4 image with a verity tree,
+installed by `pkgctl` and shown at `/opt/<name>`. The toolchain and the
+apps are two, which every root is offered. Only what a package's signer
 signed replaces it until a removal gives up the name. A person's own builds
 are files in their `~/.local`.
 
@@ -44,8 +44,7 @@ are files in their `~/.local`.
   outside this plan (below).
 - **An image is its name and its signer** (phase 7), as the systems that
   grew large settled it (below).
-- **The word extension goes** (phase 9), since nothing installed is an
-  extension of anything once an editor and a compiler are images.
+- **The word is package** (phase 9). An image is a package's file.
 
 ## What later security rests on
 
@@ -56,7 +55,7 @@ things already hold, and every phase keeps them:
    root as it is read.
 2. **A process knows, and can prove, which image it is of.** The kernel
    labels a program started from an activation, and a peer reads the label
-   (`SO_PEEREXTENSION`).
+   (`SO_PEERPACKAGE`).
 3. **Only that image's code runs under the label.** The loader takes no
    library from the starter's environment (`AT_SECURE`), and mapping other
    code executable withdraws the label
@@ -75,7 +74,7 @@ Three things name an image today, and each is used for something else:
 
 | Identifier | Says | Used for |
 |------------|------|----------|
-| The root of its hash tree | These exact bytes | The store's file name, `ext_activate`, the label a peer reads (name and root) |
+| The root of its hash tree | These exact bytes | The store's file name, `pkg_activate`, the label a peer reads (name and root) |
 | Its name | One image per machine | `/opt/<name>`, the record, its uid, `/var/lib/<name>`, `/etc/<name>` |
 | The fingerprint of the key that signed it, kept in the record | Its publisher | Every install, and `install-signed` unasked |
 
@@ -108,7 +107,7 @@ changes what phase 7 stores.
 
 ## Phase 1: the toolchain is built as an image — done
 
-`just toolchain` ends in `slopos-toolchain.ext`, held to every check an
+`just toolchain` ends in `slopos-toolchain.pkg`, held to every check an
 install makes.
 
 ## Phase 2: an image reads as fast as the root — done
@@ -138,7 +137,7 @@ an image and from the root it is a file of.
 
 ## Phase 3: an image installs at the speed of its disk — done
 
-`extctl install` had read the 950 MB toolchain image over and over, 180 000
+`pkgctl install` had read the 950 MB toolchain image over and over, 180 000
 `pread`s of a millisecond each and a `pwrite` per block: 270 s. Measured on
 the host over a 950 MB image of the Rust nightly's 5018 files, the passes
 took 2 145 reads to open it, 24 475 to hold its files to the manifest,
@@ -156,15 +155,15 @@ the sealed copy is read back only as far as its tree
 (`image::verify_tree`). Hashing takes the SHA instructions where the CPU has
 them (`sha256::ni`, userland only) and a long run every core.
 
-On the release kernel, `extctl install` takes 7.5 s by its own clock where
+On the release kernel, `pkgctl install` takes 7.5 s by its own clock where
 a plain copy of the file in the same boot, 4 MiB reads and writes and an
 fsync, takes 5.8 s: 1.3 times the raw time.
 Measured once by hand; no gate holds it.
 
 ## Phase 4: an image reaches a root without a person — done
 
-Before `activate-all`, init runs `extctl install-offered` holding
-`ExtensionUpdate` and `Seal`: each image in `/var/lib/slopos/offered`, uid
+Before `activate-all`, init runs `pkgctl install-offered` holding
+`PackageUpdate` and `Seal`: each image in `/var/lib/slopos/offered`, uid
 0's alone, that asks for nothing but commands and apps goes in above its
 record's floor, never over a key's, a removed one or a version rolled back
 from (`admit::Authority::Offered`). Host roots offer `slopos-toolchain` and
@@ -180,7 +179,7 @@ image's files being uid 0's. The cheap boot came with phase 3's kept needs.
 (four apps, five commands), its version moving only with its files, and
 `_build-userland` packs it as `slopos-essentials`. Its entries name
 `/opt/slopos-essentials/bin/…`, the editor reads its manual from the image,
-and `just install` installs it with `extctl install`. The apps start
+and `just install` installs it with `pkgctl install`. The apps start
 `AT_SECURE`.
 
 ## Phase 6: the shared prefix goes — done
@@ -197,13 +196,13 @@ stays off every path.
 
 `admit::install` holds every install, a person's too, to the key that signed
 what the name holds, or to nobody, and names any other as another
-publisher's image of that name. A person's `extctl install` takes the
+publisher's image of that name. A person's `pkgctl install` takes the
 signature beside the image, trusted or not, and the question names its
-signer or nobody. `extctl remove`, an action holding `DacOverride`, gives the
+signer or nobody. `pkgctl remove`, an action holding `DacOverride`, gives the
 name up: the record keeps only that it was removed, its retired uids and its
 configuration serial, and `/etc`, `/var/lib`, `/var/log` and
 `/run/<name>` go, a first install waiting while any is left. Another
-publisher's image then goes in as a first install, as `extension_test` shows.
+publisher's image then goes in as a first install, as `package_test` shows.
 
 ## Phase 8: as many images as a machine holds — done
 
@@ -211,7 +210,7 @@ The pool of 32 and the mount table's fixed slots went. One filesystem
 serves every activation at a mount of its own, each made from the kernel
 heap and found from the number its inodes carry; the mount table is a
 vector sorted by path. What the resident activations hold that no reclaim
-gives back is bounded by an eighth of usable memory (`extension::budget`).
+gives back is bounded by an eighth of usable memory (`package::budget`).
 An image granted no user takes no uid, and a removal that leaves nothing
 its uids own gives them back.
 
@@ -222,35 +221,22 @@ pages, the rest its volume's cache; the `fsperf` gate caps the heap and the
 reads (`FSACT`). Images stay shown at boot: a hundred cost the kernel under
 0.3 s, and showing one at first use would have a walk wait on userland.
 
-## Phase 9: the word extension goes
+## Phase 9: the word extension goes — done
 
-**For:** the names to say what the thing is.
-
-It is in the crates (`extension-core`, `fs/src/extension`,
-`tools/extension`), the tool (`extctl`), the calls (`ext_activate`,
-`ext_deactivate`, `SO_PEEREXTENSION`), the capability (`ExtensionUpdate`),
-the store (`/var/lib/slopos/extensions`), the privd actions
-(`org.slopos.extension.*`), the image itself (`/.extension/`, the `.ext`
-suffix, the signature's namespace `extension@slopos`), the boot option
-(`extensions=off`), a skill and the docs.
-
-Decide the word first: *image* is what the format is, and already names
-the base, a disk and an ISO; *package* is what a person installs.
-
-The calls and the capability are in the private call surface, so the
-rename takes a `BASE_INTERFACE` number, and a store under the old path is
-not read. Before v1 neither is kept for.
-
-Done when nothing in the tree, the docs or the skills says extension for
-an installed image.
+Installed software is a *package*: FHS's word for what sits at
+`/opt/<name>`, and Android's, Fuchsia's and MSIX's for a verified unit of
+software. *Image* stays the word for a package's file. The tool is
+`pkgctl`, the calls `pkg_activate` and `pkg_deactivate`, the suffix `.pkg`,
+and every other name follows the word, under `BASE_INTERFACE` 16. A store
+under the old path is not read.
 
 ## Later
 
 - **A front end.** Nothing fetches an image. A sidecar already names an
-  image, its version and its root, and `extctl install-signed` already
+  image, its version and its root, and `pkgctl install-signed` already
   checks the signature, the key's ceilings and the floor, so an index is a
   signed list of sidecars with an address and a serial that only rises. The
-  program that reads it needs the network and `extctl`, holds no
+  program that reads it needs the network and `pkgctl`, holds no
   capability, and can itself be an image.
 - **More of an image's identity.** A short id derived from the signing
   key, as Chrome and Windows derive theirs, shown beside the name wherever

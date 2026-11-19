@@ -1,12 +1,12 @@
 //! `base_activate` and `base_monitor`: replacing the base while the system
-//! runs, and hearing that it was. `ext_activate` and `ext_deactivate`:
-//! showing an extension beside it, and taking one away.
+//! runs, and hearing that it was. `pkg_activate` and `pkg_deactivate`:
+//! showing a package beside it, and taking one away.
 
 use slopos_abi::Errno;
-use slopos_abi::extension::{DIGEST_LEN, NAME_MAX};
+use slopos_abi::package::{DIGEST_LEN, NAME_MAX};
 use slopos_fs::VfsError;
 use slopos_fs::basefs::{ActivateError, StageError};
-use slopos_fs::extension::{self, OpenError};
+use slopos_fs::package::{self, OpenError};
 use slopos_mm::user_copy::{copy_bytes_from_user, copy_from_user};
 use slopos_ostd::user::ptr::{UserBytes, UserPtr};
 
@@ -55,30 +55,30 @@ define_syscall!(syscall_base_monitor
     Ok(fd as u64)
 });
 
-define_syscall!(syscall_ext_activate
+define_syscall!(syscall_pkg_activate
     (ctx, name: UserCStr<{ NAME_MAX + 2 }>, fd: Fd, digest: u64)
-    cap(ExtensionUpdate)
+    cap(PackageUpdate)
     requires(let pid: process_id)
     -> Result<u64, Errno>
 {
-    if slopos_ostd::boot_flags::has_flag(slopos_abi::syscall::BOOT_FLAG_EXTENSIONS_OFF) {
+    if slopos_ostd::boot_flags::has_flag(slopos_abi::syscall::BOOT_FLAG_PACKAGES_OFF) {
         return Err(Errno::EPERM);
     }
     let digest = UserPtr::<[u8; DIGEST_LEN]>::try_new(digest).map_err(|_| Errno::EFAULT)?;
     let digest = copy_from_user(digest).map_err(|_| Errno::EFAULT)?;
     slopos_fs::with_file_image_fd(pid, fd.raw(), |fs, inode| {
-        extension::activate(name.as_bytes(), digest, fs, inode, extension::budget())
+        package::activate(name.as_bytes(), digest, fs, inode, package::budget())
     })?
     .map(u64::from)
-    .map_err(ext_errno)
+    .map_err(pkg_errno)
 });
 
-define_syscall!(syscall_ext_deactivate
+define_syscall!(syscall_pkg_deactivate
     (ctx, name: UserCStr<{ NAME_MAX + 2 }>)
-    cap(ExtensionUpdate)
+    cap(PackageUpdate)
     -> Result<(), Errno>
 {
-    extension::deactivate(name.as_bytes()).map_err(ext_errno)
+    package::deactivate(name.as_bytes()).map_err(pkg_errno)
 });
 
 fn activate_errno(e: ActivateError) -> Errno {
@@ -94,8 +94,8 @@ fn activate_errno(e: ActivateError) -> Errno {
     }
 }
 
-fn ext_errno(e: extension::ActivateError) -> Errno {
-    use extension::{ActivateError as E, IndexError};
+fn pkg_errno(e: package::ActivateError) -> Errno {
+    use package::{ActivateError as E, IndexError};
     match e {
         E::Name | E::Volume(_) | E::Image(OpenError::NotImage) => Errno::EINVAL,
         E::Index(IndexError::Shape(_) | IndexError::TooMany) => Errno::EINVAL,

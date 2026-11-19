@@ -109,8 +109,8 @@ pub fn view(dialog: &Dialog, icon: Option<&ImageData>, anchor: Option<Rect>) -> 
     details = details
         .row_with(words::RUNS, shown(ask.command_line()))
         .row_with(words::IN, shown(ask.directory()));
-    if let Some(extension) = &ask.extension {
-        details = details.row_with(words::EXTENSION, shown(extension.clone()));
+    if let Some(package) = &ask.package {
+        details = details.row_with(words::PACKAGE, shown(package.clone()));
     }
     let toggle = match dialog.expanded() {
         true => words::SHOW_LESS,

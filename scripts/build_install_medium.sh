@@ -50,7 +50,7 @@ die() {
     exit 1
 }
 
-[ -z "$TOOLCHAIN" ] || { [ -f "$TOOLCHAIN/slopos-toolchain.ext" ] && [ -f "$TOOLCHAIN/slopos-toolchain.meta" ]; } ||
+[ -z "$TOOLCHAIN" ] || { [ -f "$TOOLCHAIN/slopos-toolchain.pkg" ] && [ -f "$TOOLCHAIN/slopos-toolchain.meta" ]; } ||
     die "$TOOLCHAIN holds no toolchain image; run just toolchain"
 "$SCRIPT_DIR/ensure_limine.sh"
 . "$SCRIPT_DIR/lib/bootdisk.sh"
@@ -65,11 +65,11 @@ trap 'rm -rf "$STAGE"; rm -f "$OUT.tmp" "$OUT.disk-guid.tmp" "$OUT.payload.tmp"'
 
 # Linked where it can be: the toolchain's is a gigabyte.
 stage_image() {
-    local from="$1" name="$2" to="$3" ext
+    local from="$1" name="$2" to="$3" suffix
     mkdir -p "$to"
-    for ext in ext meta; do
-        [ -f "$from/$name.$ext" ] || die "$from holds no $name.$ext"
-        ln "$from/$name.$ext" "$to/" 2>/dev/null || cp "$from/$name.$ext" "$to/"
+    for suffix in pkg meta; do
+        [ -f "$from/$name.$suffix" ] || die "$from holds no $name.$suffix"
+        ln "$from/$name.$suffix" "$to/" 2>/dev/null || cp "$from/$name.$suffix" "$to/"
     done
 }
 
@@ -123,7 +123,7 @@ done
 trees+=("$STAGE/sources=sources")
 
 ESSENTIALS="${ESSENTIALS:-$OUT_DIR/slopos-essentials}"
-[ -f "$ESSENTIALS/slopos-essentials.ext" ] || die "$ESSENTIALS holds no apps' image; build the userland first"
+[ -f "$ESSENTIALS/slopos-essentials.pkg" ] || die "$ESSENTIALS holds no apps' image; build the userland first"
 stage_image "$ESSENTIALS" slopos-essentials "$STAGE/images"
 trees+=("$STAGE/images=$MEDIUM_IMAGES")
 

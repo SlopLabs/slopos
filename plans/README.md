@@ -20,7 +20,7 @@ editing.
 | `self-build.md` | A spike: the research that decides how SlopOS builds its own compilers, toolchain programs and install medium, to be replaced by the plan it leads to |
 | `tests-without-a-host.md` | A spike: the research that decides how the kernel's tests run on hardware and the userland tests under a runner of their own, so `just test` needs no host, to be replaced by the plan it leads to |
 | `linux-interfaces.md` | The 54 private calls, each with a verdict: 26 move to an interface Linux defines, 8 to userland, 2 are deleted and 18 stay. Eight phases in order, the first (`/dev/kmsg`) done; then the resolver, `/proc`, `/sys/block` and efivarfs, evdev, DRM/KMS, io_uring, rtnetlink, each one interface number, with what it serves, what it costs the kernel and how it is checked |
-| `installed-software.md` | Every installed program as an image under `/opt`: an install at the speed of the disk, images offered to a root with nobody to approve, the apps SlopOS ships as one, no shared directory a person writes on a search path, an image identified by its name and its signer and no fixed number of images, all done; the word extension retired |
+| `installed-software.md` | Every installed program as an image under `/opt`: an install at the speed of the disk, images offered to a root with nobody to approve, the apps SlopOS ships as one, no shared directory a person writes on a search path, an image identified by its name and its signer, no fixed number of images and package as the word for it, all done |
 
 What has landed is described in the docs repo, the skills under
 `.agents/skills/` and the code, not here.

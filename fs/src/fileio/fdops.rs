@@ -1454,7 +1454,7 @@ pub fn file_set_inode_flags_fd(
     })
 }
 
-/// Run `f` on the file an extension image is read from, the descriptor's
+/// Run `f` on the file a package image is read from, the descriptor's
 /// open file held meanwhile: `EBADF` for a descriptor open for no reading or
 /// of no file, `EINVAL` for one that is no regular file.
 pub fn with_file_image_fd<R>(

@@ -34,8 +34,8 @@ names the evidence that would lift it.
 - Title: A client can draw a likeness of privd's question, and no key a client cannot see proves the real one
 - Status: `open`
 - Confidence: 45 — evidence 25 (the secure attention key locks the screen and nothing else; a client's surface holds any pixels), exploitability 15 (the person must type a password into a dialog a client drew; `ASKING` tells a requester the moment a real question shows, so a lookalike can follow one), reproducibility 5 (no lookalike built). Raised by: a client that captures a password typed into a drawn card under `just ui-shots`.
-- Impact: session code collects the person's password, or an administrator's, by drawing the question's card. A real question names the asking program and pid but not the terminal or window, so a request background code raises right after the person's own reads as theirs; an extension's action is described in the extension's own words, shown under its name.
-- Evidence: `userland/src/apps/compositor/gate.rs:187-200` (Ctrl+Alt+Delete locks); `userland/src/apps/compositor/mod.rs:390-431` (a question takes keys only while it is up; no key summons or confirms it); `userland/src/apps/privd/mod.rs:791-797` (`ASKING` on `SHOWN`); `userland/src/apps/privd/mod.rs:920-928` (an extension's `describe` in the headline).
+- Impact: session code collects the person's password, or an administrator's, by drawing the question's card. A real question names the asking program and pid but not the terminal or window, so a request background code raises right after the person's own reads as theirs; a package's action is described in the package's own words, shown under its name.
+- Evidence: `userland/src/apps/compositor/gate.rs:187-200` (Ctrl+Alt+Delete locks); `userland/src/apps/compositor/mod.rs:390-431` (a question takes keys only while it is up; no key summons or confirms it); `userland/src/apps/privd/mod.rs:788-794` (`ASKING` on `SHOWN`); `userland/src/apps/privd/mod.rs:917-925` (a package's `describe` in the headline).
 - Repro: a client maps a window over the area between the menu bar and the dock, draws the card for `org.slopos.priv` with a password field, and reads the keys typed into it as ordinary input.
 - Remediation: a trusted path — the question shows only after the secure attention key, or carries what no client can draw (a mark in the menu bar, an image the person chose) — and it names the requester's terminal or window.
 
@@ -44,25 +44,25 @@ names the evidence that would lift it.
 - Status: `open`
 - Confidence: 45 — evidence 30 (privd waits on a mechanism with no bound and releases its group only at the reap; the mechanism writes to descriptors the requester supplied; `users passwd` reads its secret with no timeout), exploitability 10 (an administrator's session asks `boot.oneshot` and `boot.commit` unasked; a standard user needs one click on `accounts.password`), reproducibility 5. Raised by: a utest that holds `boot-slots` for a minute this way.
 - Impact: an administrator's session code, unasked, holds `boot-slots` — every kernel and base install, commit and one-shot, the paired agent's included — or after one click `accounts`, every account change, until that process exits; a privd started again takes no exclusive group while the mechanism runs.
-- Evidence: `assets/privd/actions:108-118` and `:132-142` (`allow admin`, `exclusive boot-slots`); `assets/privd/actions:265-274` (`allow user confirm`, `exclusive accounts`); `userland/src/apps/privd/mod.rs:720-735` (the claim ends at the reap); `userland/src/apps/privd/mod.rs:1308-1340` (an unbounded wait; a requester that leaves does not end it); `userland/src/apps/privd/mod.rs:741` (a predecessor's mechanism keeps the group); `userland/src/secret.rs:76-90` (a blocking `read_line`).
+- Evidence: `assets/privd/actions:108-118` and `:132-142` (`allow admin`, `exclusive boot-slots`); `assets/privd/actions:265-274` (`allow user confirm`, `exclusive accounts`); `userland/src/apps/privd/mod.rs:717-732` (the claim ends at the reap); `userland/src/apps/privd/mod.rs:1305-1337` (an unbounded wait; a requester that leaves does not end it); `userland/src/apps/privd/mod.rs:738` (a predecessor's mechanism keeps the group); `userland/src/secret.rs:76-90` (a blocking `read_line`).
 - Repro: as an administrator, fill a pipe, send privd `org.slopos.boot.oneshot` with the pipe's write end as stdout and stderr, and keep the read end unread; `remote.py install` and root's `bootctl install` are refused while that process lives.
 - Remediation: privd owns a mechanism's output pipes and relays them, so no requester's descriptor blocks a mechanism, and a mechanism in an exclusive group runs under a deadline.
 
 ### SLOPOS-2026-0062
-- Title: Extension users, the greeter and a seventeenth person debit the root, bounded by no person's share
+- Title: Package users, the greeter and a seventeenth person debit the root, bounded by no person's share
 - Status: `open`
-- Confidence: 45 — evidence 35 (a spawn takes a person's row only for a uid in `PERSON_UIDS`, and the rows are the first sixteen claimed), exploitability 5 (an extension's service, or sixteen other people in one boot), reproducibility 5. Raised by: an extension service fork loop that fills the task table in a utest.
-- Impact: an extension's service (uids 100-999) or a seventeenth person forks without the quarter of `MAX_PROCESSES` and `MAX_TASKS` a person's row allows, so its fork bomb or unreaped children fill the machine's task table, which the rows exist to prevent.
+- Confidence: 45 — evidence 35 (a spawn takes a person's row only for a uid in `PERSON_UIDS`, and the rows are the first sixteen claimed), exploitability 5 (a package's service, or sixteen other people in one boot), reproducibility 5. Raised by: a package service fork loop that fills the task table in a utest.
+- Impact: a package's service (uids 100-999) or a seventeenth person forks without the quarter of `MAX_PROCESSES` and `MAX_TASKS` a person's row allows, so its fork bomb or unreaped children fill the machine's task table, which the rows exist to prevent.
 - Evidence: `core/src/exec/mod.rs:384-394` (`account_for`); `slopos-ostd/src/process/quota/persons.rs:31-46` (the root once sixteen rows are taken); `slopos-ostd/src/process/quota/persons.rs:85-91` (the rows' limits).
-- Repro: an extension whose service forks in a loop; once the table is full, every person's spawn fails.
-- Remediation: a row per extension, keyed by its record's number, and a shared row bounded as one person's for every uid past the sixteenth.
+- Repro: a package whose service forks in a loop; once the table is full, every person's spawn fails.
+- Remediation: a row per package, keyed by its record's number, and a shared row bounded as one person's for every uid past the sixteenth.
 
 ### SLOPOS-2026-0064
 - Title: A mechanism reaches by path what the person allowed: its working directory and the files its command line names
 - Status: `open`
 - Confidence: 35 — evidence 25 (a working directory is a path; privd's check before the spawn compares `(st_dev, st_ino)` and `st_dev` is 0 for every file; `bootctl` installs whatever a path holds when no digest follows it, and `just install` names none), exploitability 5 (session code of the same person must move a directory or replace a file between the answer and the read), reproducibility 5. Raised by: a test that swaps a base under `bootctl base install` after the answer.
 - Impact: a `priv` command allowed in one directory runs, holding `DacOverride` and `Mount`, against relative paths session code re-pointed by renaming directories; a base or kernel allowed by its path is replaced before `bootctl` reads it, and a base runs at once.
-- Evidence: `slopos-ostd/src/task/fs_context.rs:20` (`CwdPath`); `userland/src/apps/privd/mod.rs:960` and `:1202-1207` (`still_at`); `fs/src/vfs/traits.rs:126` (`st_dev = 0`); `assets/privd/actions:59`, `:86`, `:385-386` (`cwd`); `userland/src/apps/bootctl.rs:463-484` (the digest is optional) and `:1072`; `justfile:410` and `:423` (`install`, `install-kernel`).
+- Evidence: `slopos-ostd/src/task/fs_context.rs:20` (`CwdPath`); `userland/src/apps/privd/mod.rs:957` and `:1199-1204` (`still_at`); `fs/src/vfs/traits.rs:126` (`st_dev = 0`); `assets/privd/actions:59`, `:86`, `:385-386` (`cwd`); `userland/src/apps/bootctl.rs:463-484` (the digest is optional) and `:1072`; `justfile:410` and `:423` (`install`, `install-kernel`).
 - Repro: as an administrator run `just install`; while the question shows, replace the base it names with another that passes `boot_core::base::check`, then allow; `bootctl status` names the other build tag.
 - Remediation: the requester opens the directory and files and privd hands the mechanism descriptors, or each image travels with the SHA-256 the question shows; `stat` reports a real `st_dev`.
 
@@ -71,7 +71,7 @@ names the evidence that would lift it.
 - Status: `open`
 - Confidence: 35 — evidence 25 (`org.slopos.priv` runs as the requester, so a file it makes in a uid-0 directory is theirs), exploitability 5 (an administrator must first make the file with `priv`), reproducibility 5. Raised by: a utest on a two-person root that rewrites a file `priv` made in `/opt/bin`.
 - Impact: once an administrator makes a file in `/opt/bin` or `/etc` with `priv`, any code of their session rewrites it unasked, and other people run or read it.
-- Evidence: `assets/privd/actions:478-489` (`uid requester`); `userland/src/apps/privd/mod.rs:1216-1240` (the requester's ids); `userland/src/apps/priv.rs:262-270` (`priv` itself trusts only what uid 0 alone changes, which such a file is not).
+- Evidence: `assets/privd/actions:478-489` (`uid requester`); `userland/src/apps/privd/mod.rs:1213-1237` (the requester's ids); `userland/src/apps/priv.rs:262-270` (`priv` itself trusts only what uid 0 alone changes, which such a file is not).
 - Repro: with a second person added, `priv cp tool /opt/bin/tool`; `ls -l` names the administrator; their shell rewrites the file without a question, and the second person's `tool` runs the new bytes.
 - Remediation: a file `priv` makes in a directory only uid 0 may change is uid 0's.
 
@@ -80,7 +80,7 @@ names the evidence that would lift it.
 - Status: `open`
 - Confidence: 30 — evidence 25 (32 connections per uid and eight per uid and program, an idle connection kept for good, every program outside the base one key), exploitability 5 (a base requester whose stdout or stderr is a full pipe blocks with its connection open, so three base programs and one outside the base fill a uid's 32), reproducibility 0. Raised by: a utest that fills uid 1000's connections and sees its next request refused.
 - Impact: the person's own requests — questions, password changes, installs — are refused as crowded until those processes exit; root, the paired agent and other people are unaffected.
-- Evidence: `userland/src/apps/privd/mod.rs:74-80` (the limits); `userland/src/apps/privd/mod.rs:285-307` (`Admitted::take` keyed on uid and program path); `userland/src/apps/privd/mod.rs:428-433` (`Other` has no path, one key); `userland/src/apps/privd/mod.rs:688-718` (a connection lives until its requester closes it).
+- Evidence: `userland/src/apps/privd/mod.rs:74-80` (the limits); `userland/src/apps/privd/mod.rs:282-304` (`Admitted::take` keyed on uid and program path); `userland/src/apps/privd/mod.rs:425-430` (`Other` has no path, one key); `userland/src/apps/privd/mod.rs:685-715` (a connection lives until its requester closes it).
 - Repro: as uid 1000, hold eight idle connections from a program outside the base, then start `bootctl status`, `keymap` and `users passwd` eight times each with stdout and stderr a full pipe; the person's next `priv` is refused as crowded.
 - Remediation: count only connections with a request in flight and close idle ones after a bound, or keep a share for the programs the person's desktop starts.
 
@@ -94,13 +94,13 @@ names the evidence that would lift it.
 - Remediation: hold the parents' rename lock across the checks and the rename, checking the inodes the rename acts on.
 
 ### SLOPOS-2026-0069
-- Title: A kept answer reruns the same command with whatever input its requester gives, and an extension sets its own `keep`
+- Title: A kept answer reruns the same command with whatever input its requester gives, and a package sets its own `keep`
 - Status: `open`
-- Confidence: 30 — evidence 25 (a kept answer keys the command line, directory, session and live parent, never the input; an extension's declaration takes `keep` up to 900 that no grant names), exploitability 5, reproducibility 0. Raised by: a utest that reruns a kept `priv tee` with other input, unasked.
-- Impact: within 300 s of a person allowing `priv tee /etc/x` from a shell, code that shell starts reruns it unasked with its own standard input; an extension's action asked once stays answered for up to fifteen minutes.
-- Evidence: `userland/src/apps/privd/answers.rs:19-35` and `:49-62`; `assets/privd/actions:387`; `extension-core/src/declare.rs:736`; `priv-core/src/policy.rs:719-723`.
+- Confidence: 30 — evidence 25 (a kept answer keys the command line, directory, session and live parent, never the input; a package's declaration takes `keep` up to 900 that no grant names), exploitability 5, reproducibility 0. Raised by: a utest that reruns a kept `priv tee` with other input, unasked.
+- Impact: within 300 s of a person allowing `priv tee /etc/x` from a shell, code that shell starts reruns it unasked with its own standard input; a package's action asked once stays answered for up to fifteen minutes.
+- Evidence: `userland/src/apps/privd/answers.rs:19-35` and `:49-62`; `assets/privd/actions:387`; `package-core/src/declare.rs:736`; `priv-core/src/policy.rs:719-723`.
 - Repro: allow `priv tee /etc/motd` from a shell; within five minutes a script started from it runs `echo X | priv tee /etc/motd` and is not asked.
-- Remediation: no kept answer for a command fed by the requester's input, and an extension's `keep` held to its key's ceiling.
+- Remediation: no kept answer for a command fed by the requester's input, and a package's `keep` held to its key's ceiling.
 
 ### SLOPOS-2026-0070
 - Title: A terminal's state-changing ioctls are not held to its session, one whose foreground group has died serves any session, and `/dev/tty` opens whatever terminal holds a stale index
@@ -121,12 +121,12 @@ names the evidence that would lift it.
 - Remediation: one kernel call that freezes and kills every process of a login tag, as `cgroup.kill` does.
 
 ### SLOPOS-2026-0073
-- Title: privd and init check an extension program's activation, then spawn it by path
+- Title: privd and init check a package program's activation, then spawn it by path
 - Status: `open`
-- Confidence: 25 — evidence 20 (the check opens the file and drops it; the spawn walks the path again), exploitability 5 (the replacement takes `ExtensionUpdate`: an owner's update, a session's `install-signed` of a key's newer image, or a deactivation over a file a `DacOverride` holder left under the mount point), reproducibility 0. Raised by: a test hook in the window that shows the replacement image running with the old grant.
+- Confidence: 25 — evidence 20 (the check opens the file and drops it; the spawn walks the path again), exploitability 5 (the replacement takes `PackageUpdate`: an owner's update, a session's `install-signed` of a key's newer image, or a deactivation over a file a `DacOverride` holder left under the mount point), reproducibility 0. Raised by: a test hook in the window that shows the replacement image running with the old grant.
 - Impact: an activation replaced or taken away between the check and the spawn runs the new image's program, or a file on the root under `/opt/<name>`, with the old declaration's grant until the reload ends it.
-- Evidence: `userland/src/apps/privd/mod.rs:944-947`, `:963-971`, `:1281-1282`; `userland/src/activation.rs:71-81`; `userland/src/apps/init/extensions.rs:1036-1039`, `:1118-1131`, `:1197-1200`.
-- Repro: nearest deterministic: a test hook between `activation::holds` and the spawn that deactivates the extension; the mechanism starts from the root's file.
+- Evidence: `userland/src/apps/privd/mod.rs:941-944`, `:960-968`, `:1278-1279`; `userland/src/activation.rs:71-81`; `userland/src/apps/init/packages.rs:1036-1039`, `:1118-1131`, `:1197-1200`.
+- Repro: nearest deterministic: a test hook between `activation::holds` and the spawn that deactivates the package; the mechanism starts from the root's file.
 - Remediation: spawn from the descriptor the check opened, or have the kernel refuse a spawn whose program is not of the named activation.
 
 ### SLOPOS-2026-0074
@@ -139,20 +139,20 @@ names the evidence that would lift it.
 - Remediation: while a graphical session is in front, keys reach no console until init hands the sink on.
 
 ### SLOPOS-2026-0075
-- Title: An extension's session service runs as the first person, uid 1000, holding the extension's grant, whoever installed it
+- Title: A package's session service runs as the first person, uid 1000, holding the package's grant, whoever installed it
 - Status: `open`
 - Confidence: 25 — evidence 20, exploitability 5, reproducibility 0. Raised by: a utest showing the session service as uid 1000 after uid 1001 installed it.
-- Impact: an extension an administrator other than the first person installs runs code as the first person, in their home, holding capabilities the first person lacks.
-- Evidence: `userland/src/apps/init/extensions.rs:1449-1456`.
-- Repro: as uid 1001, an administrator, install an extension declaring a session service; `process_list` shows it as uid 1000.
+- Impact: a package an administrator other than the first person installs runs code as the first person, in their home, holding capabilities the first person lacks.
+- Evidence: `userland/src/apps/init/packages.rs:1450-1457`.
+- Repro: as uid 1001, an administrator, install a package declaring a session service; `process_list` shows it as uid 1000.
 - Remediation: run a session service as the person whose desktop is in front, for one who allowed the grant, and name that person in the install question.
 
 ### SLOPOS-2026-0076
-- Title: Any process pins a retired base generation or extension activation by holding one of its files, and their slots are few
+- Title: Any process pins a retired base generation or package activation by holding one of its files, and their slots are few
 - Status: `open`
 - Confidence: 25 — evidence 20, exploitability 5 (the owner must switch or update repeatedly), reproducibility 0. Raised by: a utest that pins sixteen generations and sees `base_activate` answer `EBUSY`.
-- Impact: session code that holds a file of each generation and activation keeps them resident: past sixteen generations, or a quarter of memory, a live base switch answers `EBUSY` until a reboot, and past 32 activations no extension activates, updates or enables; neither is charged to the holder.
-- Evidence: `fs/src/basefs/mod.rs:48`; `fs/src/basefs/reap.rs:1-10`; `abi/src/extension.rs:20`; `fs/src/extension/mod.rs:50` and `:294`.
+- Impact: session code that holds a file of each generation and activation keeps them resident: past sixteen generations, or a quarter of memory, a live base switch answers `EBUSY` until a reboot, and past 32 activations no package activates, updates or enables; neither is charged to the holder.
+- Evidence: `fs/src/basefs/mod.rs:48`; `fs/src/basefs/reap.rs:1-10`; `abi/src/package.rs:20`; `fs/src/package/mod.rs:50` and `:294`.
 - Repro: as uid 1000, after each `bootctl base install` open a file of `/bin` and keep it; the seventeenth live switch is refused.
 - Remediation: after a grace, revoke a retired generation's descriptors and mappings, or charge it to its holders.
 
@@ -166,30 +166,30 @@ names the evidence that would lift it.
 - Remediation: authenticate the payload against a digest the `install` module carries.
 
 ### SLOPOS-2026-0079
-- Title: extctl's mechanism opens the paths a request names as uid 0
+- Title: pkgctl's mechanism opens the paths a request names as uid 0
 - Status: `open`
 - Confidence: 15 — evidence 15, exploitability 0, reproducibility 0. Raised by: a utest that tells two refusals apart for paths only uid 0 searches.
 - Impact: an administrator's session code, unasked through `install-signed`, learns from the refusal whether a path under a directory only uid 0 searches exists and is a regular file.
-- Evidence: `userland/src/apps/extctl/mod.rs:79-89` and `:647`; `assets/privd/actions:182-191`.
-- Repro: ask `org.slopos.extension.install-signed` naming `/root/a`, then a file that exists there; the refusals differ.
+- Evidence: `userland/src/apps/pkgctl/mod.rs:79-89` and `:645`; `assets/privd/actions:182-191`.
+- Repro: ask `org.slopos.package.install-signed` naming `/root/a`, then a file that exists there; the refusals differ.
 - Remediation: the requester opens what it names and hands the descriptors over, as `config install` does with standard input.
 
 ### SLOPOS-2026-0080
 - Title: A script's identity comes from one file while its interpreter opens the path again, which a base switch or an activation replacement re-points
 - Status: `open`
-- Confidence: 15 — evidence 15, exploitability 0 (the switch takes `BaseUpdate` or `ExtensionUpdate`), reproducibility 0. Raised by: a test that deactivates an extension between a script's exec and its interpreter's open.
-- Impact: across a switch a script runs the next generation's or activation's bytes, and after a deactivation whatever lies on the root under `/opt/<name>`, while `SO_PEERPROGRAM` and `SO_PEEREXTENSION` name the first; an old-generation process is judged by the current policy for its path.
+- Confidence: 15 — evidence 15, exploitability 0 (the switch takes `BaseUpdate` or `PackageUpdate`), reproducibility 0. Raised by: a test that deactivates a package between a script's exec and its interpreter's open.
+- Impact: across a switch a script runs the next generation's or activation's bytes, and after a deactivation whatever lies on the root under `/opt/<name>`, while `SO_PEERPROGRAM` and `SO_PEERPACKAGE` name the first; an old-generation process is judged by the current policy for its path.
 - Evidence: `core/src/exec/script.rs:21-34`.
-- Repro: nearest deterministic: exec an extension's script and deactivate the extension before the interpreter opens it.
+- Repro: nearest deterministic: exec a package's script and deactivate the package before the interpreter opens it.
 - Remediation: hand the interpreter the script by descriptor (`/dev/fd/N`).
 
 ### SLOPOS-2026-0081
-- Title: Every service of an extension logs and keeps state as the extension's first user
+- Title: Every service of a package logs and keeps state as the package's first user
 - Status: `open`
-- Confidence: 15 — evidence 15, exploitability 0, reproducibility 0. Raised by: a utest in which one service user of an extension writes another's state.
-- Impact: a compromised service running as one of an extension's users reads and rewrites another service's logs, state and runtime directory, undoing the separation the extension declared users for.
-- Evidence: `extension-core/src/declare.rs:370-373`; `userland/src/apps/init/extensions.rs:1162`, `:1263`, `:1450`.
-- Repro: an extension with two users and a service each; one writes the other's `/var/lib/<name>`.
+- Confidence: 15 — evidence 15, exploitability 0, reproducibility 0. Raised by: a utest in which one service user of a package writes another's state.
+- Impact: a compromised service running as one of a package's users reads and rewrites another service's logs, state and runtime directory, undoing the separation the package declared users for.
+- Evidence: `package-core/src/declare.rs:370-373`; `userland/src/apps/init/packages.rs:1162`, `:1263`, `:1451`.
+- Repro: a package with two users and a service each; one writes the other's `/var/lib/<name>`.
 - Remediation: a directory and logger per service user.
 
 ### SLOPOS-2026-0082
@@ -215,7 +215,7 @@ names the evidence that would lift it.
 - Status: `open`
 - Confidence: 10 — evidence 10, exploitability 0 (a power loss must fall between the seal and the read-back), reproducibility 0. Raised by: a test hook that writes between the write and the seal and survives a cut before the read-back.
 - Impact: a write in that window fails the edit, a writable mapping refuses the seal (`EBUSY`) so such a holder fails every edit it races, and a power loss between the seal and the read-back leaves its bytes sealed and believed as the newest generation.
-- Evidence: `userland/src/sealed.rs:119-140`; `userland/src/apps/extctl/store.rs:243-260`.
+- Evidence: `userland/src/sealed.rs:119-140`; `userland/src/apps/pkgctl/store.rs:243-260`.
 - Repro: nearest deterministic: a test hook between `create_sealed`'s write and its seal that writes the file through a second descriptor.
 - Remediation: write the generation where no other process can name it and link it in once sealed.
 
@@ -229,13 +229,13 @@ names the evidence that would lift it.
 - Remediation: `sh` runs without the connection unless the operator asks for it.
 
 ### SLOPOS-2026-0086
-- Title: An extension's program keeps its extension's label with a library that maps nothing executable, where its own run path, `/usr/lib` or a relative needed name leads
+- Title: A package's program keeps its package's label with a library that maps nothing executable, where its own run path, `/usr/lib` or a relative needed name leads
 - Status: `open`
-- Confidence: 20 — evidence 15 (an extension's program starts `AT_SECURE`, which leaves an absolute `DT_RPATH` or `DT_RUNPATH` entry, `/usr/lib` and a needed name holding a slash searched as written; extctl reads neither a run path nor a slash in a needed name), exploitability 5 (an installed image must carry such a run path or name, or the attacker runs as uid 0, whose `/usr` it is, or holds `DacOverride`, to make `/usr/lib`), reproducibility 0. Raised by: an image whose program carries `DT_RUNPATH /home/user/.local/lib` asking privd as its extension with a data-only library there.
-- Impact: where an extension's program was linked with a run path a person can write — their `~/.local/lib`, a build tree — or needs `sub/libx.so`, session code places a library there, or under the directory it starts the program in, that maps only data; the program loads it ahead of its image's own and still asks privd as that extension's `program` principal. A uid-0 process or a `DacOverride` holder does the same through `/usr/lib`, which is no base directory. An extension's script keeps the label on the base's static shell, which takes its starter's environment, `PATH` among it.
-- Evidence: `slibc/src/ld_so/mod.rs:57` (`SEARCH_DIRS`); `slibc/src/ld_so/mod.rs:708-720` (a name with a slash as written; run paths ahead of every directory); `extension-core/src/elf.rs:218-219` (only `DT_NEEDED` and `DT_SONAME` are read); `abi/src/fs.rs:167-174` (`BASE_DIRS` without `/usr/lib`); `userland/src/apps/shell/env.rs:106-114` (the shell imports its environment).
-- Repro: pack an extension whose program is linked `-rpath /home/user/.local/lib` against a library also in its `lib/`; as the first person put a data-only library of that soname in `/home/user/.local/lib` and start the program: `SO_PEEREXTENSION` on its privd connection still names the activation.
-- Remediation: extctl refuses an ELF file that carries a run path or a needed name holding a slash, and `/usr/lib` becomes a base directory or leaves an `AT_SECURE` program's search.
+- Confidence: 20 — evidence 15 (a package's program starts `AT_SECURE`, which leaves an absolute `DT_RPATH` or `DT_RUNPATH` entry, `/usr/lib` and a needed name holding a slash searched as written; pkgctl reads neither a run path nor a slash in a needed name), exploitability 5 (an installed image must carry such a run path or name, or the attacker runs as uid 0, whose `/usr` it is, or holds `DacOverride`, to make `/usr/lib`), reproducibility 0. Raised by: an image whose program carries `DT_RUNPATH /home/user/.local/lib` asking privd as its package with a data-only library there.
+- Impact: where a package's program was linked with a run path a person can write — their `~/.local/lib`, a build tree — or needs `sub/libx.so`, session code places a library there, or under the directory it starts the program in, that maps only data; the program loads it ahead of its image's own and still asks privd as that package's `program` principal. A uid-0 process or a `DacOverride` holder does the same through `/usr/lib`, which is no base directory. A package's script keeps the label on the base's static shell, which takes its starter's environment, `PATH` among it.
+- Evidence: `slibc/src/ld_so/mod.rs:57` (`SEARCH_DIRS`); `slibc/src/ld_so/mod.rs:707-719` (a name with a slash as written; run paths ahead of every directory); `package-core/src/elf.rs:218-219` (only `DT_NEEDED` and `DT_SONAME` are read); `abi/src/fs.rs:167-174` (`BASE_DIRS` without `/usr/lib`); `userland/src/apps/shell/env.rs:106-114` (the shell imports its environment).
+- Repro: build a package whose program is linked `-rpath /home/user/.local/lib` against a library also in its `lib/`; as the first person put a data-only library of that soname in `/home/user/.local/lib` and start the program: `SO_PEERPACKAGE` on its privd connection still names the activation.
+- Remediation: pkgctl refuses an ELF file that carries a run path or a needed name holding a slash, and `/usr/lib` becomes a base directory or leaves an `AT_SECURE` program's search.
 
 ## Cadence
 

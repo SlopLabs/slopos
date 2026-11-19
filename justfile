@@ -58,7 +58,7 @@ capacity_stage        := build_dir / "capacity-stage"
 toolchain_image       := env("TOOLCHAIN_STAGE", build_dir / "slopos-toolchain/image")
 toolchain_install     := build_dir / "slopos-toolchain/install"
 essentials_image      := build_dir / "slopos-essentials"
-# slopos_extension_core::OFFERED; each image is a host tree of its own.
+# slopos_package_core::OFFERED; each image is a host tree of its own.
 offered               := "/var/lib/slopos/offered"
 essentials_offered    := essentials_image + ":" + offered + ":slopos-essentials"
 toolchain_offered     := toolchain_image + ":" + offered + ":slopos-toolchain"
@@ -217,15 +217,17 @@ _userland mode:
     CARGO="{{cargo}}" USERLAND_TARGET={{userland_target}} \
         scripts/build_userland.sh "{{build_dir}}" "{{cargo_target_dir}}" {{mode}}
 
-# Holds the apps' programs to the programs gate as it packs them.
+# Holds the apps' programs to the programs gate as it packs them. A root is
+# offered the whole directory, so nothing but this image and its sidecar stays.
 _build-userland: (_userland "")
     CARGO="{{host_cargo}}" CARGO_TARGET_DIR={{cargo_target_dir}} \
-        scripts/build_extension.sh {{build_dir}}/apps {{essentials_image}} {{build_dir}}/libc.so
+        scripts/build_package.sh {{build_dir}}/apps {{essentials_image}} {{build_dir}}/libc.so
+    find {{essentials_image}} -mindepth 1 ! -name slopos-essentials.pkg ! -name 'slopos-essentials.meta*' -delete
 
-# The programs the extensions of `extension_test`, `extension_action_test` and
-# `extension_service_test` carry are held to the gate here.
+# The programs the packages of `package_test`, `package_action_test` and
+# `package_service_test` carry are held to the gate here.
 _build-userland-tests: _build-userland (_userland "--test")
-    {{xtask}} programs {{build_dir}}/libc_probe.elf {{build_dir}}/ext_daemon.elf
+    {{xtask}} programs {{build_dir}}/libc_probe.elf {{build_dir}}/pkg_daemon.elf
 
 # `VERITY=off` for the tests image because the suite writes to it; the
 # shipped image keeps its trailer and `test_verity_artifact_*` mounts it.
@@ -242,12 +244,18 @@ _fs-image-tests: (_host "_fs-image-tests") _build-userland-tests
         EXTRA_SHARED_OBJECTS="{{test_shared_objects}}" FS_HOST_TREES="{{essentials_offered}}" \
         scripts/build_fs_image.sh "{{fs_image_tests}}" "{{build_dir}}" {{test_userland_bins}}
 
+# A root is offered the toolchain's directory whole, so one that holds no
+# image would offer what installs nothing.
+[no-exit-message]
+_toolchain-image:
+    @[ ! -d "{{toolchain_image}}" ] || [ -f "{{toolchain_image}}/slopos-toolchain.pkg" ] || { echo "{{toolchain_image}} holds no slopos-toolchain.pkg: run just toolchain, or remove it for a root without a toolchain" >&2; exit 1; }
+
 # `VERITY=rw`: writable, and attested wherever no boot rewrote a block. The
 # system is the booted base, mounted over the root's base directories; the
 # images it offers are the host's, replaced when they change; the clone at
 # /src/slopos is the guest's once seeded, so it is staged only for a root
 # without one.
-_fs-image-persist: (_host "_fs-image-persist") _build-userland
+_fs-image-persist: (_host "_fs-image-persist") _toolchain-image _build-userland
     #!/usr/bin/env bash
     set -euo pipefail
     seed=""
@@ -264,7 +272,7 @@ _fs-image-persist: (_host "_fs-image-persist") _build-userland
 # in the guest reads no network, and the fixtures the toolchain ladder fetches
 # from. The tests base comes from the boot module; init installs the images it
 # offers.
-_fs-image-selfhost: (_host "_fs-image-selfhost") _build-userland
+_fs-image-selfhost: (_host "_fs-image-selfhost") _toolchain-image _build-userland
     #!/usr/bin/env bash
     set -euo pipefail
     rm -rf "{{selfhost_stage}}"
@@ -375,9 +383,9 @@ _variant-kernel variant: (_kernel variant if variant =~ '^(release|dev)$' { "" }
 _variant-base variant:
     just {{ if variant =~ '^(release|dev)$' { "_initramfs" } else if variant =~ '^(release-)?tests$' { "_initramfs-tests" } else { error("the variants are release, dev, tests and release-tests, not " + variant) } }}
 
-[doc("Pack the extension laid out in DIR (bin/, libexec/, lib/, share/ and .extension/{release,declare}) into builddir/extensions/<name>.ext and its sidecar <name>.meta, checked as extctl checks an install against this build's libc.so. EXTENSION_KEY names an SSH Ed25519 key to sign the sidecar with, for `extctl install-signed`; `scripts/remote.py install --extension` installs it on a paired machine")]
-extension DIR: _build-userland
-    scripts/build_extension.sh "{{DIR}}" "{{build_dir}}/extensions" "{{build_dir}}/libc.so"
+[doc("Build the package laid out in DIR (bin/, libexec/, lib/, share/ and .package/{release,declare}) into builddir/packages/<name>.pkg and its sidecar <name>.meta, checked as pkgctl checks an install against this build's libc.so. PACKAGE_KEY names an SSH Ed25519 key to sign the sidecar with, for `pkgctl install-signed`; `scripts/remote.py install --package` installs it on a paired machine")]
+package DIR: _build-userland
+    scripts/build_package.sh "{{DIR}}" "{{build_dir}}/packages" "{{build_dir}}/libc.so"
 
 # A kernel build around scripts/build_kernel.sh, the same on both systems: the
 # toolchain before, the ELF gates after. On the host `cargo` is the owned
@@ -399,13 +407,13 @@ build VARIANT=kernel_variant: (_variant-kernel VARIANT) (_variant-base VARIANT)
 [doc("Build the kernel ELF alone, skipping the userland and the base — for gate-only jobs")]
 build-kernel-only: (_kernel kernel_variant)
 
-[doc("On SlopOS, try a build: build the kernel, the userland, the base and the apps for VARIANT (release, dev or tests), hold the build to the base interface and libc.so's growth, and hand the base and the kernel to bootctl base try, which runs the base at once when the running kernel serves it, writing nothing, and otherwise writes it for the next boot and puts the kernel into the spare slot, armed to boot once; it prints the command that keeps the trial. The apps' image goes in with extctl once the running libc.so is the one they were built against; otherwise the command that installs it is printed")]
+[doc("On SlopOS, try a build: build the kernel, the userland, the base and the apps for VARIANT (release, dev or tests), hold the build to the base interface and libc.so's growth, and hand the base and the kernel to bootctl base try, which runs the base at once when the running kernel serves it, writing nothing, and otherwise writes it for the next boot and puts the kernel into the spare slot, armed to boot once; it prints the command that keeps the trial. The apps' image goes in with pkgctl once the running libc.so is the one they were built against; otherwise the command that installs it is printed")]
 install VARIANT="release": (_slopos "install") (_variant-kernel VARIANT) (_variant-base VARIANT) base-interface libc-exports
     #!/usr/bin/env bash
     set -euo pipefail
     bootctl base try "$PWD/{{build_dir}}/{{ if VARIANT =~ 'tests$' { "initramfs-tests.cpio" } else { "initramfs.cpio" } }}" \
         --kernel "$PWD/{{build_dir}}/kernel-{{VARIANT}}.elf"
-    apps="/bin/extctl install $PWD/{{essentials_image}}/slopos-essentials.ext"
+    apps="/bin/pkgctl install $PWD/{{essentials_image}}/slopos-essentials.pkg"
     if cmp -s /lib/libc.so "{{build_dir}}/libc.so"; then
         $apps || echo "install: the apps stay as they were"
     else
@@ -627,7 +635,7 @@ test-install: (_host "test-install")
 test-install-guest: (_host "test-install-guest")
     #!/usr/bin/env bash
     set -euo pipefail
-    [ -d "{{toolchain_image}}" ] || { echo "FAIL: no toolchain image at {{toolchain_image}} — run just toolchain" >&2; exit 1; }
+    [ -f "{{toolchain_image}}/slopos-toolchain.pkg" ] || { echo "FAIL: no toolchain image at {{toolchain_image}} — run just toolchain" >&2; exit 1; }
     git diff --quiet HEAD || { echo "FAIL: slot a is built from the working tree and the guest builds HEAD; commit or stash first" >&2; exit 1; }
     head="$(git rev-parse HEAD)"
     just _fs-image-selfhost
@@ -703,7 +711,7 @@ test-installer *DISKS: (_host "test-installer")
     [[ ! "${INSTALLER_PAYLOAD:-1}" =~ ^(0|false|off|no)$ ]] || payload=0
     # Copying the payload over emulated USB doubles the install's budget.
     install_budget="${INSTALLER_TIMEOUT_SECS:-$((1800 + 1800 * payload))}"
-    if [ "$payload" = 1 ] && [ ! -d "{{toolchain_image}}" ]; then
+    if [ "$payload" = 1 ] && [ ! -f "{{toolchain_image}}/slopos-toolchain.pkg" ]; then
         echo "FAIL: no toolchain image at {{toolchain_image}} — run just toolchain, or INSTALLER_PAYLOAD=0" >&2
         exit 1
     fi
@@ -1192,7 +1200,7 @@ test-toolchain: (_host "test-toolchain") _build-run-tests
     push="$PWD/{{build_dir}}/toolchain-push.git"
     # Only the toolchain's ssh dials the peer, so only then is sshd needed.
     ssh_peer=""
-    [ -d "{{toolchain_image}}" ] && ssh_peer="$PWD/{{ladder_sshd}}"
+    [ -f "{{toolchain_image}}/slopos-toolchain.pkg" ] && ssh_peer="$PWD/{{ladder_sshd}}"
     for boot in 1 2; do
         echo "── boot $boot ──"
         log="{{build_dir}}/toolchain-boot$boot.log"
@@ -1209,7 +1217,7 @@ test-toolchain: (_host "test-toolchain") _build-run-tests
         [ "$rc" -eq 0 ] || { echo "FAIL: boot $boot exited $rc — full log in $log" >&2; exit 1; }
         scripts/check_fs_image.sh --map "{{fs_image_selfhost}}"
         # git rides the toolchain: without one there is no clone to grade.
-        [ -d "{{toolchain_image}}" ] || exit 0
+        [ -f "{{toolchain_image}}/slopos-toolchain.pkg" ] || exit 0
         grep -aq 'git_reads_the_clone_and_reaches_the_host # git status: clean' "$log" ||
             { echo "FAIL: the seeded clone is not clean in the guest — see $log" >&2; exit 1; }
         pushed="$(grep -aoE 'ssh_carries_git_to_the_host # SSH-PUSHED [0-9a-f]{40}' "$log" | awk '{print $NF}' || true)"
@@ -1230,7 +1238,7 @@ test-toolchain: (_host "test-toolchain") _build-run-tests
 test-selfhost: (_host "test-selfhost") _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
-    [ -d "{{toolchain_image}}" ] || { echo "FAIL: no toolchain image at {{toolchain_image}} — run just toolchain" >&2; exit 1; }
+    [ -f "{{toolchain_image}}/slopos-toolchain.pkg" ] || { echo "FAIL: no toolchain image at {{toolchain_image}} — run just toolchain" >&2; exit 1; }
     git diff --quiet HEAD || { echo "FAIL: the guest builds HEAD and the host grades it with the working tree's gates and tests; commit or stash first" >&2; exit 1; }
     head="$(git rev-parse HEAD)"
     just _fs-image-selfhost
@@ -1266,7 +1274,7 @@ test-selfhost: (_host "test-selfhost") _build-run-tests
 bench-selfhost: (_host "bench-selfhost") _build-run-tests
     #!/usr/bin/env bash
     set -euo pipefail
-    [ -d "{{toolchain_image}}" ] || { echo "FAIL: no toolchain image at {{toolchain_image}} — run just toolchain" >&2; exit 1; }
+    [ -f "{{toolchain_image}}/slopos-toolchain.pkg" ] || { echo "FAIL: no toolchain image at {{toolchain_image}} — run just toolchain" >&2; exit 1; }
     just _fs-image-selfhost
     KERNEL_RELEASE=1 TEST_CMDLINE="{{dev_test_cmdline}} {{dev_watchdog}} ${BENCH_PROF-prof=on} {{test_cmdline_extra}} tests.run=*install_toolchain*,*selfhost*" just _iso-tests
     cp {{build_dir}}/libc.so {{build_dir}}/bench-libc.so
@@ -1530,9 +1538,9 @@ test-remote: (_host "test-remote") _build-userland _base-recipes
 
 # /tmp is memory on SlopOS, and some of these tests write disk images: there
 # they take the root's /var/tmp.
-[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, shooter-core, net-core, nvme-core, rtl8168-core, usb-core, hid-core, cpufreq-core, ext4-core, verity-core, http-core, remote-core, installer-core, priv-core, fat-core, boot-core, accounts-core, extension-core, tls-core, chrome-core, fate-core, splash-core, theme-core, settings-core, settings-app, slibc-core, kallsyms, initramfs, extension, icons, the gates of tools/xtask and, on Linux and macOS, tools/run_tests, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
+[doc("Run host-side unit tests: abi, gfx, font, keymap-core, terminal-core, shell-core, editor-core, shooter-core, net-core, nvme-core, rtl8168-core, usb-core, hid-core, cpufreq-core, ext4-core, verity-core, http-core, remote-core, installer-core, priv-core, fat-core, boot-core, accounts-core, package-core, tls-core, chrome-core, fate-core, splash-core, theme-core, settings-core, settings-app, slibc-core, kallsyms, initramfs, package, icons, the gates of tools/xtask and, on Linux and macOS, tools/run_tests, plus the slopos-ostd suite natively (same tests KernMiri interprets, seconds instead of minutes — catches assertion drift early; UB detection still needs `just check-miri`)")]
 test-host:
-    {{ if os() == "slopos" { "TMPDIR=/var/tmp " } else { "" } }}{{host_cargo}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-shooter-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-verity-core -p slopos-http-core -p slopos-remote-core -p slopos-installer-core -p slopos-priv-core -p slopos-fat-core -p slopos-boot-core -p slopos-accounts-core -p slopos-settings-core -p slopos-settings-app -p slopos-extension-core -p slopos-tls-core -p slopos-chrome-core -p slopos-fate-core -p slopos-splash-core -p slopos-theme-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs -p slopos-extension -p slopos-icons -p slopos-xtask
+    {{ if os() == "slopos" { "TMPDIR=/var/tmp " } else { "" } }}{{host_cargo}} test -p slopos-abi -p slopos-gfx -p slopos-font -p slopos-keymap-core -p slopos-terminal-core -p slopos-shell-core -p slopos-editor-core -p slopos-shooter-core -p slopos-net-core -p slopos-nvme-core -p slopos-rtl8168-core -p slopos-usb-core -p slopos-hid-core -p slopos-cpufreq-core -p slopos-ext4-core -p slopos-verity-core -p slopos-http-core -p slopos-remote-core -p slopos-installer-core -p slopos-priv-core -p slopos-fat-core -p slopos-boot-core -p slopos-accounts-core -p slopos-settings-core -p slopos-settings-app -p slopos-package-core -p slopos-tls-core -p slopos-chrome-core -p slopos-fate-core -p slopos-splash-core -p slopos-theme-core -p slopos-slibc-core -p slopos-ostd -p slopos-kallsyms -p slopos-initramfs -p slopos-package -p slopos-icons -p slopos-xtask
     {{ if os() == "slopos" { "" } else { "just check-tests-host" } }}
 
 [doc("Run the Go test runner's own unit tests and its log gates' (host-side, no QEMU)")]

@@ -50,8 +50,8 @@ name = "terminal"
 path = "src/bin/terminal.rs"
 
 [[bin]]
-name = "extctl"
-path = "src/bin/extctl.rs"
+name = "pkgctl"
+path = "src/bin/pkgctl.rs"
 
 [[bin]]
 name = "users"
@@ -364,18 +364,18 @@ name = "priv_test"
 path = "src/bin/tests/priv_test.rs"
 
 [[bin]]
-name = "extension_test"
-path = "src/bin/tests/extension_test.rs"
+name = "package_test"
+path = "src/bin/tests/package_test.rs"
 required-features = ["testbins"]
 
 [[bin]]
-name = "extension_action_test"
-path = "src/bin/tests/extension_action_test.rs"
+name = "package_action_test"
+path = "src/bin/tests/package_action_test.rs"
 required-features = ["testbins"]
 
 [[bin]]
-name = "extension_service_test"
-path = "src/bin/tests/extension_service_test.rs"
+name = "package_service_test"
+path = "src/bin/tests/package_service_test.rs"
 required-features = ["testbins"]
 
 [[bin]]
@@ -460,7 +460,7 @@ default = []
 testbins = [
   "slopos-installer-core/fixtures",
   "slopos-tls-core/test-server",
-  "slopos-extension-core/test-elf",
+  "slopos-package-core/test-elf",
   "dep:slopos-apps",
 ]
 
@@ -478,7 +478,7 @@ slopos-boot-core = { workspace = true }
 slopos-ext4-core = { workspace = true }
 slopos-cpufreq-core = { workspace = true }
 slopos-fat-core = { workspace = true }
-slopos-extension-core = { workspace = true, features = ["std"] }
+slopos-package-core = { workspace = true, features = ["std"] }
 slopos-fate-core = { workspace = true }
 slopos-keymap-core = { workspace = true }
 slopos-gfx = { workspace = true }

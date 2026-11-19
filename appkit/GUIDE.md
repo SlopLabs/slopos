@@ -238,7 +238,7 @@ shows every component in each of its states. Its pages are
 - **Errors say what to do next; refusals say why.** A message about a
   failure is what happened, then what the person can do about it, each a
   sentence. A refusal says what was refused and why — the system's own file,
-  an extension's, one that is locked against changes, a disk that can't be
+  a package's, one that is locked against changes, a disk that can't be
   written to, or permissions, as `slopos_appkit::Refusal` reads them from the
   kernel — and offers nothing the person cannot do.
 - **Icons come from the font.** Name a glyph with `Icon::Folder`, `Icon::Trash`

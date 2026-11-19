@@ -1,0 +1,6 @@
+# What any package can ever be granted, in the sealed base at
+# /usr/share/slopos/privd/packages; the grammar is
+# slopos_package_core::ceiling's. Every install and every activation holds
+# a package's grant to it. RawBlock, Mount and DacOverride can rewrite or
+# cover the root, so a package granted one holds the machine.
+ceiling Power Mount RawBlock NetAdmin ConsoleConfig SysInspect Clock DacOverride SchedHigh
