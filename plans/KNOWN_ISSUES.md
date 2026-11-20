@@ -177,7 +177,7 @@ images refuse the next activation (`EBUSY`) where their files would fit.
 
 **Status**: Open
 **Severity**: Low (robustness)
-**Component**: `userland/src/apps/init/packages.rs:1349-1420` (`wanted`)
+**Component**: `userland/src/apps/init/packages.rs:1349-1421` (`wanted`)
 
 When init cannot read a package's record or activation it leaves that
 package's services running, holding their sockets, and counts only their
@@ -239,7 +239,7 @@ to evdev descriptors init hands the compositor, which its ring's
 **Status**: Open
 **Severity**: Low (a sender loses only its own messages)
 **Component**: `net/src/unix_socket/mod.rs:779-835`,
-`userland/src/apps/privd/mod.rs:576-582`
+`userland/src/apps/privd/mod.rs:573-579`
 
 One `recvmsg` drains every descriptor queued on the connection, drops those
 past `SCM_MAX_FDS`, and hands one whose bytes arrive during the read to the
@@ -254,7 +254,7 @@ privd reads the first.
 **Status**: Open
 **Severity**: Low (robustness)
 **Component**: `userland/src/privd.rs:781-792`, `userland/src/held.rs:46-50`,
-`userland/src/apps/privd/mod.rs:697-706`, `userland/src/apps/remoted/serve.rs:142-213`
+`userland/src/apps/privd/mod.rs:694-703`, `userland/src/apps/remoted/serve.rs:142-213`
 
 - A request privd reads as its drain begins is refused as restarting, or finds
   its connection closed, and no requester retries either.
